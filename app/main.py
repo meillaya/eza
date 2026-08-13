@@ -93,6 +93,22 @@ def index(request: Request) -> HTMLResponse:
     )
 
 
+@app.get("/bookmark/{bookmark_id}", response_class=HTMLResponse)
+async def bookmark_detail_page(request: Request, bookmark_id: int) -> HTMLResponse:
+    """Bookmark detail / reader page (todo 17). The server embeds the stored
+    record (extracted_text in the reader section, note_body, tags) so the page
+    is readable without JS; app.js drives the note/tags editor and the explicit
+    Save. Authed by the global middleware like every other page."""
+    bookmark = await db.run_db(db.get_bookmark, bookmark_id)
+    if bookmark is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return TEMPLATES.TemplateResponse(
+        request,
+        "detail.html",
+        {"bookmark": bookmark},
+    )
+
+
 # ---------------------------------------------------------------------------
 # First-run setup bootstrap (todo 9). /setup and /api/setup/* are in the
 # global unauthenticated-exemption list, so the server-side setup guard is
@@ -312,20 +328,64 @@ def api_delete_bookmark(bookmark_id: int):
 
 
 @app.patch("/api/bookmarks/{bookmark_id}")
-async def api_save_note(bookmark_id: int, request: Request) -> dict:
-    """Save a bookmark's note body (todo 15). Parses [[wikilinks]] and re-syncs
-    the links table as part of the same transaction; todo 17 extends this route
-    with title/tags/is_read editing."""
+async def api_update_bookmark(bookmark_id: int, request: Request) -> dict:
+    """Edit a bookmark (todo 17): note_body, title, tags, is_read — any
+    combination, applied atomically by db.update_bookmark.
+
+    The note_body path keeps the todo-15 behavior: [[wikilinks]] are parsed
+    and the links table re-synced inside the same transaction. The tags list
+    is authoritative (tags dropped from it are unlinked). An empty title is
+    rejected 400 before anything is written. The backend is stateless per
+    PATCH — there is deliberately no autosave endpoint; the UI saves
+    explicitly.
+    """
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from None
-    note_body = body.get("note_body") if isinstance(body, dict) else None
-    if not isinstance(note_body, str):
-        raise HTTPException(status_code=400, detail="note_body must be a string")
-    if not await db.run_db(links.save_note, bookmark_id, note_body):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    updates: dict[str, object] = {}
+    if "note_body" in body:
+        if not isinstance(body["note_body"], str):
+            raise HTTPException(status_code=400, detail="note_body must be a string")
+        updates["note_body"] = body["note_body"]
+    if "title" in body:
+        title = body["title"]
+        if not isinstance(title, str) or not title.strip():
+            raise HTTPException(status_code=400, detail="title must be a non-empty string")
+        updates["title"] = title.strip()
+    if "tags" in body:
+        tags = body["tags"]
+        if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+            raise HTTPException(status_code=400, detail="tags must be a list of strings")
+        updates["tags"] = tags
+    if "is_read" in body:
+        is_read = body["is_read"]
+        if isinstance(is_read, int) and is_read in (0, 1):
+            updates["is_read"] = is_read
+        else:
+            raise HTTPException(status_code=400, detail="is_read must be 0 or 1")
+    if not updates:
+        raise HTTPException(status_code=400, detail="No editable fields provided")
+    if not await db.run_db(db.update_bookmark, bookmark_id, **updates):
         raise HTTPException(status_code=404, detail="Not found")
     return {"ok": True}
+
+
+@app.get("/api/bookmarks/{bookmark_id}")
+async def api_bookmark_detail(bookmark_id: int) -> dict:
+    """Full bookmark detail (todo 17): the complete record plus note_body,
+    extracted_text, tags and a backlinks summary (linked + unlinked mentions,
+    reusing links.get_backlinks). The reader view renders stored
+    ``extracted_text`` — this is a minimal reader display, not a Pocket-style
+    reading app."""
+    bookmark = await db.run_db(db.get_bookmark, bookmark_id)
+    if bookmark is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    backlinks = await db.run_db(links.get_backlinks, bookmark_id)
+    bookmark["backlinks"] = backlinks if backlinks is not None else {"linked": [], "unlinked": []}
+    return bookmark
 
 
 @app.get("/api/bookmarks/{bookmark_id}/backlinks")

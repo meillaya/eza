@@ -31,7 +31,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeGuard, TypeVar
 from urllib.parse import urlparse
 
 from anyio import to_thread
@@ -684,6 +684,81 @@ def update_metadata(
     get_conn().execute(
         f"UPDATE bookmarks SET {', '.join(sets)} WHERE id = ?", params
     )
+
+
+def _is_str_list(value: object) -> TypeGuard[list[str]]:
+    """Narrow an arbitrary value to a list of strings (boundary check)."""
+    if not isinstance(value, list):
+        return False
+    return all(isinstance(v, str) for v in value)
+
+
+def _set_bookmark_tags(conn: sqlite3.Connection, bookmark_id: int, tag_names: Sequence[str]) -> None:
+    """Replace a bookmark's tags with exactly the given names.
+
+    The caller's transaction owns the write. The provided list is
+    authoritative: rows are deleted first, then each tag is upserted into
+    ``tags`` and linked — a tag dropped from the list is unlinked. Same
+    name-normalization (strip + lowercase, empty names skipped) as
+    ``insert_bookmark``.
+    """
+    conn.execute("DELETE FROM bookmark_tags WHERE bookmark_id = ?", (bookmark_id,))
+    for name in tag_names:
+        name = name.strip().lower()
+        if not name:
+            continue
+        conn.execute("INSERT OR IGNORE INTO tags(name) VALUES (?)", (name,))
+        tag_id = conn.execute("SELECT id FROM tags WHERE name = ?", (name,)).fetchone()[0]
+        conn.execute(
+            "INSERT OR IGNORE INTO bookmark_tags(bookmark_id, tag_id) VALUES (?, ?)",
+            (bookmark_id, tag_id),
+        )
+
+
+def update_bookmark(
+    bookmark_id: int,
+    *,
+    note_body: object = _UNSET,
+    title: object = _UNSET,
+    tags: object = _UNSET,
+    is_read: object = _UNSET,
+) -> bool:
+    """Partially update a bookmark (todo 17: note_body/title/tags/is_read).
+
+    Sentinel-based like ``update_metadata``: a parameter left at ``_UNSET`` is
+    not written. Every supplied field is applied in ONE ``BEGIN IMMEDIATE``
+    transaction, so a multi-field PATCH is atomic. ``note_body`` re-syncs the
+    ``links`` table (``links.sync_links`` — the same parse-on-save behavior as
+    ``links.save_note``), and ``tags`` replaces the bookmark's full tag set.
+    Returns False when the bookmark does not exist.
+    """
+    from app import links  # function-level: app.links imports app.db (cycle)
+
+    sets: list[str] = []
+    params: list[object] = []
+    if note_body is not _UNSET:
+        sets.append("note_body = ?")
+        params.append(note_body)
+    if title is not _UNSET:
+        sets.append("title = ?")
+        params.append(title)
+    if is_read is not _UNSET:
+        sets.append("is_read = ?")
+        params.append(1 if is_read else 0)
+    with transaction() as conn:
+        if conn.execute("SELECT 1 FROM bookmarks WHERE id = ?", (bookmark_id,)).fetchone() is None:
+            return False
+        if sets:
+            conn.execute(
+                f"UPDATE bookmarks SET {', '.join(sets)} WHERE id = ?", [*params, bookmark_id]
+            )
+        if tags is not _UNSET:
+            assert _is_str_list(tags)  # route-validated boundary; narrows object
+            _set_bookmark_tags(conn, bookmark_id, tags)
+        if note_body is not _UNSET:
+            assert isinstance(note_body, str)  # route-validated boundary; narrows object
+            links.sync_links(conn, bookmark_id, note_body)
+    return True
 
 
 # ---------------------------------------------------------------------------

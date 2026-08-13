@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bookmarks</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%96%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🔖 Bookmarks</div>
+    <input id="search" type="search" placeholder="Search title, url, description…" autofocus autocomplete="off">
+    <button id="add-btn" class="btn">+ Add</button>
+    <label class="btn file-btn" title="Import browser bookmarks.html">
+      Import
+      <input id="import-input" type="file" accept=".html" hidden>
+    </label>
+  </header>
+
+  <nav class="tagbar" id="tagbar">
+    <button class="chip active" data-tag="">all <span class="count">{{ total }}</span></button>
+    {% for t in tags %}
+      <button class="chip" data-tag="{{ t.name }}">{{ t.name }} <span class="count">{{ t.n }}</span></button>
+    {% endfor %}
+  </nav>
+
+  <main>
+    <div id="grid" class="grid" data-offset="0" data-loading="false" data-exhausted="false">
+      {% for b in bookmarks %}
+      <article class="card" data-id="{{ b.id }}" style="contain-intrinsic-size: 0 88px;">
+        <a class="card-link" href="{{ b.url }}" target="_blank" rel="noopener noreferrer">
+          <img class="favicon" src="{{ b.favicon_url or '/static/favicon-fallback.svg' }}" alt="" loading="lazy" onerror="this.src='/static/favicon-fallback.svg'">
+          <div class="card-body">
+            <div class="card-title">{{ b.title or b.url }}</div>
+            <div class="card-domain">{{ b.domain }}</div>
+          </div>
+        </a>
+        <div class="card-tags">
+          {% for t in b.tags %}<span class="tag">{{ t }}</span>{% endfor %}
+        </div>
+        <div class="card-footer">
+          <a class="card-detail" href="/bookmark/{{ b.id }}">Details</a>
+        </div>
+        <button class="card-delete" data-id="{{ b.id }}" title="Delete">×</button>
+      </article>
+      {% endfor %}
+    </div>
+    <div id="empty" class="empty" hidden>No bookmarks match.</div>
+  </main>
+
+  <!-- Add modal -->
+  <dialog id="add-modal" class="modal">
+    <form id="add-form" method="dialog">
+      <h2>Add bookmark</h2>
+      <label>URL
+        <input name="url" type="url" required placeholder="https://…" autofocus>
+      </label>
+      <label>Tags <small>(comma-separated)</small>
+        <input name="tags" type="text" placeholder="rust, web, reference">
+      </label>
+      <div class="modal-actions">
+        <button type="button" data-close>Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>

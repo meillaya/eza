@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ bookmark.title or bookmark.url }} — Bookmarks</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%96%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="topbar detail-topbar">
+    <a class="btn" href="/">← All bookmarks</a>
+    <div class="detail-heading">
+      <input id="title" class="title-input" type="text" value="{{ bookmark.title or bookmark.url }}"
+             aria-label="Title" autocomplete="off" spellcheck="false">
+      <div class="detail-meta">
+        <a class="detail-url" href="{{ bookmark.url }}" target="_blank" rel="noopener noreferrer">{{ bookmark.url }}</a>
+        <span class="detail-domain">{{ bookmark.domain }}</span>
+      </div>
+    </div>
+    <label class="read-toggle" title="Mark as read">
+      <input id="is-read" type="checkbox" {% if bookmark.is_read %}checked{% endif %}>
+      Read
+    </label>
+    <button id="save" class="btn primary" type="button">Save</button>
+    <span id="save-status" class="save-status" role="status" aria-live="polite"></span>
+  </header>
+
+  <main id="detail" class="detail-main" data-id="{{ bookmark.id }}">
+    <section class="reader" id="reader">
+      <h2 class="section-heading">Extracted text</h2>
+      {% if bookmark.extracted_text %}
+        <div class="reader-text">{{ bookmark.extracted_text }}</div>
+      {% else %}
+        <p class="reader-empty">No extracted text yet. Re-visit the bookmark to trigger extraction.</p>
+      {% endif %}
+    </section>
+
+    <section class="note-editor">
+      <div class="note-tabs" role="tablist" aria-label="Note mode">
+        <button id="tab-write" class="note-tab active" type="button" role="tab" aria-selected="true">Edit</button>
+        <button id="tab-preview" class="note-tab" type="button" role="tab" aria-selected="false">Preview</button>
+      </div>
+      <textarea id="note" class="note-textarea" aria-label="Note (markdown)"
+                placeholder="Write a note… [[wikilinks]] link to other bookmarks.">{{ bookmark.note_body }}</textarea>
+      <div id="note-preview" class="note-preview markdown-body" hidden></div>
+    </section>
+
+    <section class="tags-editor">
+      <h2 class="section-heading">Tags</h2>
+      <div id="tag-chips" class="tag-chips">
+        {% for t in bookmark.tags %}
+        <span class="tag chip-tag" data-tag="{{ t }}">{{ t }}<button type="button" class="chip-remove" aria-label="Remove tag {{ t }}">×</button></span>
+        {% endfor %}
+      </div>
+      <input id="tag-input" type="text" placeholder="Add a tag…" autocomplete="off" aria-label="Add tag">
+      <p class="hint">Enter or comma adds a tag; × removes one. Nothing is saved until you press Save.</p>
+    </section>
+  </main>
+
+  <script src="/static/marked.min.js"></script>
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>
