@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from selectolax.parser import HTMLParser, Node
@@ -186,6 +186,47 @@ async def api_setup_verify(request: Request) -> JSONResponse:
         key=auth.SESSION_COOKIE_NAME,
         value=session_id,
         max_age=config.SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="strict",
+        secure=config.IS_PROD,
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/recovery/redeem")
+async def api_recovery_redeem(request: Request) -> Response:
+    """Redeem a one-time recovery code (the lockout path).
+
+    The ONLY /api/recovery/* route exempt from auth (it lives in the
+    middleware's method+path exemption list, deliberately not the whole
+    prefix). A valid unused code opens a recovery-scoped session FIRST, then
+    revokes every credential and pre-existing session, then marks the code
+    used — see ``auth.redeem_code``. HTML clients get a 303 to /setup (the
+    one page the scoped session is allowed to reach); API clients get
+    ``{"next": "/setup"}``. Unknown/used codes are 400.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from None
+    code = body.get("code") if isinstance(body, dict) else None
+    if not isinstance(code, str) or not code:
+        raise HTTPException(status_code=400, detail="Missing recovery code")
+    session_id = await db.run_db(auth.redeem_code, code)
+    if session_id is None:
+        raise HTTPException(
+            status_code=400, detail="Unknown or already used recovery code"
+        )
+    response = (
+        RedirectResponse("/setup", status_code=303)
+        if "text/html" in request.headers.get("accept", "")
+        else JSONResponse({"next": "/setup"})
+    )
+    response.set_cookie(
+        key=auth.SESSION_COOKIE_NAME,
+        value=session_id,
+        max_age=auth.RECOVERY_SESSION_TTL_SECONDS,
         httponly=True,
         samesite="strict",
         secure=config.IS_PROD,
@@ -458,6 +499,36 @@ def _recovery_allowed(method: str, path: str) -> bool:
     return (method, path) in _RECOVERY_METHOD_PATHS
 
 
+# allow: SIZE_OK — _RECOVERY_403_HTML is a static template (pure data), the
+# same pattern as _SETUP_PAGE_HTML and _LOGIN_PAGE_HTML above.
+_RECOVERY_403_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Recovery in progress</title>
+</head>
+<body>
+  <h1>Passkey recovery</h1>
+  <p>Your session is limited to the recovery re-enrollment flow.</p>
+  <p><a href="/setup">Continue with /setup</a></p>
+</body>
+</html>
+"""
+
+
+def _recovery_forbidden_response(request: Request) -> Response:
+    """403 for a recovery-scoped session on a disallowed route.
+
+    HTML clients get a page whose only job is linking to /setup (the one
+    destination the scoped session is allowed to reach); API clients keep the
+    JSON detail.
+    """
+    if "text/html" in request.headers.get("accept", ""):
+        return HTMLResponse(_RECOVERY_403_HTML, status_code=403)
+    return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+
+
 def _unauthorized_response(request: Request) -> Response:
     """401 for an unauthenticated request: JSON for API clients, the minimal
     usernameless login page for HTML clients (detected via the Accept header).
@@ -485,7 +556,7 @@ async def require_auth(request: Request, call_next) -> Response:
 
     if session is not None and session["scope"] == "recovery":
         if not _recovery_allowed(request.method, request.url.path):
-            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+            return _recovery_forbidden_response(request)
         return await call_next(request)
 
     if _is_exempt(request.method, request.url.path):

@@ -498,10 +498,10 @@ def test_exempt_routes_reachable_without_session(fresh_db):
         assert client.post("/api/setup/options").status_code == 200
         assert client.get("/health").status_code == 200
         # POST /api/recovery/redeem is the ONLY /api/recovery/* route exempt
-        # from auth: it must never 401. The handler lands in todo 11, so an
-        # unauthenticated call today is a routing miss (404) — never 401.
+        # from auth: it must never 401. Its handler landed in todo 11, so an
+        # unauthenticated call with an unknown code is a 400 — never 401.
         resp = client.post("/api/recovery/redeem", json={"code": "whatever"})
-        assert resp.status_code == 404
+        assert resp.status_code == 400
         assert resp.status_code != 401
 
 

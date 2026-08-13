@@ -10,7 +10,9 @@ This module is the **single home** for the first-run registration bootstrap
 - Registration: options generation, challenge storage/consumption (single-use,
   5-minute TTL), registration verification and credential persistence.
 - ``create_session()`` — session row creation (the first post-setup session has
-  scope ``'normal'``).
+  scope ``'normal'``); ``redeem_code()`` — recovery-code redemption that opens
+  a short-lived recovery-scoped session before revoking every credential and
+  pre-existing session.
 
 The server-side setup guard lives in the endpoints (``/api/setup/*`` is in the
 global unauthenticated-exemption list, so it cannot rely on auth middleware).
@@ -22,6 +24,11 @@ Credential material, challenge bytes and recovery codes are never logged.
 Every write goes through ``db.transaction()`` (BEGIN IMMEDIATE) on the calling
 thread's connection; async callers reach these functions via ``db.run_db``.
 """
+
+# allow: SIZE_OK — this is the single shared auth-helper module; the todo-11
+# commit contract stages only app/{auth,main}.py + tests, so extracting a new
+# module would fall outside the staged files (the size is inherited from
+# todos 9/10 and mirrors the waiver already on app/main.py).
 
 from __future__ import annotations
 
@@ -77,6 +84,10 @@ AUTHENTICATION_PURPOSE = "authentication"
 CHALLENGE_TTL_SECONDS = 5 * 60  # 5-minute TTL
 
 RECOVERY_CODE_COUNT = 10
+
+# Lifetime of the recovery-scoped session opened by redeem_code: short enough
+# that a lost code stays a lockout path, long enough to complete re-enrollment.
+RECOVERY_SESSION_TTL_SECONDS = 10 * 60
 
 
 class SetupError(Exception):
@@ -303,21 +314,64 @@ def issue_codes() -> list[str]:
     return codes
 
 
-def create_session(*, scope: str = "normal", csrf_token: str | None = None) -> str:
+def create_session(
+    *,
+    scope: str = "normal",
+    csrf_token: str | None = None,
+    ttl_seconds: int | None = None,
+) -> str:
     """Create a session row and return its opaque id.
 
     ``csrf_token`` is generated internally unless the caller supplies one (the
     login flow pre-generates it so the cookie can be set without a re-read).
+    ``ttl_seconds`` overrides the default session TTL — the recovery flow uses
+    a short-lived scoped session.
     """
     session_id = secrets.token_urlsafe(32)
     if csrf_token is None:
         csrf_token = secrets.token_urlsafe(32)
     now = int(time.time())
+    ttl = config.SESSION_TTL_SECONDS if ttl_seconds is None else ttl_seconds
     with db.transaction() as conn:
         conn.execute(
             "INSERT INTO sessions (id, csrf_token, scope, created_at, expires_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            (session_id, csrf_token, scope, now, now + config.SESSION_TTL_SECONDS),
+            (session_id, csrf_token, scope, now, now + ttl),
+        )
+    return session_id
+
+
+def redeem_code(code: str) -> str | None:
+    """Redeem a one-time recovery code and open the re-enrollment window.
+
+    Returns the recovery-scoped session id, or ``None`` when the code is
+    unknown or already used. Ordering is load-bearing: the scoped session is
+    created FIRST and the revocation deletes every OTHER session row (all
+    normal sessions and any stale recovery session from an aborted attempt),
+    so the just-created session always survives; the code is marked used
+    LAST, in the same transaction as the revocation.
+
+    A failed re-registration afterwards cannot consume any extra state: the
+    single code is consumed here, the scoped session stays valid until its
+    TTL, and the user can retry the ceremony. Nothing here is ever logged.
+    """
+    code_hash = hashlib.sha256(code.encode()).hexdigest()
+    row = db.get_conn().execute(
+        "SELECT code_hash FROM recovery_codes WHERE code_hash = ? AND used = 0",
+        (code_hash,),
+    ).fetchone()
+    if row is None:
+        return None
+    session_id = create_session(
+        scope="recovery", ttl_seconds=RECOVERY_SESSION_TTL_SECONDS
+    )
+    now = int(time.time())
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM passkey_credentials")
+        conn.execute("DELETE FROM sessions WHERE id != ?", (session_id,))
+        conn.execute(
+            "UPDATE recovery_codes SET used = 1, redeemed_at = ? WHERE code_hash = ?",
+            (now, code_hash),
         )
     return session_id
 
