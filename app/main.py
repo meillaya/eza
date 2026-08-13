@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from selectolax.parser import HTMLParser, Node
 
-from . import auth, config, db, fetcher, links, snapshot
+from . import auth, config, db, dedup, fetcher, links, snapshot
 
 log = logging.getLogger("bookmarks")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -330,6 +330,22 @@ async def api_graph(
     if result is None:
         raise HTTPException(status_code=404, detail="Not found")
     return result
+
+
+@app.get("/api/dedup/candidates")
+async def api_dedup_candidates() -> dict:
+    """Duplicate-candidate groups (todo 25).
+
+    Returns ``{"groups": [{canonical: {id,title,url}, members:
+    [{id,title,url,reason}], count}]}`` — bookmarks whose normalized URLs are
+    identical (www./utm_/trailing-slash/fragment-insensitive) OR whose titles
+    fuzzy-match (RapidFuzz WRatio >= 85) within the same normalized domain.
+    The canonical is the oldest-created member (tie-break: lowest id); members
+    each carry a ``reason`` ("url" | "title" | "related"). Purely advisory —
+    the engine NEVER merges or deletes. Authed by the global middleware like
+    every route — no exemption.
+    """
+    return await db.run_db(dedup.find_candidates)
 
 
 @app.get("/api/search")
