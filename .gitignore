@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.db
+*.db-wal
+*.db-shm
+data/
+.DS_Store
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+node_modules/
+test-results/
+playwright-report/
+bun.lockb
+bun.lock

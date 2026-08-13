@@ -1,0 +1,18 @@
+services:
+  e2e:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    user: root
+    ipc: host
+    init: true
+    environment:
+      SKIP_ENV_VALIDATION: "1"
+      PLAYWRIGHT_E2E_DISABLE_HSTS: "1"
+    volumes:
+      - .:/work
+      - test-results:/work/test-results
+      - playwright-report:/work/playwright-report
+volumes:
+  test-results:
+  playwright-report:

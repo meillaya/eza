@@ -1,0 +1,33 @@
+# Task 1 — repo baseline + live-DB safety net (bookmarks-kb plan)
+
+Date: 2026-08-13
+Scope: git init, nested-repo flattening, .gitignore update, pre-migration DB snapshot via online .backup API. No migrations, no app code changes.
+
+## Backup manifest
+
+- Backup method: `sqlite3 data/bookmarks.db ".backup 'data/backup/pre-migration-20260813-043000.db'"` (SQLite online backup API — consistent snapshot; WAL-safe; no raw copy of db/-wal/-shm)
+- Backup file: `data/backup/pre-migration-20260813-043000.db`
+- Size: 14,336,000 bytes
+- Timestamp: 2026-08-13 04:30:00 (UTC) — encoded in filename `20260813-043000`
+- Snapshot integrity: `PRAGMA integrity_check` -> ok
+
+## Row counts (queried from the BACKUP file, not the live DB)
+
+sqlite3 data/backup/pre-migration-20260813-043000.db "SELECT COUNT(*) FROM bookmarks; SELECT COUNT(*) FROM tags; SELECT COUNT(*) FROM bookmark_tags;"
+- bookmarks     = 8950
+- tags          = 98
+- bookmark_tags = 18019
+
+## Verification results
+
+- git rev-parse --is-inside-work-tree -> true
+- ls data/backup/ -> pre-migration-20260813-043000.db
+- COUNT(*) FROM bookmarks (backup) == 8950
+- COUNT(*) FROM tags (backup) == 98
+- COUNT(*) FROM bookmark_tags (backup) == 18019
+- test -d reproducible-e2e-browser-testing/.git -> non-zero exit (nested .git removed)
+- grep -c "playwright-report" .gitignore -> 1
+- .gitignore covers data/, *.db, *.db-wal, *.db-shm, .venv/, .pytest_cache/, .mypy_cache/ (pre-existing) + node_modules/, test-results/, playwright-report/, bun.lockb, bun.lock (added)
+- .github/workflows/e2e.yml NOT ignored (trackable for todo 13)
+- uv run pytest -p no:cacheprovider -q -> 67 passed
+- Commit: chore(repo): init git and snapshot live DB before migration

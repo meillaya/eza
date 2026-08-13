@@ -1,0 +1,10 @@
+node_modules
+.next
+.omo
+test-results
+playwright-report
+artifacts
+android_client
+iOS_client
+observability
+.git
