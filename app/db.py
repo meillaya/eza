@@ -19,7 +19,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from urllib.parse import urlparse
 
-from app import config
+from app import config, migrations
 
 DB_PATH = config.BOOKMARKS_DB
 
@@ -103,17 +103,36 @@ def get_conn() -> sqlite3.Connection:
         for pragma in _PRAGMAS:
             _conn.execute(pragma)
         _conn.executescript(_SCHEMA)
-        _run_migrations(_conn)
+        run_migrations(_conn)
     return _conn
 
 
-def _run_migrations(conn: sqlite3.Connection) -> None:
-    """Apply additive migrations for older databases."""
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(bookmarks)")}
-    if "last_checked_at" not in cols:
-        conn.execute("ALTER TABLE bookmarks ADD COLUMN last_checked_at INTEGER")
-    # Index created unconditionally — IF NOT EXISTS makes it idempotent.
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_bookmarks_checked ON bookmarks(last_checked_at)")
+def run_migrations(conn: sqlite3.Connection) -> list[str]:
+    """Apply every pending migration, each in its own transaction.
+
+    The schema version is tracked in ``PRAGMA user_version``. Each registered
+    migration step (see :mod:`app.migrations`) runs inside a single
+    ``BEGIN IMMEDIATE`` transaction together with its version stamp, so a
+    failed step rolls back both its schema changes and the stamp. Returns the
+    names of the migrations applied (empty when the DB is already current).
+    """
+    conn.row_factory = sqlite3.Row  # migration modules rely on named access
+    row = conn.execute("PRAGMA user_version").fetchone()
+    current = int(row[0]) if row is not None else 0
+    applied: list[str] = []
+    for version, (name, fn) in enumerate(migrations.MIGRATIONS, start=1):
+        if version <= current:
+            continue
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            fn(conn)
+            conn.execute(f"PRAGMA user_version = {version}")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        applied.append(name)
+    return applied
 
 
 @contextmanager
