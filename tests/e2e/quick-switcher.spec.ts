@@ -15,13 +15,17 @@
  * dispatches the ACTUAL chosen key.
  *
  * Scenarios:
- *  1. press `k` (body focused) → palette opens → type "rust" → two results →
- *     ArrowDown selects the second → Enter opens its detail page.
+ *  1. press `k` (body focused) → palette opens → type "qswitcher" (a term
+ *     distinctive to this spec's seeds — other specs share the same
+ *     ui-e2e.db, so exact result counts are never asserted) → results show
+ *     our fixtures → ArrowDown moves the selection → Enter opens the
+ *     selected result's detail page (asserted by id AND rendered title).
  *  2. typing `k` inside the #search input does NOT open the palette.
  *  3. the "/" focus-search shortcut still works (no conflict with `k`).
  *  4. Escape closes the palette.
- *  5. a query with no matches shows "add as new bookmark"; Enter opens the
- *     Add modal with the query prefilled as the URL.
+ *  5. a query with no matches ("zzznomatchxyzzy" — guaranteed empty in every
+ *     run since no spec seeds anything like it) shows "add as new bookmark";
+ *     Enter opens the Add modal with the query prefilled as the URL.
  * Every test also asserts zero console/page errors.
  */
 
@@ -94,11 +98,19 @@ async function openGrid(
   });
 }
 
-/** Fixture bookmarks. Query "rust" matches exactly two of them (FTS5). */
+/**
+ * Fixture bookmarks. Titles carry a distinctive "QSwitcher" prefix so the
+ * query "qswitcher" (FTS5 prefix match) only ever hits THIS spec's seeds —
+ * the harness puts every setup dependent on the same wiped ui-e2e.db
+ * (notes-editor seeds "Async Rust Notes"/"Rust Wiki", backlinks seeds
+ * "Backlinks Field Guide"…, graph seeds "Graph …"), so an exact result
+ * COUNT would be fragile. Assertions therefore check that OUR titles are
+ * present/selected, never how many results exist.
+ */
 const SEEDS = [
-  { url: "https://switcher.example.org/rust-notes", title: "Rust Quick Notes" },
-  { url: "https://switcher.example.org/rust-docs", title: "Rust Docs" },
-  { url: "https://switcher.example.org/zig-notes", title: "Zig Notes" },
+  { url: "https://switcher.example.org/qswitcher-one", title: "QSwitcher One" },
+  { url: "https://switcher.example.org/qswitcher-two", title: "QSwitcher Two" },
+  { url: "https://switcher.example.org/qswitcher-zig", title: "QSwitcher Zig" },
 ];
 
 let ids: number[];
@@ -121,19 +133,28 @@ test("press k opens the palette; type, arrow, Enter opens the selected detail pa
   await expect(palette).toBeVisible();
   await expect(page.locator("#qs-input")).toBeFocused();
 
-  await page.locator("#qs-input").fill("rust");
+  // Query a term distinctive to THIS spec's seeds. Never assert an exact
+  // result count — other specs share the same ui-e2e.db and their seeds
+  // may also match a generic term.
+  await page.locator("#qs-input").fill("qswitcher");
   const results = palette.locator("#qs-results");
-  await expect(results.locator(".qs-item")).toHaveCount(2);
+  await expect(results.locator(".qs-item")).toContainText(["QSwitcher One", "QSwitcher Two"]);
   await expect(results.locator(".qs-item.selected")).toHaveCount(1);
 
-  // ArrowDown moves the selection to the second result; Enter opens it.
+  // ArrowDown moves the selection; Enter opens the SELECTED result's detail
+  // page (asserted by id AND by the rendered title — immune to FTS ranking).
+  const firstTitle = await results.locator(".qs-item.selected .qs-title").textContent();
   await page.keyboard.press("ArrowDown");
-  const selectedId = await results.locator(".qs-item.selected").getAttribute("data-id");
+  const selected = results.locator(".qs-item.selected");
+  const selectedTitle = (await selected.locator(".qs-title").textContent())?.trim() ?? "";
+  expect(selectedTitle).not.toBe(firstTitle?.trim());
+  const selectedId = await selected.getAttribute("data-id");
   expect(selectedId).not.toBeNull();
   await page.keyboard.press("Enter");
 
   await expect(page).toHaveURL(new RegExp(`/bookmark/${selectedId}$`));
   await expect(page.locator("#detail")).toBeVisible();
+  await expect(page.locator("#title")).toHaveValue(selectedTitle);
   expect(errors).toEqual([]);
 });
 
