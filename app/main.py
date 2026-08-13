@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from selectolax.parser import HTMLParser, Node
 
-from . import auth, config, db, fetcher, links
+from . import auth, config, db, fetcher, links, snapshot
 
 log = logging.getLogger("bookmarks")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -297,6 +297,9 @@ async def api_add_bookmark(
 
     # Background-enrich with title/favicon/description. Never block on this.
     fetcher.schedule_enrich(bookmark_id, url)
+    # Background content extraction (article text + metadata). Also never
+    # blocks the response — same fire-and-forget pattern as enrichment.
+    fetcher.schedule_extract(bookmark_id, url)
 
     return {"id": bookmark_id}
 
@@ -334,6 +337,23 @@ def api_backlinks(bookmark_id: int) -> dict:
     if result is None:
         raise HTTPException(status_code=404, detail="Not found")
     return result
+
+
+@app.post("/api/bookmarks/{bookmark_id}/snapshot")
+async def api_capture_snapshot(bookmark_id: int) -> dict:
+    """Capture a single-file HTML snapshot of a bookmark on demand.
+
+    Runs the monolith binary as a subprocess (30s bound) on a worker thread —
+    never inside a write transaction (todo-4 rule: no network/process I/O in
+    BEGIN IMMEDIATE) — and records the result in ``snapshot_path``, falling
+    back to a Wayback availability URL when monolith fails. On-demand only:
+    saving a bookmark never triggers a snapshot. Authed + CSRF-checked by the
+    global middleware.
+    """
+    bookmark = await db.run_db(db.get_bookmark, bookmark_id)
+    if bookmark is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return await db.run_db(snapshot.capture_snapshot, bookmark_id, bookmark["url"])
 
 
 @app.get("/api/tags")
@@ -428,7 +448,9 @@ async def api_import(file: UploadFile = File(...)):
     if top is not None:
         walk(top, [])
 
-    inserted = db.bulk_insert_bookmarks(items)
+    inserted = db.bulk_insert_bookmarks(
+        items, enrich_callback=fetcher.schedule_extract_for_url
+    )
     return {"inserted": inserted, "found": len(items)}
 
 

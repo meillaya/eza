@@ -633,16 +633,56 @@ def unchecked_bookmarks(
     return [_row_to_dict(r) for r in rows]
 
 
+# Sentinel for update_metadata: a parameter left at this default is not
+# written — the column keeps its current value. Distinguishes "don't touch"
+# from an explicit '' or NULL.
+_UNSET = object()
+
+
 def update_metadata(
-    bookmark_id: int, *, title: str, description: str, favicon_url: str, domain: str
+    bookmark_id: int,
+    *,
+    title: object = _UNSET,
+    description: object = _UNSET,
+    favicon_url: object = _UNSET,
+    domain: object = _UNSET,
+    author: object = _UNSET,
+    sitename: object = _UNSET,
+    published_at: object = _UNSET,
+    language: object = _UNSET,
+    image_url: object = _UNSET,
+    extracted_text: object = _UNSET,
 ) -> None:
+    """Update a bookmark's metadata columns, touching only the ones given.
+
+    Legacy callers pass ``title/description/favicon_url/domain``; the todo-16
+    extraction paths (background enrichment task, backfill CLI) pass the
+    article fields ``author/sitename/published_at/language/image_url/
+    extracted_text``. The SET clause is built from the supplied keywords, so a
+    partial update never clobbers the columns the caller did not mention.
+    """
+    sets: list[str] = []
+    params: list[object] = []
+    for column, value in (
+        ("title", title),
+        ("description", description),
+        ("favicon_url", favicon_url),
+        ("domain", domain),
+        ("author", author),
+        ("sitename", sitename),
+        ("published_at", published_at),
+        ("language", language),
+        ("image_url", image_url),
+        ("extracted_text", extracted_text),
+    ):
+        if value is not _UNSET:
+            sets.append(f"{column} = ?")
+            params.append(value)
+    if not sets:
+        return
+    params.append(bookmark_id)
     get_conn().execute(
-        """
-        UPDATE bookmarks
-           SET title = ?, description = ?, favicon_url = ?, domain = ?
-         WHERE id = ?
-        """,
-        (title, description, favicon_url, domain, bookmark_id),
+        f"UPDATE bookmarks SET {', '.join(sets)} WHERE id = ?", params
     )
 
 

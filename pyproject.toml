@@ -15,6 +15,7 @@ dependencies = [
     "selectolax>=0.3",
     "python-multipart>=0.0.9",
     "webauthn==3.0.0",
+    "trafilatura>=2.2.0",
 ]
 
 [project.scripts]
@@ -24,6 +25,8 @@ bookmarks-retag = "app.auto_tag:main"
 bookmarks-heuristic-tag = "app.heuristic_tag:main"
 bookmarks-reset-auth = "app.reset_auth:main"
 bookmarks-export-notes = "app.export_notes:main"
+bookmarks-snapshot = "app.snapshot:main"
+bookmarks-backfill-extract = "app.backfill_extract:main"
 
 [dependency-groups]
 dev = [
