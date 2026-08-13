@@ -32,6 +32,7 @@ thread's connection; async callers reach these functions via ``db.run_db``.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import secrets
@@ -96,6 +97,10 @@ class SetupError(Exception):
 
 class LoginError(Exception):
     """An authentication (login) ceremony could not proceed."""
+
+
+class LastCredentialError(Exception):
+    """The final passkey cannot be revoked — recovery is the only way back."""
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +379,81 @@ def redeem_code(code: str) -> str | None:
             (now, code_hash),
         )
     return session_id
+
+
+# ---------------------------------------------------------------------------
+# Credential management + recovery-code regeneration (todo 12)
+# ---------------------------------------------------------------------------
+
+
+def _b64url(data: bytes) -> str:
+    """Unpadded URL-safe base64 — the WebAuthn public ``id`` format."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def list_credentials() -> list[dict]:
+    """List enrolled passkeys with the fields the account UI needs."""
+    rows = db.get_conn().execute(
+        "SELECT credential_id, nickname, created_at, backup_eligible, last_used_at "
+        "FROM passkey_credentials ORDER BY created_at ASC"
+    ).fetchall()
+    return [
+        {
+            "id": _b64url(row["credential_id"]),
+            "nickname": row["nickname"],
+            "created_at": row["created_at"],
+            "backup_eligible": bool(row["backup_eligible"]),
+            "last_used_at": row["last_used_at"],
+        }
+        for row in rows
+    ]
+
+
+def rename_credential(credential_id: bytes, nickname: str) -> bool:
+    """Rename a passkey. Returns ``False`` when no such credential exists."""
+    with db.transaction() as conn:
+        cur = conn.execute(
+            "UPDATE passkey_credentials SET nickname = ? WHERE credential_id = ?",
+            (nickname, credential_id),
+        )
+        return cur.rowcount > 0
+
+
+def delete_credential(credential_id: bytes) -> bool:
+    """Revoke a passkey.
+
+    Raises :class:`LastCredentialError` when the target is the LAST remaining
+    credential — revoking it would lock the account out of every authenticated
+    surface, so the caller must steer the user toward the recovery path
+    instead. Returns ``False`` when no such credential exists.
+    """
+    with db.transaction() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) AS n FROM passkey_credentials"
+        ).fetchone()["n"]
+        if total <= 1:
+            raise LastCredentialError(
+                "cannot revoke your last credential — use a recovery code "
+                "to re-enroll instead"
+            )
+        cur = conn.execute(
+            "DELETE FROM passkey_credentials WHERE credential_id = ?",
+            (credential_id,),
+        )
+        return cur.rowcount > 0
+
+
+def regenerate_codes() -> list[str]:
+    """Rotate the recovery codes and return the 10 new plaintext codes once.
+
+    ALL prior ``recovery_codes`` hashes are deleted FIRST, so a code leaked
+    before this call stops redeeming immediately; then the shared
+    ``issue_codes()`` helper generates and hashes the fresh batch. This is the
+    single generation/hash path — no logic is duplicated here.
+    """
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM recovery_codes")
+    return issue_codes()
 
 
 # ---------------------------------------------------------------------------

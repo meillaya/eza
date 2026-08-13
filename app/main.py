@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import logging
 import re
+from base64 import urlsafe_b64decode
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -465,6 +466,65 @@ _LOGIN_PAGE_HTML = """<!doctype html>
 </html>
 """
 
+# allow: SIZE_OK — _ACCOUNT_PAGE_HTML is a static template (pure data), the
+# same pattern as _SETUP_PAGE_HTML and _LOGIN_PAGE_HTML above.
+_ACCOUNT_PAGE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Account</title>
+</head>
+<body>
+  <h1>Account</h1>
+  <h2>Passkeys</h2>
+  <ul id="credentials"></ul>
+  <h2>Recovery codes</h2>
+  <p>Rotating your recovery codes invalidates every code issued before this moment.</p>
+  <button id="regenerate" type="button">Regenerate recovery codes</button>
+  <p id="error" style="color:#b00020"></p>
+  <pre id="codes" hidden></pre>
+  <script>
+    function csrfToken() {
+      const c = document.cookie.split("; ").find((c) => c.startsWith("csrf_token="));
+      return c ? c.slice("csrf_token=".length) : "";
+    }
+    const list = document.getElementById("credentials");
+    (async () => {
+      try {
+        const resp = await fetch("/api/credentials");
+        if (!resp.ok) { list.textContent = "Failed to load credentials."; return; }
+        const { credentials } = await resp.json();
+        if (!credentials.length) { list.textContent = "No passkeys enrolled."; return; }
+        for (const c of credentials) {
+          const li = document.createElement("li");
+          const name = c.nickname || "Passkey";
+          li.textContent = name + (c.backup_eligible ? " (backup eligible)" : "");
+          list.appendChild(li);
+        }
+      } catch (e) { list.textContent = "Failed to load credentials: " + e.message; }
+    })();
+    const btn = document.getElementById("regenerate");
+    const err = document.getElementById("error");
+    const codes = document.getElementById("codes");
+    btn.addEventListener("click", async () => {
+      try {
+        err.textContent = "";
+        const resp = await fetch("/api/recovery/regenerate", {
+          method: "POST",
+          headers: { "X-CSRF-Token": csrfToken() },
+        });
+        if (!resp.ok) { err.textContent = "Regeneration failed (" + resp.status + ")."; return; }
+        const result = await resp.json();
+        codes.hidden = false;
+        codes.textContent = result.codes.join("\\n");
+      } catch (e) { err.textContent = "Regeneration failed: " + e.message; }
+    });
+  </script>
+</body>
+</html>
+"""
+
 # The auth-exemption list. Prefix matches, exact paths, and method+path
 # exceptions. POST /api/recovery/redeem is exempt as a single method+path
 # entry — deliberately NOT the whole /api/recovery prefix, so
@@ -632,6 +692,80 @@ def api_auth_logout(request: Request) -> JSONResponse:
     response.delete_cookie(auth.SESSION_COOKIE_NAME, path="/")
     response.delete_cookie(_CSRF_COOKIE_NAME, path="/")
     return response
+
+
+# ---------------------------------------------------------------------------
+# Credential management + recovery-code regeneration (todo 12). All four routes
+# are authed: the global middleware 401s unauth calls (regenerate is NOT in the
+# exemption list — only POST /api/recovery/redeem is) and CSRF-checks the
+# mutating writes.
+# ---------------------------------------------------------------------------
+
+
+def _credential_id_from_b64url(value: str) -> bytes | None:
+    """Decode a URL-safe-base64 credential id from a path segment.
+
+    ``binascii.Error`` is a ``ValueError`` subclass, so a single catch covers
+    malformed ids (bad alphabet, bad padding).
+    """
+    try:
+        return urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    except ValueError:
+        return None
+
+
+@app.get("/api/credentials")
+def api_list_credentials() -> dict:
+    """List enrolled passkeys: id, nickname, created_at, backup_eligible, last_used_at."""
+    return {"credentials": auth.list_credentials()}
+
+
+@app.patch("/api/credentials/{credential_id}")
+async def api_rename_credential(credential_id: str, request: Request) -> dict:
+    """Rename a passkey (nickname shown on the account page)."""
+    raw_id = _credential_id_from_b64url(credential_id)
+    if raw_id is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from None
+    nickname = body.get("nickname") if isinstance(body, dict) else None
+    if not isinstance(nickname, str):
+        raise HTTPException(status_code=400, detail="nickname must be a string")
+    if not await db.run_db(auth.rename_credential, raw_id, nickname.strip()):
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"ok": True}
+
+
+@app.delete("/api/credentials/{credential_id}")
+async def api_delete_credential(credential_id: str) -> dict:
+    """Revoke a passkey. The last credential cannot be revoked: the recovery
+    path is the only way back, so that delete is blocked with a 400."""
+    raw_id = _credential_id_from_b64url(credential_id)
+    if raw_id is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        deleted = await db.run_db(auth.delete_credential, raw_id)
+    except auth.LastCredentialError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"ok": True}
+
+
+@app.post("/api/recovery/regenerate")
+async def api_recovery_regenerate() -> dict:
+    """Rotate recovery codes: every prior hash is deleted first, then 10 new
+    codes are issued and returned exactly once (authed-only)."""
+    codes = await db.run_db(auth.regenerate_codes)
+    return {"codes": codes}
+
+
+@app.get("/account")
+def account_page() -> HTMLResponse:
+    """Credential management page: lists passkeys and offers code regeneration."""
+    return HTMLResponse(_ACCOUNT_PAGE_HTML)
 
 
 def main() -> None:
