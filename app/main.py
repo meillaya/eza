@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import os
 import re
 from base64 import urlsafe_b64decode
 from collections.abc import AsyncIterator
@@ -17,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from selectolax.parser import HTMLParser, Node
 
-from . import auth, config, db, dedup, fetcher, links, snapshot, tag_cleanup
+from . import auth, auto_tag, config, db, dedup, fetcher, links, snapshot, tag_cleanup
 
 log = logging.getLogger("bookmarks")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -551,6 +552,84 @@ async def api_capture_snapshot(bookmark_id: int) -> dict:
 @app.get("/api/tags")
 def api_tags():
     return {"tags": db.all_tags()}
+
+
+@app.get("/api/tags/{tag}/suggestions")
+async def api_tag_suggestions(
+    tag: str,
+    sample_size: int = Query(default=10, ge=1, le=50),
+) -> dict:
+    """Per-bookmark AI tag suggestions for a tag bucket (todo 28).
+
+    Reuses auto_tag's existing stratified sampling: the tag's bookmarks are
+    sampled across domains, then each sampled bookmark gets its own LLM call
+    constrained to the user's existing-tag vocabulary (top-K, stopwords
+    excluded). Returns ``{"suggestions": [{bookmark_id, title, url,
+    candidate_tags}]}`` where ``candidate_tags`` is already vocabulary- and
+    stopword-filtered — the UI can only ever approve existing tags. Purely
+    advisory: nothing is applied here. Authed by the global middleware — no
+    exemption. Unknown tag -> 404; no LLM API key configured -> 400.
+    """
+    bookmarks = db.bookmarks_with_tag(tag)
+    if not bookmarks:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    api_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="No LLM API key configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY)",
+        )
+    vocab = auto_tag.build_tag_vocab(db.all_tags())
+    sample = auto_tag._stratified_sample(bookmarks, sample_size)
+    provider = "anthropic"
+    suggestions = await auto_tag.suggest_bookmark_tags(
+        bookmarks=sample,
+        provider=provider,
+        model=auto_tag.DEFAULT_MODELS[provider],
+        api_key=api_key,
+        vocab=vocab,
+    )
+    return {"suggestions": suggestions}
+
+
+@app.post("/api/tags/apply")
+async def api_apply_tags(request: Request) -> dict:
+    """Apply tags to bookmarks in bulk (todo 28).
+
+    ``{"bookmark_ids": [int], "tags": [str]}`` -> ``db.bulk_add_tags`` (the
+    existing bulk tag-insert path) in one transaction. Stopword tags are
+    filtered before anything is written — applied tags never come from the
+    stopword set. Purely explicit: this endpoint is only ever called after the
+    user approves a suggestion in the review UI. Authed + CSRF-checked by the
+    global middleware.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    bookmark_ids = body.get("bookmark_ids")
+    tags = body.get("tags")
+    if not isinstance(bookmark_ids, list) or not all(isinstance(i, int) for i in bookmark_ids):
+        raise HTTPException(status_code=400, detail="bookmark_ids must be a list of integers")
+    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+        raise HTTPException(status_code=400, detail="tags must be a list of strings")
+    if not bookmark_ids or not tags:
+        raise HTTPException(status_code=400, detail="bookmark_ids and tags must be non-empty")
+    filtered = [t for t in tags if t.strip().lower() not in auto_tag._DEFAULT_STOPWORDS]
+    added = db.bulk_add_tags(bookmark_ids, filtered)
+    return {"ok": True, "added": added, "filtered": len(tags) - len(filtered)}
+
+
+@app.get("/tags-suggestions", response_class=HTMLResponse)
+def tags_suggestions_page(request: Request) -> HTMLResponse:
+    """AI tag suggest-approve screen (todo 28): per-bookmark candidate tags
+    with approve/discard buttons and an apply-selected action. The page itself
+    is authed by the global middleware like every page; data comes from
+    GET /api/tags/{tag}/suggestions and mutations go through
+    POST /api/tags/apply."""
+    return TEMPLATES.TemplateResponse(request, "tags-suggestions.html", {})
 
 
 @app.get("/api/tags/consolidation-candidates")

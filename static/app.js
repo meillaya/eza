@@ -1375,6 +1375,152 @@ function initTagsCleanupPage() {
 }
 
 // ---------------------------------------------------------------------------
+// AI tagging page (/tags-suggestions) — per-bookmark candidate tags from the
+// user's existing taxonomy with approve/discard buttons and an apply-selected
+// action. Reads GET /api/tags/{tag}/suggestions (already vocabulary- and
+// stopword-filtered server-side); applying goes through POST /api/tags/apply
+// (CSRF-checked) — one request per approved bookmark so each bookmark gets
+// exactly its own candidate tags. Never applies anything automatically.
+// ---------------------------------------------------------------------------
+
+function initTagSuggestionsPage() {
+  const statusEl = $("#ts-status");
+  const tagSelect = $("#ts-tag");
+  const loadBtn = $("#ts-load");
+  const listEl = $("#ts-list");
+  const summaryEl = $("#ts-summary");
+  let suggestions = [];   // current [{bookmark_id, title, url, candidate_tags}]
+  const approved = new Map(); // bookmark_id -> {title, tags}
+
+  function setStatus(text, isError = false) {
+    statusEl.textContent = text;
+    statusEl.classList.toggle("dedup-error", isError);
+  }
+
+  function updateSummary() {
+    const n = approved.size;
+    summaryEl.hidden = n === 0;
+    summaryEl.innerHTML = n
+      ? `${n} approved · <button id="ts-apply" class="btn ts-apply" type="button">Apply selected</button>`
+      : "";
+    if (n) {
+      $("#ts-apply").addEventListener("click", applySelected);
+    }
+  }
+
+  async function loadTags() {
+    const resp = await fetch("/api/tags");
+    if (!resp.ok) { setStatus("Could not load tags.", true); return; }
+    const data = await resp.json();
+    tagSelect.innerHTML = data.tags
+      .map((t) => `<option value="${escapeHtml(t.name)}">${escapeHtml(t.name)} (${t.n})</option>`)
+      .join("");
+    if (data.tags.length) loadSuggestions();
+  }
+
+  function renderRows() {
+    if (!suggestions.length) {
+      listEl.innerHTML = `<p class="dedup-empty">No suggestions to review — the LLM returned nothing in-vocabulary for this bucket.</p>`;
+      return;
+    }
+    listEl.innerHTML = suggestions.map((s, i) => `
+      <li class="ts-row" data-index="${i}">
+        <div class="ts-row-head">
+          <span class="ts-row-title">${escapeHtml(s.title || s.url)}</span>
+          <a class="ts-row-url" href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s.url)}</a>
+        </div>
+        <div class="ts-chips">
+          ${s.candidate_tags.length
+            ? s.candidate_tags.map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join("")
+            : `<span class="ts-none">no in-vocabulary tags</span>`}
+        </div>
+        <div class="ts-actions">
+          <button type="button" class="btn ts-approve" ${s.candidate_tags.length ? "" : "disabled"}>Approve</button>
+          <button type="button" class="btn ts-discard">Discard</button>
+        </div>
+      </li>`).join("");
+    listEl.querySelectorAll(".ts-approve").forEach((btn, i) => {
+      btn.addEventListener("click", () => approve(i, btn));
+    });
+    listEl.querySelectorAll(".ts-discard").forEach((btn, i) => {
+      btn.addEventListener("click", () => discard(i, btn));
+    });
+  }
+
+  function approve(index, btn) {
+    const s = suggestions[index];
+    approved.set(s.bookmark_id, { title: s.title || s.url, tags: s.candidate_tags });
+    btn.closest(".ts-row").classList.add("ts-approved");
+    btn.disabled = true;
+    setStatus(`Approved tags for “${approved.get(s.bookmark_id).title}”.`);
+    updateSummary();
+  }
+
+  function discard(index, btn) {
+    const s = suggestions[index];
+    approved.delete(s.bookmark_id);
+    btn.closest(".ts-row").classList.add("ts-discarded");
+    btn.closest(".ts-row").querySelector(".ts-approve").disabled = true;
+    setStatus(`Discarded “${s.title || s.url}”.`);
+    updateSummary();
+  }
+
+  async function loadSuggestions() {
+    const tag = tagSelect.value;
+    if (!tag) return;
+    approved.clear();
+    updateSummary();
+    loadBtn.disabled = true;
+    setStatus(`Asking the LLM for suggestions in “${tag}”…`);
+    try {
+      const resp = await fetch(`/api/tags/${encodeURIComponent(tag)}/suggestions`);
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({}));
+        setStatus(detail.detail || "Could not load suggestions (" + resp.status + ").", true);
+        listEl.innerHTML = "";
+        return;
+      }
+      suggestions = (await resp.json()).suggestions;
+      renderRows();
+      setStatus(suggestions.length ? "Review the suggestions below." : "No suggestions to review.");
+    } catch (err) {
+      setStatus("Could not load suggestions: " + err.message, true);
+    } finally {
+      loadBtn.disabled = false;
+    }
+  }
+
+  async function applySelected() {
+    loadBtn.disabled = true;
+    const pending = Array.from(approved.entries());
+    try {
+      for (const [bookmarkId, s] of pending) {
+        const resp = await fetch("/api/tags/apply", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
+          body: JSON.stringify({ bookmark_ids: [bookmarkId], tags: s.tags }),
+        });
+        if (!resp.ok) {
+          const detail = await resp.json().catch(() => ({}));
+          throw new Error(detail.detail || "Apply failed (" + resp.status + ")");
+        }
+      }
+      setStatus(`Applied tags to ${pending.length} bookmark(s).`);
+      approved.clear();
+      updateSummary();
+      await loadSuggestions();
+    } catch (err) {
+      setStatus(err.message, true);
+    } finally {
+      loadBtn.disabled = false;
+    }
+  }
+
+  loadBtn.addEventListener("click", loadSuggestions);
+  loadTags();
+}
+
+// ---------------------------------------------------------------------------
 // Boot — run only the wiring for the page that exists.
 // ---------------------------------------------------------------------------
 
@@ -1383,3 +1529,4 @@ if ($("#detail")) initDetailPage();
 if ($("#graph")) initGraphPage();
 if ($("#dedup")) initDedupPage();
 if ($("#tags-cleanup")) initTagsCleanupPage();
+if ($("#tags-suggestions")) initTagSuggestionsPage();
