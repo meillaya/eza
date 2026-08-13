@@ -66,6 +66,22 @@
     </form>
   </dialog>
 
+  <!-- Quick switcher palette (todo 22): opened with plain "k" (no modifier —
+       Ctrl+K is reserved by Chrome's omnibox and Firefox's search bar, so
+       page JS cannot intercept it). Escape / backdrop click closes. -->
+  <dialog id="quick-switcher" class="modal qs-modal">
+    <div class="qs-body">
+      <input id="qs-input" type="search" placeholder="Search titles and URLs…"
+             autocomplete="off" aria-label="Quick switcher search">
+      <div id="qs-results" class="qs-results" role="listbox" aria-label="Bookmark results"></div>
+      <div class="qs-footer">
+        <span>↑↓ navigate</span><span>↵ open</span><span>Esc close</span>
+      </div>
+    </div>
+  </dialog>
+
+  <footer class="kbd-hint" aria-label="Keyboard shortcuts">press k for the quick switcher</footer>
+
   <script src="/static/app.js" type="module"></script>
 </body>
 </html>

@@ -123,6 +123,7 @@ function initGridPage() {
   const searchInput = $("#search");
   const tagbar = $("#tagbar");
   const modal = $("#add-modal");
+  const palette = $("#quick-switcher");
 
   searchInput.addEventListener("input", (e) => {
     state.q = e.target.value.trim();
@@ -183,13 +184,15 @@ function initGridPage() {
     }
   });
 
-  // Add modal.
-  $("#add-btn").addEventListener("click", () => {
-    $("input[name=url]", modal).value = "";
+  // Add modal. openAddModal(url) is also used by the quick switcher's
+  // "add as new bookmark" fallback, which prefills the URL field.
+  function openAddModal(url = "") {
+    $("input[name=url]", modal).value = url;
     $("input[name=tags]", modal).value = "";
     modal.showModal();
     $("input[name=url]", modal).focus();
-  });
+  }
+  $("#add-btn").addEventListener("click", () => openAddModal());
   modal.addEventListener("click", (e) => {
     if (e.target === modal || e.target.matches("[data-close]")) modal.close();
   });
@@ -223,13 +226,155 @@ function initGridPage() {
     e.target.value = "";
   });
 
-  // Keyboard shortcut: "/" focuses search.
+  // Quick switcher palette (todo 22): a command palette over /api/search
+  // (small limit). Plain "k" opens it; ↑↓ move the selection; Enter opens
+  // the selected bookmark's detail page; when nothing matches, an
+  // "add as new bookmark" fallback prefills the Add modal with the query.
+  // The binding is deliberately NOT Ctrl+K — that key is reserved by Chrome's
+  // omnibox and Firefox's search bar, so page JS can never intercept it.
+
+  const QS_LIMIT = 8;
+  const qsInput = $("#qs-input");
+  const qsResults = $("#qs-results");
+  let qsItems = [];
+  let qsSelected = -1;
+  let qsCreateNew = false;
+  let qsFetchSeq = 0;
+
+  function qsOptionCount() {
+    return qsItems.length + (qsCreateNew ? 1 : 0);
+  }
+
+  function qsRender() {
+    const rows = qsItems.map((it, i) => {
+      const title = it.title || it.url;
+      return `
+        <button type="button" role="option" aria-selected="${i === qsSelected}"
+                class="qs-item${i === qsSelected ? " selected" : ""}" data-id="${it.id}">
+          <span class="qs-title">${escapeHtml(title)}</span>
+          <span class="qs-url">${escapeHtml(it.url)}</span>
+        </button>`;
+    });
+    if (qsCreateNew) {
+      const i = qsItems.length;
+      rows.push(`
+        <button type="button" role="option" aria-selected="${i === qsSelected}"
+                class="qs-item qs-create${i === qsSelected ? " selected" : ""}" data-action="create">
+          <span class="qs-title">+ Add as new bookmark</span>
+          <span class="qs-url">${escapeHtml(qsInput.value.trim())}</span>
+        </button>`);
+    }
+    qsResults.innerHTML = rows.length
+      ? rows.join("")
+      : '<div class="qs-empty">Type to search titles and URLs…</div>';
+  }
+
+  async function qsFetch(q) {
+    const seq = ++qsFetchSeq;
+    try {
+      const params = new URLSearchParams({ q, limit: String(QS_LIMIT) });
+      const resp = await fetch("/api/search?" + params);
+      if (!resp.ok) throw new Error("quick search failed: " + resp.status);
+      const data = await resp.json();
+      if (seq !== qsFetchSeq) return;
+      qsItems = data.items || [];
+      qsCreateNew = q.trim() !== "" && qsItems.length === 0;
+      qsSelected = qsOptionCount() > 0 ? 0 : -1;
+      qsRender();
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  const qsDebounced = debounce(() => {
+    const q = qsInput.value.trim();
+    if (!q) {
+      qsItems = [];
+      qsCreateNew = false;
+      qsSelected = -1;
+      qsRender();
+      return;
+    }
+    qsFetch(q);
+  }, 180);
+
+  function qsActivate() {
+    if (qsSelected >= 0 && qsSelected < qsItems.length) {
+      const id = qsItems[qsSelected].id;
+      palette.close();
+      window.location.href = `/bookmark/${id}`;
+      return;
+    }
+    if (qsCreateNew && qsSelected === qsItems.length) {
+      const q = qsInput.value.trim();
+      palette.close();
+      if (q) openAddModal(q);
+    }
+  }
+
+  function openPalette() {
+    qsItems = [];
+    qsCreateNew = false;
+    qsSelected = -1;
+    qsFetchSeq++;
+    qsInput.value = "";
+    qsRender();
+    palette.showModal();
+    qsInput.focus();
+  }
+
+  qsInput.addEventListener("input", qsDebounced);
+  qsInput.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const total = qsOptionCount();
+      if (total === 0) return;
+      const delta = e.key === "ArrowDown" ? 1 : -1;
+      qsSelected = (qsSelected + delta + total) % total;
+      qsRender();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      qsActivate();
+    }
+  });
+  qsResults.addEventListener("click", (e) => {
+    const btn = e.target.closest(".qs-item");
+    if (!btn) return;
+    const id = btn.dataset.id;
+    palette.close();
+    if (id) {
+      window.location.href = `/bookmark/${id}`;
+    } else if (btn.dataset.action === "create") {
+      const q = qsInput.value.trim();
+      if (q) openAddModal(q);
+    }
+  });
+  palette.addEventListener("click", (e) => {
+    if (e.target === palette) palette.close();
+  });
+  palette.addEventListener("close", () => {
+    if (!modal.open) searchInput.focus();
+  });
+
+  // Keyboard shortcuts. "k" (no modifier — Ctrl+K is reserved by Chrome's
+  // omnibox and Firefox's search bar) opens the quick switcher; "/" focuses
+  // search; Escape closes whichever modal is open. None fire while typing in
+  // an input/textarea/contenteditable or while a modal dialog is open.
   document.addEventListener("keydown", (e) => {
-    if (e.key === "/" && document.activeElement !== searchInput && !modal.open) {
+    const target = e.target;
+    const typing = target instanceof HTMLElement && (
+      target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable
+    );
+    if (e.key === "k" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey
+        && !typing && !modal.open && !palette.open) {
+      e.preventDefault();
+      openPalette();
+    } else if (e.key === "/" && !typing && !modal.open && !palette.open) {
       e.preventDefault();
       searchInput.focus();
+    } else if (e.key === "Escape" && modal.open) {
+      modal.close();
     }
-    if (e.key === "Escape" && modal.open) modal.close();
   });
 }
 
