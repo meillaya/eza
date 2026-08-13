@@ -17,8 +17,12 @@ Three independent signals feed candidate groups:
 3. **Fuzzy title** — RapidFuzz ``WRatio`` ≥ 85 (:data:`FUZZY_TITLE_THRESHOLD`)
    groups bookmarks within the same normalized domain.
 
-The engine is strictly read-only: it produces candidate groups, never merges,
-never deletes. Merging is todo 26's job, and only with explicit user action.
+The candidate engine is strictly read-only: it produces candidate groups,
+never merges, never deletes. Todo 26 adds the user-confirmed, undo-able merge
+(:func:`merge_bookmarks` / :func:`undo_merge`) — the one explicit carve-out
+from "no destructive changes": it never runs without explicit user action,
+rejects cross-domain merges, and writes every pre-merge state to
+``undo_snapshots`` so a merge is always reversible.
 
 The backfill CLI is deliberately bounded (``--limit``) and marker-resumable,
 the same shape as ``bookmarks-backfill-extract``:
@@ -27,13 +31,21 @@ the same shape as ``bookmarks-backfill-extract``:
     uv run python -m app.dedup --limit 500 --marker /tmp/finalurl.marker
 """
 
+# allow: SIZE_OK — pre-existing monolithic dedup module (>250 LOC before todo
+# 26, single coherent engine: URL normalize + fuzzy grouping + redirect-final
+# backfill + merge/undo). Splitting would stage new modules outside each todo's
+# commit contract (app/dedup.py only); the todo-26 merge section is
+# self-contained below.
+
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import sqlite3
 import sys
+import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TypedDict
@@ -299,6 +311,270 @@ def find_candidates(conn: sqlite3.Connection | None = None) -> dict[str, list[_G
 
     groups.sort(key=lambda g: (-g["count"], g["canonical"]["url"], g["canonical"]["id"]))
     return {"groups": groups}
+
+
+# ---------------------------------------------------------------------------
+# Confirm-and-undo merge (todo 26)
+#
+# The one explicit carve-out from "no destructive changes": a merge only ever
+# runs on explicit user action, is guarded against cross-domain mixes, and
+# writes the FULL pre-merge state to undo_snapshots so undo restores it.
+# ---------------------------------------------------------------------------
+
+
+class MergeError(Exception):
+    """A merge request the server rejects (client error -> HTTP 400)."""
+
+
+class UndoError(Exception):
+    """An undo request that has no snapshot to consume (-> HTTP 404)."""
+
+
+def _set_tags(conn: sqlite3.Connection, bookmark_id: int, tag_names: Iterable[str]) -> None:
+    """Replace a bookmark's tag links with exactly the given names.
+
+    Mirrors ``db._set_bookmark_tags`` (same name-normalization, ``tags`` rows
+    upserted on demand) but lives here so the merge/undo transaction owns its
+    writes without reaching into db's private helpers. Callers must already
+    hold a write transaction.
+    """
+    conn.execute("DELETE FROM bookmark_tags WHERE bookmark_id = ?", (bookmark_id,))
+    for name in tag_names:
+        name = name.strip().lower()
+        if not name:
+            continue
+        conn.execute("INSERT OR IGNORE INTO tags(name) VALUES (?)", (name,))
+        tag_id = conn.execute("SELECT id FROM tags WHERE name = ?", (name,)).fetchone()[0]
+        conn.execute(
+            "INSERT OR IGNORE INTO bookmark_tags(bookmark_id, tag_id) VALUES (?, ?)",
+            (bookmark_id, tag_id),
+        )
+
+
+def _bookmark_snapshot(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
+    """The full pre-merge state of one bookmark: its complete row + tags.
+
+    ``note_body`` lives inside ``row``, so a discarded note (the
+    NOTE-COLLISION RULE) is captured here and undo restores it verbatim.
+    """
+    tags = [
+        r["name"]
+        for r in conn.execute(
+            "SELECT t.name FROM tags t JOIN bookmark_tags bt ON bt.tag_id = t.id "
+            "WHERE bt.bookmark_id = ? ORDER BY t.name",
+            (row["id"],),
+        ).fetchall()
+    ]
+    return {"row": dict(row), "tags": tags}
+
+
+def _repoint_links(
+    conn: sqlite3.Connection, keep_id: int, merge_ids: list[int]
+) -> None:
+    """Re-point every ``links`` row mentioning a merge row onto ``keep_id``.
+
+    The affected set is every row whose source OR target is a group member.
+    Each row is re-mapped source/target onto ``keep_id`` where it names a merge
+    row; rows that would become self-links (a merge row linking to the keep,
+    or the keep linking to a merge row) are dropped; rows that would collide
+    on ``UNIQUE(source_id, target_id, line_number)`` are deduped in
+    deterministic (row-id) order. The affected rows are then deleted and the
+    survivors re-inserted with ``INSERT OR IGNORE`` so any survivor that still
+    collides with a group-external row is silently dropped rather than raised.
+    """
+    group = [keep_id, *merge_ids]
+    marks = ",".join("?" for _ in group)
+    rows = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT id, source_id, target_id, target_title, display_text, line_number "
+            f"FROM links WHERE source_id IN ({marks}) OR target_id IN ({marks})",
+            (*group, *group),
+        ).fetchall()
+    ]
+    merge_set = set(merge_ids)
+    survivors: list[tuple[int, int | None, str, str | None, int | None]] = []
+    seen: set[tuple[int, int | None, int | None]] = set()
+    for row in sorted(rows, key=lambda r: r["id"]):
+        new_source = keep_id if row["source_id"] in merge_set else row["source_id"]
+        new_target = keep_id if row["target_id"] in merge_set else row["target_id"]
+        if new_source == new_target:
+            continue  # would become a self-link: drop
+        target_title = (
+            "" if new_target is not None and new_target != row["target_id"] else row["target_title"]
+        )
+        key = (new_source, new_target, row["line_number"])
+        if key in seen:
+            continue
+        seen.add(key)
+        survivors.append(
+            (new_source, new_target, target_title, row["display_text"], row["line_number"])
+        )
+    if rows:
+        id_marks = ",".join("?" for _ in rows)
+        conn.execute(
+            f"DELETE FROM links WHERE id IN ({id_marks})", [r["id"] for r in rows]
+        )
+    conn.executemany(
+        "INSERT OR IGNORE INTO links "
+        "(source_id, target_id, target_title, display_text, line_number)"
+        " VALUES (?, ?, ?, ?, ?)",
+        survivors,
+    )
+
+
+def merge_bookmarks(keep_id: int, merge_ids: Iterable[int]) -> dict:
+    """Merge ``merge_ids`` into ``keep_id`` — one user-confirmed transaction.
+
+    Explicit user action only; this function is never called automatically. In
+    a single ``BEGIN IMMEDIATE`` transaction it: (a) unions the merge rows'
+    tags onto keep (deduped), (b) adopts a merge note only when keep has none —
+    on a collision KEEP wins and the discarded note lives inside the snapshot
+    payload, (c) re-points ``links`` rows onto keep, (d) deletes the merge
+    rows, and (e) writes the full pre-merge state to ``undo_snapshots`` for
+    :func:`undo_merge`. Empty ``merge_ids`` and any cross-domain merge
+    (normalized-domain equality) are rejected. Returns
+    ``{"snapshot_id", "kept", "merged"}``.
+    """
+    ids = sorted({int(i) for i in merge_ids})
+    if not ids:
+        raise MergeError("merge_ids must not be empty")
+    if keep_id in ids:
+        raise MergeError("keep_id cannot be merged into itself")
+    with db.transaction() as conn:
+        keep_row = conn.execute("SELECT * FROM bookmarks WHERE id = ?", (keep_id,)).fetchone()
+        if keep_row is None:
+            raise MergeError(f"keep bookmark {keep_id} does not exist")
+        merge_rows: list[sqlite3.Row] = []
+        for mid in ids:
+            row = conn.execute("SELECT * FROM bookmarks WHERE id = ?", (mid,)).fetchone()
+            if row is None:
+                raise MergeError(f"merge bookmark {mid} does not exist")
+            merge_rows.append(row)
+        keep_domain = normalized_domain(keep_row["url"])
+        for row in merge_rows:
+            if normalized_domain(row["url"]) != keep_domain:
+                raise MergeError("cannot merge bookmarks from different domains")
+
+        # Full pre-merge state for the undo ledger, written BEFORE any change
+        # so a failed merge can never orphan a snapshot.
+        keep_snapshot = _bookmark_snapshot(conn, keep_row)
+        merged_snapshots = [_bookmark_snapshot(conn, row) for row in merge_rows]
+        group = [keep_id, *ids]
+        marks = ",".join("?" for _ in group)
+        links = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT source_id, target_id, target_title, display_text, line_number "
+                f"FROM links WHERE source_id IN ({marks}) OR target_id IN ({marks}) "
+                "ORDER BY id",
+                (*group, *group),
+            ).fetchall()
+        ]
+        payload = {
+            "keep_id": keep_id,
+            "merge_ids": ids,
+            "keep": keep_snapshot,
+            "merged": merged_snapshots,
+            "links": links,
+        }
+        cur = conn.execute(
+            "INSERT INTO undo_snapshots (payload_json, created_at) VALUES (?, ?)",
+            (json.dumps(payload), int(time.time())),
+        )
+        snapshot_id = cur.lastrowid
+
+        union = sorted(set(keep_snapshot["tags"]).union(*(m["tags"] for m in merged_snapshots)))
+        _set_tags(conn, keep_id, union)
+
+        # NOTE-COLLISION RULE: keep wins — a merge note is adopted only when
+        # keep has none. Discarded notes live in the snapshot payload.
+        if not (keep_row["note_body"] or "").strip():
+            for snapshot in merged_snapshots:
+                note = snapshot["row"]["note_body"] or ""
+                if note.strip():
+                    conn.execute(
+                        "UPDATE bookmarks SET note_body = ? WHERE id = ?", (note, keep_id)
+                    )
+                    break
+
+        _repoint_links(conn, keep_id, ids)
+        id_marks = ",".join("?" for _ in ids)
+        conn.execute(f"DELETE FROM bookmarks WHERE id IN ({id_marks})", ids)
+    return {"snapshot_id": snapshot_id, "kept": keep_id, "merged": ids}
+
+
+def undo_merge(snapshot_id: int | None = None) -> dict:
+    """Pop the latest undo snapshot and restore the merged state.
+
+    Restores keep's pre-merge note/tags, re-inserts every merged bookmark with
+    its original row/tags/note (the discarded note included), restores the
+    full pre-merge ``links`` neighborhood, then consumes the snapshot. With no
+    snapshot available (or a nonexistent ``snapshot_id``) raises
+    :class:`UndoError`, which the API maps to 404. Returns
+    ``{"snapshot_id", "kept", "restored"}``.
+    """
+    with db.transaction() as conn:
+        if snapshot_id is None:
+            snap = conn.execute(
+                "SELECT id, payload_json FROM undo_snapshots ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        else:
+            snap = conn.execute(
+                "SELECT id, payload_json FROM undo_snapshots WHERE id = ?", (snapshot_id,)
+            ).fetchone()
+        if snap is None:
+            raise UndoError("No merge to undo")
+        payload = json.loads(snap["payload_json"])
+        keep_id = payload["keep_id"]
+        merge_ids = payload["merge_ids"]
+        if conn.execute("SELECT 1 FROM bookmarks WHERE id = ?", (keep_id,)).fetchone() is None:
+            raise UndoError("keep bookmark is gone; cannot undo")
+
+        # Bookmarks first (their links/tags reference them via FKs), then the
+        # mutable state, then the links neighborhood.
+        for snapshot in payload["merged"]:
+            row = snapshot["row"]
+            columns = list(row.keys())
+            column_list = ",".join(columns)
+            placeholders = ",".join("?" for _ in columns)
+            conn.execute(
+                f"INSERT INTO bookmarks ({column_list}) VALUES ({placeholders})",
+                [row[column] for column in columns],
+            )
+            _set_tags(conn, row["id"], snapshot["tags"])
+
+        keep_snapshot = payload["keep"]
+        conn.execute(
+            "UPDATE bookmarks SET note_body = ? WHERE id = ?",
+            (keep_snapshot["row"]["note_body"], keep_id),
+        )
+        _set_tags(conn, keep_id, keep_snapshot["tags"])
+
+        # Restore the pre-merge links neighborhood: delete the current set for
+        # the whole group, then re-insert the snapshot's original rows.
+        group = [keep_id, *merge_ids]
+        marks = ",".join("?" for _ in group)
+        conn.execute(
+            f"DELETE FROM links WHERE source_id IN ({marks}) OR target_id IN ({marks})",
+            (*group, *group),
+        )
+        for link in payload["links"]:
+            conn.execute(
+                "INSERT OR IGNORE INTO links "
+                "(source_id, target_id, target_title, display_text, line_number)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (
+                    link["source_id"],
+                    link["target_id"],
+                    link["target_title"],
+                    link["display_text"],
+                    link["line_number"],
+                ),
+            )
+
+        conn.execute("DELETE FROM undo_snapshots WHERE id = ?", (snap["id"],))
+    return {"snapshot_id": snap["id"], "kept": keep_id, "restored": merge_ids}
 
 
 # ---------------------------------------------------------------------------

@@ -1081,9 +1081,137 @@ function initGraphPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Dedup review page (/dedup) — candidate groups with keep-one radio + merge
+// action, plus the undo control. Reads GET /api/dedup/candidates; mutations
+// go through POST /api/dedup/merge and DELETE /api/dedup/undo (CSRF-checked).
+// ---------------------------------------------------------------------------
+
+function initDedupPage() {
+  const root = $("#dedup");
+  const groupsEl = $("#dedup-groups");
+  const statusEl = $("#dedup-status");
+  const undoBtn = $("#dedup-undo");
+
+  function setStatus(text, isError = false) {
+    statusEl.textContent = text;
+    statusEl.classList.toggle("dedup-error", isError);
+  }
+
+  function rowHtml(entry, isCanonical) {
+    return `
+      <li class="dedup-row">
+        <label class="dedup-keep">
+          <input type="radio" name="keep-${entry.id}" value="${entry.id}"
+            ${isCanonical ? "checked" : ""}>
+          <span class="dedup-badge ${isCanonical ? "dedup-canonical" : ""}">${isCanonical ? "keep (oldest)" : "merge"}</span>
+        </label>
+        <div class="dedup-row-body">
+          <div class="dedup-row-title">${escapeHtml(entry.title || entry.url)}</div>
+          <a class="dedup-row-url" href="${escapeHtml(entry.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(entry.url)}</a>
+        </div>
+        <span class="dedup-reason">${escapeHtml(entry.reason || "")}</span>
+      </li>`;
+  }
+
+  function renderGroup(group) {
+    const section = document.createElement("section");
+    section.className = "dedup-group";
+    const rows = [group.canonical, ...group.members];
+    section.innerHTML = `
+      <div class="dedup-group-head">
+        <span class="dedup-count">${group.count} bookmarks</span>
+        <button type="button" class="btn dedup-merge">Merge into selected</button>
+      </div>
+      <ul class="dedup-rows">
+        ${rowHtml(group.canonical, true)}
+        ${group.members.map((m) => rowHtml(m, false)).join("")}
+      </ul>
+      <p class="dedup-hint">The oldest bookmark is pre-selected. Merging combines
+        tags, notes and links into the kept row (its note wins on conflict); the
+        merge can be undone.</p>`;
+    section.querySelector(".dedup-merge").addEventListener("click", () => mergeGroup(section));
+    return section;
+  }
+
+  async function loadGroups() {
+    groupsEl.innerHTML = "";
+    try {
+      const resp = await fetch("/api/dedup/candidates");
+      if (!resp.ok) { setStatus("Could not load candidates.", true); return; }
+      const { groups } = await resp.json();
+      if (!groups.length) {
+        groupsEl.innerHTML = `<p class="dedup-empty">No duplicate candidates found.</p>`;
+        return;
+      }
+      for (const group of groups) groupsEl.appendChild(renderGroup(group));
+    } catch (err) {
+      setStatus("Could not load candidates: " + err.message, true);
+    }
+  }
+
+  async function mergeGroup(section) {
+    const checked = section.querySelector('input[type="radio"]:checked');
+    if (!checked) return;
+    const keepId = Number(checked.value);
+    const mergeIds = $$('input[type="radio"]', section)
+      .map((radio) => Number(radio.value))
+      .filter((id) => id !== keepId);
+    const btn = section.querySelector(".dedup-merge");
+    btn.disabled = true;
+    btn.textContent = "Merging…";
+    try {
+      const resp = await fetch("/api/dedup/merge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
+        body: JSON.stringify({ keep_id: keepId, merge_ids: mergeIds }),
+      });
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({}));
+        setStatus("Merge failed: " + (detail.detail || resp.status), true);
+        btn.disabled = false;
+        btn.textContent = "Merge into selected";
+        return;
+      }
+      setStatus(`Merged ${mergeIds.length} bookmark(s) into #${keepId}.`);
+      await loadGroups();
+    } catch (err) {
+      setStatus("Merge failed: " + err.message, true);
+      btn.disabled = false;
+      btn.textContent = "Merge into selected";
+    }
+  }
+
+  async function undoLastMerge() {
+    undoBtn.disabled = true;
+    try {
+      const resp = await fetch("/api/dedup/undo", {
+        method: "DELETE",
+        headers: { "X-CSRF-Token": csrfToken() },
+      });
+      if (resp.status === 404) {
+        setStatus("Nothing to undo.", true);
+        return;
+      }
+      if (!resp.ok) { setStatus("Undo failed (" + resp.status + ").", true); return; }
+      const data = await resp.json();
+      setStatus(`Restored bookmark(s) ${data.restored.join(", ")} from the last merge.`);
+      await loadGroups();
+    } catch (err) {
+      setStatus("Undo failed: " + err.message, true);
+    } finally {
+      undoBtn.disabled = false;
+    }
+  }
+
+  undoBtn.addEventListener("click", undoLastMerge);
+  loadGroups();
+}
+
+// ---------------------------------------------------------------------------
 // Boot — run only the wiring for the page that exists.
 // ---------------------------------------------------------------------------
 
 if ($("#grid")) initGridPage();
 if ($("#detail")) initDetailPage();
 if ($("#graph")) initGraphPage();
+if ($("#dedup")) initDedupPage();

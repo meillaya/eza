@@ -414,9 +414,9 @@ def test_v3_db_reaches_v4_via_runner_preserving_links(db_path):
     conn.commit()
     conn.close()
 
-    db.get_conn()  # production init path: _SCHEMA no-op + pending v4 migration
+    db.get_conn()  # production init path: _SCHEMA no-op + pending v4+v5 migrations
     conn = db.get_conn()
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(links)")}
     assert "target_title" in cols
     row = conn.execute("SELECT source_id, target_id, target_title FROM links").fetchone()

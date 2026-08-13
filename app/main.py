@@ -348,6 +348,58 @@ async def api_dedup_candidates() -> dict:
     return await db.run_db(dedup.find_candidates)
 
 
+@app.get("/dedup", response_class=HTMLResponse)
+def dedup_page(request: Request) -> HTMLResponse:
+    """Duplicate-review page (todo 26): lists candidate groups with a
+    keep-one radio + merge action and an undo control. The page itself is
+    authed by the global middleware like every page; all data comes from
+    /api/dedup/candidates and mutations go through /api/dedup/merge|undo."""
+    return TEMPLATES.TemplateResponse(request, "dedup.html", {})
+
+
+@app.post("/api/dedup/merge")
+async def api_dedup_merge(request: Request) -> dict:
+    """Merge ``merge_ids`` into ``keep_id`` (todo 26).
+
+    The confirm-and-undo carve-out from "no destructive changes": a merge only
+    ever happens here, on explicit user action, and writes an undo snapshot so
+    the result is reversible. Cross-domain merges, empty ``merge_ids`` and
+    self-merges are rejected with 400 (via :class:`dedup.MergeError`); missing
+    bookmarks are also 400. Authed + CSRF-checked by the global middleware.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    keep_id = body.get("keep_id")
+    merge_ids = body.get("merge_ids")
+    if not isinstance(keep_id, int):
+        raise HTTPException(status_code=400, detail="keep_id must be an integer")
+    if not isinstance(merge_ids, list) or not all(isinstance(i, int) for i in merge_ids):
+        raise HTTPException(status_code=400, detail="merge_ids must be a list of integers")
+    try:
+        return await db.run_db(dedup.merge_bookmarks, keep_id, merge_ids)
+    except dedup.MergeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/dedup/undo")
+async def api_dedup_undo() -> dict:
+    """Pop the latest undo snapshot and restore the merged state (todo 26).
+
+    Restores the merged bookmarks, tags, notes (the discarded note included)
+    and links, then consumes the snapshot. An empty undo stack is 404 — there
+    is no snapshot resource to consume. Authed + CSRF-checked like every
+    mutation.
+    """
+    try:
+        return await db.run_db(dedup.undo_merge)
+    except dedup.UndoError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.get("/api/search")
 def api_search(
     q: str = Query(default=""),
