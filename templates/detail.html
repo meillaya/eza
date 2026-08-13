@@ -56,6 +56,12 @@
       <input id="tag-input" type="text" placeholder="Add a tag…" autocomplete="off" aria-label="Add tag">
       <p class="hint">Enter or comma adds a tag; × removes one. Nothing is saved until you press Save.</p>
     </section>
+
+    <section id="backlinks-panel" class="backlinks-panel"
+             data-target-title="{{ bookmark.title or bookmark.url }}" aria-label="Backlinks">
+      <h2 class="section-heading">Backlinks</h2>
+      <div id="backlinks" role="region" aria-live="polite"></div>
+    </section>
   </main>
 
   <script src="/static/vendor/marked.min.js"></script>

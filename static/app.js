@@ -569,6 +569,117 @@ function initDetailPage() {
       save();
     }
   });
+
+  // --- Backlinks panel (todo 21): GET /api/bookmarks/{id}/backlinks and
+  // render Linked mentions (clickable → the source bookmark) and Unlinked
+  // mentions (context snippet + a "Link" button). The Link button rewrites
+  // the prose mention into [[Title]] in the SOURCE bookmark via PATCH, then
+  // re-fetches so the mention moves unlinked → linked. There is deliberately
+  // NO auto-link: nothing is written until the user clicks Link. ---
+
+  const backlinksPanel = $("#backlinks-panel");
+  const backlinksEl = $("#backlinks");
+  // The server-known title at page load — the wikilink target the Link
+  // button must resolve against, even if the user has unsaved title edits.
+  const targetTitle = (backlinksPanel.dataset.targetTitle || "").trim();
+
+  function backlinkRowHtml(item, linked) {
+    const line = item.line_number
+      ? `<span class="bl-line">line ${item.line_number}</span>`
+      : "";
+    const snippet = `<span class="bl-snippet">${escapeHtml(item.snippet)}</span>`;
+    if (linked) {
+      return `
+        <li class="bl-row bl-linked">
+          <a class="bl-source" href="/bookmark/${item.source_id}">${escapeHtml(item.source_title)}</a>
+          ${line}${snippet}
+        </li>`;
+    }
+    return `
+      <li class="bl-row bl-unlinked" data-source-id="${item.source_id}">
+        <span class="bl-source">${escapeHtml(item.source_title)}</span>
+        ${line}${snippet}
+        <button type="button" class="btn bl-link" data-source-id="${item.source_id}">Link</button>
+      </li>`;
+  }
+
+  function renderBacklinks(data) {
+    const linked = data.linked || [];
+    const unlinked = data.unlinked || [];
+    if (linked.length === 0 && unlinked.length === 0) {
+      backlinksEl.innerHTML =
+        '<p class="bl-empty">No backlinks yet. When another bookmark\u2019s note mentions this one, it will appear here.</p>';
+      return;
+    }
+    const linkedSection = linked.length
+      ? `<div class="bl-section"><h3 class="bl-heading">Linked mentions <span class="bl-count">${linked.length}</span></h3><ul class="bl-list">${linked.map((i) => backlinkRowHtml(i, true)).join("")}</ul></div>`
+      : "";
+    const unlinkedSection = unlinked.length
+      ? `<div class="bl-section"><h3 class="bl-heading">Unlinked mentions <span class="bl-count">${unlinked.length}</span></h3><ul class="bl-list">${unlinked.map((i) => backlinkRowHtml(i, false)).join("")}</ul></div>`
+      : "";
+    backlinksEl.innerHTML = linkedSection + unlinkedSection;
+  }
+
+  async function refreshBacklinks() {
+    try {
+      const resp = await fetch(`/api/bookmarks/${bookmarkId}/backlinks`);
+      if (!resp.ok) throw new Error("backlinks failed: " + resp.status);
+      renderBacklinks(await resp.json());
+    } catch (err) {
+      console.error(err);
+      backlinksEl.innerHTML =
+        '<p class="bl-empty">Could not load backlinks.</p>';
+    }
+  }
+
+  backlinksEl.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".bl-link");
+    if (!btn) return;
+    const sourceId = Number(btn.dataset.sourceId);
+    btn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = "Linking…";
+    try {
+      // Pull the source's current note and rewrite the FIRST occurrence of
+      // the target title into [[Title]] (mirrors links.py _line_of, which is
+      // what made the source an unlinked mention).
+      const resp = await fetch(`/api/bookmarks/${sourceId}`);
+      if (!resp.ok) throw new Error("Could not load the source note (" + resp.status + ")");
+      const source = await resp.json();
+      const noteBody = source.note_body || "";
+      const idx = noteBody.toLowerCase().indexOf(targetTitle.toLowerCase());
+      if (idx === -1) throw new Error("Mention no longer present in the source note");
+      const rewritten =
+        noteBody.slice(0, idx) + `[[${targetTitle}]]` + noteBody.slice(idx + targetTitle.length);
+      const patch = await fetch(`/api/bookmarks/${sourceId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken(),
+        },
+        body: JSON.stringify({ note_body: rewritten }),
+      });
+      if (!patch.ok) {
+        const detail = await patch.json().catch(() => ({}));
+        throw new Error(detail.detail || "Link failed (" + patch.status + ")");
+      }
+      await refreshBacklinks();
+    } catch (err) {
+      // Show the failure inline rather than console.error — the QA scenario
+      // asserts zero console errors on the backlinks panel.
+      btn.disabled = false;
+      btn.textContent = label;
+      const row = btn.closest(".bl-row");
+      if (row) {
+        const msg = document.createElement("span");
+        msg.className = "bl-error";
+        msg.textContent = err.message || "Link failed";
+        row.appendChild(msg);
+      }
+    }
+  });
+
+  refreshBacklinks();
 }
 
 // ---------------------------------------------------------------------------
