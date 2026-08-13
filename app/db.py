@@ -74,7 +74,10 @@ CREATE TRIGGER IF NOT EXISTS bookmarks_ad AFTER DELETE ON bookmarks BEGIN
   INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, url)
   VALUES('delete', old.id, old.title, old.description, old.url);
 END;
-CREATE TRIGGER IF NOT EXISTS bookmarks_au AFTER UPDATE ON bookmarks BEGIN
+CREATE TRIGGER IF NOT EXISTS bookmarks_au AFTER UPDATE ON bookmarks
+WHEN old.title IS NOT new.title OR old.description IS NOT new.description
+  OR old.url IS NOT new.url
+BEGIN
   INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, url)
   VALUES('delete', old.id, old.title, old.description, old.url);
   INSERT INTO bookmarks_fts(rowid, title, description, url)
