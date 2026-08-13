@@ -229,11 +229,26 @@ test("keyboard nav: / focuses search, Tab walks the topbar into the grid, k open
   await page.keyboard.press("/");
   await expect(page.locator("#search")).toBeFocused();
 
-  // Tab walks the topbar in DOM order: search → +Add → Graph link → "all" chip.
+  // Tab walks the topbar in DOM order: search → +Add → the nav links (Inbox,
+  // Graph, Dedup, Tags, AI tags, Maintenance) → + Save search → "all" chip →
+  // first grid card. The topbar grew these links as features landed (dedup,
+  // tag consolidation, AI tags, inbox), so the sequence tracks the live DOM.
+  const topbarLinks = [
+    'a.btn[href="/inbox"]',
+    'a.btn[href="/graph"]',
+    'a.btn[href="/dedup"]',
+    'a.btn[href="/tags-cleanup"]',
+    'a.btn[href="/tags-suggestions"]',
+    'a.btn[href="/maintenance"]',
+  ];
   await page.keyboard.press("Tab");
   await expect(page.locator("#add-btn")).toBeFocused();
+  for (const selector of topbarLinks) {
+    await page.keyboard.press("Tab");
+    await expect(page.locator(selector)).toBeFocused();
+  }
   await page.keyboard.press("Tab");
-  await expect(page.locator('a.btn[href="/graph"]')).toBeFocused();
+  await expect(page.locator("#save-search")).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(page.locator('.chip[data-tag=""]')).toBeFocused();
   // …and the next Tab lands inside the grid on the first card link.
