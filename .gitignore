@@ -35,5 +35,5 @@ dist/
 .DS_Store
 
 # Local tooling state
-.omo/
-.codegraph/
+.omo
+.codegraph
