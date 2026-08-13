@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clean up tags — Bookmarks</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%96%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="topbar dedup-topbar">
+    <a class="btn" href="/">← All bookmarks</a>
+    <div class="dedup-heading">
+      <span class="dedup-title">Clean up tags</span>
+      <span class="dedup-subtitle">Review suggested tag consolidations — nothing is applied until you click.</span>
+    </div>
+  </header>
+
+  <main id="tags-cleanup" class="dedup-main">
+    <p id="tc-status" class="dedup-status" role="status" aria-live="polite"></p>
+    <section id="tc-stats" class="tc-section"></section>
+    <section id="tc-case" class="tc-section" data-title="Case duplicates"></section>
+    <section id="tc-fuzzy" class="tc-section" data-title="Similar names"></section>
+    <section id="tc-junk" class="tc-section" data-title="Junk tags"></section>
+  </main>
+
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>

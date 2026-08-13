@@ -1208,6 +1208,173 @@ function initDedupPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Tag cleanup page (/tags-cleanup) — suggested consolidation pairs (case +
+// fuzzy + junk) with apply buttons, plus the proliferation stats. Reads GET
+// /api/tags/consolidation-candidates; mutations go through POST /api/tags/merge,
+// POST /api/tags/{id} (rename) and DELETE /api/tags/{id} (empty tags only),
+// all CSRF-checked. Never applies anything automatically.
+// ---------------------------------------------------------------------------
+
+function initTagsCleanupPage() {
+  const statusEl = $("#tc-status");
+  const statsEl = $("#tc-stats");
+  const caseEl = $("#tc-case");
+  const fuzzyEl = $("#tc-fuzzy");
+  const junkEl = $("#tc-junk");
+
+  function setStatus(text, isError = false) {
+    statusEl.textContent = text;
+    statusEl.classList.toggle("dedup-error", isError);
+  }
+
+  async function applyMerge(btn, fromName, toName) {
+    btn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = "Merging…";
+    try {
+      const resp = await fetch("/api/tags/merge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
+        body: JSON.stringify({ from: fromName, to: toName }),
+      });
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({}));
+        throw new Error(detail.detail || "Merge failed (" + resp.status + ")");
+      }
+      const data = await resp.json();
+      setStatus(`Merged "${data.from}" → "${data.to}" (${data.bookmarks_affected} bookmark link(s)).`);
+      await load();
+    } catch (err) {
+      setStatus(err.message, true);
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  }
+
+  async function renameTag(form, tagId) {
+    const input = form.querySelector(".tc-rename-input");
+    const name = input.value.trim();
+    const btn = form.querySelector(".tc-rename");
+    if (!name) return;
+    btn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = "Renaming…";
+    try {
+      const resp = await fetch(`/api/tags/${tagId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
+        body: JSON.stringify({ name }),
+      });
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({}));
+        throw new Error(detail.detail || "Rename failed (" + resp.status + ")");
+      }
+      setStatus(`Renamed tag to "${resp.json().name}".`);
+      await load();
+    } catch (err) {
+      setStatus(err.message, true);
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  }
+
+  async function deleteTag(btn, tagId) {
+    btn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = "Deleting…";
+    try {
+      const resp = await fetch(`/api/tags/${tagId}`, {
+        method: "DELETE",
+        headers: { "X-CSRF-Token": csrfToken() },
+      });
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({}));
+        throw new Error(detail.detail || "Delete failed (" + resp.status + ")");
+      }
+      setStatus("Deleted empty tag.");
+      await load();
+    } catch (err) {
+      setStatus(err.message, true);
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  }
+
+  function pairRow(pair) {
+    const score = pair.score !== undefined ? `<span class="tc-score">${pair.score}%</span>` : "";
+    return `
+      <li class="tc-pair">
+        <span class="tc-names"><code>${escapeHtml(pair.from)}</code> → <code>${escapeHtml(pair.to)}</code></span>
+        ${score}
+        <span class="tc-count">${pair.from_count} → ${pair.to_count} bookmark(s)</span>
+        <button type="button" class="btn tc-apply" data-from="${escapeHtml(pair.from)}" data-to="${escapeHtml(pair.to)}">Merge</button>
+      </li>`;
+  }
+
+  function renderPairs(section, pairs, emptyText) {
+    const title = section.dataset.title;
+    section.innerHTML = `<h3 class="tc-heading">${escapeHtml(title)}</h3>`;
+    if (!pairs.length) {
+      section.innerHTML += `<p class="dedup-empty">${escapeHtml(emptyText)}</p>`;
+      return;
+    }
+    section.innerHTML += `<ul class="tc-pairs">${pairs.map(pairRow).join("")}</ul>`;
+    section.querySelectorAll(".tc-apply").forEach((btn) => {
+      btn.addEventListener("click", () => applyMerge(btn, btn.dataset.from, btn.dataset.to));
+    });
+  }
+
+  function renderJunk(junkTags) {
+    junkEl.innerHTML = `<h3 class="tc-heading">Junk tags</h3>`;
+    if (!junkTags.length) {
+      junkEl.innerHTML += `<p class="dedup-empty">No junk tags found.</p>`;
+      return;
+    }
+    junkEl.innerHTML += `
+      <ul class="tc-pairs">${junkTags.map((j) => `
+        <li class="tc-pair tc-junk" data-id="${j.id}">
+          <span class="tc-names"><code>${escapeHtml(j.name)}</code></span>
+          <span class="tc-count">${j.n} bookmark(s)</span>
+          <form class="tc-rename-form">
+            <input class="tc-rename-input" type="text" value="${escapeHtml(j.name)}" aria-label="New name for ${escapeHtml(j.name)}">
+            <button type="submit" class="btn tc-rename">Rename</button>
+          </form>
+          <button type="button" class="btn tc-delete" data-id="${j.id}">Delete</button>
+        </li>`).join("")}
+      </ul>`;
+    junkEl.querySelectorAll(".tc-rename-form").forEach((form) => {
+      form.addEventListener("submit", (e) => {
+        e.preventDefault();
+        renameTag(form, form.closest(".tc-junk").dataset.id);
+      });
+    });
+    junkEl.querySelectorAll(".tc-delete").forEach((btn) => {
+      btn.addEventListener("click", () => deleteTag(btn, btn.dataset.id));
+    });
+  }
+
+  async function load() {
+    try {
+      const resp = await fetch("/api/tags/consolidation-candidates");
+      if (!resp.ok) { setStatus("Could not load candidates.", true); return; }
+      const data = await resp.json();
+      const prol = data.proliferation;
+      statsEl.innerHTML = `
+        <h3 class="tc-heading">Tag proliferation</h3>
+        <p class="tc-stats-text">${prol.count} tags total · ${prol.tags_on_le_3} tags on ≤ 3 bookmarks
+          (the long tail most worth consolidating).</p>`;
+      renderPairs(caseEl, data.case_pairs, "No case duplicates found.");
+      renderPairs(fuzzyEl, data.fuzzy_pairs, "No similar-name pairs found.");
+      renderJunk(data.junk_tags);
+    } catch (err) {
+      setStatus("Could not load candidates: " + err.message, true);
+    }
+  }
+
+  load();
+}
+
+// ---------------------------------------------------------------------------
 // Boot — run only the wiring for the page that exists.
 // ---------------------------------------------------------------------------
 
@@ -1215,3 +1382,4 @@ if ($("#grid")) initGridPage();
 if ($("#detail")) initDetailPage();
 if ($("#graph")) initGraphPage();
 if ($("#dedup")) initDedupPage();
+if ($("#tags-cleanup")) initTagsCleanupPage();

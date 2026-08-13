@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from selectolax.parser import HTMLParser, Node
 
-from . import auth, config, db, dedup, fetcher, links, snapshot
+from . import auth, config, db, dedup, fetcher, links, snapshot, tag_cleanup
 
 log = logging.getLogger("bookmarks")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -551,6 +551,99 @@ async def api_capture_snapshot(bookmark_id: int) -> dict:
 @app.get("/api/tags")
 def api_tags():
     return {"tags": db.all_tags()}
+
+
+@app.get("/api/tags/consolidation-candidates")
+async def api_tag_consolidation_candidates() -> dict:
+    """Tag-consolidation suggestions (todo 27).
+
+    Returns ``{"case_pairs": [{from, to, from_count, to_count}],
+    "fuzzy_pairs": [{from, to, score, from_count, to_count}],
+    "junk_tags": [{id, name, n}], "proliferation": {count, tags_on_le_3}}``:
+    case-duplicate tag names ("Music"/"music"), WRatio >= 85 fuzzy pairs,
+    junk-tag candidates (auto_tag stopwords + noise heuristics), and
+    tag-proliferation stats (tags on <= 3 bookmarks). Purely advisory —
+    nothing is merged or deleted here; every mutation is an explicit user
+    action through POST /api/tags/merge, POST /api/tags/{id} or
+    DELETE /api/tags/{id}. Authed by the global middleware — no exemption.
+    """
+    return await db.run_db(tag_cleanup.consolidation_candidates)
+
+
+@app.post("/api/tags/merge")
+async def api_merge_tags(request: Request) -> dict:
+    """Merge tag ``from`` into ``to`` (todo 27).
+
+    Rewrites every ``bookmark_tags`` link from -> to (deduping) and deletes
+    the now-empty from-tag row. Merging to a NONEXISTENT tag creates it —
+    defined behavior, so a rename-by-merge never loses data. ``from == to``,
+    empty names and a nonexistent ``from`` are 400. Every merge is an explicit
+    user action: there is no automatic merge anywhere. Authed + CSRF-checked
+    by the global middleware.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    from_name = body.get("from")
+    to_name = body.get("to")
+    if not isinstance(from_name, str) or not isinstance(to_name, str):
+        raise HTTPException(status_code=400, detail="from and to must be strings")
+    try:
+        return await db.run_db(tag_cleanup.merge_tags, from_name, to_name)
+    except tag_cleanup.TagCleanupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/tags/{tag_id}")
+async def api_rename_tag(tag_id: int, request: Request) -> dict:
+    """Rename a tag (todo 27): POST with ``{"name": "new name"}``.
+
+    The new name must be non-empty; renaming onto an existing tag name is a
+    400. A nonexistent tag id is 404. Authed + CSRF-checked by the global
+    middleware.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from None
+    name = body.get("name") if isinstance(body, dict) else None
+    if not isinstance(name, str):
+        raise HTTPException(status_code=400, detail="name must be a string")
+    try:
+        return await db.run_db(tag_cleanup.rename_tag, tag_id, name)
+    except tag_cleanup.TagNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except tag_cleanup.TagCleanupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/tags/{tag_id}")
+async def api_delete_tag(tag_id: int) -> dict:
+    """Delete a tag row — only when it is empty (todo 27).
+
+    A tag still applied to bookmarks is rejected 400 (merge or unlink it
+    first — silently dropping live links would lose data); a nonexistent tag
+    id is 404. Authed + CSRF-checked by the global middleware.
+    """
+    try:
+        return await db.run_db(tag_cleanup.delete_tag, tag_id)
+    except tag_cleanup.TagNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except tag_cleanup.TagCleanupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/tags-cleanup", response_class=HTMLResponse)
+def tags_cleanup_page(request: Request) -> HTMLResponse:
+    """Tag-consolidation screen (todo 27): suggested pairs (case + fuzzy +
+    junk) with apply buttons and the proliferation stats. The page itself is
+    authed by the global middleware like every page; data comes from
+    GET /api/tags/consolidation-candidates and mutations go through
+    POST /api/tags/merge, POST /api/tags/{id} and DELETE /api/tags/{id}."""
+    return TEMPLATES.TemplateResponse(request, "tags-cleanup.html", {})
 
 
 # ---------------------------------------------------------------------------

@@ -1030,3 +1030,64 @@ a.bl-source:hover { color: var(--accent); text-decoration: underline; }
 }
 .dedup-hint { margin: 10px 0 0; font-size: 12px; color: var(--fg-muted); }
 .dedup-empty { color: var(--fg-muted); }
+
+/* ---------------------------------------------------------------------------
+ * Tag cleanup page (/tags-cleanup)
+ * ------------------------------------------------------------------------- */
+
+.tc-section { margin-bottom: 22px; }
+.tc-heading { margin: 0 0 8px; font-size: 15px; }
+.tc-stats-text { margin: 0; font-size: 14px; color: var(--fg-muted); }
+
+.tc-pairs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tc-pair {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  flex-wrap: wrap;
+}
+.tc-names {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 13px;
+  min-width: 0;
+  flex: 1;
+}
+.tc-names code {
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tc-score {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.tc-count { flex-shrink: 0; font-size: 12px; color: var(--fg-muted); }
+.tc-rename-form { display: inline-flex; gap: 6px; }
+.tc-rename-input {
+  width: 140px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--fg);
+}
