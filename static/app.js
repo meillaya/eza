@@ -201,7 +201,10 @@ function initGridPage() {
     const id = btn.dataset.id;
     btn.disabled = true;
     try {
-      const resp = await fetch(`/api/bookmarks/${id}`, { method: "DELETE" });
+      const resp = await fetch(`/api/bookmarks/${id}`, {
+        method: "DELETE",
+        headers: { "X-CSRF-Token": csrfToken() },
+      });
       if (!resp.ok) throw new Error("delete failed");
       const card = btn.closest(".card");
       card.style.transition = "opacity .15s, transform .15s";
@@ -329,7 +332,11 @@ function initGridPage() {
   $("#add-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
-    const resp = await fetch("/api/bookmarks", { method: "POST", body: fd });
+    const resp = await fetch("/api/bookmarks", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken() },
+      body: fd,
+    });
     if (resp.ok) {
       modal.close();
       refresh();
@@ -345,7 +352,11 @@ function initGridPage() {
     if (!file) return;
     const fd = new FormData();
     fd.append("file", file);
-    const resp = await fetch("/api/import", { method: "POST", body: fd });
+    const resp = await fetch("/api/import", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken() },
+      body: fd,
+    });
     if (resp.ok) {
       const data = await resp.json();
       alert(`Imported ${data.inserted} bookmarks. Reloading…`);

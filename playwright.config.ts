@@ -120,6 +120,15 @@ export default defineConfig({
       storageState: ".auth/ui-user.json",
     },
     {
+      // Grid mutation flows (add modal, card delete, import) that must carry
+      // the CSRF header (F2 fix). Seeds its own credential + real ceremony.
+      name: "add-bookmark",
+      testMatch: "**/add-bookmark.spec.ts",
+      use: { ...devices["Desktop Chrome"], baseURL: "http://localhost:8001" },
+      dependencies: ["setup"],
+      storageState: ".auth/ui-user.json",
+    },
+    {
       name: "visual-qa",
       testMatch: "**/visual-qa.spec.ts",
       use: { ...devices["Desktop Chrome"], baseURL: "http://localhost:8001" },
