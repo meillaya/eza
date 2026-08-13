@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from selectolax.parser import HTMLParser, Node
 
-from . import db, fetcher
+from . import auth, config, db, fetcher
 
 log = logging.getLogger("bookmarks")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -89,6 +89,108 @@ def index(request: Request) -> HTMLResponse:
             "total": db.count_bookmarks(),
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# First-run setup bootstrap (todo 9). /setup and /api/setup/* are in the
+# global unauthenticated-exemption list, so the server-side setup guard is
+# enforced IN these endpoints, not by auth middleware.
+# ---------------------------------------------------------------------------
+
+# allow: SIZE_OK — _SETUP_PAGE_HTML is a static template (pure data); the
+# commit contract for this todo stages only app/{auth,main}.py + tests, so the
+# setup page cannot live in its own template file yet.
+_SETUP_PAGE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Set up your passkey</title>
+</head>
+<body>
+  <h1>Set up your passkey</h1>
+  <p>Create a passkey, then save the one-time recovery codes shown once.</p>
+  <button id="register" type="button">Create passkey</button>
+  <p id="error" style="color:#b00020"></p>
+  <h2 hidden>Your one-time recovery codes</h2>
+  <pre id="codes" hidden></pre>
+  <script>
+    const btn = document.getElementById("register");
+    const err = document.getElementById("error");
+    const codes = document.getElementById("codes");
+    btn.addEventListener("click", async () => {
+      try {
+        err.textContent = "";
+        const resp = await fetch("/api/setup/options", { method: "POST" });
+        if (resp.status === 403) { err.textContent = "Setup is not available."; return; }
+        const options = await resp.json();
+        const credential = await navigator.credentials.create({
+          publicKey: PublicKeyCredential.parseCreationOptionsFromJSON(options),
+        });
+        const verify = await fetch("/api/setup/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(credential),
+        });
+        if (!verify.ok) { err.textContent = "Registration failed (" + verify.status + ")."; return; }
+        const result = await verify.json();
+        btn.hidden = true;
+        codes.hidden = false;
+        codes.textContent = result.codes.join("\\n");
+      } catch (e) {
+        err.textContent = "Setup failed: " + e.message;
+      }
+    });
+  </script>
+</body>
+</html>
+"""
+
+
+@app.get("/setup", response_class=HTMLResponse)
+def setup_page() -> HTMLResponse:
+    """First-run bootstrap page. Hidden once any credential exists."""
+    if auth.count_credentials() > 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return HTMLResponse(_SETUP_PAGE_HTML)
+
+
+@app.post("/api/setup/options")
+def api_setup_options() -> dict:
+    """Registration options for the fixed user. Guarded in-endpoint."""
+    if not auth.setup_options_allowed():
+        raise HTTPException(status_code=403, detail="Setup is not available")
+    return auth.registration_options()
+
+
+@app.post("/api/setup/verify")
+async def api_setup_verify(request: Request) -> JSONResponse:
+    """Verify the registration, persist the credential, issue codes, create the first session."""
+    if not await db.run_db(auth.setup_verify_allowed):
+        raise HTTPException(status_code=403, detail="Setup is not available")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from None
+    if not isinstance(body, (str, dict)):
+        raise HTTPException(status_code=400, detail="Invalid registration response")
+    try:
+        codes, session_id = await db.run_db(auth.complete_registration, body)
+    except auth.SetupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    response = JSONResponse(
+        {"status": "ok", "codes": codes, "session_id": session_id}
+    )
+    response.set_cookie(
+        key=auth.SESSION_COOKIE_NAME,
+        value=session_id,
+        max_age=config.SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="strict",
+        secure=config.IS_PROD,
+        path="/",
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------
