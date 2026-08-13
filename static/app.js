@@ -254,6 +254,25 @@ function initDetailPage() {
   const saveBtn = $("#save");
   const saveStatus = $("#save-status");
 
+  // --- Unsaved-edit guard: any change sets a dirty flag; beforeunload
+  //     warns before the edits are lost on navigation. Cleared on save. ---
+
+  let dirty = false;
+
+  function markDirty() {
+    dirty = true;
+  }
+
+  function clearDirty() {
+    dirty = false;
+  }
+
+  window.addEventListener("beforeunload", (e) => {
+    if (!dirty) return;
+    e.preventDefault();
+    e.returnValue = "";
+  });
+
   // --- Tags editor: chips + input. Enter/comma adds a chip, × removes one. ---
 
   function addTag(name) {
@@ -269,9 +288,13 @@ function initDetailPage() {
     remove.className = "chip-remove";
     remove.setAttribute("aria-label", "Remove tag " + name);
     remove.textContent = "×";
-    remove.addEventListener("click", () => chip.remove());
+    remove.addEventListener("click", () => {
+      chip.remove();
+      markDirty();
+    });
     chip.appendChild(remove);
     tagChips.appendChild(chip);
+    markDirty();
   }
 
   function currentTags() {
@@ -292,10 +315,23 @@ function initDetailPage() {
     }
   });
 
-  // --- Markdown preview via the vendored marked.js (Edit / Preview tabs). ---
+  titleInput.addEventListener("input", markDirty);
+  isReadInput.addEventListener("change", markDirty);
+
+  // --- Markdown preview via the vendored marked.js (Edit / Preview tabs).
+  // Rendered LIVE (debounced) as the user types, so the Preview tab always
+  // shows current content. ---
 
   const tabWrite = $("#tab-write");
   const tabPreview = $("#tab-preview");
+
+  function renderPreview() {
+    if (window.marked) {
+      notePreview.innerHTML = window.marked.parse(noteTextarea.value || "");
+    }
+  }
+
+  const renderPreviewDebounced = debounce(renderPreview, 180);
 
   function showTab(which) {
     const isPreview = which === "preview";
@@ -305,13 +341,188 @@ function initDetailPage() {
     tabPreview.setAttribute("aria-selected", String(isPreview));
     noteTextarea.hidden = isPreview;
     notePreview.hidden = !isPreview;
-    if (isPreview && window.marked) {
-      notePreview.innerHTML = window.marked.parse(noteTextarea.value || "");
-    }
+    if (isPreview) renderPreview();
   }
 
   tabWrite.addEventListener("click", () => showTab("write"));
   tabPreview.addEventListener("click", () => showTab("preview"));
+
+  // --- Wikilink autocomplete: typing [[ opens a dropdown of bookmarks.
+  // GET /api/autocomplete?q= matches title/url (prefix+substring, capped at
+  // 10). Selecting inserts [[Title|]] at the cursor, replacing the [[query.
+  // Arrow keys move the selection; Enter/Tab or a click commits; Escape
+  // closes. ---
+
+  const acEl = document.createElement("div");
+  acEl.id = "wikilink-autocomplete";
+  acEl.className = "ac-dropdown";
+  acEl.setAttribute("role", "listbox");
+  acEl.hidden = true;
+  acEl.addEventListener("mousedown", (e) => e.preventDefault());
+  acEl.addEventListener("click", (e) => {
+    const itemEl = e.target.closest(".ac-item");
+    if (itemEl) insertAutocomplete(itemEl.dataset.title || itemEl.dataset.url);
+  });
+  document.body.appendChild(acEl);
+
+  let acItems = [];
+  let acSelected = -1;
+  let acQuery = null;
+  let acLoading = false;
+  let acFetchSeq = 0;
+
+  function openBracketContext() {
+    const value = noteTextarea.value;
+    const caret = noteTextarea.selectionStart ?? value.length;
+    const before = value.slice(0, caret);
+    const lastOpen = before.lastIndexOf("[[");
+    if (lastOpen === -1) return null;
+    if (before.slice(lastOpen + 2).includes("]]")) return null;
+    return { start: lastOpen, query: before.slice(lastOpen + 2) };
+  }
+
+  function positionAutocomplete() {
+    const rect = noteTextarea.getBoundingClientRect();
+    if (rect.width === 0) return;
+    const value = noteTextarea.value;
+    const caret = noteTextarea.selectionStart ?? value.length;
+    const style = getComputedStyle(noteTextarea);
+    const lineHeight = parseFloat(style.lineHeight) || 21;
+    const padTop = parseFloat(style.paddingTop) || 0;
+    const lineCount = value.slice(0, caret).split("\n").length;
+    const top = rect.top + padTop + (lineCount - 1) * lineHeight + 2;
+    acEl.style.left = `${rect.left + 12}px`;
+    acEl.style.width = `${Math.max(240, rect.width - 24)}px`;
+    acEl.style.top = `${Math.min(top, window.innerHeight - 260)}px`;
+  }
+
+  function renderAutocomplete() {
+    const ctx = openBracketContext();
+    if (!ctx || noteTextarea.hidden) {
+      closeAutocomplete();
+      return;
+    }
+    positionAutocomplete();
+    if (acItems.length > 0) {
+      acSelected = Math.max(0, Math.min(acSelected, acItems.length - 1));
+      acEl.innerHTML = acItems
+        .map(
+          (item, i) => `
+          <button type="button" role="option" aria-selected="${i === acSelected}"
+                  class="ac-item${i === acSelected ? " selected" : ""}"
+                  data-title="${escapeHtml(item.title)}" data-url="${escapeHtml(item.url)}">
+            <span class="ac-title">${escapeHtml(item.title || item.url)}</span>
+            ${item.title ? `<span class="ac-url">${escapeHtml(item.url)}</span>` : ""}
+          </button>`
+        )
+        .join("");
+    } else if (ctx.query.trim() === "") {
+      acEl.innerHTML = '<div class="ac-hint">Start typing a title or URL…</div>';
+    } else if (acLoading) {
+      acEl.innerHTML = '<div class="ac-hint">Searching…</div>';
+    } else {
+      acEl.innerHTML = '<div class="ac-hint">No matches</div>';
+    }
+    acEl.hidden = false;
+  }
+
+  function closeAutocomplete() {
+    acEl.hidden = true;
+    acEl.innerHTML = "";
+    acItems = [];
+    acSelected = -1;
+    acQuery = null;
+    acLoading = false;
+    acFetchSeq++;
+  }
+
+  async function fetchAutocomplete(query) {
+    const seq = ++acFetchSeq;
+    let items = [];
+    try {
+      const resp = await fetch("/api/autocomplete?q=" + encodeURIComponent(query));
+      if (!resp.ok) throw new Error("autocomplete failed: " + resp.status);
+      items = await resp.json();
+    } catch (err) {
+      console.error(err);
+      items = [];
+    }
+    if (seq !== acFetchSeq) return;
+    acQuery = query;
+    acLoading = false;
+    acItems = items;
+    acSelected = -1;
+    renderAutocomplete();
+  }
+
+  const acDebounced = debounce(() => {
+    const ctx = openBracketContext();
+    if (ctx) fetchAutocomplete(ctx.query);
+  }, 180);
+
+  function updateAutocomplete() {
+    if (noteTextarea.hidden) {
+      closeAutocomplete();
+      return;
+    }
+    const ctx = openBracketContext();
+    if (!ctx) {
+      closeAutocomplete();
+      return;
+    }
+    positionAutocomplete();
+    if (ctx.query !== acQuery) {
+      acItems = [];
+      acSelected = -1;
+      acLoading = true;
+    }
+    renderAutocomplete();
+    acDebounced();
+  }
+
+  function insertAutocomplete(title) {
+    const ctx = openBracketContext();
+    if (!ctx || !title) return;
+    const value = noteTextarea.value;
+    const caret = noteTextarea.selectionStart ?? value.length;
+    const insertion = `[[${title}|]]`;
+    noteTextarea.value = value.slice(0, ctx.start) + insertion + value.slice(caret);
+    const newCaret = ctx.start + insertion.length;
+    noteTextarea.setSelectionRange(newCaret, newCaret);
+    closeAutocomplete();
+    renderPreviewDebounced();
+    markDirty();
+  }
+
+  noteTextarea.addEventListener("input", () => {
+    markDirty();
+    renderPreviewDebounced();
+    updateAutocomplete();
+  });
+  noteTextarea.addEventListener("keydown", (e) => {
+    if (acEl.hidden) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (acItems.length === 0) return;
+      const delta = e.key === "ArrowDown" ? 1 : -1;
+      acSelected = (acSelected + delta + acItems.length) % acItems.length;
+      renderAutocomplete();
+    } else if (e.key === "Enter" || e.key === "Tab") {
+      if (acItems.length > 0) {
+        e.preventDefault();
+        const item = acItems[acSelected >= 0 ? acSelected : 0];
+        insertAutocomplete(item.title || item.url);
+      }
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closeAutocomplete();
+    }
+  });
+  noteTextarea.addEventListener("blur", closeAutocomplete);
+  document.addEventListener("click", (e) => {
+    if (acEl.hidden || acEl.contains(e.target) || e.target === noteTextarea) return;
+    closeAutocomplete();
+  });
 
   // --- Explicit save only (button + Ctrl/Cmd+S). Never autosave. ---
 
@@ -343,6 +554,7 @@ function initDetailPage() {
         throw new Error(detail.detail || "Save failed (" + resp.status + ")");
       }
       setStatus("Saved");
+      clearDirty();
     } catch (err) {
       setStatus(err.message, true);
     } finally {

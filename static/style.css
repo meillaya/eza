@@ -576,3 +576,55 @@ main {
   .detail-url { max-width: 100%; }
   .save-status { width: 100%; order: 3; }
 }
+
+/* ----- Wikilink autocomplete dropdown (todo 20) ----- */
+
+.ac-dropdown {
+  position: fixed;
+  z-index: 50;
+  max-height: 240px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  box-shadow: 0 4px 12px rgba(0,0,0,.12);
+  font-size: 13px;
+}
+.ac-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ac-item:hover, .ac-item.selected { background: var(--bg-hover); }
+.ac-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.ac-url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+.ac-hint {
+  padding: 8px 10px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}

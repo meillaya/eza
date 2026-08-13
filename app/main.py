@@ -276,6 +276,19 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/api/autocomplete")
+def api_autocomplete(q: str = Query(default="", max_length=200)):
+    """Wikilink autocomplete (todo 20).
+
+    Case-insensitive prefix+substring match over bookmark title/url (the
+    "alias" behavior — no aliases schema exists), capped at 10, returning
+    ``{id, title, url}`` items. Authed by the global middleware like every
+    route — this endpoint is deliberately NOT in the exemption list. An
+    empty/blank ``q`` yields an empty list, never an error.
+    """
+    return db.autocomplete(q, limit=10)
+
+
 @app.get("/api/search")
 def api_search(
     q: str = Query(default=""),

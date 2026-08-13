@@ -655,6 +655,34 @@ def get_bookmark(bookmark_id: int) -> dict | None:
     return d
 
 
+def autocomplete(q: str, *, limit: int = 10) -> list[dict]:
+    """Wikilink autocomplete (todo 20): prefix+substring over title/url.
+
+    Case-insensitive ``LIKE`` matching (COLLATE NOCASE) over both ``title``
+    and ``url`` — the "alias" behavior, since no aliases schema exists. A
+    title starting with the query ranks ahead of a title that merely contains
+    it. Empty/blank ``q`` returns ``[]`` (the typeahead dropdown just opens
+    without results). Returns ``{id, title, url}`` items, at most ``limit``.
+    """
+    query = q.strip()
+    if not query:
+        return []
+    pattern = f"%{query}%"
+    prefix = f"{query}%"
+    rows = get_conn().execute(
+        """
+        SELECT id, title, url FROM bookmarks
+        WHERE title LIKE ? COLLATE NOCASE OR url LIKE ? COLLATE NOCASE
+        ORDER BY
+            CASE WHEN title LIKE ? COLLATE NOCASE THEN 0 ELSE 1 END,
+            title COLLATE NOCASE
+        LIMIT ?
+        """,
+        (pattern, pattern, prefix, limit),
+    ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
 def insert_bookmark(
     *,
     url: str,
