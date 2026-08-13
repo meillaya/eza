@@ -18,7 +18,19 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from selectolax.parser import HTMLParser, Node
 
-from . import auth, auto_tag, check_dead, config, db, dedup, fetcher, links, snapshot, tag_cleanup
+from . import (
+    auth,
+    auto_tag,
+    check_dead,
+    config,
+    db,
+    dedup,
+    exporter,
+    fetcher,
+    links,
+    snapshot,
+    tag_cleanup,
+)
 
 log = logging.getLogger("bookmarks")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -1008,6 +1020,33 @@ async def api_import(file: UploadFile = File(...)):
         items, enrich_callback=fetcher.schedule_extract_for_url
     )
     return {"inserted": inserted, "found": len(items)}
+
+
+# ---------------------------------------------------------------------------
+# Netscape HTML export (todo 31). Authed by the global middleware like every
+# route — deliberately NO exemption. Notes are never included: the exported
+# file carries no note_body/secrets unless the CLI runs with --with-notes.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/export")
+def api_export() -> Response:
+    """Export every bookmark as a Chromium-compatible Netscape bookmarks.html.
+
+    Returns the canonical header, ``\r\n`` line endings, ADD_DATE/LAST_MODIFIED
+    unix seconds, the ICON data URL when a favicon exists, a
+    ``PERSONAL_TOOLBAR_FOLDER`` folder for the configured toolbar tag, and the
+    Chromium Other-bucket flattening (non-toolbar bookmarks written one level
+    up). Non-http(s) URLs are skipped. Notes are EXCLUDED by default — this
+    endpoint never exports note_body. Served as a Content-Disposition
+    attachment (``bookmarks.html``).
+    """
+    content = exporter.export_bookmarks()
+    return Response(
+        content=content,
+        media_type="text/html",
+        headers={"Content-Disposition": 'attachment; filename="bookmarks.html"'},
+    )
 
 
 # ---------------------------------------------------------------------------

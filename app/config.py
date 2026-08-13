@@ -97,3 +97,12 @@ BACKUP_OFFBOX_DEST = _env_path("BACKUP_OFFBOX_DEST", None)
 
 # Startup side effect: guarantee the DB dir exists before anything connects.
 BOOKMARKS_DB.parent.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# Netscape HTML export (todo 31)
+# ---------------------------------------------------------------------------
+
+# The tag whose bookmarks land in the exported file's toolbar folder
+# (<H3 PERSONAL_TOOLBAR_FOLDER="true">) — Chromium's "Bookmarks bar". Every
+# other bookmark is the flattened "Other bucket" (written one level up).
+EXPORT_TOOLBAR_TAG = os.environ.get("EXPORT_TOOLBAR_TAG", "toolbar").strip().lower()
