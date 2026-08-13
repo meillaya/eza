@@ -3,7 +3,8 @@
 The schema is intentionally minimal:
   - one flat `bookmarks` table
   - a many-to-many `tags` setup
-  - an external-content FTS5 virtual table on (title, description, url)
+  - an external-content FTS5 virtual table on (title, description, url,
+    note_body, extracted_text) — the todo-14 rebuild
 
 WAL mode + synchronous=NORMAL gives us fast reads with safe-enough durability
 for a personal tool. FTS5 with porter stemming gives ranked, sub-millisecond
@@ -30,6 +31,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeGuard, TypeVar
 from urllib.parse import urlparse
@@ -337,6 +339,137 @@ def fts_query(user_input: str) -> str | None:
     return " AND ".join(f'"{t}"*' for t in tokens)
 
 
+@dataclass(frozen=True, slots=True)
+class _ParsedQuery:
+    """A search string split into its structured parts (todo 18 operators).
+
+    ``q`` is the ONLY place the operators live — the q/tags/offset/limit API
+    shape is untouched. Plain tokens become the FTS5 MATCH expression;
+    ``-term`` becomes an FTS5-backed NOT-IN filter; ``tag:name`` merges into
+    the tag filter; ``is:unread`` restricts to unread rows; ``link:target``
+    restricts to bookmarks whose note links resolve to the named bookmark.
+    Malformed operators (``tag:`` with no value, unknown ``is:*`` values) are
+    dropped — parsing never raises and never filters.
+    """
+
+    fts_expr: str | None
+    terms: tuple[str, ...]
+    tags: tuple[str, ...]
+    is_unread: bool
+    link_targets: tuple[str, ...]
+    negated: tuple[str, ...]
+
+
+_TAG_PREFIX = "tag:"
+_LINK_PREFIX = "link:"
+_IS_UNREAD = "is:unread"
+
+
+def _sanitize_token(token: str) -> str:
+    """Drop every non word/hyphen character from a single search token."""
+    return _FTS_SANITIZE.sub(" ", token).strip()
+
+
+def _fts_expr(plain: Sequence[str]) -> str | None:
+    """FTS5 MATCH expression from the plain (non-operator) tokens."""
+    cleaned = _FTS_SANITIZE.sub(" ", " ".join(plain)).strip()
+    tokens = [t for t in cleaned.split() if t]
+    if not tokens:
+        return None
+    return " AND ".join(f'"{t}"*' for t in tokens)
+
+
+def _parse_operators(user_input: str) -> _ParsedQuery:
+    """Split a search string into FTS terms, tag filters and flags.
+
+    Tokens are classified independently: ``tag:value`` (lowercased, empty
+    value dropped), ``is:unread`` (any other ``is:*`` dropped), ``link:value``
+    (empty value dropped), ``-term`` (FTS5-backed negation), and everything
+    else as a plain FTS term.
+    """
+    tags: list[str] = []
+    link_targets: list[str] = []
+    plain: list[str] = []
+    negated: list[str] = []
+    is_unread = False
+    for token in user_input.split():
+        if token.startswith(_TAG_PREFIX):
+            value = token[len(_TAG_PREFIX) :].strip().lower()
+            if value:
+                tags.append(value)
+            continue
+        if token.startswith(_LINK_PREFIX):
+            value = token[len(_LINK_PREFIX) :].strip()
+            if value:
+                link_targets.append(value)
+            continue
+        if token.startswith("is:"):
+            if token == _IS_UNREAD:
+                is_unread = True
+            continue
+        if token.startswith("-") and len(token) > 1:
+            term = token[1:].strip()
+            if term:
+                negated.append(term)
+            continue
+        plain.append(token)
+    return _ParsedQuery(
+        fts_expr=_fts_expr(plain),
+        terms=tuple(filter(None, (_sanitize_token(t) for t in plain))),
+        tags=tuple(tags),
+        is_unread=is_unread,
+        link_targets=tuple(link_targets),
+        negated=tuple(filter(None, (_sanitize_token(t) for t in negated))),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Snippets (todo 18): a ~120-char window from the best-matching FTS field
+# ---------------------------------------------------------------------------
+
+_SNIPPET_FIELDS = ("title", "description", "url", "note_body", "extracted_text")
+_SNIPPET_LENGTH = 120
+_SNIPPET_LEAD = 40
+
+
+def _build_snippet(row: dict, terms: Sequence[str]) -> str:
+    """A ~120-char window around the earliest query-term match.
+
+    Scans the five FTS fields in order and keeps the one whose earliest
+    case-insensitive term occurrence comes first (the "best/earliest" match).
+    Returns "" when no term appears literally — porter stemming may still have
+    matched an inflected form, leaving no literal window to anchor on.
+    """
+    best_index: int | None = None
+    best_text: str | None = None
+    for field in _SNIPPET_FIELDS:
+        text = row.get(field)
+        if not text:
+            continue
+        text = " ".join(text.split())
+        index = _earliest_match(text, terms)
+        if index is not None and (best_index is None or index < best_index):
+            best_index, best_text = index, text
+    if best_text is None or best_index is None:
+        return ""
+    start = max(0, best_index - _SNIPPET_LEAD)
+    end = min(len(best_text), start + _SNIPPET_LENGTH)
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(best_text) else ""
+    return f"{prefix}{best_text[start:end]}{suffix}"
+
+
+def _earliest_match(text: str, terms: Sequence[str]) -> int | None:
+    """The earliest case-insensitive index of any term, or None."""
+    lowered = text.lower()
+    best: int | None = None
+    for term in terms:
+        index = lowered.find(term.lower())
+        if index >= 0 and (best is None or index < best):
+            best = index
+    return best
+
+
 def _row_to_dict(row: sqlite3.Row) -> dict:
     return dict(row)
 
@@ -362,6 +495,26 @@ def _tag_filter_subquery(tags: Sequence[str]) -> str:
     )
 
 
+def _merged_tags(parsed: _ParsedQuery | None, tags: Sequence[str]) -> list[str]:
+    """The tag: operators from q merged with the tags API parameter (ANDed).
+
+    Order-preserving dedupe: a duplicate tag (``tag:rust`` plus a ``rust``
+    entry in the tags parameter) must not inflate the HAVING count.
+    """
+    merged: list[str] = []
+    if parsed is not None:
+        merged.extend(parsed.tags)
+    merged.extend(tags)
+    return list(dict.fromkeys(merged))
+
+
+_LINK_TARGET_SUBQUERY = (
+    "EXISTS (SELECT 1 FROM links l WHERE l.source_id = b.id AND l.target_id IN "
+    "(SELECT id FROM bookmarks WHERE title = ? OR title LIKE ? COLLATE NOCASE "
+    "OR url LIKE ? COLLATE NOCASE))"
+)
+
+
 def _search_sql(
     *,
     q: str | None = None,
@@ -380,41 +533,70 @@ def _search_sql(
 
     With ``count=True`` the grouped result is wrapped so ``COUNT(*)`` counts
     distinct bookmarks rather than (bookmark x tag) rows.
-    """
-    params: list = []
-    fts = fts_query(q) if q else None
 
-    if fts and tags:
+    Operators parsed out of ``q`` become WHERE fragments appended to every
+    branch: ``tag:`` merges into ``tags`` (AND), while ``is:unread``,
+    ``link:target`` and ``-term`` are plain filter conditions whose params
+    follow the driving clause's params in SQL order.
+    """
+    parsed = _parse_operators(q) if q else None
+    fts = parsed.fts_expr if parsed is not None else None
+    merged_tags = _merged_tags(parsed, tags)
+
+    where_fragments: list[str] = []
+    where_params: list = []
+    if parsed is not None:
+        if parsed.is_unread:
+            where_fragments.append("b.is_read = 0")
+        for target in parsed.link_targets:
+            where_fragments.append(_LINK_TARGET_SUBQUERY)
+            where_params.extend([target, f"%{target}%", f"%{target}%"])
+        for negated in parsed.negated:
+            where_fragments.append(
+                "b.id NOT IN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH ?)"
+            )
+            where_params.append(f'"{negated}"*')
+
+    params: list = []
+    if fts and merged_tags:
         fts_cols = "rowid" if count else "rowid, rank"
         from_clause = (
             f"(SELECT {fts_cols} FROM bookmarks_fts WHERE bookmarks_fts MATCH ?) f "
             "CROSS JOIN bookmarks b ON b.id = f.rowid"
         )
         params.append(fts)
-        placeholders = ",".join("?" for _ in tags)
+        placeholders = ",".join("?" for _ in merged_tags)
         join = (
             " JOIN bookmark_tags bt ON bt.bookmark_id = b.id "
             " JOIN tags t ON t.id = bt.tag_id "
         )
-        where = f"t.name IN ({placeholders})"
-        params.extend(tags)
-        group_having = f" GROUP BY b.id HAVING COUNT(DISTINCT bt.tag_id) = {len(tags)} "
+        tag_where = f"t.name IN ({placeholders})"
+        params.extend(merged_tags)
+        params.extend(where_params)
+        where = " AND ".join([tag_where, *where_fragments])
+        group_having = f" GROUP BY b.id HAVING COUNT(DISTINCT bt.tag_id) = {len(merged_tags)} "
     elif fts:
         from_clause = "bookmarks b"
         join = " JOIN bookmarks_fts f ON f.rowid = b.id "
         where = "bookmarks_fts MATCH ?"
         params.append(fts)
+        params.extend(where_params)
+        if where_fragments:
+            where = f"{where} AND " + " AND ".join(where_fragments)
         group_having = ""
     else:
         from_clause = "bookmarks b"
         join = ""
-        where = _tag_filter_subquery(tags) if tags else ""
-        params.extend(tags)
+        if merged_tags:
+            where_fragments.insert(0, _tag_filter_subquery(merged_tags))
+            params.extend(merged_tags)
+        params.extend(where_params)
+        where = " AND ".join(where_fragments)
         group_having = ""
 
     where_sql = f" WHERE {where}" if where else ""
     if count:
-        if fts and tags:
+        if fts and merged_tags:
             sql = (
                 "SELECT COUNT(*) AS n FROM (SELECT b.id FROM "
                 f"{from_clause}{join}{where_sql}{group_having})"
@@ -423,7 +605,10 @@ def _search_sql(
             sql = f"SELECT COUNT(*) AS n FROM {from_clause}{join}{where_sql}"
     else:
         order = " ORDER BY f.rank, b.created_at DESC " if fts else " ORDER BY b.created_at DESC "
-        sql = f"SELECT b.* FROM {from_clause}{join}{where_sql}{group_having}{order} LIMIT ? OFFSET ?"
+        sql = (
+            f"SELECT b.* FROM {from_clause}{join}{where_sql}{group_having}{order}"
+            " LIMIT ? OFFSET ?"
+        )
         params.extend([limit, offset])
     return sql, params
 
@@ -435,11 +620,23 @@ def list_bookmarks(
     limit: int = 60,
     offset: int = 0,
 ) -> list[dict]:
-    """Return a page of bookmarks, optionally filtered by FTS query and tags."""
+    """Return a page of bookmarks, optionally filtered by FTS query and tags.
+
+    When ``q`` carries plain search terms each result gains a ``snippet``: a
+    ~120-char window around the best/earliest match across the five FTS
+    fields (title/description/url/note_body/extracted_text). Operators in
+    ``q`` (tag:/is:unread/link:/-term) are applied by ``_search_sql``.
+    """
     conn = get_conn()
     sql, params = _search_sql(q=q, tags=tags, limit=limit, offset=offset)
     rows = conn.execute(sql, params).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    items = [_row_to_dict(r) for r in rows]
+    if q:
+        parsed = _parse_operators(q)
+        if parsed.terms:
+            for item in items:
+                item["snippet"] = _build_snippet(item, parsed.terms)
+    return items
 
 
 def count_bookmarks(*, q: str | None = None, tags: Sequence[str] = ()) -> int:

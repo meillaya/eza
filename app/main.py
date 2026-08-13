@@ -283,6 +283,14 @@ def api_search(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=60, ge=1, le=200),
 ):
+    """Search (todo 18: full content + operators).
+
+    The ``q``/``tags``/``offset``/``limit`` contract is unchanged. ``q`` may
+    carry operators parsed by the DB layer: ``tag:name`` (ANDed with the
+    ``tags`` parameter), ``is:unread``, ``link:target`` and ``-term``. Each
+    result item additionally carries a ~120-char ``snippet`` from the
+    best-matching FTS field when ``q`` has plain terms.
+    """
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
     items = db.list_bookmarks(q=q, tags=tag_list, limit=limit, offset=offset)
     total = db.count_bookmarks(q=q, tags=tag_list)
