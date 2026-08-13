@@ -29,6 +29,7 @@ bookmarks-export-notes = "app.export_notes:main"
 bookmarks-export = "app.exporter:main"
 bookmarks-snapshot = "app.snapshot:main"
 bookmarks-backfill-extract = "app.backfill_extract:main"
+bookmarks-backup = "app.backup:main"
 
 [dependency-groups]
 dev = [
