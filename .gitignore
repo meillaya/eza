@@ -13,5 +13,6 @@ data/
 node_modules/
 test-results/
 playwright-report/
+.auth/
 bun.lockb
 bun.lock

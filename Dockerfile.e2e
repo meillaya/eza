@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1.7-labs
+#
+# Reproducible browser-e2e runner (plan todo 13) — adapted from
+# reproducible-e2e-browser-testing/Dockerfile.e2e with two additions:
+#
+#   1. Python 3.12 + uv (the app's todo-35 runtime; noble ships 3.12 as the
+#      default python3) so `uv run --frozen uvicorn ...` resolves inside the
+#      container.
+#   2. Bun + uv are installed system-wide (/usr/local/bin) so the image is
+#      usable by pwuser AND root (devcontainer runs as root against the host
+#      bind mount).
+#
+# The app code is deliberately NOT synced at build time: the webServer
+# commands in playwright.config.ts run `uv run --frozen` at CONTAINER START,
+# which is the sync-at-boot mechanism. A build-time RUN would be shadowed by
+# the `.:/work` bind mount anyway (the bind-mount trap).
+FROM mcr.microsoft.com/playwright:v1.62.1-noble
+ARG BUN_VERSION=1.3.11
+ARG UV_VERSION=0.11.32
+
+# Python 3.12 (the app runtime) + tooling needed to run it.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends curl unzip python3 python3-venv \
+  && rm -rf /var/lib/apt/lists/*
+
+# Bun pinned to package.json's packageManager, installed system-wide.
+RUN curl -fsSL https://bun.sh/install | bash -s -- "bun-v${BUN_VERSION}" \
+  && ln -sf /root/.bun/bin/bun /usr/local/bin/bun
+
+# uv pinned to the host toolchain version, installed system-wide.
+RUN curl -LsSf https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz \
+  | tar -xz -C /usr/local/bin --strip-components=1
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV PLAYWRIGHT_INCLUDE_WEBKIT=1
+RUN mkdir -p /work && chown -R pwuser:pwuser /work
+USER pwuser
+WORKDIR /work

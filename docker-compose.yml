@@ -1,0 +1,31 @@
+# Reproducible browser-e2e runner (plan todo 13), adapted from
+# reproducible-e2e-browser-testing/docker-compose.yml (Topology B, runner-only).
+#
+# The e2e service BUILDS the adapted Dockerfile.e2e image (NOT the raw
+# mcr.microsoft.com/playwright image) so Python 3.12 + uv are present —
+# otherwise `uv run --frozen uvicorn` fails with "uv: command not found".
+# PLAYWRIGHT_BASE_URL is deliberately unset: playwright.config.ts's own
+# two-entry webServer array boots BOTH uvicorn servers (8000 = auth DB,
+# 8001 = ui DB) inside the container. BOOKMARKS_DB is NOT set here — each
+# webServer entry owns its DB.
+services:
+  e2e:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    user: root
+    ipc: host
+    init: true
+    environment:
+      PUBLIC_ORIGIN: "http://localhost:8000"
+      SECRET_KEY: "compose-level-e2e-secret-key-not-used-by-server-processes"
+    volumes:
+      - .:/work
+      - test-results:/work/test-results
+      - playwright-report:/work/playwright-report
+    working_dir: /work
+    command: bun run test:e2e
+
+volumes:
+  test-results:
+  playwright-report:
