@@ -23,6 +23,11 @@ Connection model (concurrency-safe):
     ``anyio.to_thread`` so the event loop is never blocked.
 """
 
+# allow: SIZE_OK — pre-existing monolithic DB layer (all SQL helpers in one
+# module, >250 LOC before todo 23). Splitting it would stage new modules
+# outside each todo's commit contract; the todos-17..23 commits grow it in
+# place. graph_neighborhood() (todo 23) is self-contained below.
+
 from __future__ import annotations
 
 import re
@@ -653,6 +658,127 @@ def get_bookmark(bookmark_id: int) -> dict | None:
     d = _row_to_dict(row)
     d["tags"] = get_tags_for_bookmark(bookmark_id)
     return d
+
+
+# ---------------------------------------------------------------------------
+# Neighborhood graph (todo 23): BFS over the links table, bounded by hops.
+# ---------------------------------------------------------------------------
+
+# Hard cap on the number of nodes a single neighborhood may contain. A depth-2
+# neighborhood on a pathological hub must never grow past this: beyond the cap
+# the BFS truncates deterministically (seed first, then neighbors in BFS
+# discovery order), keeping both the API payload and the Cytoscape render
+# bounded no matter how large the corpus is. 500 sits comfortably under the
+# ~1k-node threshold where Cytoscape.js starts to lag (wave-1 digests, LiACS
+# 2019: "Cytoscape.js beats d3-force SVG past ~1k nodes").
+_GRAPH_MAX_NODES = 500
+
+
+def graph_neighborhood(seed_id: int, depth: int = 1) -> dict | None:
+    """BFS neighborhood of ``seed_id`` over the ``links`` table.
+
+    Returns None when the seed bookmark does not exist. Otherwise returns
+    ``{"nodes": [...], "edges": [...]}`` where:
+
+    - ``nodes`` — the seed plus every bookmark within ``depth`` hops, with
+      links traversed in BOTH directions (an edge A→B makes each endpoint a
+      neighbor of the other). Each node is
+      ``{id, title, url, tags, is_read, indegree}``.
+    - ``edges`` — the directed links between the returned nodes ONLY, in
+      source→target (wikilink) direction: when A's note contains ``[[B]]`` the
+      edge is ``{source: A, target: B}``. An edge whose endpoints fall outside
+      the neighborhood is never included.
+
+    The neighborhood is bounded by construction: at depth 1 the node set is
+    the seed plus its direct neighbors; at depth 2 it grows by exactly one
+    more hop; ``_GRAPH_MAX_NODES`` caps the total. An isolated seed yields a
+    single-node graph with an empty edge list. ``indegree`` is the count of
+    incoming links across the WHOLE corpus (how many bookmarks point at this
+    node) — the global importance signal the graph UI maps to node size.
+    """
+    conn = get_conn()
+    if conn.execute("SELECT 1 FROM bookmarks WHERE id = ?", (seed_id,)).fetchone() is None:
+        return None
+
+    # BFS. ``node_ids`` keeps discovery order (seed first, then hop-1 by
+    # bookmark id, then hop-2) so cap truncation below is deterministic.
+    node_ids: list[int] = [seed_id]
+    known: set[int] = {seed_id}
+    edge_pairs: set[tuple[int, int]] = set()
+    frontier: list[int] = [seed_id]
+
+    for _ in range(depth):
+        marks = ",".join("?" for _ in frontier)
+        rows = conn.execute(
+            f"""
+            SELECT source_id, target_id FROM links
+             WHERE (source_id IN ({marks}) OR target_id IN ({marks}))
+               AND source_id IS NOT NULL AND target_id IS NOT NULL
+            """,
+            (*frontier, *frontier),
+        ).fetchall()
+        next_frontier: list[int] = []
+        for row in rows:
+            src, tgt = row["source_id"], row["target_id"]
+            edge_pairs.add((src, tgt))
+            for nid in (src, tgt):
+                if nid not in known:
+                    known.add(nid)
+                    next_frontier.append(nid)
+        frontier = next_frontier
+        node_ids.extend(frontier)
+
+    # Cap: keep discovery order, drop the overflow, and discard every edge
+    # with a truncated endpoint so the graph stays internally consistent.
+    if len(node_ids) > _GRAPH_MAX_NODES:
+        kept = set(node_ids[:_GRAPH_MAX_NODES])
+        node_ids = node_ids[:_GRAPH_MAX_NODES]
+        edge_pairs = {(s, t) for (s, t) in edge_pairs if s in kept and t in kept}
+
+    # Bookmark details, tags and global indegree for the node set — three
+    # parameterized queries, all index-driven (id IN (…), idx_links_target).
+    marks = ",".join("?" for _ in node_ids)
+    rows = conn.execute(
+        f"SELECT id, title, url, is_read FROM bookmarks WHERE id IN ({marks})", node_ids
+    ).fetchall()
+    by_id = {r["id"]: dict(r) for r in rows}
+
+    tags: dict[int, list[str]] = {nid: [] for nid in node_ids}
+    for r in conn.execute(
+        f"""
+        SELECT bt.bookmark_id, t.name FROM bookmark_tags bt
+        JOIN tags t ON t.id = bt.tag_id
+        WHERE bt.bookmark_id IN ({marks})
+        ORDER BY bt.bookmark_id, t.name
+        """,
+        node_ids,
+    ).fetchall():
+        tags[r["bookmark_id"]].append(r["name"])
+
+    indegree = {r["target_id"]: r["n"] for r in conn.execute(
+        f"SELECT target_id, COUNT(*) AS n FROM links WHERE target_id IN ({marks}) GROUP BY target_id",
+        node_ids,
+    ).fetchall()}
+
+    nodes = []
+    for nid in node_ids:
+        b = by_id[nid]
+        nodes.append(
+            {
+                "id": nid,
+                "title": b["title"],
+                "url": b["url"],
+                "tags": tags.get(nid, []),
+                "is_read": b["is_read"],
+                "indegree": indegree.get(nid, 0),
+            }
+        )
+    edges = [
+        {"source": s, "target": t}
+        for (s, t) in sorted(edge_pairs)
+        if s in by_id and t in by_id
+    ]
+    return {"nodes": nodes, "edges": edges}
 
 
 def autocomplete(q: str, *, limit: int = 10) -> list[dict]:

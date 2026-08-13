@@ -828,8 +828,262 @@ function initDetailPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Graph page (/graph) — neighborhood graph via the vendored Cytoscape.js
+// ---------------------------------------------------------------------------
+//
+// The seed's 1-2 hop neighborhood over the links table is fetched from
+// /api/graph?seed={id}&depth={1|2} (the API never returns the whole corpus)
+// and rendered with the vendored Cytoscape.js browser global. Node size ∝
+// indegree (how many bookmarks across the corpus point at the node). Filters
+// (tag / is:unread / orphan) are applied client-side to the fetched
+// neighborhood; the SEED node is always rendered as the graph's anchor.
+// Clicking a node navigates to its detail page. Without a seed the page shows
+// a picker over /api/search. The graph is a view — the grid stays primary.
+
+function initGraphPage() {
+  const root = $("#graph");
+  const canvas = $("#graph-canvas");
+  const empty = $("#graph-empty");
+  const seedPicker = $("#graph-seed-picker");
+  const depthSelect = $("#graph-depth");
+  const tagFilter = $("#graph-tag-filter");
+  const unreadFilter = $("#graph-unread-filter");
+  const orphanFilter = $("#graph-orphan-filter");
+  const stats = $("#graph-stats");
+
+  const seedId = root.dataset.seed ? Number(root.dataset.seed) : null;
+  let graphData = { nodes: [], edges: [] };
+  let cy = null;
+
+  function nodeSize(indegree) {
+    return Math.min(46, Math.max(14, 14 + Math.sqrt(Math.max(indegree, 0)) * 9));
+  }
+
+  function showEmpty(message, opts = {}) {
+    empty.textContent = message;
+    empty.classList.toggle("blocking", !!opts.blocking);
+    empty.hidden = false;
+    if (opts.blocking) canvas.hidden = true;
+  }
+
+  function hideEmpty() {
+    empty.hidden = true;
+    empty.classList.remove("blocking");
+    canvas.hidden = false;
+  }
+
+  // Client-side filters. Orphan = a node with NO edges among the currently
+  // visible node set (degree 0), e.g. an isolated bookmark. The seed node is
+  // always kept — it is the anchor of the view.
+  function visibleSubgraph() {
+    const tag = tagFilter.value;
+    const unreadOnly = unreadFilter.checked;
+    const orphanOnly = orphanFilter.checked;
+    const keptIds = new Set();
+    const nodes = graphData.nodes.filter((n) => {
+      if (n.id !== seedId) {
+        if (tag && !(n.tags || []).includes(tag)) return false;
+        if (unreadOnly && n.is_read) return false;
+      }
+      keptIds.add(n.id);
+      return true;
+    });
+    const edges = graphData.edges.filter(
+      (e) => keptIds.has(e.source) && keptIds.has(e.target)
+    );
+    if (orphanOnly) {
+      const degree = new Map();
+      for (const e of edges) {
+        degree.set(e.source, (degree.get(e.source) || 0) + 1);
+        degree.set(e.target, (degree.get(e.target) || 0) + 1);
+      }
+      return {
+        nodes: nodes.filter((n) => (degree.get(n.id) || 0) === 0),
+        edges,
+      };
+    }
+    return { nodes, edges };
+  }
+
+  function renderGraph() {
+    if (!window.cytoscape) {
+      showEmpty("The graph engine failed to load.");
+      return;
+    }
+    const { nodes, edges } = visibleSubgraph();
+    if (nodes.length === 0) {
+      if (cy) {
+        cy.destroy();
+        cy = null;
+      }
+      showEmpty("No nodes match the current filters.", { blocking: true });
+      return;
+    }
+
+    const byId = new Map(graphData.nodes.map((n) => [n.id, n]));
+    const elements = nodes.map((n) => ({
+      data: {
+        id: String(n.id),
+        label: n.title || n.url,
+        isSeed: n.id === seedId,
+        isRead: !!n.is_read,
+        indegree: n.indegree,
+      },
+      classes: (n.id === seedId ? "seed " : "") + (n.is_read ? "read" : "unread"),
+    }));
+    for (const e of edges) {
+      elements.push({
+        data: { id: `${e.source}-${e.target}`, source: String(e.source), target: String(e.target) },
+      });
+    }
+
+    if (cy) cy.destroy();
+    cy = window.cytoscape({
+      container: canvas,
+      elements,
+      style: [
+        {
+          selector: "node",
+          style: {
+            label: "data(label)",
+            "font-size": 11,
+            color: "var(--fg)",
+            "text-wrap": "wrap",
+            "text-max-width": "120px",
+            "text-valign": "bottom",
+            "text-halign": "center",
+            "text-margin-y": 4,
+            "background-color": "var(--bg-elev)",
+            "border-width": 1.5,
+            "border-color": "var(--border)",
+            "overlay-opacity": 0,
+          },
+        },
+        { selector: "node.seed", style: { "border-width": 3, "border-color": "var(--accent)" } },
+        { selector: "node.unread", style: { "background-color": "var(--accent-soft)" } },
+        {
+          selector: "edge",
+          style: {
+            width: 1.5,
+            "line-color": "var(--fg-muted)",
+            "target-arrow-color": "var(--fg-muted)",
+            "target-arrow-shape": "triangle",
+            "arrow-scale": 0.8,
+            "curve-style": "bezier",
+            "overlay-opacity": 0,
+          },
+        },
+      ],
+      layout: { name: "cose", animate: false, nodeRepulsion: 8000 },
+    });
+    cy.nodes().forEach((n) => {
+      const size = nodeSize(byId.get(Number(n.id())).indegree);
+      n.style({ width: size, height: size });
+    });
+    cy.on("tap", "node", (evt) => {
+      window.location.href = `/bookmark/${evt.target.id()}`;
+    });
+    // The e2e seam: tests read node positions / rendered state through this.
+    window.cy = cy;
+
+    canvas.dataset.rendered = "true";
+    stats.textContent = `${nodes.length} node${nodes.length === 1 ? "" : "s"} · ${edges.length} edge${edges.length === 1 ? "" : "s"}`;
+    // A one-node/zero-edge neighborhood keeps the node rendered and shows the
+    // empty-state message as a transparent overlay on top of it.
+    if (graphData.nodes.length === 1 && graphData.edges.length === 0) {
+      showEmpty(
+        "This bookmark isn't linked to anything yet. Add [[wikilinks]] to other bookmarks in its note to see them here."
+      );
+    } else {
+      hideEmpty();
+    }
+  }
+
+  function populateTagFilter(nodes) {
+    const seen = new Set();
+    for (const n of nodes) for (const t of n.tags || []) seen.add(t);
+    const current = tagFilter.value;
+    tagFilter.innerHTML = '<option value="">all</option>';
+    for (const t of [...seen].sort()) {
+      const opt = document.createElement("option");
+      opt.value = t;
+      opt.textContent = t;
+      tagFilter.appendChild(opt);
+    }
+    if ([...seen].includes(current)) tagFilter.value = current;
+  }
+
+  async function loadGraph(seed, depth) {
+    canvas.dataset.rendered = "false";
+    seedPicker.hidden = true;
+    try {
+      const resp = await fetch(`/api/graph?seed=${seed}&depth=${depth}`);
+      if (!resp.ok) {
+        showEmpty("Could not load the graph (" + resp.status + ").");
+        return;
+      }
+      graphData = await resp.json();
+      populateTagFilter(graphData.nodes);
+      renderGraph();
+    } catch (err) {
+      console.error(err);
+      showEmpty("Could not load the graph.");
+    }
+  }
+
+  function currentSeed() {
+    return root.dataset.seed ? Number(root.dataset.seed) : null;
+  }
+
+  if (!seedId) {
+    // Seed picker: search /api/search, click a result to open its graph.
+    canvas.hidden = true;
+    seedPicker.hidden = false;
+    const searchInput = $("#graph-seed-search");
+    const resultsEl = $("#graph-seed-results");
+    const debouncedSearch = debounce(async () => {
+      const q = searchInput.value.trim();
+      resultsEl.innerHTML = "";
+      if (!q) return;
+      try {
+        const resp = await fetch("/api/search?q=" + encodeURIComponent(q) + "&limit=8");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        resultsEl.innerHTML = data.items
+          .map(
+            (b) => `<li><button type="button" class="graph-seed-result" data-id="${b.id}">
+              <span class="qs-title">${escapeHtml(b.title || b.url)}</span>
+              <span class="qs-url">${escapeHtml(b.url)}</span>
+            </button></li>`
+          )
+          .join("");
+      } catch (err) {
+        console.error(err);
+      }
+    }, 180);
+    searchInput.addEventListener("input", debouncedSearch);
+    resultsEl.addEventListener("click", (e) => {
+      const btn = e.target.closest(".graph-seed-result");
+      if (btn) window.location.href = `/graph?seed=${btn.dataset.id}`;
+    });
+  } else {
+    const initialDepth = Number(root.dataset.depth) || 1;
+    depthSelect.value = String(initialDepth);
+    depthSelect.addEventListener("change", () => {
+      const depth = Number(depthSelect.value);
+      loadGraph(currentSeed(), depth);
+    });
+    tagFilter.addEventListener("change", renderGraph);
+    unreadFilter.addEventListener("change", renderGraph);
+    orphanFilter.addEventListener("change", renderGraph);
+    loadGraph(seedId, initialDepth);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Boot — run only the wiring for the page that exists.
 // ---------------------------------------------------------------------------
 
 if ($("#grid")) initGridPage();
 if ($("#detail")) initDetailPage();
+if ($("#graph")) initGraphPage();

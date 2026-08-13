@@ -109,6 +109,28 @@ async def bookmark_detail_page(request: Request, bookmark_id: int) -> HTMLRespon
     )
 
 
+@app.get("/graph", response_class=HTMLResponse)
+async def graph_page(
+    request: Request,
+    seed: int | None = Query(default=None),
+    depth: int = Query(default=1),
+) -> HTMLResponse:
+    """Graph view page (todo 23): renders the SEED's 1-2 hop neighborhood over
+    the links table via the vendored Cytoscape.js browser global. With no
+    ``seed`` param the page shows a seed picker (the graph is a view reached
+    from the grid/detail, never the primary navigation). ``depth`` defaults to
+    1 and is validated to be exactly 1 or 2. Authed by the global middleware
+    like every page — no exemption."""
+    if depth not in (1, 2):
+        raise HTTPException(status_code=400, detail="depth must be 1 or 2")
+    bookmark = await db.run_db(db.get_bookmark, seed) if seed is not None else None
+    if seed is not None and bookmark is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return TEMPLATES.TemplateResponse(
+        request, "graph.html", {"seed": bookmark, "depth": depth}
+    )
+
+
 # ---------------------------------------------------------------------------
 # First-run setup bootstrap (todo 9). /setup and /api/setup/* are in the
 # global unauthenticated-exemption list, so the server-side setup guard is
@@ -287,6 +309,27 @@ def api_autocomplete(q: str = Query(default="", max_length=200)):
     empty/blank ``q`` yields an empty list, never an error.
     """
     return db.autocomplete(q, limit=10)
+
+
+@app.get("/api/graph")
+async def api_graph(
+    seed: int = Query(...),
+    depth: int = Query(default=1),
+) -> dict:
+    """Neighborhood graph (todo 23): the SEED bookmark plus its 1-2 hop
+    neighborhood over the links table — NEVER the whole corpus. Returns
+    ``{"nodes": [{id, title, url, tags, is_read, indegree}], "edges":
+    [{source, target}]}``; edges are directed source→target (the [[wikilink]]
+    direction). ``depth`` defaults to 1 and is validated to be exactly 1 or 2.
+    Authed by the global middleware — deliberately no exemption. Unknown seed
+    → 404.
+    """
+    if depth not in (1, 2):
+        raise HTTPException(status_code=400, detail="depth must be 1 or 2")
+    result = await db.run_db(db.graph_neighborhood, seed, depth)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return result
 
 
 @app.get("/api/search")

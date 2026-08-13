@@ -818,3 +818,133 @@ a.bl-source:hover { color: var(--accent); text-decoration: underline; }
   font-size: 12px;
   pointer-events: none;
 }
+/* ----- Graph view (/graph) — neighborhood graph via Cytoscape.js ----- */
+
+.graph-topbar {
+  flex-wrap: wrap;
+}
+.graph-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.graph-title {
+  font-weight: 600;
+  letter-spacing: -.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 420px;
+}
+.graph-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+.graph-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+.graph-control select {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font: inherit;
+}
+.filter-check input { accent-color: var(--accent); }
+.graph-stats {
+  font-size: 12px;
+  color: var(--fg-muted);
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  white-space: nowrap;
+}
+
+.graph-main {
+  position: relative;
+  height: calc(100vh - 64px);
+  min-height: 380px;
+}
+.graph-canvas {
+  position: absolute;
+  inset: 0;
+}
+.graph-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  color: var(--fg-muted);
+  pointer-events: none;
+  max-width: 560px;
+  margin: 0 auto;
+}
+.graph-empty.blocking {
+  pointer-events: auto;
+  width: 100%;
+  background: var(--bg);
+}
+.graph-seed-picker {
+  max-width: 560px;
+  margin: 48px auto;
+  padding: 0 20px;
+}
+.graph-seed-picker h2 { font-size: 18px; margin: 0 0 12px; }
+.graph-seed-picker .hint { color: var(--fg-muted); font-size: 13px; }
+#graph-seed-search {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font: inherit;
+  outline: none;
+}
+#graph-seed-search:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.graph-seed-results {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.graph-seed-result {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 9px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+.graph-seed-result:hover { background: var(--bg-hover); }
+.graph-seed-result .qs-url {
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

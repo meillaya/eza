@@ -10,6 +10,7 @@
 <body>
   <header class="topbar detail-topbar">
     <a class="btn" href="/">← All bookmarks</a>
+    <a class="btn" href="/graph?seed={{ bookmark.id }}" title="Neighborhood graph view">Graph</a>
     <div class="detail-heading">
       <input id="title" class="title-input" type="text" value="{{ bookmark.title or bookmark.url }}"
              aria-label="Title" autocomplete="off" spellcheck="false">

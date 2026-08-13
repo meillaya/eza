@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if seed %}{{ seed.title or seed.url }} — Graph{% else %}Graph — Bookmarks{% endif %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%96%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="topbar graph-topbar">
+    <a class="btn" href="/">← All bookmarks</a>
+    <div class="graph-heading">
+      <span class="graph-title">{% if seed %}{{ seed.title or seed.url }}{% else %}Graph{% endif %}</span>
+      {% if seed %}<span class="detail-domain">{{ seed.url }}</span>{% endif %}
+    </div>
+    <div class="graph-controls">
+      <label class="graph-control">Depth
+        <select id="graph-depth" aria-label="Neighborhood depth">
+          <option value="1" {% if depth == 1 %}selected{% endif %}>1 hop</option>
+          <option value="2" {% if depth == 2 %}selected{% endif %}>2 hops</option>
+        </select>
+      </label>
+      <label class="graph-control">Tag
+        <select id="graph-tag-filter" aria-label="Filter nodes by tag">
+          <option value="">all</option>
+        </select>
+      </label>
+      <label class="graph-control filter-check"><input id="graph-unread-filter" type="checkbox"> is:unread</label>
+      <label class="graph-control filter-check"><input id="graph-orphan-filter" type="checkbox"> orphan</label>
+      <span id="graph-stats" class="graph-stats" role="status" aria-live="polite"></span>
+    </div>
+  </header>
+
+  <main id="graph" class="graph-main"
+        data-seed="{% if seed %}{{ seed.id }}{% endif %}" data-depth="{{ depth }}"
+        aria-label="Bookmark neighborhood graph">
+    <div id="graph-canvas" class="graph-canvas" data-rendered="false"></div>
+    <div id="graph-empty" class="graph-empty" hidden></div>
+    <div id="graph-seed-picker" class="graph-seed-picker" hidden>
+      <h2>Choose a bookmark to graph</h2>
+      <input id="graph-seed-search" type="search" placeholder="Search titles and URLs…"
+             autocomplete="off" aria-label="Search bookmarks to graph">
+      <ul id="graph-seed-results" class="graph-seed-results" role="listbox" aria-label="Bookmark results"></ul>
+      <p class="hint">The graph shows a bookmark's 1–2 hop neighborhood over
+        its [[wikilinks]] — never the whole library. Node size reflects how
+        many bookmarks point at that node.</p>
+    </div>
+  </main>
+
+  <script src="/static/vendor/cytoscape.min.js"></script>
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>
