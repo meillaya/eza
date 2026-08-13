@@ -341,6 +341,93 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     return dict(row)
 
 
+def _tag_filter_subquery(tags: Sequence[str]) -> str:
+    """Build the ``b.id IN (…)`` multi-tag AND filter fragment.
+
+    Index-driven replacement for the old correlated
+    ``(SELECT COUNT(DISTINCT …) FROM bookmark_tags … WHERE … = b.id …) = N``
+    subquery, which was O(rows x tags): each tag name resolves through the
+    unique ``tags.name`` index, then ``idx_bookmark_tags_tag`` enumerates the
+    candidate bookmarks. ``GROUP BY bookmark_id`` +
+    ``HAVING COUNT(DISTINCT bt.tag_id) = N`` preserves exact AND semantics —
+    a bookmark must carry every requested tag — without multiplying rows.
+    """
+    placeholders = ",".join("?" for _ in tags)
+    return (
+        "b.id IN (SELECT bookmark_id FROM bookmark_tags bt "
+        "JOIN tags t ON t.id = bt.tag_id "
+        f"WHERE t.name IN ({placeholders}) "
+        "GROUP BY bookmark_id "
+        f"HAVING COUNT(DISTINCT bt.tag_id) = {len(tags)})"
+    )
+
+
+def _search_sql(
+    *,
+    q: str | None = None,
+    tags: Sequence[str] = (),
+    limit: int = 60,
+    offset: int = 0,
+    count: bool = False,
+) -> tuple[str, list]:
+    """Build the parameterized search statement and its params.
+
+    FTS + tags keeps the FTS match as the driving join: the match set is
+    materialized first and ``CROSS JOIN`` pins it ahead of ``bookmarks`` so
+    the optimizer cannot reorder the tag filter ahead of it (which degrades
+    the plan from ~2 ms to ~700 ms of per-candidate FTS scans). The tag
+    filter then applies as a second join + ``GROUP BY b.id``/``HAVING``.
+
+    With ``count=True`` the grouped result is wrapped so ``COUNT(*)`` counts
+    distinct bookmarks rather than (bookmark x tag) rows.
+    """
+    params: list = []
+    fts = fts_query(q) if q else None
+
+    if fts and tags:
+        fts_cols = "rowid" if count else "rowid, rank"
+        from_clause = (
+            f"(SELECT {fts_cols} FROM bookmarks_fts WHERE bookmarks_fts MATCH ?) f "
+            "CROSS JOIN bookmarks b ON b.id = f.rowid"
+        )
+        params.append(fts)
+        placeholders = ",".join("?" for _ in tags)
+        join = (
+            " JOIN bookmark_tags bt ON bt.bookmark_id = b.id "
+            " JOIN tags t ON t.id = bt.tag_id "
+        )
+        where = f"t.name IN ({placeholders})"
+        params.extend(tags)
+        group_having = f" GROUP BY b.id HAVING COUNT(DISTINCT bt.tag_id) = {len(tags)} "
+    elif fts:
+        from_clause = "bookmarks b"
+        join = " JOIN bookmarks_fts f ON f.rowid = b.id "
+        where = "bookmarks_fts MATCH ?"
+        params.append(fts)
+        group_having = ""
+    else:
+        from_clause = "bookmarks b"
+        join = ""
+        where = _tag_filter_subquery(tags) if tags else ""
+        params.extend(tags)
+        group_having = ""
+
+    where_sql = f" WHERE {where}" if where else ""
+    if count:
+        if fts and tags:
+            sql = (
+                "SELECT COUNT(*) AS n FROM (SELECT b.id FROM "
+                f"{from_clause}{join}{where_sql}{group_having})"
+            )
+        else:
+            sql = f"SELECT COUNT(*) AS n FROM {from_clause}{join}{where_sql}"
+    else:
+        order = " ORDER BY f.rank, b.created_at DESC " if fts else " ORDER BY b.created_at DESC "
+        sql = f"SELECT b.* FROM {from_clause}{join}{where_sql}{group_having}{order} LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+    return sql, params
+
+
 def list_bookmarks(
     *,
     q: str | None = None,
@@ -350,62 +437,14 @@ def list_bookmarks(
 ) -> list[dict]:
     """Return a page of bookmarks, optionally filtered by FTS query and tags."""
     conn = get_conn()
-    params: list = []
-    where: list[str] = []
-
-    fts = fts_query(q) if q else None
-    join = ""
-    if fts:
-        join += " JOIN bookmarks_fts f ON f.rowid = b.id "
-        where.append("bookmarks_fts MATCH ?")
-        params.append(fts)
-
-    if tags:
-        # AND semantics: bookmark must have ALL specified tags.
-        # We use a subquery instead of joining bookmark_tags so that
-        # multiple matching tags don't multiply rows.
-        placeholders = ",".join("?" for _ in tags)
-        where.append(
-            "(SELECT COUNT(DISTINCT t2.name) FROM bookmark_tags bt2 "
-            "JOIN tags t2 ON t2.id = bt2.tag_id "
-            f"WHERE bt2.bookmark_id = b.id AND t2.name IN ({placeholders})) = ?"
-        )
-        params.extend([*tags, len(tags)])
-
-    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
-
-    order = " ORDER BY f.rank, b.created_at DESC " if fts else " ORDER BY b.created_at DESC "
-
-    sql = "SELECT b.* FROM bookmarks b " + join + where_sql + order + " LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
-
+    sql, params = _search_sql(q=q, tags=tags, limit=limit, offset=offset)
     rows = conn.execute(sql, params).fetchall()
     return [_row_to_dict(r) for r in rows]
 
 
 def count_bookmarks(*, q: str | None = None, tags: Sequence[str] = ()) -> int:
     conn = get_conn()
-    params: list = []
-    where: list[str] = []
-    join = ""
-
-    fts = fts_query(q) if q else None
-    if fts:
-        join += " JOIN bookmarks_fts f ON f.rowid = b.id "
-        where.append("bookmarks_fts MATCH ?")
-        params.append(fts)
-
-    if tags:
-        placeholders = ",".join("?" for _ in tags)
-        where.append(
-            "(SELECT COUNT(DISTINCT t2.name) FROM bookmark_tags bt2 "
-            "JOIN tags t2 ON t2.id = bt2.tag_id "
-            f"WHERE bt2.bookmark_id = b.id AND t2.name IN ({placeholders})) = ?"
-        )
-        params.extend([*tags, len(tags)])
-
-    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
-    sql = "SELECT COUNT(*) AS n FROM bookmarks b " + join + where_sql
+    sql, params = _search_sql(q=q, tags=tags, count=True)
     return conn.execute(sql, params).fetchone()["n"]
 
 
