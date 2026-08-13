@@ -1,0 +1,40 @@
+# Build context hygiene for the app image (plan todo 35). The runtime only
+# needs pyproject.toml, uv.lock, app/, templates/, static/ — everything else
+# is local tooling, data, secrets, or the e2e harness.
+
+# Local/runtime state
+data/
+.venv/
+.env
+.auth/
+*.db
+*.db-wal
+*.db-shm
+
+# Repo tooling and docs
+.git/
+.github/
+.gitignore
+.omo/
+.codegraph/
+README.md
+bookmarks_04_08_2026.html
+
+# Node / e2e harness (separate image: Dockerfile.e2e)
+node_modules/
+package.json
+bun.lock
+playwright.config.ts
+playwright-report/
+test-results/
+reproducible-e2e-browser-testing/
+Dockerfile.e2e
+Dockerfile.e2e.dockerignore
+docker-compose.yml
+
+# Build artifacts and caches
+dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/

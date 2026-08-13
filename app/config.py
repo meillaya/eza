@@ -95,7 +95,13 @@ BACKUP_OFFBOX_DEST = _env_path("BACKUP_OFFBOX_DEST", None)
 # Startup side effects
 # ---------------------------------------------------------------------------
 
-# Startup side effect: guarantee the DB dir exists before anything connects.
+# Runtime parent-dir creation: guarantee the DB directory exists before
+# anything connects. This is the PRIMARY empty-volume fix (plan todo 35): a
+# volume mounted at BOOKMARKS_DB's parent (e.g. /app/data on Railway) shadows
+# the image's directory AND its build-time ownership, so a build-time
+# `mkdir/chown` in the Dockerfile does NOT apply to the mount. Running here,
+# at import time, creates the parent on the live filesystem (the mounted
+# volume) instead.
 BOOKMARKS_DB.parent.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
