@@ -20,7 +20,7 @@ import pytest
 from fastapi import UploadFile
 from selectolax.parser import HTMLParser
 
-from app import config, db
+from app import config, db, exporter
 from app.main import _looks_like_timestamp_folder, api_import
 
 SIMPLE = """\
@@ -346,3 +346,79 @@ beta">Split</A>
 
     b = _bookmark_by_url("https://example.com/split")
     assert set(b["tags"]) == {"alpha", "beta"}
+
+
+# ---------------------------------------------------------------------------
+# Task-33 round-trip: dedup + TAGS-exported rows (existing cases above are
+# untouched)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_duplicate_urls_deduped_on_import(fresh_db):
+    """UNIQUE on url: a file with duplicate URLs yields one row per distinct
+    URL (assert count), and re-importing the same file does not grow it."""
+    html = """\
+<DL><p>
+    <DT><A HREF="https://example.com/dup">Dup1</A>
+    <DT><A HREF="https://example.com/dup">Dup2</A>
+    <DT><A HREF="https://example.com/uniq">U</A>
+</DL><p>
+"""
+    file = UploadFile(filename="x.html", file=io.BytesIO(html.encode()))
+    result = await api_import(file)
+    assert result["found"] == 3  # both dup lines are seen...
+    assert db.count_bookmarks() == 2  # ...but collapse to one row each
+
+    rows = db.get_conn().execute(
+        "SELECT url, COUNT(*) AS n FROM bookmarks GROUP BY url"
+    ).fetchall()
+    assert {r["url"]: r["n"] for r in rows} == {
+        "https://example.com/dup": 1,
+        "https://example.com/uniq": 1,
+    }
+
+    # Re-importing the same file is idempotent: still 2 rows.
+    file2 = UploadFile(filename="x.html", file=io.BytesIO(html.encode()))
+    await api_import(file2)
+    assert db.count_bookmarks() == 2
+
+
+@pytest.mark.asyncio
+async def test_tags_exported_rows_round_trip(fresh_db, monkeypatch, tmp_path):
+    """A TAGS-carrying Netscape file (the exact shape the exporter writes)
+    round-trips through the app: import → export → re-import keeps every tag,
+    including the toolbar-folder tag."""
+    html = """\
+<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<DL><p>
+    <DT><H3 ADD_DATE="1700000000" LAST_MODIFIED="1700000000" PERSONAL_TOOLBAR_FOLDER="true">Bookmarks bar</H3>
+    <DL><p>
+        <DT><A HREF="https://example.com/t1" ADD_DATE="1700000000" TAGS="dev,toolbar">T1</A>
+    </DL><p>
+    <DT><A HREF="https://example.com/t2" ADD_DATE="1700000000" TAGS="python,rust">T2</A>
+    <DT><A HREF="https://example.com/t3" ADD_DATE="1700000000" TAGS="toolbar">T3</A>
+</DL><p>
+"""
+    file = UploadFile(filename="x.html", file=io.BytesIO(html.encode()))
+    result = await api_import(file)
+    assert result["inserted"] == 3
+
+    content = exporter.export_bookmarks()
+    p2 = tmp_path / "reimport.db"
+    monkeypatch.setattr(db, "DB_PATH", p2)
+    monkeypatch.setattr(db, "_conn", None)
+    db.get_conn()
+    file2 = UploadFile(filename="rt.html", file=io.BytesIO(content.encode("utf-8")))
+    await api_import(file2)
+
+    def tags_of(url: str) -> set[str]:
+        row = db.get_conn().execute(
+            "SELECT id FROM bookmarks WHERE url = ?", (url,)
+        ).fetchone()
+        assert row is not None
+        return set(db.get_tags_for_bookmark(row["id"]))
+
+    assert tags_of("https://example.com/t1") == {"dev", "toolbar"}
+    assert tags_of("https://example.com/t2") == {"python", "rust"}
+    assert tags_of("https://example.com/t3") == {"toolbar"}

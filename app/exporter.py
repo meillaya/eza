@@ -20,7 +20,10 @@ Layout mirrors Chromium exactly:
 
 Attributes follow Chromium: ``ADD_DATE``/``LAST_MODIFIED`` are unix seconds;
 ``ICON`` is emitted when the stored favicon is a base64 data URL or an
-http(s) URL. Escaping is Chromium's two-tier scheme: attribute values escape
+http(s) URL. Beyond Chromium, every tag is written as a ``TAGS="a,b"``
+attribute (comma-joined, sorted) so tags survive an export→import round trip
+through this app's own importer; foreign browsers that ignore ``TAGS`` are
+unaffected. Escaping is Chromium's two-tier scheme: attribute values escape
 only ``"`` -> ``&quot;``; content (titles, notes) uses EscapeForHTML
 (``& < > " '``). A bookmark with an empty title falls back to its URL.
 
@@ -43,7 +46,7 @@ import sqlite3
 import sys
 import time
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from . import config, db
@@ -73,6 +76,7 @@ _FOLDER_CHILDREN = "<DL><p>"
 _FOLDER_CHILDREN_END = "</DL><p>"
 _BOOKMARK_START = '<DT><A HREF="'
 _ADD_DATE = '" ADD_DATE="'
+_TAGS = '" TAGS="'
 _ICON = '" ICON="'
 _BOOKMARK_ATTR_END = '">'
 _BOOKMARK_END = "</A>"
@@ -116,15 +120,31 @@ def _tags_by_bookmark(conn: sqlite3.Connection) -> dict[int, list[str]]:
 
 
 def _bookmark_line(
-    url: str, created_at: int, favicon_url: str, title: str, note_body: str, *, with_notes: bool
+    url: str,
+    created_at: int,
+    favicon_url: str,
+    title: str,
+    note_body: str,
+    *,
+    with_notes: bool,
+    tags: Sequence[str] = (),
 ) -> str:
-    """One ``<DT><A …>title</A>`` line (plus the optional ``<DD>`` note)."""
+    """One ``<DT><A …>title</A>`` line (plus the optional ``<DD>`` note).
+
+    ``tags`` are written as a ``TAGS="a,b"`` attribute (comma-joined, sorted
+    by the caller). The importer reads it back, so tags survive an
+    export→import round trip; foreign browsers simply ignore the attribute.
+    The toolbar tag rides BOTH the attribute and the toolbar folder — the
+    importer dedupes the duplicate link, so the tag set is unchanged.
+    """
     line = (
         _BOOKMARK_START
         + _escape_attribute(url)
         + _ADD_DATE
         + str(created_at)
     )
+    if tags:
+        line += _TAGS + _escape_attribute(",".join(tags))
     if favicon_url and _FAVICON_URL.match(favicon_url):
         line += _ICON + _escape_attribute(favicon_url)
     line += _BOOKMARK_ATTR_END + _escape_content(title or url) + _BOOKMARK_END
@@ -173,14 +193,14 @@ def export_bookmarks(
         parts.append(f"{_INDENT}{_FOLDER_CHILDREN}")
         for row in toolbar_rows:
             parts.append(
-                f"{_INDENT}{_INDENT}{_bookmark_line(row['url'], row['created_at'], row['favicon_url'], row['title'], row['note_body'], with_notes=with_notes)}"
+                f"{_INDENT}{_INDENT}{_bookmark_line(row['url'], row['created_at'], row['favicon_url'], row['title'], row['note_body'], with_notes=with_notes, tags=tags_by_id.get(row['id'], ()))}"
             )
         parts.append(f"{_INDENT}{_FOLDER_CHILDREN_END}")
     # Other bucket — Chromium flattens these one level up: direct <DT><A>
     # children of the root DL, no H3 wrapper.
     for row in other_rows:
         parts.append(
-            f"{_INDENT}{_bookmark_line(row['url'], row['created_at'], row['favicon_url'], row['title'], row['note_body'], with_notes=with_notes)}"
+            f"{_INDENT}{_bookmark_line(row['url'], row['created_at'], row['favicon_url'], row['title'], row['note_body'], with_notes=with_notes, tags=tags_by_id.get(row['id'], ()))}"
         )
     parts.append(_FOLDER_CHILDREN_END)
     return _NEWLINE.join(parts) + _NEWLINE

@@ -24,12 +24,13 @@ exact text — preserved.
 from __future__ import annotations
 
 import io
+import re
 
 import pytest
 from fastapi import UploadFile
 from fastapi.testclient import TestClient
 
-from app import auth, db, exporter
+from app import auth, db, exporter, fetcher
 from app.main import api_import, app
 
 # A tiny 1x1 transparent PNG, base64 — the favicon fixture.
@@ -226,3 +227,141 @@ def test_export_route_headers_and_content(fresh_db):
     assert resp.headers["content-disposition"] == 'attachment; filename="bookmarks.html"'
     assert resp.text.startswith("<!DOCTYPE NETSCAPE-Bookmark-file-1>")
     assert "https://route.example/" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Round-trip fidelity suite (todo 33): export → import → assert. Pure Python
+# — the app's own import path (api_import / the hardened walker) is the
+# reader; no browser anywhere.
+# ---------------------------------------------------------------------------
+
+
+async def _roundtrip_library(
+    content: str, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> dict[str, dict[str, str | set[str]]]:
+    """Import ``content`` through ``api_import`` into a brand-new temp DB and
+    return ``{url: {"title": str, "tags": set[str]}}`` for every row.
+
+    The enrichment callback is stubbed to a no-op so the round trip is pure
+    parse + insert (no background network fetches, no browser required).
+    """
+    monkeypatch.setattr(fetcher, "schedule_extract_for_url", lambda url: None)
+    p2 = tmp_path / "rt-fresh.db"
+    monkeypatch.setattr(db, "DB_PATH", p2)
+    monkeypatch.setattr(db, "_conn", None)
+    db.get_conn()
+    file = UploadFile(filename="rt.html", file=io.BytesIO(content.encode("utf-8")))
+    await api_import(file)
+    conn = db.get_conn()
+    rows = conn.execute("SELECT id, url, title FROM bookmarks").fetchall()
+    return {
+        row["url"]: {
+            "title": row["title"],
+            "tags": set(db.get_tags_for_bookmark(row["id"])),
+        }
+        for row in rows
+    }
+
+
+def _hrefs(content: str) -> list[str]:
+    """Every HREF the export wrote, in file order."""
+    return re.findall(r'HREF="([^"]+)"', content)
+
+
+def _seed_representative_library() -> dict[str, set[str]]:
+    """~300 representative rows — toolbar-tagged, plain-tagged and untagged,
+    including URLs with query strings — and returns the
+    ``{url: set(tags)}`` expectation for the http(s) subset (the export
+    skips non-http URLs by design)."""
+    expected: dict[str, set[str]] = {}
+    for i in range(100):
+        url = f"https://lib.example/{i:03d}"
+        db.insert_bookmark(url=url, title=f"Lib {i}", tags=["python", "web"] if i % 2 else [])
+        expected[url] = {"python", "web"} if i % 2 else set()
+    for i in range(100):
+        url = f"https://rust.example/{i:03d}"
+        db.insert_bookmark(url=url, title=f"Rust {i}", tags=["rust", "toolbar"])
+        expected[url] = {"rust", "toolbar"}
+    for i in range(100):
+        url = f"https://mix.example/q?x={i}&y=z"
+        db.insert_bookmark(url=url, title="Mix", tags=["dev", "toolbar", "alpha"])
+        expected[url] = {"dev", "toolbar", "alpha"}
+    db.insert_bookmark(url="javascript:alert(1)", title="never exported")
+    assert len(expected) == 300
+    return expected
+
+
+@pytest.mark.asyncio
+async def test_round_trip_url_set_equality(fresh_db, monkeypatch, tmp_path):
+    """Every URL the export writes comes back, and nothing extra appears:
+    export a 300-row representative library → import through ``api_import``
+    → the re-imported URL set equals the exported HREF set exactly (the
+    load-bearing round-trip assertion)."""
+    expected = _seed_representative_library()
+    content = exporter.export_bookmarks()
+    exported = set(_hrefs(content))
+    assert exported == set(expected)  # the export writes exactly the http(s) seed
+    assert "javascript:alert(1)" not in content
+
+    imported = await _roundtrip_library(content, monkeypatch, tmp_path)
+    assert set(imported) == exported  # no missing, no extra
+    assert len(imported) == len(exported) == 300
+
+
+@pytest.mark.asyncio
+async def test_round_trip_tag_mapping_preserved(fresh_db, monkeypatch, tmp_path):
+    """Every tag survives the round trip: toolbar-tagged rows keep the toolbar
+    tag (PERSONAL_TOOLBAR_FOLDER folder → tag), every other row keeps its tags
+    via the TAGS attribute — set equality holds per re-imported URL."""
+    expected = _seed_representative_library()
+    content = exporter.export_bookmarks()
+
+    imported = await _roundtrip_library(content, monkeypatch, tmp_path)
+    for url, want_tags in expected.items():
+        assert imported[url]["tags"] == want_tags, f"tags lost for {url}"
+
+
+@pytest.mark.asyncio
+async def test_round_trip_folder_structure_preserved(fresh_db, monkeypatch, tmp_path):
+    """The toolbar folder is the one piece of folder structure the exporter
+    writes; it must come back as the toolbar tag, not as a generic folder."""
+    db.insert_bookmark(url="https://folder.example/bar", title="Bar", tags=["toolbar", "dev"])
+    db.insert_bookmark(url="https://folder.example/plain", title="Plain", tags=["other"])
+    content = exporter.export_bookmarks()
+    assert 'PERSONAL_TOOLBAR_FOLDER="true"' in content  # folder structure written
+
+    imported = await _roundtrip_library(content, monkeypatch, tmp_path)
+    assert imported["https://folder.example/bar"]["tags"] == {"toolbar", "dev"}
+    assert imported["https://folder.example/plain"]["tags"] == {"other"}
+
+
+@pytest.mark.asyncio
+async def test_round_trip_reimport_dedupes_duplicate_urls(fresh_db, monkeypatch, tmp_path):
+    """Importing the SAME exported file twice must not grow the library:
+    ``UNIQUE`` on ``bookmarks.url`` keeps each URL a single row."""
+    _seed_representative_library()
+    content = exporter.export_bookmarks()
+
+    imported = await _roundtrip_library(content, monkeypatch, tmp_path)
+    assert len(imported) == 300
+
+    file = UploadFile(filename="rt2.html", file=io.BytesIO(content.encode("utf-8")))
+    await api_import(file)
+    conn = db.get_conn()
+    assert conn.execute("SELECT COUNT(*) AS n FROM bookmarks").fetchone()["n"] == 300
+
+
+@pytest.mark.asyncio
+async def test_round_trip_escaping_fidelity(fresh_db, monkeypatch, tmp_path):
+    """A URL with ``&`` and a quoted value plus a title with quotes, ampersands
+    and tags survive the round trip EXACTLY (exact strings on the re-imported
+    row — no entity leftovers, no lost characters)."""
+    url = 'https://esc.example/search?q="rust"&lang=py&v=1'
+    title = 'A & B "quoted" <tag> & \'single\''
+    db.insert_bookmark(url=url, title=title)
+    content = exporter.export_bookmarks()
+    assert 'HREF="https://esc.example/search?q=&quot;rust&quot;&lang=py&v=1"' in content
+
+    imported = await _roundtrip_library(content, monkeypatch, tmp_path)
+    assert url in imported  # exact URL string survived
+    assert imported[url]["title"] == title
