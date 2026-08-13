@@ -341,6 +341,125 @@ If you ever *do* enable sleep for cost reasons, you must move the daily backup
 out of the container (Railway cron + the offsite logical dump is the pattern)
 and accept cold-boot latency. Default: keep it always-on.
 
+## Deploy — NixOS
+
+For a bare-metal box (or any NixOS host) the repo ships a self-contained
+**deployment flake** at [`nixos/`](nixos/flake.nix) — do not confuse it with
+the repo-root `flake.nix`, which is the *e2e-harness devshell* (Playwright
+tests) from todo 13. The two flakes are independent; the deployment flake lives
+in `nixos/` so they never collide.
+
+What it provides, all **build-verified** (`nix flake check ./nixos` and
+`nix build ./nixos#default` pass — the venv boots and serves):
+
+| Piece | Details |
+|---|---|
+| **uv2nix venv** (`packages.default`) | `mkVirtualEnv` over the repo's `uv.lock` (hello-world template, wheel preference). Entry points: `uvicorn`, `bookmarks-server`, all `bookmarks-*` CLIs. QA: `nix run .#bookmarks-server` from `nixos/` starts the server. |
+| **NixOS module** (`nixosModules.default`) | `services.bookmarks` option — domain, port (default 8000), `extraEnv`, and a `backup` sub-option (schedule, retention, optional offsite destination). |
+| **Hardened systemd unit** | `DynamicUser`, `StateDirectory=bookmarks` → `/var/lib/private/bookmarks` with `BOOKMARKS_DB` pointing there, empty `CapabilityBoundingSet`, `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, `RestrictAddressFamilies=AF_INET/AF_INET6/AF_UNIX`, `UMask=0027`, `Restart=on-failure`. |
+| **Caddy** | Automatic HTTPS (ACME) for your domain, `reverse_proxy 127.0.0.1:8000`. |
+| **agenix** | `SECRET_KEY` + optional API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …) injected as a systemd credential via `LoadCredential`. |
+| **Backup timer** | `systemd` timer (default 03:17 daily) running `scripts/backup.sh` from a **Nix-store derivation** — see below. |
+
+> **⚠️ `MemoryDenyWriteExecute` must stay OFF.** The hardened unit deliberately
+> does **not** set `MemoryDenyWriteExecute`. That systemd policy breaks the
+> V8/Node JIT and `require()` in Node — if an e2e runner (the todo-13
+> Playwright harness) is ever added to this unit, MDWE would crash Chromium
+> and the test runner at startup. Keep it unset. (`grep -c
+> MemoryDenyWriteExecute nixos/flake.nix` must be 0.)
+
+### One-time provisioning (user-run, needs the target box)
+
+The steps below are executed on the NixOS host. Nothing in the repo requires a
+live NixOS box to build or test.
+
+1. **Add the flake to your NixOS config.** In `flake.nix` (your system's),
+   add `bookmarks.url = "path:/path/to/this/repo/nixos"` (or push the repo and
+   use a `git+file:`/`github:` URL) and import the module:
+
+   ```nix
+   inputs.bookmarks.url = "path:/srv/bookmarks/nixos";
+
+   # in modules:
+   {
+     imports = [ inputs.bookmarks.nixosModules.default ];
+     services.bookmarks = {
+       enable = true;
+       domain = "bm.example.com";          # must resolve to this host's public IP
+       backup = {
+         enable = true;
+         offboxDest = "s3:/...";           # optional offsite (todo 37)
+       };
+     };
+   }
+   ```
+
+2. **Provision the agenix secret.** `secrets/bookmarks-env.age` is *not*
+   committed (no secrets in the repo; the flake evaluates without it — the
+   service then falls back to the app's loud dev default until you do this):
+
+   ```bash
+   # on the target host (as root):
+   mkdir -p /srv/bookmarks/nixos/secrets
+   # find the host age key
+   ls /etc/ssh/ssh_host_ed25519_key.pub   # nixos-rebuild uses this by default
+   # encrypt SECRET_KEY + any API keys into the env file:
+   nix run github:ryantm/agenix -- -i /etc/ssh/ssh_host_ed25519_key -e \
+     /srv/bookmarks/nixos/secrets/bookmarks-env.age
+   # content: KEY=VALUE lines, e.g.
+   #   SECRET_KEY=<long random string>
+   #   OPENAI_API_KEY=...
+   #   ANTHROPIC_API_KEY=...
+   ```
+
+   Generate the key with
+   `python3 -c "import secrets; print(secrets.token_urlsafe(64))"`.
+
+3. **`nixos-rebuild switch`** (on the host, from your system flake). This
+   builds the venv, installs the hardened unit, the Caddy vhost, the agenix
+   secret and the backup timer. Caddy obtains the ACME certificate for the
+   domain on first request.
+
+4. **Verify.** `curl https://bm.example.com/health` → `200 {"status":"ok"}`;
+   register your first passkey at `/setup`; import bookmarks. The DB lives at
+   `/var/lib/private/bookmarks/bookmarks.db` (survives restarts; owned by the
+   dynamic user).
+
+### How the backup reaches the Nix store
+
+`scripts/backup.sh` (todo 37) is a repo source file, not a Nix package — the
+systemd timer can't execute it from the mutable checkout. The flake copies it
+into the store as a `pkgs.writeShellScript` derivation via
+`lib.strings.fileContents`, and the timer's `ExecStart` points at that store
+path. If `scripts/backup.sh` doesn't exist yet, a built-in equivalent (online
+`sqlite3 .backup` + `integrity_check` + prune) is used instead, so the timer
+path always resolves. The backup unit is a hardened, **network-isolated root
+oneshot** (minimal `CapabilityBoundingSet` of read/traverse/unlink caps, no
+`AF_INET`): the app's state dir sits behind the root-owned 0700
+`/var/lib/private` boundary, which systemd only relaxes inside the owning
+DynamicUser's mount namespace, so no second unit can read the DB as the app's
+user — root with a minimal capability set is the only way in. It runs
+`sqlite3 .backup` (safe against the live writer), verifies the copy, prunes
+older than `BACKUP_KEEP_DAYS` (default 14), and copies offsite when
+`backup.offboxDest` is set.
+
+### Secrets in the unit
+
+`age.secrets.bookmarks-env` decrypts to a 0400 root file at activation;
+`LoadCredential=bookmarks-env:<path>` makes systemd read it as root
+(DynamicUser-proof) and re-exports it at `$CREDENTIALS_DIRECTORY/bookmarks-env`,
+which the unit's `ExecStart` wrapper sources into the environment. Non-secret
+settings (`BOOKMARKS_DB`, `PUBLIC_ORIGIN`, `WEBAUTHN_RP_ID`, `extraEnv`) are
+plain `Environment=` lines.
+
+### Restore & recovery
+
+The daily backup is an online, integrity-checked `.backup` copy — restore it
+with `scripts/backup.sh verify <file>` or `sqlite3 <backup> ".backup
+/tmp/restored.db"` then point `BOOKMARKS_DB` at the restored file (see "Backup
+& recovery" in the todo-37 runbook for passkey recovery codes and
+`bookmarks-reset-auth`).
+
 ## Extending
 
 Common things you'll likely want next, in roughly increasing complexity:
