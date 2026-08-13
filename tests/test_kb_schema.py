@@ -30,6 +30,12 @@ KB_SCHEMA_NAME = (
     else "m0003_kb_schema"
 )
 
+LINKS_NAME = (
+    migrations.MIGRATIONS[3][0]
+    if len(migrations.MIGRATIONS) > 3
+    else "m0004_links_target_title"
+)
+
 KB_COLUMNS = {
     "note_body",
     "extracted_text",
@@ -95,10 +101,11 @@ def _make_v2_db(db_path) -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 
-def test_fresh_db_reaches_v3_with_kb_columns(fresh_db):
-    """A freshly initialized DB lands on user_version 3 with all ten columns."""
+def test_fresh_db_reaches_latest_version_with_kb_columns(fresh_db):
+    """A freshly initialized DB lands on the latest user_version with all ten
+    columns (v3 adds them; v4 then adds links.target_title)."""
     conn = fresh_db.get_conn()
-    assert _version(conn) == 3
+    assert _version(conn) == 4
     assert _column_names(conn) >= KB_COLUMNS
 
 
@@ -244,9 +251,9 @@ def test_links_unique_and_cascade(fresh_db):
 # ---------------------------------------------------------------------------
 
 
-def test_v2_db_reaches_v3_via_runner_preserving_data(db_path):
+def test_v2_db_reaches_latest_version_via_runner_preserving_data(db_path):
     """A genuine v2 database (the live-DB shape) migrates through the app
-    runner to v3 with its rows intact and integrity ok."""
+    runner to the latest version (4) with its rows intact and integrity ok."""
     conn = _make_v2_db(db_path)
     assert _version(conn) == 2
     conn.execute(
@@ -258,9 +265,9 @@ def test_v2_db_reaches_v3_via_runner_preserving_data(db_path):
     conn.commit()
     conn.close()
 
-    db.get_conn()  # production init path: _SCHEMA no-op + pending v3 migration
+    db.get_conn()  # production init path: _SCHEMA no-op + pending v3+v4 migrations
     conn = db.get_conn()
-    assert _version(conn) == 3
+    assert _version(conn) == 4
     assert conn.execute("SELECT title FROM bookmarks WHERE id = 1").fetchone()[0] == "Keep Me"
     assert conn.execute("SELECT COUNT(*) FROM bookmarks").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0] == 1
@@ -269,11 +276,11 @@ def test_v2_db_reaches_v3_via_runner_preserving_data(db_path):
 
 
 def test_v2_db_via_run_migrations(db_path):
-    """Applying the full migration list to a v2 DB returns exactly v3."""
+    """Applying the full migration list to a v2 DB lands on the latest version."""
     conn = _make_v2_db(db_path)
     applied = db.run_migrations(conn)
-    assert applied == [KB_SCHEMA_NAME]
-    assert _version(conn) == 3
+    assert applied == [KB_SCHEMA_NAME, LINKS_NAME]
+    assert _version(conn) == 4
     assert _column_names(conn) >= KB_COLUMNS
     assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     conn.close()
@@ -284,9 +291,9 @@ def test_v2_db_via_run_migrations(db_path):
 # ---------------------------------------------------------------------------
 
 
-def test_v3_runner_rerun_is_noop(fresh_db):
-    """Re-running the runner on a v3 DB applies nothing and keeps v3."""
+def test_latest_runner_rerun_is_noop(fresh_db):
+    """Re-running the runner on the latest DB applies nothing and keeps v4."""
     conn = fresh_db.get_conn()
-    assert _version(conn) == 3
+    assert _version(conn) == 4
     assert db.run_migrations(conn) == []
-    assert _version(conn) == 3
+    assert _version(conn) == 4

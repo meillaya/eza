@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from selectolax.parser import HTMLParser, Node
 
-from . import auth, config, db, fetcher
+from . import auth, config, db, fetcher, links
 
 log = logging.getLogger("bookmarks")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -306,6 +306,34 @@ def api_delete_bookmark(bookmark_id: int):
     if not db.delete_bookmark(bookmark_id):
         raise HTTPException(status_code=404, detail="Not found")
     return {"ok": True}
+
+
+@app.patch("/api/bookmarks/{bookmark_id}")
+async def api_save_note(bookmark_id: int, request: Request) -> dict:
+    """Save a bookmark's note body (todo 15). Parses [[wikilinks]] and re-syncs
+    the links table as part of the same transaction; todo 17 extends this route
+    with title/tags/is_read editing."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from None
+    note_body = body.get("note_body") if isinstance(body, dict) else None
+    if not isinstance(note_body, str):
+        raise HTTPException(status_code=400, detail="note_body must be a string")
+    if not await db.run_db(links.save_note, bookmark_id, note_body):
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"ok": True}
+
+
+@app.get("/api/bookmarks/{bookmark_id}/backlinks")
+def api_backlinks(bookmark_id: int) -> dict:
+    """Linked + unlinked mentions of a bookmark. Authed by the global
+    middleware (no exemption); both lists carry the link-it payload
+    (source_id + line_number) plus a context snippet."""
+    result = links.get_backlinks(bookmark_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return result
 
 
 @app.get("/api/tags")
