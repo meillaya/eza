@@ -38,11 +38,18 @@ dev = [
     "pytest-asyncio>=0.24",
 ]
 
+# Ship the HTML templates and static assets in the wheel so an installed app
+# renders pages from site-packages. app/main.py resolves them __file__-relative
+# (ROOT = parent of the package dir), which is site-packages for a wheel
+# install, so the force-include destinations must be the wheel-root
+# directories. Declared at the top level so the SDIST also carries them — uv
+# build builds the wheel from the unpacked sdist, which would otherwise miss
+# the files. Running from a checkout is no longer the only supported mode.
+[tool.hatch.build]
+force-include = { "templates" = "templates/", "static" = "static/" }
+
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
-# Templates and static assets live alongside the source tree at dev time and
-# are resolved via __file__-relative paths in app/main.py. They are not part
-# of the installed wheel; the app is meant to be run from a checkout.
 
 # ---------------------------------------------------------------------------
 # Ruff
