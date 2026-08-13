@@ -1,18 +1,39 @@
+# Python
 __pycache__/
 *.pyc
 .venv/
 venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Database
 *.db
 *.db-wal
 *.db-shm
 data/
-.DS_Store
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
+*.extract-marker
+bookmarks_*.html
+
+# Environments / secrets
+.env
+.env.local
+
+# Node / e2e harness
 node_modules/
 test-results/
 playwright-report/
 .auth/
 bun.lockb
-bun.lock
+
+# Build artifacts
+dist/
+*.log
+
+# Editor / OS
+.DS_Store
+
+# Local tooling state
+.omo/
+.codegraph/
