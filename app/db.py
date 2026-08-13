@@ -1,0 +1,584 @@
+"""SQLite + FTS5 layer for the bookmark store.
+
+The schema is intentionally minimal:
+  - one flat `bookmarks` table
+  - a many-to-many `tags` setup
+  - an external-content FTS5 virtual table on (title, description, url)
+
+WAL mode + synchronous=NORMAL gives us fast reads with safe-enough durability
+for a personal tool. FTS5 with porter stemming gives ranked, sub-millisecond
+search across 10k+ rows.
+"""
+
+from __future__ import annotations
+
+import re
+import sqlite3
+import time
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
+from urllib.parse import urlparse
+
+from app import config
+
+DB_PATH = config.BOOKMARKS_DB
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS bookmarks (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    url              TEXT    NOT NULL UNIQUE,
+    title            TEXT    NOT NULL DEFAULT '',
+    description      TEXT    NOT NULL DEFAULT '',
+    favicon_url      TEXT    NOT NULL DEFAULT '',
+    domain           TEXT    NOT NULL DEFAULT '',
+    created_at       INTEGER NOT NULL,
+    last_opened_at   INTEGER,
+    last_checked_at  INTEGER,
+    open_count       INTEGER NOT NULL DEFAULT 0,
+    is_dead          INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_bookmarks_created ON bookmarks(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bookmarks_domain  ON bookmarks(domain);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
+    title,
+    description,
+    url,
+    content='bookmarks',
+    content_rowid='id',
+    tokenize='porter unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS bookmarks_ai AFTER INSERT ON bookmarks BEGIN
+  INSERT INTO bookmarks_fts(rowid, title, description, url)
+  VALUES (new.id, new.title, new.description, new.url);
+END;
+CREATE TRIGGER IF NOT EXISTS bookmarks_ad AFTER DELETE ON bookmarks BEGIN
+  INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, url)
+  VALUES('delete', old.id, old.title, old.description, old.url);
+END;
+CREATE TRIGGER IF NOT EXISTS bookmarks_au AFTER UPDATE ON bookmarks BEGIN
+  INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, url)
+  VALUES('delete', old.id, old.title, old.description, old.url);
+  INSERT INTO bookmarks_fts(rowid, title, description, url)
+  VALUES (new.id, new.title, new.description, new.url);
+END;
+
+CREATE TABLE IF NOT EXISTS tags (
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT    NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS bookmark_tags (
+    bookmark_id INTEGER NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE,
+    tag_id      INTEGER NOT NULL REFERENCES tags(id)      ON DELETE CASCADE,
+    PRIMARY KEY (bookmark_id, tag_id)
+);
+CREATE INDEX IF NOT EXISTS idx_bookmark_tags_tag ON bookmark_tags(tag_id);
+"""
+
+_PRAGMAS = [
+    "PRAGMA journal_mode = WAL",
+    "PRAGMA synchronous = NORMAL",
+    "PRAGMA temp_store = MEMORY",
+    "PRAGMA foreign_keys = ON",
+    "PRAGMA busy_timeout = 5000",
+]
+
+
+_conn: sqlite3.Connection | None = None
+
+
+def get_conn() -> sqlite3.Connection:
+    """Return the process-wide SQLite connection, creating it on first call."""
+    global _conn
+    if _conn is None:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _conn = sqlite3.connect(
+            str(DB_PATH),
+            check_same_thread=False,
+            isolation_level=None,  # autocommit; we manage transactions explicitly
+        )
+        _conn.row_factory = sqlite3.Row
+        for pragma in _PRAGMAS:
+            _conn.execute(pragma)
+        _conn.executescript(_SCHEMA)
+        _run_migrations(_conn)
+    return _conn
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    """Apply additive migrations for older databases."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(bookmarks)")}
+    if "last_checked_at" not in cols:
+        conn.execute("ALTER TABLE bookmarks ADD COLUMN last_checked_at INTEGER")
+    # Index created unconditionally — IF NOT EXISTS makes it idempotent.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bookmarks_checked ON bookmarks(last_checked_at)")
+
+
+@contextmanager
+def transaction() -> Iterator[sqlite3.Connection]:
+    """Explicit transaction wrapper. Commits on success, rolls back on error."""
+    conn = get_conn()
+    conn.execute("BEGIN")
+    try:
+        yield conn
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
+
+
+# ---------------------------------------------------------------------------
+# Query helpers
+# ---------------------------------------------------------------------------
+
+_FTS_SANITIZE = re.compile(r"[^\w\s-]+", re.UNICODE)
+
+
+def fts_query(user_input: str) -> str | None:
+    """Turn a user-typed search string into a safe FTS5 MATCH expression.
+
+    Each token is converted to a prefix match (token*) and ANDed together, so
+    "rust web" matches "rust web framework" and "rustlang websocket". Anything
+    that isn't a word/hyphen/space is dropped, so users can't break out of the
+    query syntax.
+    """
+    cleaned = _FTS_SANITIZE.sub(" ", user_input).strip()
+    if not cleaned:
+        return None
+    tokens = [t for t in cleaned.split() if t]
+    if not tokens:
+        return None
+    return " AND ".join(f'"{t}"*' for t in tokens)
+
+
+def _row_to_dict(row: sqlite3.Row) -> dict:
+    return dict(row)
+
+
+def list_bookmarks(
+    *,
+    q: str | None = None,
+    tags: Sequence[str] = (),
+    limit: int = 60,
+    offset: int = 0,
+) -> list[dict]:
+    """Return a page of bookmarks, optionally filtered by FTS query and tags."""
+    conn = get_conn()
+    params: list = []
+    where: list[str] = []
+
+    fts = fts_query(q) if q else None
+    join = ""
+    if fts:
+        join += " JOIN bookmarks_fts f ON f.rowid = b.id "
+        where.append("bookmarks_fts MATCH ?")
+        params.append(fts)
+
+    if tags:
+        # AND semantics: bookmark must have ALL specified tags.
+        # We use a subquery instead of joining bookmark_tags so that
+        # multiple matching tags don't multiply rows.
+        placeholders = ",".join("?" for _ in tags)
+        where.append(
+            "(SELECT COUNT(DISTINCT t2.name) FROM bookmark_tags bt2 "
+            "JOIN tags t2 ON t2.id = bt2.tag_id "
+            f"WHERE bt2.bookmark_id = b.id AND t2.name IN ({placeholders})) = ?"
+        )
+        params.extend([*tags, len(tags)])
+
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+    order = " ORDER BY f.rank, b.created_at DESC " if fts else " ORDER BY b.created_at DESC "
+
+    sql = "SELECT b.* FROM bookmarks b " + join + where_sql + order + " LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    rows = conn.execute(sql, params).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def count_bookmarks(*, q: str | None = None, tags: Sequence[str] = ()) -> int:
+    conn = get_conn()
+    params: list = []
+    where: list[str] = []
+    join = ""
+
+    fts = fts_query(q) if q else None
+    if fts:
+        join += " JOIN bookmarks_fts f ON f.rowid = b.id "
+        where.append("bookmarks_fts MATCH ?")
+        params.append(fts)
+
+    if tags:
+        placeholders = ",".join("?" for _ in tags)
+        where.append(
+            "(SELECT COUNT(DISTINCT t2.name) FROM bookmark_tags bt2 "
+            "JOIN tags t2 ON t2.id = bt2.tag_id "
+            f"WHERE bt2.bookmark_id = b.id AND t2.name IN ({placeholders})) = ?"
+        )
+        params.extend([*tags, len(tags)])
+
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    sql = "SELECT COUNT(*) AS n FROM bookmarks b " + join + where_sql
+    return conn.execute(sql, params).fetchone()["n"]
+
+
+def get_bookmark(bookmark_id: int) -> dict | None:
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM bookmarks WHERE id = ?", (bookmark_id,)).fetchone()
+    if row is None:
+        return None
+    d = _row_to_dict(row)
+    d["tags"] = get_tags_for_bookmark(bookmark_id)
+    return d
+
+
+def insert_bookmark(
+    *,
+    url: str,
+    title: str = "",
+    description: str = "",
+    favicon_url: str = "",
+    domain: str = "",
+    tags: Iterable[str] = (),
+) -> int:
+    """Insert a bookmark. Returns the new row id. URL must be unique.
+
+    If `domain` is empty, it's derived from the URL.
+    """
+    if not domain:
+        domain = urlparse(url).netloc
+    now = int(time.time())
+    with transaction() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO bookmarks (url, title, description, favicon_url, domain, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(url) DO UPDATE SET
+                title       = excluded.title,
+                description = excluded.description,
+                favicon_url = excluded.favicon_url,
+                domain      = excluded.domain
+            RETURNING id
+            """,
+            (url, title, description, favicon_url, domain, now),
+        )
+        row = cur.fetchone()
+        bookmark_id = row[0]
+
+        for tag in tags:
+            tag = tag.strip().lower()
+            if not tag:
+                continue
+            conn.execute("INSERT OR IGNORE INTO tags(name) VALUES (?)", (tag,))
+            tag_id = conn.execute("SELECT id FROM tags WHERE name = ?", (tag,)).fetchone()[0]
+            conn.execute(
+                "INSERT OR IGNORE INTO bookmark_tags(bookmark_id, tag_id) VALUES (?, ?)",
+                (bookmark_id, tag_id),
+            )
+    return bookmark_id
+
+
+def bulk_insert_bookmarks(
+    items: Iterable[dict],
+    *,
+    enrich_callback=None,
+) -> int:
+    """Insert many bookmarks in a single transaction. Much faster than
+    calling insert_bookmark() in a loop (~100x for thousands of rows).
+
+    Each item is a dict with keys: url, title, domain, tags (list of names).
+    Returns the number of rows touched.
+
+    enrich_callback(url) → coroutine: called for each NEW (non-duplicate) URL
+    so the caller can schedule metadata fetching. Pass None to skip.
+    """
+    items = list(items)
+    if not items:
+        return 0
+    now = int(time.time())
+    touched = 0
+
+    with transaction() as conn:
+        # Pre-create all unique tags so we can map name→id in one pass.
+        all_tags: set[str] = set()
+        for it in items:
+            for tag in it.get("tags", []):
+                t = tag.strip().lower()
+                if t:
+                    all_tags.add(t)
+        conn.executemany(
+            "INSERT OR IGNORE INTO tags(name) VALUES (?)",
+            ((t,) for t in all_tags),
+        )
+        tag_id_by_name = {
+            row["name"]: row["id"] for row in conn.execute("SELECT id, name FROM tags").fetchall()
+        }
+
+        for it in items:
+            url = it["url"]
+            title = it.get("title", "")
+            domain = it.get("domain", "")
+            tag_names = [t.strip().lower() for t in it.get("tags", []) if t.strip()]
+
+            cur = conn.execute(
+                """
+                INSERT INTO bookmarks (url, title, domain, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    title  = excluded.title,
+                    domain = excluded.domain
+                RETURNING id
+                """,
+                (url, title, domain, now),
+            )
+            bookmark_id = cur.fetchone()[0]
+            touched += 1
+
+            for tag_name in tag_names:
+                tag_id = tag_id_by_name.get(tag_name)
+                if tag_id is None:
+                    continue
+                conn.execute(
+                    "INSERT OR IGNORE INTO bookmark_tags(bookmark_id, tag_id) VALUES (?, ?)",
+                    (bookmark_id, tag_id),
+                )
+
+    # Schedule enrichment for newly inserted rows after the transaction
+    # has committed. We can't know here which rows were new vs. duplicates,
+    # but the fetcher handles existing titles gracefully.
+    if enrich_callback is not None:
+        for it in items:
+            enrich_callback(it["url"])
+
+    return touched
+
+
+def delete_bookmark(bookmark_id: int) -> bool:
+    with transaction() as conn:
+        cur = conn.execute("DELETE FROM bookmarks WHERE id = ?", (bookmark_id,))
+        return cur.rowcount > 0
+
+
+def record_open(bookmark_id: int) -> None:
+    """Bump the open count and last_opened_at timestamp."""
+    now = int(time.time())
+    get_conn().execute(
+        "UPDATE bookmarks SET open_count = open_count + 1, last_opened_at = ? WHERE id = ?",
+        (now, bookmark_id),
+    )
+
+
+def mark_checked(bookmark_id: int, *, is_dead: bool) -> None:
+    """Update the liveness status of a bookmark after a HEAD check."""
+    now = int(time.time())
+    get_conn().execute(
+        "UPDATE bookmarks SET is_dead = ?, last_checked_at = ? WHERE id = ?",
+        (1 if is_dead else 0, now, bookmark_id),
+    )
+
+
+def unchecked_bookmarks(
+    *,
+    limit: int = 1000,
+    older_than: int = 0,
+    include_dead: bool = True,
+) -> list[dict]:
+    """Return bookmarks that haven't been checked in `older_than` seconds.
+
+    `older_than=0` means "never checked". Useful for incremental sweeps.
+    """
+    conn = get_conn()
+    cutoff = int(time.time()) - older_than
+    if include_dead:
+        sql = (
+            "SELECT id, url FROM bookmarks "
+            "WHERE last_checked_at IS NULL OR last_checked_at < ? "
+            "ORDER BY last_checked_at ASC "
+            "LIMIT ?"
+        )
+    else:
+        sql = (
+            "SELECT id, url FROM bookmarks "
+            "WHERE is_dead = 0 AND (last_checked_at IS NULL OR last_checked_at < ?) "
+            "ORDER BY last_checked_at ASC "
+            "LIMIT ?"
+        )
+    rows = conn.execute(sql, (cutoff, limit)).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def update_metadata(
+    bookmark_id: int, *, title: str, description: str, favicon_url: str, domain: str
+) -> None:
+    get_conn().execute(
+        """
+        UPDATE bookmarks
+           SET title = ?, description = ?, favicon_url = ?, domain = ?
+         WHERE id = ?
+        """,
+        (title, description, favicon_url, domain, bookmark_id),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tag helpers
+# ---------------------------------------------------------------------------
+
+
+def get_tags_for_bookmark(bookmark_id: int) -> list[str]:
+    rows = (
+        get_conn()
+        .execute(
+            """
+        SELECT t.name FROM tags t
+        JOIN bookmark_tags bt ON bt.tag_id = t.id
+        WHERE bt.bookmark_id = ?
+        ORDER BY t.name
+        """,
+            (bookmark_id,),
+        )
+        .fetchall()
+    )
+    return [r["name"] for r in rows]
+
+
+def all_tags() -> list[dict]:
+    """Return every tag with its bookmark count, ordered by count desc."""
+    rows = (
+        get_conn()
+        .execute(
+            """
+        SELECT t.name, COUNT(bt.bookmark_id) AS n
+          FROM tags t
+          LEFT JOIN bookmark_tags bt ON bt.tag_id = t.id
+         GROUP BY t.id
+         ORDER BY n DESC, t.name ASC
+        """,
+        )
+        .fetchall()
+    )
+    return [_row_to_dict(r) for r in rows]
+
+
+def bulk_add_tags(bookmark_ids: Iterable[int], tag_names: Iterable[str]) -> int:
+    """Add tags to many bookmarks in one transaction. Creates tag rows on
+    demand. Returns the number of (bookmark, tag) link rows newly inserted.
+    """
+    ids = list({int(i) for i in bookmark_ids})
+    tag_list = [t.strip().lower() for t in tag_names if t.strip()]
+    if not ids or not tag_list:
+        return 0
+
+    with transaction() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO tags(name) VALUES (?)",
+            ((t,) for t in tag_list),
+        )
+        tag_id_by_name = {
+            row["name"]: row["id"] for row in conn.execute("SELECT id, name FROM tags").fetchall()
+        }
+        pairs = [(bid, tag_id_by_name[t]) for bid in ids for t in tag_list if t in tag_id_by_name]
+        # Count pre-existing rows so we can return the new-insertion count.
+        before = conn.execute("SELECT COUNT(*) AS n FROM bookmark_tags").fetchone()["n"]
+        conn.executemany(
+            "INSERT OR IGNORE INTO bookmark_tags(bookmark_id, tag_id) VALUES (?, ?)",
+            pairs,
+        )
+        after = conn.execute("SELECT COUNT(*) AS n FROM bookmark_tags").fetchone()["n"]
+    return after - before
+
+
+def bulk_add_tag_pairs(pairs: Iterable[tuple[int, str]]) -> int:
+    """Insert (bookmark_id, tag_name) pairs precisely. Each pair becomes
+    one (bookmark, tag) link row. Creates tag rows on demand. Returns the
+    number of newly-inserted link rows.
+
+    Use this when the pairing is data-driven (e.g. heuristic matches) and
+    you don't want the cartesian product of (bookmarks x tags).
+    """
+    norm: list[tuple[int, str]] = [
+        (int(bid), tn.strip().lower()) for bid, tn in pairs if tn and tn.strip()
+    ]
+    if not norm:
+        return 0
+    # Dedupe in-Python before hitting the DB.
+    norm = list({(b, t) for b, t in norm})
+
+    with transaction() as conn:
+        unique_tag_names = {t for _, t in norm}
+        conn.executemany(
+            "INSERT OR IGNORE INTO tags(name) VALUES (?)",
+            ((t,) for t in unique_tag_names),
+        )
+        tag_id_by_name = {
+            row["name"]: row["id"] for row in conn.execute("SELECT id, name FROM tags").fetchall()
+        }
+        resolved = [(bid, tag_id_by_name[t]) for bid, t in norm if t in tag_id_by_name]
+        before = conn.execute("SELECT COUNT(*) AS n FROM bookmark_tags").fetchone()["n"]
+        conn.executemany(
+            "INSERT OR IGNORE INTO bookmark_tags(bookmark_id, tag_id) VALUES (?, ?)",
+            resolved,
+        )
+        after = conn.execute("SELECT COUNT(*) AS n FROM bookmark_tags").fetchone()["n"]
+    return after - before
+
+
+def remove_tag_from_bookmarks(bookmark_ids: Iterable[int], tag_name: str) -> int:
+    """Remove a tag from all listed bookmarks. Returns the number of
+    bookmark_tags rows deleted. The tag row itself is left in place."""
+    tag = tag_name.strip().lower()
+    if not tag:
+        return 0
+    ids = list(set(int(i) for i in bookmark_ids))
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    cur = get_conn().execute(
+        f"DELETE FROM bookmark_tags "
+        f"WHERE tag_id = (SELECT id FROM tags WHERE name = ?) "
+        f"AND bookmark_id IN ({placeholders})",
+        (tag, *ids),
+    )
+    return cur.rowcount
+
+
+def bookmarks_with_tag(tag_name: str, *, limit: int = 100_000) -> list[dict]:
+    """Return every bookmark that has the given tag."""
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT b.* FROM bookmarks b
+        JOIN bookmark_tags bt ON bt.bookmark_id = b.id
+        JOIN tags t ON t.id = bt.tag_id
+        WHERE t.name = ?
+        ORDER BY b.created_at DESC
+        LIMIT ?
+        """,
+        (tag_name.strip().lower(), limit),
+    ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def generic_tag_candidates(*, min_count: int) -> list[dict]:
+    """Return tags applied to ≥ min_count bookmarks. These are the buckets
+    that benefit most from semantic re-tagging."""
+    rows = (
+        get_conn()
+        .execute(
+            """
+        SELECT t.name, COUNT(bt.bookmark_id) AS n
+          FROM tags t
+          JOIN bookmark_tags bt ON bt.tag_id = t.id
+         GROUP BY t.id
+        HAVING n >= ?
+         ORDER BY n DESC
+        """,
+            (min_count,),
+        )
+        .fetchall()
+    )
+    return [_row_to_dict(r) for r in rows]
