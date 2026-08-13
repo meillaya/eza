@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from selectolax.parser import HTMLParser, Node
 
-from . import auth, auto_tag, config, db, dedup, fetcher, links, snapshot, tag_cleanup
+from . import auth, auto_tag, check_dead, config, db, dedup, fetcher, links, snapshot, tag_cleanup
 
 log = logging.getLogger("bookmarks")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -406,6 +406,7 @@ def api_search(
     q: str = Query(default=""),
     tags: str = Query(default=""),  # comma-separated
     is_read: int | None = Query(default=None, ge=0, le=1),
+    is_dead: int | None = Query(default=None, ge=0, le=1),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=60, ge=1, le=200),
 ):
@@ -413,18 +414,25 @@ def api_search(
 
     The ``q``/``tags``/``offset``/``limit`` contract is unchanged. ``q`` may
     carry operators parsed by the DB layer: ``tag:name`` (ANDed with the
-    ``tags`` parameter), ``is:unread``, ``link:target`` and ``-term``. Each
-    result item additionally carries a ~120-char ``snippet`` from the
-    best-matching FTS field when ``q`` has plain terms.
+    ``tags`` parameter), ``is:unread``, ``is:dead``, ``link:target`` and
+    ``-term``. Each result item additionally carries a ~120-char ``snippet``
+    from the best-matching FTS field when ``q`` has plain terms.
 
     ``is_read`` (0 or 1) is the todo-29 inbox-queue view: an explicit filter
     that composes with everything above. The queue view is
     ``GET /api/search?is_read=0`` (default sort ``created_at DESC``); the
     ``is:unread`` operator keeps working — both paths are equivalent.
+
+    ``is_dead`` (0 or 1) is the todo-30 dead-link review view, threaded
+    through the DB layer exactly like ``is_read``. The review view is
+    ``GET /api/search?is_dead=1``; the ``is:dead`` operator is the equivalent
+    ``q`` form and composes with every other filter.
     """
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
-    items = db.list_bookmarks(q=q, tags=tag_list, is_read=is_read, limit=limit, offset=offset)
-    total = db.count_bookmarks(q=q, tags=tag_list, is_read=is_read)
+    items = db.list_bookmarks(
+        q=q, tags=tag_list, is_read=is_read, is_dead=is_dead, limit=limit, offset=offset
+    )
+    total = db.count_bookmarks(q=q, tags=tag_list, is_read=is_read, is_dead=is_dead)
     # Hydrate tags for each card on the search path so the frontend stays dumb.
     for item in items:
         item["tags"] = db.get_tags_for_bookmark(item["id"])
@@ -500,6 +508,90 @@ async def api_delete_saved_search(saved_search_id: int) -> dict:
     if not await db.run_db(db.delete_saved_search, saved_search_id):
         raise HTTPException(status_code=404, detail="Not found")
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Dead-link review + age-pruning (todo 30). POST /api/check-dead/run reuses
+# the check_dead CLI sweep (bounded); GET /api/search?is_dead=1 is the review
+# view; /api/prune/* suggest and apply age-based deletions. Every mutation is
+# user-confirmed — nothing auto-deletes, nothing prunes by default.
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/check-dead/run")
+async def api_check_dead_run(request: Request) -> dict:
+    """Run a bounded dead-link sweep (todo 30).
+
+    Reuses ``check_dead.check_dead`` — the SAME HEAD-check + ranged-GET
+    fallback sweep the CLI runs — bounded by a ``limit`` body param defaulting
+    to the CLI's 10_000 (the ``--limit`` default ``check_dead`` itself uses).
+    Returns ``{"checked", "dead", "alive"}``. Manual/on-demand only: nothing
+    triggers the sweep automatically. Authed + CSRF-checked by the global
+    middleware.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    limit = body.get("limit", 10_000) if isinstance(body, dict) else 10_000
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise HTTPException(status_code=400, detail="limit must be a positive integer")
+    return await check_dead.check_dead(limit=limit, older_than=0, include_dead=True)
+
+
+@app.get("/api/prune/candidates")
+async def api_prune_candidates(
+    older_than_days: int = Query(default=db.DEFAULT_PRUNE_AGE_DAYS, ge=1),
+) -> dict:
+    """Age-pruning candidate list (todo 30).
+
+    Bookmarks OLDER THAN ``older_than_days`` days (default 365) that were
+    NEVER opened (``open_count = 0 AND last_opened_at IS NULL``), oldest
+    first. Purely advisory — nothing is deleted here; the user confirms
+    deletions via POST /api/prune/apply. Authed by the global middleware —
+    no exemption.
+    """
+    candidates = await db.run_db(db.prune_candidates, older_than_days=older_than_days)
+    return {"candidates": candidates, "older_than_days": older_than_days}
+
+
+@app.post("/api/prune/apply")
+async def api_prune_apply(request: Request) -> dict:
+    """Delete the listed prune candidates (todo 30) — user-confirmed only.
+
+    ``{"ids": [int]}`` deletes EXACTLY those ids in one transaction, writing
+    the full pre-delete state to ``undo_snapshots`` first (reuse of the
+    todo-26 snapshot pattern, so a prune is as reversible as a merge). Empty
+    ids -> 400 (QA-pinned). Never automatic: this endpoint is only ever called
+    after the user confirms the candidate list. Authed + CSRF-checked by the
+    global middleware.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not all(isinstance(i, int) for i in ids):
+        raise HTTPException(status_code=400, detail="ids must be a list of integers")
+    try:
+        return await db.run_db(db.prune_apply, ids)
+    except db.PruneError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/maintenance", response_class=HTMLResponse)
+def maintenance_page(request: Request) -> HTMLResponse:
+    """Dead-link review + age-pruning screen (todo 30).
+
+    Two sections: the review view (run a bounded sweep via POST
+    /api/check-dead/run, then list GET /api/search?is_dead=1 with per-row
+    delete) and the prune-candidates list (GET /api/prune/candidates with
+    per-row + bulk delete via POST /api/prune/apply — user-confirmed, never
+    automatic). Authed by the global middleware like every page.
+    """
+    return TEMPLATES.TemplateResponse(request, "maintenance.html", {})
 
 
 @app.post("/api/bookmarks")

@@ -352,16 +352,18 @@ class _ParsedQuery:
     ``q`` is the ONLY place the operators live — the q/tags/offset/limit API
     shape is untouched. Plain tokens become the FTS5 MATCH expression;
     ``-term`` becomes an FTS5-backed NOT-IN filter; ``tag:name`` merges into
-    the tag filter; ``is:unread`` restricts to unread rows; ``link:target``
-    restricts to bookmarks whose note links resolve to the named bookmark.
-    Malformed operators (``tag:`` with no value, unknown ``is:*`` values) are
-    dropped — parsing never raises and never filters.
+    the tag filter; ``is:unread`` restricts to unread rows; ``is:dead`` (todo
+    30) restricts to dead-link rows; ``link:target`` restricts to bookmarks
+    whose note links resolve to the named bookmark. Malformed operators
+    (``tag:`` with no value, unknown ``is:*`` values) are dropped — parsing
+    never raises and never filters.
     """
 
     fts_expr: str | None
     terms: tuple[str, ...]
     tags: tuple[str, ...]
     is_unread: bool
+    is_dead: bool
     link_targets: tuple[str, ...]
     negated: tuple[str, ...]
 
@@ -369,6 +371,7 @@ class _ParsedQuery:
 _TAG_PREFIX = "tag:"
 _LINK_PREFIX = "link:"
 _IS_UNREAD = "is:unread"
+_IS_DEAD = "is:dead"
 
 
 def _sanitize_token(token: str) -> str:
@@ -389,15 +392,16 @@ def _parse_operators(user_input: str) -> _ParsedQuery:
     """Split a search string into FTS terms, tag filters and flags.
 
     Tokens are classified independently: ``tag:value`` (lowercased, empty
-    value dropped), ``is:unread`` (any other ``is:*`` dropped), ``link:value``
-    (empty value dropped), ``-term`` (FTS5-backed negation), and everything
-    else as a plain FTS term.
+    value dropped), ``is:unread`` / ``is:dead`` (any other ``is:*`` dropped),
+    ``link:value`` (empty value dropped), ``-term`` (FTS5-backed negation),
+    and everything else as a plain FTS term.
     """
     tags: list[str] = []
     link_targets: list[str] = []
     plain: list[str] = []
     negated: list[str] = []
     is_unread = False
+    is_dead = False
     for token in user_input.split():
         if token.startswith(_TAG_PREFIX):
             value = token[len(_TAG_PREFIX) :].strip().lower()
@@ -412,6 +416,8 @@ def _parse_operators(user_input: str) -> _ParsedQuery:
         if token.startswith("is:"):
             if token == _IS_UNREAD:
                 is_unread = True
+            elif token == _IS_DEAD:
+                is_dead = True
             continue
         if token.startswith("-") and len(token) > 1:
             term = token[1:].strip()
@@ -424,6 +430,7 @@ def _parse_operators(user_input: str) -> _ParsedQuery:
         terms=tuple(filter(None, (_sanitize_token(t) for t in plain))),
         tags=tuple(tags),
         is_unread=is_unread,
+        is_dead=is_dead,
         link_targets=tuple(link_targets),
         negated=tuple(filter(None, (_sanitize_token(t) for t in negated))),
     )
@@ -526,6 +533,7 @@ def _search_sql(
     q: str | None = None,
     tags: Sequence[str] = (),
     is_read: int | None = None,
+    is_dead: int | None = None,
     limit: int = 60,
     offset: int = 0,
     count: bool = False,
@@ -543,10 +551,12 @@ def _search_sql(
 
     Operators parsed out of ``q`` become WHERE fragments appended to every
     branch: ``tag:`` merges into ``tags`` (AND), while ``is:unread``,
-    ``link:target`` and ``-term`` are plain filter conditions whose params
-    follow the driving clause's params in SQL order. The explicit ``is_read``
-    keyword (the todo-29 inbox queue view) is another plain filter condition
-    and composes with the ``is:unread`` operator — both stay working.
+    ``is:dead``, ``link:target`` and ``-term`` are plain filter conditions
+    whose params follow the driving clause's params in SQL order. The explicit
+    ``is_read`` keyword (the todo-29 inbox queue view) and ``is_dead`` keyword
+    (the todo-30 dead-link review view) are two more plain filter conditions
+    that compose with the ``is:unread`` / ``is:dead`` operators — all four
+    stay working together.
     """
     parsed = _parse_operators(q) if q else None
     fts = parsed.fts_expr if parsed is not None else None
@@ -557,6 +567,8 @@ def _search_sql(
     if parsed is not None:
         if parsed.is_unread:
             where_fragments.append("b.is_read = 0")
+        if parsed.is_dead:
+            where_fragments.append("b.is_dead = 1")
         for target in parsed.link_targets:
             where_fragments.append(_LINK_TARGET_SUBQUERY)
             where_params.extend([target, f"%{target}%", f"%{target}%"])
@@ -568,6 +580,9 @@ def _search_sql(
     if is_read is not None:
         where_fragments.append("b.is_read = ?")
         where_params.append(is_read)
+    if is_dead is not None:
+        where_fragments.append("b.is_dead = ?")
+        where_params.append(is_dead)
 
     params: list = []
     if fts and merged_tags:
@@ -630,6 +645,7 @@ def list_bookmarks(
     q: str | None = None,
     tags: Sequence[str] = (),
     is_read: int | None = None,
+    is_dead: int | None = None,
     limit: int = 60,
     offset: int = 0,
 ) -> list[dict]:
@@ -638,12 +654,14 @@ def list_bookmarks(
     When ``q`` carries plain search terms each result gains a ``snippet``: a
     ~120-char window around the best/earliest match across the five FTS
     fields (title/description/url/note_body/extracted_text). Operators in
-    ``q`` (tag:/is:unread/link:/-term) are applied by ``_search_sql``, and the
-    explicit ``is_read`` filter (the todo-29 inbox queue view) composes with
-    them.
+    ``q`` (tag:/is:unread/is:dead/link:/-term) are applied by ``_search_sql``,
+    and the explicit ``is_read`` (todo-29 inbox) / ``is_dead`` (todo-30
+    dead-link review) filters compose with them.
     """
     conn = get_conn()
-    sql, params = _search_sql(q=q, tags=tags, is_read=is_read, limit=limit, offset=offset)
+    sql, params = _search_sql(
+        q=q, tags=tags, is_read=is_read, is_dead=is_dead, limit=limit, offset=offset
+    )
     rows = conn.execute(sql, params).fetchall()
     items = [_row_to_dict(r) for r in rows]
     if q:
@@ -655,10 +673,14 @@ def list_bookmarks(
 
 
 def count_bookmarks(
-    *, q: str | None = None, tags: Sequence[str] = (), is_read: int | None = None
+    *,
+    q: str | None = None,
+    tags: Sequence[str] = (),
+    is_read: int | None = None,
+    is_dead: int | None = None,
 ) -> int:
     conn = get_conn()
-    sql, params = _search_sql(q=q, tags=tags, is_read=is_read, count=True)
+    sql, params = _search_sql(q=q, tags=tags, is_read=is_read, is_dead=is_dead, count=True)
     return conn.execute(sql, params).fetchone()["n"]
 
 
@@ -1196,6 +1218,90 @@ def mark_all_above(above_id: int | None = None) -> int:
                 (above_id,),
             )
         return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
+# Age-pruning suggestions (todo 30). Candidates are OLDER THAN N days
+# (default 365) AND never opened (open_count = 0 AND last_opened_at IS NULL).
+# The ``bookmarks`` base schema has always carried open_count/last_opened_at
+# (record_open bumps both), so no migration was needed. Purely advisory:
+# prune_apply() only ever runs on the user's explicit id list.
+# ---------------------------------------------------------------------------
+
+DEFAULT_PRUNE_AGE_DAYS = 365
+_DAY_SECONDS = 86400
+
+
+class PruneError(Exception):
+    """A prune request the server rejects (client error -> HTTP 400)."""
+
+
+def _row_snapshot(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
+    """The full pre-delete state of one pruned bookmark: its complete row plus
+    tags — the same payload shape dedup._bookmark_snapshot uses, so an undo
+    could restore the row verbatim and re-link its tags."""
+    tags = [
+        r["name"]
+        for r in conn.execute(
+            "SELECT t.name FROM tags t JOIN bookmark_tags bt ON bt.tag_id = t.id "
+            "WHERE bt.bookmark_id = ? ORDER BY t.name",
+            (row["id"],),
+        ).fetchall()
+    ]
+    return {"row": dict(row), "tags": tags}
+
+
+def prune_candidates(*, older_than_days: int = DEFAULT_PRUNE_AGE_DAYS) -> list[dict]:
+    """Bookmarks old enough and never opened — the age-pruning candidate list.
+
+    A candidate satisfies BOTH criteria: ``created_at`` is strictly older than
+    ``now - older_than_days`` days AND it was never opened
+    (``open_count = 0 AND last_opened_at IS NULL``). Any open (``open_count >
+    0`` or a set ``last_opened_at``) or any young row is excluded, so a
+    recently-opened bookmark can never appear here. Returned oldest-first with
+    ``{id, title, url, created_at, open_count, last_opened_at}``. Read-only —
+    nothing is deleted.
+    """
+    cutoff = int(time.time()) - older_than_days * _DAY_SECONDS
+    rows = get_conn().execute(
+        "SELECT id, title, url, created_at, open_count, last_opened_at "
+        "FROM bookmarks "
+        "WHERE open_count = 0 AND last_opened_at IS NULL AND created_at < ? "
+        "ORDER BY created_at ASC",
+        (cutoff,),
+    ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def prune_apply(ids: Sequence[int]) -> dict:
+    """Delete EXACTLY the listed bookmark ids — user-confirmed, undo-able.
+
+    Explicit user action only; this function is never called automatically. In
+    a single ``BEGIN IMMEDIATE`` transaction it (a) reads the FULL pre-delete
+    state of the listed rows (row + tags) and writes it to ``undo_snapshots``
+    FIRST (the same payload shape as ``dedup.merge_bookmarks``, so a prune is
+    as reversible as a merge), then (b) deletes ONLY those ids — ``bookmark_tags``
+    and ``links`` rows cascade. Unlisted ids are never touched. Empty ``ids``
+    raises :class:`PruneError` (mapped to 400). Returns
+    ``{"snapshot_id", "deleted"}`` with the ids actually removed.
+    """
+    ids = sorted({int(i) for i in ids})
+    if not ids:
+        raise PruneError("ids must not be empty")
+    with transaction() as conn:
+        marks = ",".join("?" for _ in ids)
+        rows = conn.execute(
+            f"SELECT * FROM bookmarks WHERE id IN ({marks}) ORDER BY id", ids
+        ).fetchall()
+        # Snapshot FIRST so a failed delete can never orphan the ledger.
+        payload = {"op": "prune", "pruned": [_row_snapshot(conn, row) for row in rows]}
+        cur = conn.execute(
+            "INSERT INTO undo_snapshots (payload_json, created_at) VALUES (?, ?)",
+            (json.dumps(payload), int(time.time())),
+        )
+        snapshot_id = cur.lastrowid
+        conn.execute(f"DELETE FROM bookmarks WHERE id IN ({marks})", ids)
+    return {"snapshot_id": snapshot_id, "deleted": [r["id"] for r in rows]}
 
 
 # ---------------------------------------------------------------------------

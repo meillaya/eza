@@ -1651,6 +1651,198 @@ function initTagSuggestionsPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Maintenance page (/maintenance) — dead-link review + age-pruning.
+// Runs a bounded sweep via POST /api/check-dead/run, lists dead links from
+// GET /api/search?is_dead=1 (per-row delete), and lists age-prune candidates
+// from GET /api/prune/candidates with per-row + bulk delete via POST
+// /api/prune/apply. Every mutation sends the CSRF token and is user-initiated
+// — nothing deletes automatically.
+// ---------------------------------------------------------------------------
+
+function initMaintenancePage() {
+  const statusEl = $("#maint-status");
+  const checkForm = $("#check-dead-form");
+  const deadResults = $("#dead-results");
+  const deadList = $("#dead-list");
+  const deadEmpty = $("#dead-empty");
+  const pruneResults = $("#prune-results");
+  const pruneList = $("#prune-list");
+  const pruneEmpty = $("#prune-empty");
+  const pruneDeleteBtn = $("#prune-delete-selected");
+  let deadItems = [];
+  let pruneItems = [];
+
+  function setStatus(text, isError = false) {
+    statusEl.textContent = text;
+    statusEl.classList.toggle("maint-error", isError);
+  }
+
+  function rowHtml(item) {
+    return `
+      <li class="maint-row" data-id="${item.id}">
+        <div class="maint-row-body">
+          <div class="maint-row-title">${escapeHtml(item.title || item.url)}</div>
+          <a class="maint-row-url" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.url)}</a>
+        </div>
+        <span class="maint-age">${escapeHtml(item.age_text || "")}</span>
+        <button type="button" class="btn maint-delete" data-id="${item.id}" title="Delete this bookmark">Delete</button>
+      </li>`;
+  }
+
+  function pruneRowHtml(item) {
+    return `
+      <li class="maint-row" data-id="${item.id}">
+        <label class="maint-check">
+          <input type="checkbox" class="maint-prune-check" value="${item.id}" aria-label="Select ${escapeHtml(item.title || item.url)}">
+        </label>
+        <div class="maint-row-body">
+          <div class="maint-row-title">${escapeHtml(item.title || item.url)}</div>
+          <a class="maint-row-url" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.url)}</a>
+        </div>
+        <span class="maint-age">${escapeHtml(item.age_text || "")}</span>
+      </li>`;
+  }
+
+  function ageText(createdAt) {
+    const days = Math.floor((Date.now() / 1000 - createdAt) / 86400);
+    return `${days} days old`;
+  }
+
+  function updatePruneDeleteState() {
+    const any = $$(".maint-prune-check:checked", pruneList).length > 0;
+    pruneDeleteBtn.disabled = !any;
+  }
+
+  async function loadDeadReview() {
+    try {
+      const resp = await fetch("/api/search?is_dead=1&limit=200");
+      if (!resp.ok) throw new Error("search failed: " + resp.status);
+      const data = await resp.json();
+      deadItems = data.items || [];
+      deadResults.hidden = false;
+      if (!deadItems.length) {
+        deadList.innerHTML = "";
+        deadEmpty.hidden = false;
+        return;
+      }
+      deadEmpty.hidden = true;
+      deadList.innerHTML = deadItems.map((b) =>
+        rowHtml({ ...b, age_text: ageText(b.created_at) })
+      ).join("");
+    } catch (err) {
+      setStatus("Could not load the dead-link review: " + err.message, true);
+    }
+  }
+
+  checkForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = $("#run-check-dead");
+    const limit = Number($("#check-dead-limit").value) || 500;
+    btn.disabled = true;
+    setStatus("Running dead-link sweep…");
+    try {
+      const resp = await fetch("/api/check-dead/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
+        body: JSON.stringify({ limit }),
+      });
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({}));
+        throw new Error(detail.detail || "Sweep failed (" + resp.status + ")");
+      }
+      const result = await resp.json();
+      setStatus(`Sweep done: checked ${result.checked}, dead ${result.dead}, alive ${result.alive}.`);
+      await loadDeadReview();
+    } catch (err) {
+      setStatus("Sweep failed: " + err.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  deadList.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".maint-delete");
+    if (!btn) return;
+    btn.disabled = true;
+    try {
+      const resp = await fetch(`/api/bookmarks/${btn.dataset.id}`, {
+        method: "DELETE",
+        headers: { "X-CSRF-Token": csrfToken() },
+      });
+      if (!resp.ok) throw new Error("delete failed: " + resp.status);
+      btn.closest(".maint-row").remove();
+      setStatus("Deleted the bookmark.");
+      if (deadList.children.length === 0) deadEmpty.hidden = false;
+    } catch (err) {
+      setStatus("Delete failed: " + err.message, true);
+      btn.disabled = false;
+    }
+  });
+
+  async function loadPruneCandidates() {
+    const btn = $("#load-prune-candidates");
+    btn.disabled = true;
+    setStatus("Loading prune candidates…");
+    try {
+      const resp = await fetch("/api/prune/candidates");
+      if (!resp.ok) throw new Error("prune candidates failed: " + resp.status);
+      const data = await resp.json();
+      pruneItems = data.candidates || [];
+      pruneResults.hidden = false;
+      if (!pruneItems.length) {
+        pruneList.innerHTML = "";
+        pruneEmpty.hidden = false;
+        setStatus(`No candidates older than ${data.older_than_days} days that were never opened.`);
+        return;
+      }
+      pruneEmpty.hidden = true;
+      pruneList.innerHTML = pruneItems.map((c) =>
+        pruneRowHtml({ ...c, age_text: ageText(c.created_at) })
+      ).join("");
+      updatePruneDeleteState();
+      setStatus(`${pruneItems.length} candidate(s). Select rows, then confirm the delete.`);
+    } catch (err) {
+      setStatus("Could not load prune candidates: " + err.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  $("#load-prune-candidates").addEventListener("click", loadPruneCandidates);
+  pruneList.addEventListener("change", updatePruneDeleteState);
+
+  pruneDeleteBtn.addEventListener("click", async () => {
+    const ids = $$(".maint-prune-check:checked", pruneList).map((c) => Number(c.value));
+    if (!ids.length) return;
+    if (!window.confirm(`Delete ${ids.length} bookmark(s)? This is undo-able via the snapshot.`)) return;
+    pruneDeleteBtn.disabled = true;
+    setStatus("Deleting…");
+    try {
+      const resp = await fetch("/api/prune/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
+        body: JSON.stringify({ ids }),
+      });
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({}));
+        throw new Error(detail.detail || "Prune failed (" + resp.status + ")");
+      }
+      const result = await resp.json();
+      $$(".maint-prune-check", pruneList).forEach((c) => {
+        if (result.deleted.includes(Number(c.value))) c.closest(".maint-row").remove();
+      });
+      updatePruneDeleteState();
+      setStatus(`Deleted ${result.deleted.length} bookmark(s).`);
+      if (pruneList.children.length === 0) pruneEmpty.hidden = false;
+      await loadDeadReview();
+    } catch (err) {
+      setStatus("Prune failed: " + err.message, true);
+      pruneDeleteBtn.disabled = false;
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Boot — run only the wiring for the page that exists.
 // ---------------------------------------------------------------------------
 
@@ -1660,3 +1852,4 @@ if ($("#graph")) initGraphPage();
 if ($("#dedup")) initDedupPage();
 if ($("#tags-cleanup")) initTagsCleanupPage();
 if ($("#tags-suggestions")) initTagSuggestionsPage();
+if ($("#maintenance")) initMaintenancePage();
