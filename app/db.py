@@ -8,16 +8,33 @@ The schema is intentionally minimal:
 WAL mode + synchronous=NORMAL gives us fast reads with safe-enough durability
 for a personal tool. FTS5 with porter stemming gives ranked, sub-millisecond
 search across 10k+ rows.
+
+Connection model (concurrency-safe):
+  - Every thread owns its reader connection via ``threading.local()``.
+    ``check_same_thread`` stays at its default (True), so the driver refuses
+    cross-thread use instead of silently racing.
+  - Writes use ``BEGIN IMMEDIATE``: the write reservation is taken up front so
+    a read-then-write flow can never die with a BUSY_SNAPSHOT upgrade error.
+    ``transaction()`` additionally retries SQLITE_BUSY a bounded number of
+    times (cross-process CLI contention).
+  - Async handlers / background tasks must reach sqlite3 through
+    :func:`run_db`, which offloads the call to a worker thread via
+    ``anyio.to_thread`` so the event loop is never blocked.
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 import time
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, TypeVar
 from urllib.parse import urlparse
+
+from anyio import to_thread
 
 from app import config, migrations
 
@@ -85,26 +102,154 @@ _PRAGMAS = [
     "PRAGMA busy_timeout = 5000",
 ]
 
+# Bounded SQLITE_BUSY retry used by transaction() for cross-process
+# contention (a CLI writing while the web server holds the write lock).
+_BUSY_RETRIES = 3
+_BUSY_BACKOFF_SECONDS = 0.05
 
-_conn: sqlite3.Connection | None = None
+T = TypeVar("T")
+
+
+class _ConnState:
+    """One generation of per-thread reader connections for a DB file.
+
+    A fresh state is created whenever ``DB_PATH`` changes or the module-level
+    ``_conn`` is reset (tests). Each state owns its own ``threading.local()``,
+    so every thread lazily builds — and exclusively owns — its sqlite3
+    connection. Dropping the state (and thus its thread-local) lets the old
+    connections be garbage-collected and closed.
+    """
+
+    __slots__ = ("local", "path")
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.local = threading.local()
+
+
+# Kept as a module-level name so tests can reset it (conftest sets
+# ``db._conn = None`` to isolate each test against a fresh temp DB).
+_conn: _ConnState | None = None
+_migration_lock = threading.Lock()
+
+
+def _assert_pragmas(conn: sqlite3.Connection) -> None:
+    """Fail loudly if any pragma did not stick.
+
+    Most of these can silently fall back (e.g. ``journal_mode`` on a
+    filesystem without WAL support), so we read them back rather than trusting
+    the SET statement.
+    """
+    mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    assert str(mode).lower() == "wal", f"journal_mode is {mode!r}, expected 'wal'"
+    synchronous = conn.execute("PRAGMA synchronous").fetchone()[0]
+    assert int(synchronous) == 1, f"synchronous is {synchronous!r}, expected NORMAL(1)"
+    temp_store = conn.execute("PRAGMA temp_store").fetchone()[0]
+    assert int(temp_store) == 2, f"temp_store is {temp_store!r}, expected MEMORY(2)"
+    foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    assert int(foreign_keys) == 1, f"foreign_keys is {foreign_keys!r}, expected ON(1)"
+    busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert int(busy_timeout) == 5000, f"busy_timeout is {busy_timeout!r}, expected 5000"
+
+
+def _connect() -> sqlite3.Connection:
+    """Open a connection to ``DB_PATH`` with every pragma applied and asserted.
+
+    ``check_same_thread`` is left at its default (True): each connection is
+    owned by exactly one thread, so the driver refuses cross-thread use
+    instead of racing silently. ``isolation_level=None`` keeps us in autocommit
+    mode; transactions are managed explicitly (see :func:`transaction`).
+    """
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(DB_PATH), isolation_level=None)
+    try:
+        conn.row_factory = sqlite3.Row
+        for pragma in _PRAGMAS:
+            conn.execute(pragma)
+        _assert_pragmas(conn)
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
+def _migrate_once() -> None:
+    """Apply the base schema and pending migrations exactly once per DB file.
+
+    Runs on a short-lived connection while holding ``_migration_lock``. The
+    ``IF NOT EXISTS`` DDL and the transactional ``user_version`` stamp make
+    this safe even across processes racing on a fresh database.
+    """
+    conn = _connect()
+    try:
+        conn.executescript(_SCHEMA)
+        run_migrations(conn)
+    finally:
+        conn.close()
+
+
+def _ensure_state() -> _ConnState:
+    """Return the connection state for the current ``DB_PATH``.
+
+    Rebuilds it (running the one-time schema + migration init) under
+    ``_migration_lock`` when ``DB_PATH`` changed or the state was reset.
+    """
+    global _conn
+    state = _conn
+    if state is not None and state.path == DB_PATH:
+        return state
+    with _migration_lock:
+        state = _conn
+        if state is not None and state.path == DB_PATH:
+            return state
+        _migrate_once()
+        fresh = _ConnState(DB_PATH)
+        _conn = fresh
+        return fresh
 
 
 def get_conn() -> sqlite3.Connection:
-    """Return the process-wide SQLite connection, creating it on first call."""
+    """Return the calling thread's reader connection, creating it on first use.
+
+    Each thread gets its own connection (``check_same_thread=True``), so the
+    driver enforces single-thread ownership. The first connection ever opened
+    initializes the schema and runs pending migrations exactly once.
+    """
+    state = _ensure_state()
+    conn = getattr(state.local, "conn", None)
+    if conn is None:
+        conn = _connect()
+        state.local.conn = conn
+    return conn
+
+
+def _reset_connection_state() -> None:
+    """Drop every cached connection so the next get_conn() reconnects.
+
+    Tests point ``DB_PATH`` at a fresh file and call this (or set ``_conn``
+    to None) to isolate each test database.
+    """
     global _conn
-    if _conn is None:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(
-            str(DB_PATH),
-            check_same_thread=False,
-            isolation_level=None,  # autocommit; we manage transactions explicitly
-        )
-        _conn.row_factory = sqlite3.Row
-        for pragma in _PRAGMAS:
-            _conn.execute(pragma)
-        _conn.executescript(_SCHEMA)
-        run_migrations(_conn)
-    return _conn
+    with _migration_lock:
+        _conn = None
+
+
+def _is_busy(exc: BaseException) -> bool:
+    """True when the exception is a SQLITE_BUSY contention failure."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is not None:
+        return code == sqlite3.SQLITE_BUSY
+    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
+
+
+async def run_db(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """Run a synchronous DB call on a worker thread — never the event loop.
+
+    Async handlers and background tasks must reach sqlite3 through this
+    helper so the event loop is never blocked by a query. Returns the
+    function's result when awaited.
+    """
+    return await to_thread.run_sync(lambda: fn(*args, **kwargs))
 
 
 def run_migrations(conn: sqlite3.Connection) -> list[str]:
@@ -137,16 +282,32 @@ def run_migrations(conn: sqlite3.Connection) -> list[str]:
 
 @contextmanager
 def transaction() -> Iterator[sqlite3.Connection]:
-    """Explicit transaction wrapper. Commits on success, rolls back on error."""
+    """Explicit transaction wrapper: ``BEGIN IMMEDIATE`` + bounded busy retry.
+
+    ``BEGIN IMMEDIATE`` takes the write reservation up front, so a handler
+    that reads and then writes can never die with a BUSY_SNAPSHOT upgrade
+    error. When another writer — another thread, or a CLI process — holds the
+    lock, we retry the whole transaction up to ``_BUSY_RETRIES`` times with a
+    short backoff. Commits on success, rolls back on error.
+    """
     conn = get_conn()
-    conn.execute("BEGIN")
-    try:
-        yield conn
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    else:
-        conn.execute("COMMIT")
+    for attempt in range(_BUSY_RETRIES):
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            if not _is_busy(exc) or attempt == _BUSY_RETRIES - 1:
+                raise
+            time.sleep(_BUSY_BACKOFF_SECONDS)
+            continue
+        try:
+            yield conn
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        else:
+            conn.execute("COMMIT")
+            return
+    raise RuntimeError("unreachable: transaction retry loop exhausted")
 
 
 # ---------------------------------------------------------------------------
