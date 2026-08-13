@@ -1,0 +1,97 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bookmarks"
+version = "0.1.0"
+description = "A fast, tag-based bookmark manager for 10k+ links"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "jinja2>=3.1",
+    "httpx>=0.27",
+    "selectolax>=0.3",
+    "python-multipart>=0.0.9",
+    "webauthn==3.0.0",
+]
+
+[project.scripts]
+bookmarks-server = "app.main:main"
+bookmarks-check-dead = "app.check_dead:main"
+bookmarks-retag = "app.auto_tag:main"
+bookmarks-heuristic-tag = "app.heuristic_tag:main"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15",
+    "ty>=0.0.61",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+# Templates and static assets live alongside the source tree at dev time and
+# are resolved via __file__-relative paths in app/main.py. They are not part
+# of the installed wheel; the app is meant to be run from a checkout.
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [".venv", "data"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "ASYNC", # flake8-async
+    "RUF",   # ruff-specific
+    "TID",   # flake8-tidy-imports
+]
+ignore = [
+    "E501",   # line length handled by formatter
+    "B008",   # do not perform function calls in default argument (FastAPI uses Depends())
+]
+
+[tool.ruff.lint.per-file-ignores]
+"static/**" = ["ALL"]
+# Tests intentionally use en-dashes and other "ambiguous" Unicode that
+# appears in real browser-exported bookmark files.
+"tests/**" = ["RUF001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ---------------------------------------------------------------------------
+# ty (Astral type checker)
+# ---------------------------------------------------------------------------
+
+[tool.ty.environment]
+python = ".venv"
+python-version = "3.11"
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+minversion = "8"
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
