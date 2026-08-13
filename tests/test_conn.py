@@ -77,7 +77,7 @@ def test_get_conn_returns_per_thread_connections(fresh_db):
         t.join(10)
 
     assert len(seen) == 4  # four distinct worker connections
-    assert all(v == 2 for v in seen.values())  # migrations ran through v2
+    assert all(v == 3 for v in seen.values())  # migrations ran through v3
     assert id(main_conn) not in seen
 
 
@@ -246,7 +246,7 @@ def test_migrations_run_exactly_once_on_racing_first_connect(db_path, monkeypatc
 
     assert errors == []
     assert calls == [1]  # exactly one schema + migration initialization
-    assert db.get_conn().execute("PRAGMA user_version").fetchone()[0] == 2
+    assert db.get_conn().execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 # ---------------------------------------------------------------------------
