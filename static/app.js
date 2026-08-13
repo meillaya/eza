@@ -34,6 +34,17 @@ function initGridPage() {
   const PAGE_SIZE = 60;
   const SEARCH_DEBOUNCE_MS = 180;
 
+  const grid = $("#grid");
+  const empty = $("#empty");
+  const searchInput = $("#search");
+  const tagbar = $("#tagbar");
+  const modal = $("#add-modal");
+  const palette = $("#quick-switcher");
+
+  // Todo 29: the inbox page renders the same grid but pins the queue filter
+  // (is_read=0) and swaps the card actions for mark-read + mark-all-above.
+  const isRead = grid.dataset.isread !== undefined ? Number(grid.dataset.isread) : undefined;
+
   const state = {
     q: "",
     tags: [],          // array of tag names currently filtered
@@ -47,6 +58,9 @@ function initGridPage() {
     const tagsHtml = (b.tags || []).map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join("");
     const title = b.title || b.url;
     const favicon = b.favicon_url || "/static/favicon-fallback.svg";
+    const readAction = isRead === 0
+      ? `<button class="card-read" data-id="${b.id}" title="Mark as read" aria-label="Mark as read">Mark read</button>`
+      : "";
     return `
       <article class="card" data-id="${b.id}" style="contain-intrinsic-size: 0 92px;">
         <a class="card-link" href="${escapeHtml(b.url)}" target="_blank" rel="noopener noreferrer">
@@ -60,6 +74,7 @@ function initGridPage() {
         ${tagsHtml ? `<div class="card-tags">${tagsHtml}</div>` : ""}
         <div class="card-footer">
           <a class="card-detail" href="/bookmark/${b.id}">Details</a>
+          ${readAction}
         </div>
         <button class="card-delete" data-id="${b.id}" title="Delete" aria-label="Delete">×</button>
       </article>
@@ -70,6 +85,7 @@ function initGridPage() {
     const params = new URLSearchParams();
     if (state.q) params.set("q", state.q);
     if (state.tags.length) params.set("tags", state.tags.join(","));
+    if (isRead !== undefined) params.set("is_read", String(isRead));
     params.set("offset", String(state.offset));
     params.set("limit", String(PAGE_SIZE));
     return params.toString();
@@ -118,13 +134,6 @@ function initGridPage() {
 
   const debouncedSearch = debounce(refresh, SEARCH_DEBOUNCE_MS);
 
-  const grid = $("#grid");
-  const empty = $("#empty");
-  const searchInput = $("#search");
-  const tagbar = $("#tagbar");
-  const modal = $("#add-modal");
-  const palette = $("#quick-switcher");
-
   searchInput.addEventListener("input", (e) => {
     state.q = e.target.value.trim();
     debouncedSearch();
@@ -163,8 +172,30 @@ function initGridPage() {
     { rootMargin: "400px" }
   ).observe(sentinel);
 
-  // Delete (event delegation).
+  // Delete (event delegation) + mark-read (inbox only).
   grid.addEventListener("click", async (e) => {
+    const readBtn = e.target.closest(".card-read");
+    if (readBtn) {
+      readBtn.disabled = true;
+      try {
+        const resp = await fetch(`/api/bookmarks/${readBtn.dataset.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
+          body: JSON.stringify({ is_read: 1 }),
+        });
+        if (!resp.ok) throw new Error("mark read failed");
+        const card = readBtn.closest(".card");
+        card.style.transition = "opacity .15s, transform .15s";
+        card.style.opacity = "0";
+        card.style.transform = "scale(.96)";
+        setTimeout(() => card.remove(), 150);
+        state.total = Math.max(0, state.total - 1);
+      } catch (err) {
+        console.error(err);
+        readBtn.disabled = false;
+      }
+      return;
+    }
     const btn = e.target.closest(".card-delete");
     if (!btn) return;
     const id = btn.dataset.id;
@@ -183,6 +214,105 @@ function initGridPage() {
       btn.disabled = false;
     }
   });
+
+  // "Mark all above" (inbox): every unread item with a HIGHER id than the
+  // last loaded card flips to read in one server-side transaction.
+  const markAllAboveBtn = $("#mark-all-above");
+  if (markAllAboveBtn) {
+    markAllAboveBtn.addEventListener("click", async () => {
+      const cards = $$(".card", grid);
+      const last = cards[cards.length - 1];
+      const body = last ? JSON.stringify({ above_id: Number(last.dataset.id) }) : "{}";
+      try {
+        const resp = await fetch("/api/bookmarks/mark-all-above", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
+          body,
+        });
+        if (!resp.ok) throw new Error("mark all above failed: " + resp.status);
+        refresh();
+      } catch (err) {
+        console.error(err);
+        alert("Mark all above failed.");
+      }
+    });
+  }
+
+  // Saved-search collections rail (todo 29): load the virtual collections,
+  // apply one on click, delete via the ×, and save the current view.
+  const savedEl = $("#saved-searches");
+  const saveSearchBtn = $("#save-search");
+  if (savedEl && saveSearchBtn) {
+    let savedItems = [];
+
+    async function loadSavedSearches() {
+      try {
+        const resp = await fetch("/api/saved-searches");
+        if (!resp.ok) throw new Error("saved searches failed: " + resp.status);
+        savedItems = (await resp.json()).saved_searches || [];
+        savedEl.innerHTML = savedItems.map((s) => `
+          <span class="chip saved-search-chip">
+            <button type="button" class="saved-search-apply" data-id="${s.id}"
+                    title="${escapeHtml(s.q || "all bookmarks")}">${escapeHtml(s.name)}</button>
+            <button type="button" class="saved-search-delete" data-id="${s.id}"
+                    aria-label="Delete ${escapeHtml(s.name)}">×</button>
+          </span>`).join("");
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    function applyFilter(q, tags) {
+      searchInput.value = q;
+      state.q = q;
+      state.tags = tags.slice();
+      $$(".chip", tagbar).forEach((c) => {
+        const t = c.dataset.tag || "";
+        c.classList.toggle("active", t === "" ? state.tags.length === 0 : state.tags.includes(t));
+      });
+      refresh();
+    }
+
+    savedEl.addEventListener("click", async (e) => {
+      const applyBtn = e.target.closest(".saved-search-apply");
+      if (applyBtn) {
+        const saved = savedItems.find((s) => s.id === Number(applyBtn.dataset.id));
+        if (saved) applyFilter(saved.q || "", saved.tags || []);
+        return;
+      }
+      const delBtn = e.target.closest(".saved-search-delete");
+      if (!delBtn) return;
+      try {
+        const resp = await fetch(`/api/saved-searches/${delBtn.dataset.id}`, {
+          method: "DELETE",
+          headers: { "X-CSRF-Token": csrfToken() },
+        });
+        if (!resp.ok) throw new Error("delete failed: " + resp.status);
+        await loadSavedSearches();
+      } catch (err) {
+        console.error(err);
+      }
+    });
+
+    saveSearchBtn.addEventListener("click", async () => {
+      const name = window.prompt("Name this saved search:", state.q || "");
+      if (!name) return;
+      try {
+        const resp = await fetch("/api/saved-searches", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
+          body: JSON.stringify({ name, q: state.q, tags: state.tags }),
+        });
+        if (!resp.ok) throw new Error("save failed: " + resp.status);
+        await loadSavedSearches();
+      } catch (err) {
+        console.error(err);
+        alert("Could not save the search.");
+      }
+    });
+
+    loadSavedSearches();
+  }
 
   // Add modal. openAddModal(url) is also used by the quick switcher's
   // "add as new bookmark" fallback, which prefills the URL field.

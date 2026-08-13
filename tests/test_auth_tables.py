@@ -49,6 +49,12 @@ SNAPSHOTS_NAME = (
     else "m0005_undo_snapshots"
 )
 
+SAVED_SEARCHES_NAME = (
+    migrations.MIGRATIONS[5][0]
+    if len(migrations.MIGRATIONS) > 5
+    else "m0006_saved_searches"
+)
+
 # The live-like pre-v2 schema: last_checked_at exists, user_version not stamped.
 _LEGACY_SCHEMA = """
 CREATE TABLE bookmarks (
@@ -108,7 +114,7 @@ def test_m0002_is_registered_as_version_2():
 def test_fresh_db_lands_on_latest_version_with_all_auth_tables(fresh_db):
     """A fresh DB runs every step and ends up with the five auth tables."""
     conn = fresh_db.get_conn()
-    assert _version(conn) == 5
+    assert _version(conn) == 6
     assert _table_names(conn) >= AUTH_TABLES
 
 
@@ -262,23 +268,30 @@ def test_recovery_code_hash_is_unique(fresh_db):
 
 def test_migration_is_idempotent(db_path):
     """Running the runner twice applies nothing the second time and keeps the
-    latest version (5)."""
+    latest version (6)."""
     conn = _open(db_path)
     conn.executescript(_LEGACY_SCHEMA)
 
     first = db.run_migrations(conn)
-    assert first == [migrations.MIGRATIONS[0][0], AUTH_NAME, KB_SCHEMA_NAME, LINKS_NAME, SNAPSHOTS_NAME]
-    assert _version(conn) == 5
+    assert first == [
+        migrations.MIGRATIONS[0][0],
+        AUTH_NAME,
+        KB_SCHEMA_NAME,
+        LINKS_NAME,
+        SNAPSHOTS_NAME,
+        SAVED_SEARCHES_NAME,
+    ]
+    assert _version(conn) == 6
 
     second = db.run_migrations(conn)
     assert second == []
-    assert _version(conn) == 5
+    assert _version(conn) == 6
     assert _table_names(conn) >= AUTH_TABLES
     conn.close()
 
 
 def test_v2_applies_after_v1_on_legacy_stamped_db(db_path):
-    """A DB already stamped at v1 runs the v2..v5 steps — v1 never re-runs."""
+    """A DB already stamped at v1 runs the v2..v6 steps — v1 never re-runs."""
     conn = _open(db_path)
     conn.executescript(_LEGACY_SCHEMA)
     conn.execute("PRAGMA user_version = 1")
@@ -286,8 +299,14 @@ def test_v2_applies_after_v1_on_legacy_stamped_db(db_path):
 
     applied = db.run_migrations(conn)
 
-    assert applied == [AUTH_NAME, KB_SCHEMA_NAME, LINKS_NAME, SNAPSHOTS_NAME]
-    assert _version(conn) == 5
+    assert applied == [
+        AUTH_NAME,
+        KB_SCHEMA_NAME,
+        LINKS_NAME,
+        SNAPSHOTS_NAME,
+        SAVED_SEARCHES_NAME,
+    ]
+    assert _version(conn) == 6
     assert _table_names(conn) >= AUTH_TABLES
     assert "last_checked_at" in {
         row["name"] for row in conn.execute("PRAGMA table_info(bookmarks)")

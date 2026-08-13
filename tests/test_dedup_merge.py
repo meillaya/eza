@@ -89,13 +89,13 @@ def _seed_merge_pair(conn=None) -> tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
-# Migration: m0005 lands the DB on version 5 with the undo_snapshots table
+# Migration: m0005 lands the DB on version 5; m0006 appends saved_searches
 # ---------------------------------------------------------------------------
 
 
-def test_fresh_db_has_undo_snapshots_table_at_version_5(fresh_db):
+def test_fresh_db_has_undo_snapshots_table_at_version_6(fresh_db):
     conn = fresh_db.get_conn()
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
     tables = {
         row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }

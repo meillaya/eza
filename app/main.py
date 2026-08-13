@@ -405,6 +405,7 @@ async def api_dedup_undo() -> dict:
 def api_search(
     q: str = Query(default=""),
     tags: str = Query(default=""),  # comma-separated
+    is_read: int | None = Query(default=None, ge=0, le=1),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=60, ge=1, le=200),
 ):
@@ -415,14 +416,90 @@ def api_search(
     ``tags`` parameter), ``is:unread``, ``link:target`` and ``-term``. Each
     result item additionally carries a ~120-char ``snippet`` from the
     best-matching FTS field when ``q`` has plain terms.
+
+    ``is_read`` (0 or 1) is the todo-29 inbox-queue view: an explicit filter
+    that composes with everything above. The queue view is
+    ``GET /api/search?is_read=0`` (default sort ``created_at DESC``); the
+    ``is:unread`` operator keeps working — both paths are equivalent.
     """
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
-    items = db.list_bookmarks(q=q, tags=tag_list, limit=limit, offset=offset)
-    total = db.count_bookmarks(q=q, tags=tag_list)
+    items = db.list_bookmarks(q=q, tags=tag_list, is_read=is_read, limit=limit, offset=offset)
+    total = db.count_bookmarks(q=q, tags=tag_list, is_read=is_read)
     # Hydrate tags for each card on the search path so the frontend stays dumb.
     for item in items:
         item["tags"] = db.get_tags_for_bookmark(item["id"])
     return {"items": items, "total": total, "offset": offset, "limit": limit}
+
+
+@app.get("/inbox", response_class=HTMLResponse)
+def inbox_page(request: Request) -> HTMLResponse:
+    """Read-later queue page (todo 29): the 2-bucket mental model — the inbox
+    shows ONLY unread bookmarks, default-sorted ``created_at DESC``, with the
+    "mark all above" control and the saved-searches collections rail. The
+    library grid (/) is the other bucket. The page itself is authed by the
+    global middleware like every page; data comes from
+    GET /api/search?is_read=0 and mutations go through PATCH
+    /api/bookmarks/{id}, POST /api/bookmarks/mark-all-above and the
+    /api/saved-searches routes."""
+    initial = db.list_bookmarks(is_read=0, limit=60)
+    for item in initial:
+        item["tags"] = db.get_tags_for_bookmark(item["id"])
+    tags = db.all_tags()
+    return TEMPLATES.TemplateResponse(
+        request,
+        "inbox.html",
+        {
+            "bookmarks": initial,
+            "tags": tags,
+            "total": db.count_bookmarks(is_read=0),
+        },
+    )
+
+
+@app.get("/api/saved-searches")
+def api_list_saved_searches() -> dict:
+    """List saved searches (todo 29): every stored collection as
+    ``{id, name, q, tags, created_at}``, newest first. Authed by the global
+    middleware like every route — no exemption."""
+    return {"saved_searches": db.list_saved_searches()}
+
+
+@app.post("/api/saved-searches")
+async def api_create_saved_search(request: Request) -> dict:
+    """Save the current search as a named collection (todo 29).
+
+    ``{"name": str, "q": str, "tags": [str]}`` — ``q`` may carry the search
+    operators (``is:unread`` etc.), ``tags`` is the explicit tag filter. Both
+    are persisted (the ``saved_searches`` table stores them in separate
+    columns), so the collections rail can apply either on its own. A blank
+    name is rejected 400. Authed + CSRF-checked by the global middleware.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    name = body.get("name")
+    q = body.get("q", "")
+    tags = body.get("tags", [])
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(status_code=400, detail="name must be a non-empty string")
+    if not isinstance(q, str):
+        raise HTTPException(status_code=400, detail="q must be a string")
+    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+        raise HTTPException(status_code=400, detail="tags must be a list of strings")
+    saved_id = await db.run_db(db.create_saved_search, name=name, q=q, tags=tags)
+    return {"id": saved_id}
+
+
+@app.delete("/api/saved-searches/{saved_search_id}")
+async def api_delete_saved_search(saved_search_id: int) -> dict:
+    """Delete a saved search (todo 29). Unknown id -> 404. Authed +
+    CSRF-checked by the global middleware."""
+    if not await db.run_db(db.delete_saved_search, saved_search_id):
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"ok": True}
 
 
 @app.post("/api/bookmarks")
@@ -451,6 +528,29 @@ async def api_add_bookmark(
     fetcher.schedule_extract(bookmark_id, url)
 
     return {"id": bookmark_id}
+
+
+@app.post("/api/bookmarks/mark-all-above")
+async def api_mark_all_above(request: Request) -> dict:
+    """"Mark all above" bulk op (todo 29): flip every unread bookmark ABOVE a
+    cursor to read in ONE transaction.
+
+    Body ``{"above_id": int}`` — the id of the last/oldest visible row in the
+    inbox (created_at DESC). Everything with a higher id (the newer items the
+    user has scrolled past) becomes read; the cursor and older rows stay
+    unread. Omit ``above_id`` (or pass an empty body) to mark EVERY unread
+    bookmark read. Returns ``{"updated": n}``. Authed + CSRF-checked by the
+    global middleware.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    above_id = body.get("above_id") if isinstance(body, dict) else None
+    if above_id is not None and not isinstance(above_id, int):
+        raise HTTPException(status_code=400, detail="above_id must be an integer")
+    updated = await db.run_db(db.mark_all_above, above_id)
+    return {"updated": updated}
 
 
 @app.delete("/api/bookmarks/{bookmark_id}")

@@ -145,6 +145,60 @@ body {
   opacity: .7;
 }
 
+/* ----- Saved-search collections rail (todo 29) ----- */
+
+.collections {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 20px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: thin;
+}
+.collections-label {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  margin-right: 4px;
+}
+.saved-searches {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.saved-search-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 6px 3px 10px;
+}
+.saved-search-apply {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0;
+}
+.saved-search-delete {
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.saved-search-delete:hover { background: var(--danger); color: white; }
+
 /* ----- Grid + cards ----- */
 
 main {
@@ -260,6 +314,24 @@ main {
 }
 .card:hover .card-delete { opacity: 1; }
 .card-delete:hover { background: var(--danger); color: white; }
+
+.card-read {
+  margin-left: 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 10px;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.card-read:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
 
 /* ----- Empty / loading ----- */
 

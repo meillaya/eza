@@ -30,6 +30,7 @@ Connection model (concurrency-safe):
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import threading
@@ -524,6 +525,7 @@ def _search_sql(
     *,
     q: str | None = None,
     tags: Sequence[str] = (),
+    is_read: int | None = None,
     limit: int = 60,
     offset: int = 0,
     count: bool = False,
@@ -542,7 +544,9 @@ def _search_sql(
     Operators parsed out of ``q`` become WHERE fragments appended to every
     branch: ``tag:`` merges into ``tags`` (AND), while ``is:unread``,
     ``link:target`` and ``-term`` are plain filter conditions whose params
-    follow the driving clause's params in SQL order.
+    follow the driving clause's params in SQL order. The explicit ``is_read``
+    keyword (the todo-29 inbox queue view) is another plain filter condition
+    and composes with the ``is:unread`` operator — both stay working.
     """
     parsed = _parse_operators(q) if q else None
     fts = parsed.fts_expr if parsed is not None else None
@@ -561,6 +565,9 @@ def _search_sql(
                 "b.id NOT IN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH ?)"
             )
             where_params.append(f'"{negated}"*')
+    if is_read is not None:
+        where_fragments.append("b.is_read = ?")
+        where_params.append(is_read)
 
     params: list = []
     if fts and merged_tags:
@@ -622,6 +629,7 @@ def list_bookmarks(
     *,
     q: str | None = None,
     tags: Sequence[str] = (),
+    is_read: int | None = None,
     limit: int = 60,
     offset: int = 0,
 ) -> list[dict]:
@@ -630,10 +638,12 @@ def list_bookmarks(
     When ``q`` carries plain search terms each result gains a ``snippet``: a
     ~120-char window around the best/earliest match across the five FTS
     fields (title/description/url/note_body/extracted_text). Operators in
-    ``q`` (tag:/is:unread/link:/-term) are applied by ``_search_sql``.
+    ``q`` (tag:/is:unread/link:/-term) are applied by ``_search_sql``, and the
+    explicit ``is_read`` filter (the todo-29 inbox queue view) composes with
+    them.
     """
     conn = get_conn()
-    sql, params = _search_sql(q=q, tags=tags, limit=limit, offset=offset)
+    sql, params = _search_sql(q=q, tags=tags, is_read=is_read, limit=limit, offset=offset)
     rows = conn.execute(sql, params).fetchall()
     items = [_row_to_dict(r) for r in rows]
     if q:
@@ -644,9 +654,11 @@ def list_bookmarks(
     return items
 
 
-def count_bookmarks(*, q: str | None = None, tags: Sequence[str] = ()) -> int:
+def count_bookmarks(
+    *, q: str | None = None, tags: Sequence[str] = (), is_read: int | None = None
+) -> int:
     conn = get_conn()
-    sql, params = _search_sql(q=q, tags=tags, count=True)
+    sql, params = _search_sql(q=q, tags=tags, is_read=is_read, count=True)
     return conn.execute(sql, params).fetchone()["n"]
 
 
@@ -1110,6 +1122,80 @@ def update_bookmark(
             assert isinstance(note_body, str)  # route-validated boundary; narrows object
             links.sync_links(conn, bookmark_id, note_body)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Inbox / saved-search helpers (todo 29). Saved searches are virtual
+# collections — a name plus a stored search — never a folders hierarchy.
+# ---------------------------------------------------------------------------
+
+
+def create_saved_search(*, name: str, q: str = "", tags: Sequence[str] = ()) -> int:
+    """Persist a named saved search and return its new id.
+
+    ``q`` (the search string, possibly carrying ``is:unread``/``tag:``/``link:``
+    operators) and ``tags`` (the explicit tag filter, serialized to
+    ``tags_json``) are stored separately so the collections rail can apply
+    either filter on its own. Blank tag names are dropped before storage.
+    """
+    now = int(time.time())
+    tags_json = json.dumps([t for t in tags if t.strip()])
+    with transaction() as conn:
+        cur = conn.execute(
+            "INSERT INTO saved_searches (name, q, tags_json, created_at) "
+            "VALUES (?, ?, ?, ?) RETURNING id",
+            (name.strip(), q, tags_json, now),
+        )
+        row = cur.fetchone()
+        saved_id = int(row[0])
+    return saved_id
+
+
+def list_saved_searches() -> list[dict]:
+    """Every saved search, newest first, with ``tags`` parsed back from
+    ``tags_json`` so callers never touch the serialized form. A hand-edited /
+    corrupt ``tags_json`` degrades to an empty tag list rather than a 500."""
+    rows = get_conn().execute(
+        "SELECT id, name, q, tags_json, created_at FROM saved_searches "
+        "ORDER BY created_at DESC, id DESC"
+    ).fetchall()
+    items: list[dict] = []
+    for row in rows:
+        item = _row_to_dict(row)
+        try:
+            item["tags"] = json.loads(item.pop("tags_json"))
+        except (TypeError, ValueError):
+            item["tags"] = []
+        items.append(item)
+    return items
+
+
+def delete_saved_search(saved_search_id: int) -> bool:
+    """Delete a saved search. Returns False when the id does not exist."""
+    with transaction() as conn:
+        cur = conn.execute("DELETE FROM saved_searches WHERE id = ?", (saved_search_id,))
+        return cur.rowcount > 0
+
+
+def mark_all_above(above_id: int | None = None) -> int:
+    """Mark unread bookmarks as read in ONE transaction (todo 29).
+
+    Boundary semantics: "above" is a bookmark-id cursor. In the inbox view
+    (sorted ``created_at DESC``, ids issued in insertion order) an item sits
+    ABOVE another exactly when its id is higher, so ``above_id`` = the id of
+    the last/oldest visible row means "everything newer than what I am
+    looking at". The cursor row itself and everything below it stay unread.
+    ``above_id=None`` marks every unread row. Returns the number flipped.
+    """
+    with transaction() as conn:
+        if above_id is None:
+            cur = conn.execute("UPDATE bookmarks SET is_read = 1 WHERE is_read = 0")
+        else:
+            cur = conn.execute(
+                "UPDATE bookmarks SET is_read = 1 WHERE is_read = 0 AND id > ?",
+                (above_id,),
+            )
+        return cur.rowcount
 
 
 # ---------------------------------------------------------------------------

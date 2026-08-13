@@ -55,6 +55,7 @@ AUTH_NAME = migrations.MIGRATIONS[1][0] if len(migrations.MIGRATIONS) > 1 else "
 KB_SCHEMA_NAME = migrations.MIGRATIONS[2][0] if len(migrations.MIGRATIONS) > 2 else "m0003_kb_schema"
 LINKS_NAME = migrations.MIGRATIONS[3][0] if len(migrations.MIGRATIONS) > 3 else "m0004_links_target_title"
 SNAPSHOTS_NAME = migrations.MIGRATIONS[4][0] if len(migrations.MIGRATIONS) > 4 else "m0005_undo_snapshots"
+SAVED_SEARCHES_NAME = migrations.MIGRATIONS[5][0] if len(migrations.MIGRATIONS) > 5 else "m0006_saved_searches"
 
 
 def _open(path) -> sqlite3.Connection:
@@ -83,7 +84,7 @@ def _index_names(conn: sqlite3.Connection) -> set[str]:
 
 def test_legacy_db_without_column_is_detected_and_upgraded(db_path):
     """A truly legacy DB (no last_checked_at, user_version 0) is upgraded in
-    the baseline step and migrated through the latest version (5)."""
+    the baseline step and migrated through the latest version (6)."""
     conn = _open(db_path)
     conn.executescript(_LEGACY_SCHEMA)
     assert _version(conn) == 0
@@ -91,8 +92,15 @@ def test_legacy_db_without_column_is_detected_and_upgraded(db_path):
 
     applied = db.run_migrations(conn)
 
-    assert applied == [BASELINE_NAME, AUTH_NAME, KB_SCHEMA_NAME, LINKS_NAME, SNAPSHOTS_NAME]
-    assert _version(conn) == 5
+    assert applied == [
+        BASELINE_NAME,
+        AUTH_NAME,
+        KB_SCHEMA_NAME,
+        LINKS_NAME,
+        SNAPSHOTS_NAME,
+        SAVED_SEARCHES_NAME,
+    ]
+    assert _version(conn) == 6
     assert "last_checked_at" in _column_names(conn)
     assert "idx_bookmarks_checked" in _index_names(conn)
     conn.close()
@@ -121,18 +129,18 @@ def test_legacy_db_with_column_is_stamped_without_ddl(db_path, monkeypatch):
     monkeypatch.setattr(migrations, "MIGRATIONS", full)
     applied = db.run_migrations(conn)
 
-    assert applied == [KB_SCHEMA_NAME, LINKS_NAME, SNAPSHOTS_NAME]
-    assert _version(conn) == 5
+    assert applied == [KB_SCHEMA_NAME, LINKS_NAME, SNAPSHOTS_NAME, SAVED_SEARCHES_NAME]
+    assert _version(conn) == 6
     assert _column_names(conn) >= columns_before
     conn.close()
 
 
 def test_fresh_db_reaches_latest_version(fresh_db):
     """A freshly initialized DB goes through the whole runner and lands on
-    user_version 5 (the baseline column comes from _SCHEMA, so v1 runs no
+    user_version 6 (the baseline column comes from _SCHEMA, so v1 runs no
     DDL; v2 adds the auth tables; v3 adds the KB schema; v4 adds
-    links.target_title; v5 adds undo_snapshots)."""
-    assert _version(fresh_db.get_conn()) == 5
+    links.target_title; v5 adds undo_snapshots; v6 adds saved_searches)."""
+    assert _version(fresh_db.get_conn()) == 6
     assert "last_checked_at" in _column_names(fresh_db.get_conn())
 
 
@@ -148,11 +156,11 @@ def test_runner_is_idempotent(db_path):
 
     first = db.run_migrations(conn)
     assert len(first) == len(migrations.MIGRATIONS)
-    assert _version(conn) == 5
+    assert _version(conn) == 6
 
     second = db.run_migrations(conn)
     assert second == []
-    assert _version(conn) == 5
+    assert _version(conn) == 6
     conn.close()
 
 
@@ -164,9 +172,9 @@ def test_runner_is_idempotent(db_path):
 def test_failed_migration_rolls_back_ddl_and_stamp(db_path, monkeypatch):
     """A broken step aborts its whole transaction: the partial DDL and the
     version stamp are both rolled back and the error propagates."""
-    db.get_conn()  # baseline + v2 + v3 + v4 + v5 applied -> version 5
+    db.get_conn()  # baseline + v2 + v3 + v4 + v5 + v6 applied -> version 6
     conn = db.get_conn()
-    assert _version(conn) == 5
+    assert _version(conn) == 6
 
     def broken(_: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE bookmarks ADD COLUMN boom_col INTEGER")
@@ -181,7 +189,8 @@ def test_failed_migration_rolls_back_ddl_and_stamp(db_path, monkeypatch):
             ("m0003_noop", lambda c: None),
             ("m0004_noop", lambda c: None),
             ("m0005_noop", lambda c: None),
-            ("m0006_broken", broken),
+            ("m0006_noop", lambda c: None),
+            ("m0007_broken", broken),
         ],
     )
 
@@ -189,7 +198,7 @@ def test_failed_migration_rolls_back_ddl_and_stamp(db_path, monkeypatch):
         db.run_migrations(conn)
 
     assert "boom_col" not in _column_names(conn)
-    assert _version(conn) == 5
+    assert _version(conn) == 6
     # The connection is left usable after the rollback.
     assert conn.execute("SELECT COUNT(*) FROM bookmarks").fetchone()[0] == 0
     conn.close()
@@ -202,20 +211,20 @@ def test_failed_migration_rolls_back_ddl_and_stamp(db_path, monkeypatch):
 
 def test_latest_step_runs_after_prior_steps_in_order(db_path, monkeypatch):
     """From user_version 0 every step runs, each fully committed (stamped)
-    before the next starts; the appended step lands the DB on version 6."""
+    before the next starts; the appended step lands the DB on version 7."""
     seen: list[int] = []
 
     def fake_step(conn_: sqlite3.Connection) -> None:
         seen.append(_version(conn_))
         conn_.execute("CREATE TABLE probe_step (x INTEGER)")
 
-    monkeypatch.setattr(migrations, "MIGRATIONS", [*migrations.MIGRATIONS, ("m0006_fake", fake_step)])
+    monkeypatch.setattr(migrations, "MIGRATIONS", [*migrations.MIGRATIONS, ("m0007_fake", fake_step)])
 
     db.get_conn()
     conn = db.get_conn()
 
-    assert _version(conn) == 6
-    assert seen == [5]  # v1-v5 were committed before this step's transaction opened
+    assert _version(conn) == 7
+    assert seen == [6]  # v1-v6 were committed before this step's transaction opened
     tables = {
         row["name"]
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")

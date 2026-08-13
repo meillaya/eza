@@ -42,6 +42,12 @@ SNAPSHOTS_NAME = (
     else "m0005_undo_snapshots"
 )
 
+SAVED_SEARCHES_NAME = (
+    migrations.MIGRATIONS[5][0]
+    if len(migrations.MIGRATIONS) > 5
+    else "m0006_saved_searches"
+)
+
 KB_COLUMNS = {
     "note_body",
     "extracted_text",
@@ -109,9 +115,10 @@ def _make_v2_db(db_path) -> sqlite3.Connection:
 
 def test_fresh_db_reaches_latest_version_with_kb_columns(fresh_db):
     """A freshly initialized DB lands on the latest user_version with all ten
-    columns (v3 adds them; v4 adds links.target_title; v5 adds undo_snapshots)."""
+    columns (v3 adds them; v4 adds links.target_title; v5 adds undo_snapshots;
+    v6 adds saved_searches)."""
     conn = fresh_db.get_conn()
-    assert _version(conn) == 5
+    assert _version(conn) == 6
     assert _column_names(conn) >= KB_COLUMNS
 
 
@@ -259,7 +266,7 @@ def test_links_unique_and_cascade(fresh_db):
 
 def test_v2_db_reaches_latest_version_via_runner_preserving_data(db_path):
     """A genuine v2 database (the live-DB shape) migrates through the app
-    runner to the latest version (5) with its rows intact and integrity ok."""
+    runner to the latest version (6) with its rows intact and integrity ok."""
     conn = _make_v2_db(db_path)
     assert _version(conn) == 2
     conn.execute(
@@ -271,9 +278,9 @@ def test_v2_db_reaches_latest_version_via_runner_preserving_data(db_path):
     conn.commit()
     conn.close()
 
-    db.get_conn()  # production init path: _SCHEMA no-op + pending v3+v4+v5 migrations
+    db.get_conn()  # production init path: _SCHEMA no-op + pending v3+v4+v5+v6 migrations
     conn = db.get_conn()
-    assert _version(conn) == 5
+    assert _version(conn) == 6
     assert conn.execute("SELECT title FROM bookmarks WHERE id = 1").fetchone()[0] == "Keep Me"
     assert conn.execute("SELECT COUNT(*) FROM bookmarks").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0] == 1
@@ -285,8 +292,8 @@ def test_v2_db_via_run_migrations(db_path):
     """Applying the full migration list to a v2 DB lands on the latest version."""
     conn = _make_v2_db(db_path)
     applied = db.run_migrations(conn)
-    assert applied == [KB_SCHEMA_NAME, LINKS_NAME, SNAPSHOTS_NAME]
-    assert _version(conn) == 5
+    assert applied == [KB_SCHEMA_NAME, LINKS_NAME, SNAPSHOTS_NAME, SAVED_SEARCHES_NAME]
+    assert _version(conn) == 6
     assert _column_names(conn) >= KB_COLUMNS
     assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     conn.close()
@@ -298,8 +305,8 @@ def test_v2_db_via_run_migrations(db_path):
 
 
 def test_latest_runner_rerun_is_noop(fresh_db):
-    """Re-running the runner on the latest DB applies nothing and keeps v5."""
+    """Re-running the runner on the latest DB applies nothing and keeps v6."""
     conn = fresh_db.get_conn()
-    assert _version(conn) == 5
+    assert _version(conn) == 6
     assert db.run_migrations(conn) == []
-    assert _version(conn) == 5
+    assert _version(conn) == 6
