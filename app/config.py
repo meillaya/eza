@@ -106,3 +106,9 @@ BOOKMARKS_DB.parent.mkdir(parents=True, exist_ok=True)
 # (<H3 PERSONAL_TOOLBAR_FOLDER="true">) — Chromium's "Bookmarks bar". Every
 # other bookmark is the flattened "Other bucket" (written one level up).
 EXPORT_TOOLBAR_TAG = os.environ.get("EXPORT_TOOLBAR_TAG", "toolbar").strip().lower()
+
+# Import mapping (todo 32): Chromium exports mark the toolbar folder and the
+# "Other bookmarks" folder with PERSONAL_TOOLBAR_FOLDER / UNFILED_BOOKMARKS_FOLDER.
+# Their descendants are imported with these tags instead of being dropped.
+IMPORT_TOOLBAR_TAG = os.environ.get("IMPORT_TOOLBAR_TAG", "toolbar").strip().lower()
+IMPORT_UNFILED_TAG = os.environ.get("IMPORT_UNFILED_TAG", "unfiled").strip().lower()

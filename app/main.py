@@ -933,6 +933,30 @@ def tags_cleanup_page(request: Request) -> HTMLResponse:
 # Browser bookmark importer (Netscape bookmark-file format)
 # ---------------------------------------------------------------------------
 
+# Chromium's importer reads the charset from the <META> tag and defaults to
+# UTF-8; "charset=" may appear in either a <meta charset="…"> or a
+# <META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=…"> declaration.
+_CHARSET_META_RE = re.compile(
+    rb"""<meta\b[^>]*\bcharset\s*=\s*["']?\s*([a-z0-9_\-]+)""",
+    re.IGNORECASE,
+)
+
+
+def _decode_bookmarks_html(raw: bytes) -> str:
+    """Decode a Netscape bookmarks file honoring its <META charset> declaration
+    (Chromium does the same; UTF-8 when absent). Falls back to UTF-8 then lossy
+    latin-1 so a malformed file never 500s."""
+    match = _CHARSET_META_RE.search(raw[:4096])
+    charset = "utf-8"
+    if match is not None:
+        declared = match.group(1).decode("ascii", errors="ignore").strip()
+        if declared:
+            charset = declared
+    try:
+        return raw.decode(charset)
+    except (UnicodeDecodeError, LookupError):
+        return raw.decode("utf-8", errors="replace")
+
 
 @app.post("/api/import")
 async def api_import(file: UploadFile = File(...)):
@@ -941,10 +965,7 @@ async def api_import(file: UploadFile = File(...)):
     single SQLite transaction for speed (~100x faster than per-row inserts).
     """
     raw = await file.read()
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        text = raw.decode("latin-1", errors="replace")
+    text = _decode_bookmarks_html(raw)
 
     html = HTMLParser(text)
     items: list[dict] = []
@@ -982,17 +1003,31 @@ async def api_import(file: UploadFile = File(...)):
             if direct_a is not None and direct_h3 is None:
                 href_attr = direct_a.attributes.get("href")
                 href = (href_attr or "").strip()
-                if href.startswith(("http://", "https://")):
+                if href.lower().startswith(("http://", "https://")):
+                    tags = [*folder_tags]
+                    # Netscape TAGS="a,b" attribute (Chromium writes it
+                    # comma-joined, possibly split across lines).
+                    tags_attr = direct_a.attributes.get("tags")
+                    if tags_attr:
+                        for tag in tags_attr.split(","):
+                            tag = tag.strip()
+                            if tag:
+                                tags.append(tag.lower())
+                    # created_at is NOT read from ADD_DATE; bulk_insert stamps
+                    # import time (now) on every row — an ADD_DATE-less
+                    # bookmark still gets a timestamp.
                     items.append(
                         {
                             "url": href,
                             "title": (direct_a.text() or "").strip(),
                             "domain": urlparse(href).netloc,
-                            "tags": folder_tags,
+                            "tags": tags,
                         }
                     )
                 continue
 
+            # A separator <DT> (Chromium's <HR> between toolbar groups) has
+            # neither an <A> nor an <H3> — skipped here.
             if direct_h3 is None:
                 continue
 
@@ -1000,11 +1035,16 @@ async def api_import(file: UploadFile = File(...)):
             if not folder_name:
                 continue
 
-            # Top-level browser folders ("Bookmarks bar", etc.) and
-            # timestamp-named session-manager folders are not useful as
-            # tags — but their children are real bookmarks, so we recurse
-            # without adding the folder name.
-            if folder_name in _BROWSER_ROOT_FOLDERS or _looks_like_timestamp_folder(folder_name):
+            # Chromium's special folders map to their configured tags; the
+            # folder name itself is NOT used as a tag. Every other folder keeps
+            # the existing semantics (name → tag; browser roots and
+            # timestamp-named folders are recursed without a tag).
+            attrs = direct_h3.attributes
+            if (attrs.get("personal_toolbar_folder") or "").lower() == "true":
+                new_tags = [*folder_tags, config.IMPORT_TOOLBAR_TAG]
+            elif (attrs.get("unfiled_bookmarks_folder") or "").lower() == "true":
+                new_tags = [*folder_tags, config.IMPORT_UNFILED_TAG]
+            elif folder_name in _BROWSER_ROOT_FOLDERS or _looks_like_timestamp_folder(folder_name):
                 new_tags = folder_tags
             else:
                 new_tags = [*folder_tags, folder_name.lower()]
