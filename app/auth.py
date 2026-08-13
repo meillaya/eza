@@ -35,8 +35,17 @@ from webauthn import (
     options_to_json,
     verify_registration_response,
 )
+from webauthn.authentication.generate_authentication_options import (
+    generate_authentication_options,
+)
+from webauthn.authentication.verify_authentication_response import (
+    verify_authentication_response,
+)
 from webauthn.helpers.decode_credential_public_key import decode_credential_public_key
 from webauthn.helpers.exceptions import WebAuthnException
+from webauthn.helpers.parse_authentication_credential_json import (
+    parse_authentication_credential_json,
+)
 from webauthn.helpers.parse_client_data_json import parse_client_data_json
 from webauthn.helpers.parse_registration_credential_json import (
     parse_registration_credential_json,
@@ -64,6 +73,7 @@ USER_DISPLAY_NAME = "Bookmarks"
 SESSION_COOKIE_NAME = "session"
 
 REGISTRATION_PURPOSE = "registration"
+AUTHENTICATION_PURPOSE = "authentication"
 CHALLENGE_TTL_SECONDS = 5 * 60  # 5-minute TTL
 
 RECOVERY_CODE_COUNT = 10
@@ -71,6 +81,10 @@ RECOVERY_CODE_COUNT = 10
 
 class SetupError(Exception):
     """A setup registration could not proceed (bad body, stale challenge, ...)."""
+
+
+class LoginError(Exception):
+    """An authentication (login) ceremony could not proceed."""
 
 
 # ---------------------------------------------------------------------------
@@ -289,10 +303,15 @@ def issue_codes() -> list[str]:
     return codes
 
 
-def create_session(*, scope: str = "normal") -> str:
-    """Create a session row and return its opaque id."""
+def create_session(*, scope: str = "normal", csrf_token: str | None = None) -> str:
+    """Create a session row and return its opaque id.
+
+    ``csrf_token`` is generated internally unless the caller supplies one (the
+    login flow pre-generates it so the cookie can be set without a re-read).
+    """
     session_id = secrets.token_urlsafe(32)
-    csrf_token = secrets.token_urlsafe(32)
+    if csrf_token is None:
+        csrf_token = secrets.token_urlsafe(32)
     now = int(time.time())
     with db.transaction() as conn:
         conn.execute(
@@ -301,3 +320,130 @@ def create_session(*, scope: str = "normal") -> str:
             (session_id, csrf_token, scope, now, now + config.SESSION_TTL_SECONDS),
         )
     return session_id
+
+
+# ---------------------------------------------------------------------------
+# Usernameless login (todo 10) — options, verify, sessions, logout
+# ---------------------------------------------------------------------------
+
+
+def authentication_options() -> dict:
+    """Build usernameless authentication options and store the challenge.
+
+    ``allow_credentials=[]`` makes the ceremony discoverable (usernameless):
+    the authenticator offers every resident credential for this RP. Requires
+    user verification. Returns the L3 JSON options dict.
+    """
+    challenge = secrets.token_bytes(32)
+    options = generate_authentication_options(
+        rp_id=config.WEBAUTHN_RP_ID,
+        challenge=challenge,
+        allow_credentials=[],
+        user_verification=UserVerificationRequirement.REQUIRED,
+    )
+    store_challenge(challenge, purpose=AUTHENTICATION_PURPOSE)
+    return json.loads(options_to_json(options))
+
+
+def get_session(session_id: str | None) -> dict | None:
+    """Load a session row if it exists and has not expired; else ``None``."""
+    if not session_id:
+        return None
+    row = db.get_conn().execute(
+        "SELECT id, csrf_token, scope, expires_at FROM sessions WHERE id = ?",
+        (session_id,),
+    ).fetchone()
+    if row is None or row["expires_at"] <= int(time.time()):
+        return None
+    return dict(row)
+
+
+def logout(session_id: str | None) -> None:
+    """Delete a session row (logout). No-op for a missing id."""
+    if not session_id:
+        return
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
+
+def create_login_session() -> tuple[str, str]:
+    """Create a normal-scoped session and return ``(session_id, csrf_token)``.
+
+    The csrf token is generated up front so the endpoint can set both the
+    httpOnly session cookie and the non-httpOnly csrf cookie from one call.
+    """
+    csrf_token = secrets.token_urlsafe(32)
+    session_id = create_session(scope="normal", csrf_token=csrf_token)
+    return session_id, csrf_token
+
+
+def complete_login(json_body: str | dict) -> tuple[str, str]:
+    """Verify an authentication response and open a normal-scoped session.
+
+    Returns ``(session_id, csrf_token)``. The challenge is consumed (single-use)
+    before verification. The credential is resolved by its id; the sign-count
+    update is BE-gated and lenient (w3c #2172 caveat) — a stale counter never
+    hard-fails. Raises :class:`LoginError` on any failure.
+    """
+    try:
+        credential = parse_authentication_credential_json(json_body)
+    except WebAuthnException as exc:
+        raise LoginError("malformed authentication response") from exc
+
+    client_data = parse_client_data_json(credential.response.client_data_json)
+    challenge = client_data.challenge
+    if not consume_challenge(challenge, purpose=AUTHENTICATION_PURPOSE):
+        raise LoginError("challenge is unknown, expired or already used")
+
+    stored = db.get_conn().execute(
+        "SELECT credential_id, public_key, sign_count, backup_eligible "
+        "FROM passkey_credentials WHERE credential_id = ?",
+        (credential.raw_id,),
+    ).fetchone()
+    if stored is None:
+        raise LoginError("unknown credential")
+
+    try:
+        verified = verify_authentication_response(
+            credential=credential,
+            expected_challenge=challenge,
+            expected_rp_id=config.WEBAUTHN_RP_ID,
+            expected_origin=config.PUBLIC_ORIGIN,
+            credential_public_key=stored["public_key"],
+            # py_webauthn's sign-count comparison is not lenient about synced
+            # (backup-eligible) passkeys — w3c #2172. The comparison is
+            # therefore disabled here and the BE-gated lenient policy in
+            # _record_credential_use() replaces it.
+            credential_current_sign_count=0,
+            require_user_verification=True,
+        )
+    except WebAuthnException as exc:
+        raise LoginError(f"authentication response failed verification: {exc}") from exc
+
+    _record_credential_use(stored, verified.new_sign_count)
+    return create_login_session()
+
+
+def _record_credential_use(stored, new_sign_count: int) -> None:
+    """Persist ``last_used_at`` and a BE-gated, lenient sign-count update.
+
+    Policy (w3c #2172): when ``backup_eligible=1`` (Apple/Google synced
+    passkeys never increment signCount reliably) or the stored counter is 0
+    (unknown), the new counter is accepted as-is — never a hard failure. For
+    single-device credentials the usual monotonic comparison applies, but a
+    regression does NOT lock the account: the login still succeeds and the
+    stored counter is left untouched. (The strict scenarios run in todo 13's
+    harness auth.spec.ts.)
+    """
+    now = int(time.time())
+    lenient = stored["backup_eligible"] == 1 or stored["sign_count"] == 0
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE passkey_credentials SET last_used_at = ? WHERE credential_id = ?",
+            (now, stored["credential_id"]),
+        )
+        if lenient or new_sign_count > stored["sign_count"]:
+            conn.execute(
+                "UPDATE passkey_credentials SET sign_count = ? WHERE credential_id = ?",
+                (new_sign_count, stored["credential_id"]),
+            )
