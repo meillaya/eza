@@ -2,6 +2,8 @@ module Main (main) where
 
 import Control.Exception (bracket)
 import qualified Data.ByteString as BS
+import Data.Text (Text)
+import qualified Data.Text as T
 import Database.SQLite.Simple (close)
 import qualified Database.SQLite.Simple as Sqlite
 import System.Directory (listDirectory)
@@ -13,9 +15,11 @@ import Test.Hspec
 import Eza.Bookmarks
 import Eza.Db (openDb, queryScalar, schemaV1, schemaVersion)
 import Eza.Favicon (parseDataIcon, parseIconLinks, sniffImage)
+import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateHighlight)
 import Eza.Import
 import Eza.SearchQuery
-import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), ImportReport (..), SearchPage (..))
+import Eza.Shares (ShareRecord (..), createShare, resolveShare, revokeShare)
+import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), Highlight (..), ImportReport (..), SearchPage (..))
 import Eza.Url (normalizeUrl)
 
 main :: IO ()
@@ -63,6 +67,41 @@ main = hspec $ do
         backups <- listDirectory (dir </> "backups")
         length backups `shouldBe` 1
         close migrated
+
+  describe "highlights" $ do
+    it "creates, lists, updates, and deletes a highlight" $
+      withSystemTempDirectory "eza-highlight" $ \dir -> do
+        conn <- openDb (dir </> "test.db")
+        Sqlite.execute_ conn "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://example.test/h','H','example.test',1,1,1)"
+        bid <- fromIntegral <$> Sqlite.lastInsertRowId conn
+        created <- createHighlight conn bid "H" "" "" 0 1 "note" "yellow"
+        case created of
+          Left err -> expectationFailure (T.unpack err)
+          Right highlight -> hQuote highlight `shouldBe` "H"
+        listed <- listHighlights conn bid
+        length listed `shouldBe` 1
+        updated <- updateHighlight conn bid (hId (head listed)) (Just "changed") (Just "blue")
+        updated `shouldBe` True
+        deleted <- deleteHighlight conn bid (hId (head listed))
+        deleted `shouldBe` True
+        close conn
+
+  describe "share links" $ do
+    it "resolves a bookmark share and revokes it" $
+      withSystemTempDirectory "eza-share" $ \dir -> do
+        conn <- openDb (dir </> "test.db")
+        Sqlite.execute_ conn "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://example.test/s','S','example.test',1,1,1)"
+        bid <- fromIntegral <$> Sqlite.lastInsertRowId conn
+        shared <- createShare conn "bookmark" bid False 7
+        case shared of
+          Left err -> expectationFailure (T.unpack err)
+          Right (sid, raw) -> do
+            record <- resolveShare conn raw
+            fmap srTargetId record `shouldBe` Just bid
+            revoked <- revokeShare conn sid
+            revoked `shouldBe` True
+            resolveShare conn raw `shouldReturn` Nothing
+        close conn
 
   describe "parseSearchQuery" $ do
     it "extracts tags and unread" $ do

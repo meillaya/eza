@@ -50,10 +50,20 @@ kubectl -n eza create secret generic eza-secrets \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Keys are optional: the pod starts without them and the AI features stay
-disabled. The deployment command already wraps the server in SecretSpec's
-`env` provider (`--file /etc/eza/secretspec.toml --profile production`), so
-either keys or nothing works. See [secrets.md](secrets.md).
+Keys are optional: the pod starts without them. AI tagging is off by default
+(`EZA_AI_PROVIDER=none`), and a key-based provider with no key reports the
+missing key instead of failing. The deployment command already wraps the server
+in SecretSpec's `env` provider (`--file /etc/eza/secretspec.toml --profile
+production`), so either keys or nothing works. See [secrets.md](secrets.md).
+
+`configmap.yaml` carries the non-secret runtime settings, with the same
+defaults as the server: `EZA_ENRICH_WORKERS` (in-process background workers,
+`0` disables), `EZA_FETCH_TIMEOUT_MS`, `EZA_FAVICON_MAX_BYTES`,
+`EZA_FAVICON_TTL_DAYS`, `EZA_SHARE_TTL_DAYS`, `EZA_ALLOW_PRIVATE_FETCH` (SSRF
+guard; keep `0`), and the AI settings `EZA_AI_PROVIDER` (`none` disables AI
+tagging), `EZA_OLLAMA_BASE_URL`, `EZA_AI_MODEL` and `EZA_AI_AUTO_TAG`. Edit the
+ConfigMap and let the Deployment roll; the workers stay inside the single pod,
+so `replicas: 1` is still required.
 
 ## 3. Apply
 

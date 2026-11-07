@@ -435,7 +435,7 @@ bulkUpdate conn action ids
         let marks = T.intercalate "," (replicate (length uniqueIds) "?")
         execute
           conn
-          (Query ("UPDATE bookmarks SET is_read = ?, updated_at = strftime('%s','now') WHERE id IN (" <> marks <> "))"))
+          (Query ("UPDATE bookmarks SET is_read = ?, updated_at = strftime('%s','now') WHERE id IN (" <> marks <> ")"))
           ((if value then 1 else 0 :: Int) : uniqueIds)
         pure (length uniqueIds)
       BulkDelete -> do

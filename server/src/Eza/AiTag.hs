@@ -50,6 +50,7 @@ aiSuggestions conn tagName sampleSize = do
   provider <- fromMaybe "anthropic" <$> lookupEnv "EZA_AI_PROVIDER"
   rawKey <-
     case provider of
+      "ollama" -> pure Nothing
       "openai" -> lookupEnv "OPENAI_API_KEY"
       "openai-compatible" -> lookupEnv "OPENAI_API_KEY"
       _ -> lookupEnv "ANTHROPIC_API_KEY"
@@ -65,9 +66,10 @@ aiSuggestions conn tagName sampleSize = do
   let ids = [i | Only i <- rows]
   if null ids
     then pure (Left "no bookmarks with that tag")
-    else case key of
-      Nothing -> pure (Left "AI key is not configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY)")
-      Just apiKey -> do
+    else if provider /= "ollama" && key == Nothing
+      then pure (Left "AI key is not configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY, or use EZA_AI_PROVIDER=ollama)")
+      else do
+        let apiKey = fromMaybe "" key
         summaries <- bookmarksByIds conn ids
         let listing =
               T.intercalate "\n"
@@ -103,7 +105,20 @@ callProvider provider apiKey prompt = do
 
 tryJson :: Manager -> Text -> Text -> Text -> IO (Either Text Text)
 tryJson manager provider apiKey prompt = do
-  if provider == "openai" || provider == "openai-compatible"
+  if provider == "ollama"
+    then do
+      base <- fromMaybe "http://127.0.0.1:11434" <$> lookupEnv "EZA_OLLAMA_BASE_URL"
+      model <- fromMaybe "llama3.2" <$> lookupEnv "EZA_AI_MODEL"
+      req0 <- parseRequest (base <> "/api/chat")
+      let body =
+            object
+              [ "model" .= model
+              , "stream" .= False
+              , "messages" .= [object ["role" .= ("user" :: Text), "content" .= prompt]]
+              ]
+      resp <- httpLbs req0 {method = "POST", requestHeaders = [(hContentType, "application/json")], requestBody = RequestBodyLBS (encode body)} manager
+      pure (extractOllama (responseBody resp))
+    else if provider == "openai" || provider == "openai-compatible"
     then do
       base <- fromMaybe "https://api.openai.com/v1" <$> lookupEnv "EZA_OPENAI_BASE_URL"
       req0 <- parseRequest (base <> "/chat/completions")
@@ -125,6 +140,18 @@ tryJson manager provider apiKey prompt = do
               ]
       resp <- httpLbs req0 {method = "POST", requestHeaders = [(hContentType, "application/json"), ("x-api-key", TE.encodeUtf8 apiKey), ("anthropic-version", "2023-06-01")], requestBody = RequestBodyLBS (encode body)} manager
       pure (extractAnthropic (responseBody resp))
+
+extractOllama :: LBS.ByteString -> Either Text Text
+extractOllama body =
+  case decode body :: Maybe Value of
+    Just v -> case parseMaybe (withObject "ollama" $ \o -> do
+        message <- o .: "message" :: Parser Value
+        case message of
+          Object m -> m .: "content" :: Parser Text
+          _ -> fail "no message") v of
+      Just t -> Right t
+      Nothing -> Left "could not parse Ollama response"
+    Nothing -> Left "invalid Ollama response"
 
 extractOpenAI :: LBS.ByteString -> Either Text Text
 extractOpenAI body =

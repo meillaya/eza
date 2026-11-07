@@ -10,7 +10,7 @@ module Eza.Web.Panels (
 
 import Data.List (sortOn)
 import qualified Data.Map.Strict as M
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -30,7 +30,7 @@ import Eza.Types (
     TagStat (..),
  )
 import Eza.Web.Model
-import Eza.Web.Types (AccountInfo (..), ConsolGroup (..), Credential (..), DedupGroup (..), TagSuggestion (..))
+import Eza.Web.Types (AccountInfo (..), ConsolGroup (..), Credential (..), DedupGroup (..), TagSuggestion (..), TokenView (..))
 import Eza.Web.Widgets
 
 pageHeader :: MisoString -> [View () () Model Action] -> View () () Model Action
@@ -483,6 +483,7 @@ accountPage m =
         [HP.class_ "stack"]
         [ pageHeader "Account" [btn "btn-danger btn-sm" [HE.onClick Logout] [text "Sign out"]]
         , capturePanel m
+        , tokensPanel m
         , case mAccount m of
             Nothing
                 | mAccountLoading m -> spinnerRow "Loading account…"
@@ -594,6 +595,98 @@ captureBookmarklet m
   where
     rawOrigin = mWindowOrigin m
     origin = fromMisoString rawOrigin :: String
+
+{- | Bearer API tokens: list, create (scope checkboxes), one-time reveal,
+revoke.  Session-only on the server side.
+-}
+tokensPanel :: Model -> View () () Model Action
+tokensPanel m =
+    panelWithHead
+        "API tokens"
+        ([H.span_ [HP.class_ "muted"] [text (ms (show (length (mTokens m)) <> " token(s)"))] | not (null (mTokens m))])
+        [ H.p_
+            [HP.class_ "muted"]
+            [text "Bearer tokens let browser extensions and shortcuts read and write eza. Create them here; bearer tokens cannot manage other tokens."]
+        , H.div_
+            [HP.class_ "token-form"]
+            [ H.input_
+                [ HP.id_ "token-name"
+                , HP.class_ "input"
+                , HP.placeholder_ "Token name (e.g. iOS shortcut)"
+                , HP.value_ (mTokenName m)
+                , HP.autocomplete_ "off"
+                , HE.onInput TokenNameInput
+                ]
+            , H.div_
+                [HP.class_ "row-wrap"]
+                (map scopeOption ["read", "write", "capture"])
+            , btn
+                "btn-primary"
+                ([HE.onClick TokenCreate] ++ disabledAttr (mTokenBusy m))
+                [text (if mTokenBusy m then "Creating…" else "Create token")]
+            ]
+        , case mTokenSecret m of
+            Nothing -> H.div_ [] []
+            Just (raw, _) ->
+                H.div_
+                    [HP.class_ "token-reveal", HP.role_ "alert"]
+                    [ H.div_ [HP.class_ "token-reveal-title"] [text "Copy this token now — it is shown only once"]
+                    , H.pre_ [HP.class_ "token-secret"] [H.code_ [] [text (ms raw)]]
+                    , H.div_
+                        [HP.class_ "row-wrap"]
+                        [ btn "btn-primary" [HE.onClick (TokenCopied raw)] [text "Copy token"]
+                        , btn "btn-ghost" [HE.onClick TokenRevealDismiss] [text "Done"]
+                        ]
+                    ]
+        , if mTokensLoading m && null (mTokens m)
+            then spinnerRow "Loading tokens…"
+            else
+                H.div_
+                    [HP.class_ "stack"]
+                    ( [tokenRow token | token <- mTokens m]
+                        ++ [ H.p_ [HP.class_ "muted"] [text "No API tokens yet."]
+                           | null (mTokens m)
+                           ]
+                    )
+        ]
+  where
+    scopeOption scope =
+        H.label_
+            [HP.class_ "scope-option"]
+            [ H.input_
+                [ HP.type_ "checkbox"
+                , HP.class_ "scope-option-box"
+                , HP.checked_ (scope `elem` mTokenScopes m)
+                , HE.onClick (TokenScopeToggled scope)
+                ]
+            , text (ms scope)
+            ]
+    tokenRow token =
+        H.div_
+            [HP.class_ ("cred" <> if isJust (tvRevokedAt token) then " is-revoked" else "")]
+            [ H.div_
+                [HP.class_ "cred-main"]
+                [ H.div_
+                    [HP.class_ "cred-title"]
+                    [ text (ms (tvName token))
+                    , H.span_ [HP.class_ "token-prefix mono"] [text (ms (tvPrefix token))]
+                    ]
+                , H.div_
+                    [HP.class_ "cred-meta"]
+                    [ text (ms ("Created " <> (fromMisoString (formatStamp (tvCreatedAt token)) :: String)))
+                    , text (ms (maybe "" (\used -> " · last used " <> (fromMisoString (formatStamp used) :: String)) (tvLastUsedAt token)))
+                    , if isJust (tvRevokedAt token) then text " · revoked" else text ""
+                    ]
+                , H.div_
+                    [HP.class_ "row-wrap"]
+                    [ H.span_ [HP.class_ "tag-chip"] [text (ms scope)]
+                    | scope <- tvScopes token
+                    ]
+                ]
+            , if isJust (tvRevokedAt token)
+                then pill "warn" "revoked"
+                else iconBtnDanger iTrash "Revoke token" (TokenRevoke (tvId token))
+            ]
 
 credentialRow :: Model -> Credential -> View () () Model Action
 credentialRow m credential =

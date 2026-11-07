@@ -86,10 +86,26 @@ WebAuthn passkeys require a **secure origin**, so plain
 | `EZA_BACKUP_OFFSITE` | unset | Optional local directory: `eza-bookmarks backup` copies each backup there. |
 | `EZA_MONOLITH` | `monolith` | Snapshot tool (on PATH in the image). |
 | `EZA_LOG_LEVEL` | `info` | debug/info/warn/error. |
-| `EZA_ALLOW_PRIVATE_FETCH` | `0` | Set `1` to allow fetching private/RFC1918 URLs. |
-| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | unset | Optional AI tagging (empty = feature off). |
-| `EZA_AI_PROVIDER` | auto | AI tagging provider selection (`anthropic` / `openai`). |
+| `EZA_ENRICH_WORKERS` | `2` | In-process background enrichment workers; `0` disables them. |
+| `EZA_FETCH_TIMEOUT_MS` | `8000` | Timeout per outbound fetch (server clamps below 1000). |
+| `EZA_FAVICON_MAX_BYTES` | `65536` | Maximum favicon download size. |
+| `EZA_FAVICON_TTL_DAYS` | `90` | Favicon cache lifetime. |
+| `EZA_SHARE_TTL_DAYS` | `7` | Public share-link lifetime. |
+| `EZA_ALLOW_PRIVATE_FETCH` | `0` | Set `1` to allow fetching private/RFC1918 URLs (lifts the SSRF guard). |
+| `EZA_AI_PROVIDER` | `none` | AI tagging: `none`, `ollama`, `openai`, `openai-compatible`, `anthropic`. |
+| `EZA_OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama endpoint for the `ollama` provider. |
+| `EZA_AI_MODEL` | `llama3.2` | Model used for AI tagging. |
+| `EZA_AI_AUTO_TAG` | `0` | Automatic AI tagging of newly added bookmarks. |
 | `EZA_OPENAI_BASE_URL` | unset | OpenAI-compatible base URL for self-hosted LLM endpoints. |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | unset | Optional AI-tagging keys; empty disables key-based providers. |
+
+Enrichment workers run inside the server process (each with its own SQLite
+connection), so there is no extra container or sidecar: set
+`EZA_ENRICH_WORKERS=0` to disable background work. The fetcher refuses
+loopback/link-local/private addresses unless `EZA_ALLOW_PRIVATE_FETCH=1` is
+set, which is an SSRF surface and only safe for a fully trusted UI. With
+`EZA_AI_PROVIDER=none` (the default) the AI endpoints still answer, returning
+an empty suggestion list and a notice; `ollama` needs no API key.
 
 ## Healthcheck
 
@@ -132,9 +148,10 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
 ```
 
-Both keys are optional: the server starts normally when they are absent and
-the AI-tagging features stay disabled. Details and CI/desktop provider setups
-are in [secrets.md](secrets.md).
+Both keys are optional: the server starts normally when they are absent. AI
+tagging is off by default (`EZA_AI_PROVIDER=none`), and a key-based provider
+with no key reports the missing key instead of failing. Details and CI/desktop
+provider setups are in [secrets.md](secrets.md).
 
 ## Data, backup and restore
 

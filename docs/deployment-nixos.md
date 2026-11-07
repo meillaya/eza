@@ -129,6 +129,16 @@ All options live under `services.eza`:
 | `rpId` | host of `publicOrigin` | WebAuthn relying-party ID (`EZA_RP_ID`); host only, no scheme/port. |
 | `rpName` | `eza` | Relying-party display name (`EZA_RP_NAME`). |
 | `logLevel` | `info` | `EZA_LOG_LEVEL` (debug/info/warn/error). |
+| `allowPrivateFetch` | `false` | `EZA_ALLOW_PRIVATE_FETCH`; permits fetching private/RFC1918 URLs. Leave off (SSRF guard). |
+| `enrichWorkers` | `2` | `EZA_ENRICH_WORKERS`: in-process background enrichment workers; 0 disables them. |
+| `fetchTimeoutMs` | `8000` | `EZA_FETCH_TIMEOUT_MS`: timeout per outbound fetch (server clamps below 1000). |
+| `faviconMaxBytes` | `65536` | `EZA_FAVICON_MAX_BYTES`: maximum favicon download size. |
+| `faviconTtlDays` | `90` | `EZA_FAVICON_TTL_DAYS`: favicon cache lifetime. |
+| `shareTtlDays` | `7` | `EZA_SHARE_TTL_DAYS`: public share-link lifetime. |
+| `aiProvider` | `none` | `EZA_AI_PROVIDER`: `none`, `ollama`, `openai`, `openai-compatible`, `anthropic`. |
+| `ollamaBaseUrl` | `http://127.0.0.1:11434` | `EZA_OLLAMA_BASE_URL` for the `ollama` provider. |
+| `aiModel` | `llama3.2` | `EZA_AI_MODEL` used by AI tagging. |
+| `aiAutoTag` | `false` | `EZA_AI_AUTO_TAG`: automatic AI tagging of new bookmarks. |
 | `environmentFile` | `null` | Optional systemd EnvironmentFile path string (non-secret settings). |
 | `staticDir` | `null` | Override `EZA_STATIC_DIR`; defaults to `webAssets`' `share/eza/static`. |
 | `secretspecFile` | flake `secretspec.toml` | SecretSpec manifest; declares secrets, never values. |
@@ -156,7 +166,10 @@ so the SQLite file keeps a stable owner) with `StateDirectory=eza` →
 
 Environment: `EZA_DATA_DIR`, `EZA_DB`, `EZA_BIND`, `PUBLIC_ORIGIN`,
 `EZA_RP_ID`, `EZA_RP_NAME`, `EZA_STATIC_DIR`, `EZA_SNAPSHOT_DIR`,
-`EZA_BACKUP_DIR`, `EZA_LOG_LEVEL`, `HOME`.
+`EZA_BACKUP_DIR`, `EZA_LOG_LEVEL`, `EZA_ALLOW_PRIVATE_FETCH`,
+`EZA_ENRICH_WORKERS`, `EZA_FETCH_TIMEOUT_MS`, `EZA_FAVICON_MAX_BYTES`,
+`EZA_FAVICON_TTL_DAYS`, `EZA_SHARE_TTL_DAYS`, `EZA_AI_PROVIDER`,
+`EZA_OLLAMA_BASE_URL`, `EZA_AI_MODEL`, `EZA_AI_AUTO_TAG`, `HOME`.
 
 ExecStart is wrapped by SecretSpec:
 
@@ -167,8 +180,9 @@ Optional API keys are passed as systemd credentials
 (`LoadCredential=NAME:/path`); SecretSpec's `systemd-credential` provider
 resolves them from `$CREDENTIALS_DIRECTORY`. When no key files are configured,
 the wrapper points the provider at an empty private directory (`<dataDir>/.credentials`)
-so every optional secret resolves to "unset" and the AI features stay disabled.
-See [secrets.md](secrets.md).
+so every optional secret resolves to "unset". Key-based AI providers then report
+the missing key instead of failing, and `aiProvider = "ollama"` needs no key at
+all. See [secrets.md](secrets.md).
 
 After start, a non-fatal `ExecStartPost` probe waits up to 30 s, calling
 `eza-bookmarks healthcheck` (which hits `GET /healthz` on `EZA_BIND`; HTTP 200
@@ -185,6 +199,29 @@ Hardening includes: `NoNewPrivileges`, `ProtectSystem=strict`,
 
 Restart policy: `on-failure`, 5 s backoff. The unit wants
 `network-online.target` (fetching bookmarks, monolith snapshots).
+
+## Fetching, enrichment, shares and AI
+
+Enrichment (titles, favicons, extracted text) runs on `enrichWorkers`
+in-process background workers. Each worker opens its own SQLite connection
+inside the server process, so there is no second systemd unit to watch; set
+`enrichWorkers = 0` to disable background work entirely. Outbound requests
+are bounded by `fetchTimeoutMs`, and favicons are capped at
+`faviconMaxBytes` and cached for `faviconTtlDays`.
+
+The server refuses to fetch loopback, link-local and private/RFC1918
+addresses by default. `allowPrivateFetch = true` lifts that guard; only do
+this only when every UI user is trusted: it lets a bookmark URL reach
+loopback and private-network services that the outside world cannot see, which
+is an SSRF surface rather than a normal-use setting. Public share links expire after `shareTtlDays`.
+
+AI tagging is off by default (`aiProvider = "none"`): the AI endpoints still
+answer, returning an empty suggestion list with a notice. `ollama` talks to
+`ollamaBaseUrl` and needs no API key; `openai` / `openai-compatible` use the
+`OPENAI_API_KEY` credential and `anthropic` uses `ANTHROPIC_API_KEY` (see
+[secrets.md](secrets.md)). `aiModel` selects the model; `aiAutoTag` enables
+automatic tagging of newly added bookmarks (explicit AI-tag actions work
+regardless).
 
 ## Backups and restore
 

@@ -2174,3 +2174,145 @@ img {
   font-size: 12.5px;
   line-height: 1.55;
 }
+
+/* ------------------------------------------------------ bulk selection --- */
+.card {
+  padding-left: 40px;
+}
+.card-select {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 2;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.card.is-selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 45%, var(--surface));
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.selection-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  z-index: 75;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100vw - 24px);
+  padding: 8px 10px 8px 16px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+.selection-count {
+  font-size: 13.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.selection-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.toasts.above-selection {
+  bottom: 84px;
+}
+
+/* ------------------------------------------------------------ tokens --- */
+.token-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 14px;
+}
+.token-form .input {
+  flex: 1 1 220px;
+}
+.scope-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.scope-option:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.scope-option-box {
+  margin: 0;
+  accent-color: var(--accent);
+}
+.token-reveal {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0 16px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+  border-radius: var(--radius);
+  background: var(--warn-soft);
+}
+.token-reveal-title {
+  font-size: 13px;
+  font-weight: 650;
+}
+.token-secret {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.token-prefix {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.cred.is-revoked {
+  opacity: 0.65;
+}
+.enrich-error {
+  margin: 8px 0 0;
+  color: var(--warn);
+  font-size: 12.5px;
+}
+
+@media (max-width: 767px) {
+  .card {
+    padding-left: 36px;
+  }
+  .selection-bar {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    transform: none;
+    flex-wrap: wrap;
+    justify-content: center;
+    border-radius: var(--radius);
+  }
+  .toasts.above-selection {
+    bottom: 150px;
+  }
+}

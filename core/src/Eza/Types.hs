@@ -16,6 +16,7 @@ module Eza.Types
   , GraphData (..)
   , ImportReport (..)
   , CredentialInfo (..)
+  , Highlight (..)
   ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON, genericToJSON)
@@ -215,6 +216,23 @@ instance ToJSON ImportReport where
   toJSON = genericToJSON (jsonOptions "ir")
 instance FromJSON ImportReport where
   parseJSON = genericParseJSON (jsonOptions "ir")
+
+data Highlight = Highlight
+  { hId :: Int
+  , hBookmarkId :: Int
+  , hQuote :: Text
+  , hStartOffset :: Int
+  , hEndOffset :: Int
+  , hNote :: Text
+  , hColor :: Text
+  , hCreatedAt :: Int
+  }
+  deriving stock (Show, Eq, Generic)
+
+instance ToJSON Highlight where
+  toJSON = genericToJSON (jsonOptions "h")
+instance FromJSON Highlight where
+  parseJSON = genericParseJSON (jsonOptions "h")
 
 data CredentialInfo = CredentialInfo
   { ciId :: Text

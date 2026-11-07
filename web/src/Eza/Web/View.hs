@@ -10,6 +10,7 @@ import qualified Miso.CSS as C
 import qualified Miso.Html as H
 import qualified Miso.Html.Event as HE
 import qualified Miso.Html.Property as HP
+import qualified Miso.JSON as MJ
 
 import Eza.Types (
     BookmarkSummary (..),
@@ -27,9 +28,12 @@ viewModel m =
         [HP.class_ "app-shell"]
         ( [topbar m, scopes m, routeBody m, toastsView m]
             ++ [offlineBanner | not (mOnline m)]
+            ++ [selectionBar m | selectedCount m > 0 && isListRoute m]
             ++ [addModal m | mAddOpen m]
             ++ [paletteView m | mPaletteOpen m]
             ++ [guardModal m | mGuardOpen m]
+            ++ [tagPromptModal m | maybe False (const True) (mTagPrompt m)]
+            ++ [bulkDeleteModal m | mConfirmBulkDelete m]
             ++ [importInput]
         )
 
@@ -158,10 +162,17 @@ contentHead m =
             ]
         , H.div_
             [HP.class_ "head-actions"]
-            ( ( if mRoute m == Inbox
-                    then [btn "btn-sm" [HE.onClick MarkAllAbove] [icon iCheck, text "Mark all above read"]]
+            ( ( if isListRoute m
+                    then
+                        [ btn "btn-sm" [HE.onClick SelectAllLoaded] [text "Select page"]
+                        , btn "btn-sm" [HE.onClick SelectAllMatchingStart] [text "Select all matching"]
+                        ]
                     else []
               )
+                ++ ( if mRoute m == Inbox
+                        then [btn "btn-sm" [HE.onClick MarkAllAbove] [icon iCheck, text "Mark all above read"]]
+                        else []
+                   )
                 ++ [ H.a_
                         [ HP.class_ "btn btn-sm"
                         , HP.href_ exportUrl'
@@ -278,12 +289,40 @@ hasActiveFilters m =
 cardView :: Model -> BookmarkSummary -> View () () Model Action
 cardView m bookmark =
     H.article_
-        [ HP.class_ (cardClass bookmark)
+        [ HP.class_ (cardClass m bookmark)
         , HP.tabindex_ "0"
-        , HE.onClick (Navigate (Bookmark (bsId bookmark)))
-        , HE.onKeyDownWithInfo (\info -> if keyCodeToInt (keyCode info) == 13 then Navigate (Bookmark (bsId bookmark)) else Noop)
+        , shiftClickAttr
+            ( \(shift, _detail) ->
+                if shift || selectedCount m > 0
+                    then SelectToggled (bsId bookmark) shift
+                    else Navigate (Bookmark (bsId bookmark))
+            )
+        , HE.onKeyDownWithInfo
+            ( \info ->
+                if keyCodeToInt (keyCode info) == 13
+                    then Navigate (Bookmark (bsId bookmark))
+                    else
+                        if keyCodeToInt (keyCode info) == 32
+                            then SelectToggled (bsId bookmark) (shiftKey info)
+                            else Noop
+            )
         ]
-        [ H.div_
+        [ H.input_
+            [ HP.class_ "card-select"
+            , HP.type_ "checkbox"
+            , HP.aria_ "label" (ms ("Select " <> bsTitle bookmark))
+            , HP.title_ "Select for bulk actions (shift-click for a range)"
+            , HP.checked_ (isSelected m (bsId bookmark))
+            , HP.data_ "id" (ms (show (bsId bookmark)))
+            , -- Keyboard activation of a checkbox also fires a click with
+              -- detail 0; the keydown handler already toggled it, so ignore it.
+              shiftClickAttr
+                ( \(shift, detail) ->
+                    if detail == 0 then Noop else SelectToggled (bsId bookmark) shift
+                )
+            , cardSelectKeyAttr (bsId bookmark)
+            ]
+        , H.div_
             [HP.class_ "card-head"]
             [ H.img_
                 [ HP.class_ "favicon"
@@ -321,11 +360,53 @@ cardView m bookmark =
   where
     _ = m
 
-cardClass :: BookmarkSummary -> MisoString
-cardClass bookmark =
+cardClass :: Model -> BookmarkSummary -> MisoString
+cardClass m bookmark =
     "card"
         <> (if bsIsRead bookmark then " is-read" else "")
         <> (if bsIsDead bookmark then " is-dead" else "")
+        <> (if isSelected m (bsId bookmark) then " is-selected" else "")
+
+{- | A click handler that also reports the shift-key state (for range
+selection).  Stops propagation so card-level selection does not also
+trigger the inner link/delete buttons.
+-}
+shiftClickDecoder :: Decoder (Bool, Int)
+shiftClickDecoder =
+    Decoder
+        { decodeAt = DecodeTarget []
+        , decoder =
+            MJ.withObject
+                "click"
+                ( \o ->
+                    (,)
+                        <$> o MJ..:? "shiftKey" MJ..!= False
+                        <*> o MJ..:? "detail" MJ..!= 0
+                )
+        }
+
+shiftClickAttr :: ((Bool, Int) -> Action) -> Attribute Model Action
+shiftClickAttr handler =
+    onWithOptions BUBBLE stopPropagation "click" shiftClickDecoder (\(shift, detail) _ _ -> handler (shift, detail))
+
+{- | Keyboard support for the per-card selection checkbox: Space and Enter
+toggle selection instead of navigating.  Propagation is stopped so the
+card's Enter handler does not open the detail page; default behaviour (tab
+navigation, native checkbox state) is left to the browser.
+-}
+cardSelectKeyAttr :: Int -> Attribute Model Action
+cardSelectKeyAttr bookmarkId =
+    onWithOptions
+        BUBBLE
+        stopPropagation
+        "keydown"
+        keyInfoDecoder
+        ( \info _ _ ->
+            case keyCodeToInt (keyCode info) of
+                32 -> SelectToggled bookmarkId (shiftKey info)
+                13 -> SelectToggled bookmarkId (shiftKey info)
+                _ -> Noop
+        )
 
 {- | Favicon source for a card.  The server sends either a remote https URL or
 a local /api/v1/favicons/<domain> path; both are used verbatim (so the
@@ -547,6 +628,126 @@ paletteItem m (index, (label, hint, _)) =
         , H.span_ [HP.class_ "palette-meta"] [text hint]
         ]
 
+-- | Floating action bar shown while cards are selected.
+selectionBar :: Model -> View () () Model Action
+selectionBar m =
+    H.div_
+        [ HP.class_ "selection-bar"
+        , HP.role_ "toolbar"
+        , HP.aria_ "label" "Bulk actions"
+        ]
+        [ H.span_
+            [HP.class_ "selection-count", HP.aria_ "live" "polite"]
+            [text (ms (show (selectedCount m) <> " selected"))]
+        , H.div_
+            [HP.class_ "selection-actions"]
+            [ bulkButton (BulkTagPromptOpen True) (mBulkBusy m) [icon iPlus, text "Add tag"]
+            , bulkButton (BulkTagPromptOpen False) (mBulkBusy m) [text "Remove tag"]
+            , bulkButton (BulkMark True) (mBulkBusy m) [icon iCheck, text "Mark read"]
+            , bulkButton (BulkMark False) (mBulkBusy m) [text "Mark unread"]
+            , btn
+                "btn-danger btn-sm"
+                ([HE.onClick BulkDeleteRequest] ++ disabledAttr (mBulkBusy m))
+                [icon iTrash, text "Delete"]
+            , btn
+                "btn-sm"
+                ([HE.onClick UndoRun] ++ disabledAttr (mBulkBusy m))
+                [icon iRefresh, text "Undo"]
+            , H.button_
+                [ HP.class_ "icon-btn"
+                , HP.type_ "button"
+                , HP.title_ "Clear selection"
+                , HP.aria_ "label" "Clear selection"
+                , HE.onClick SelectClear
+                ]
+                [text "×"]
+            ]
+        , if mSelectingAll m
+            then H.span_ [HP.class_ "muted", HP.aria_ "live" "polite"] [text "Selecting…"]
+            else H.span_ [] []
+        ]
+  where
+    bulkButton action busy children =
+        btn "btn-sm" ([HE.onClick action] ++ disabledAttr busy) children
+
+-- | Add/remove-tag prompt for the current selection.
+tagPromptModal :: Model -> View () () Model Action
+tagPromptModal m =
+    H.div_
+        [HP.class_ "overlay", HE.onClick BulkTagCancel]
+        [ H.div_
+            [HP.class_ "modal", HE.onClickWithOptions stopPropagation Noop]
+            [ H.div_
+                [HP.class_ "modal-head"]
+                [ text
+                    ( if mTagPrompt m == Just True
+                        then "Add tags to selection"
+                        else "Remove tags from selection"
+                    )
+                ]
+            , H.div_
+                [HP.class_ "modal-body"]
+                [ H.label_
+                    [HP.class_ "field"]
+                    [ H.span_ [HP.class_ "field-label"] [text "Tags (comma separated)"]
+                    , H.input_
+                        [ HP.id_ "bulk-tag-input"
+                        , HP.class_ "input"
+                        , HP.placeholder_ "research, reading"
+                        , HP.value_ (mTagPromptValue m)
+                        , HP.autocomplete_ "off"
+                        , HE.onInput BulkTagInput
+                        , HE.onKeyDown
+                            (\code -> if keyCodeToInt code == 13 then BulkTagSubmit else Noop)
+                        ]
+                    ]
+                , H.p_
+                    [HP.class_ "muted"]
+                    [text (ms (show (selectedCount m) <> " bookmark(s) will be updated."))]
+                ]
+            , H.div_
+                [HP.class_ "modal-foot"]
+                [ btn "btn-ghost" [HE.onClick BulkTagCancel] [text "Cancel"]
+                , btn
+                    "btn-primary"
+                    ([HE.onClick BulkTagSubmit] ++ disabledAttr (mBulkBusy m))
+                    [text "Apply"]
+                ]
+            ]
+        ]
+
+-- | Destructive delete confirmation for the current selection.
+bulkDeleteModal :: Model -> View () () Model Action
+bulkDeleteModal m =
+    H.div_
+        [HP.class_ "overlay"]
+        [ H.div_
+            [HP.class_ "modal"]
+            [ H.div_ [HP.class_ "modal-head"] [text "Delete selected bookmarks"]
+            , H.div_
+                [HP.class_ "modal-body"]
+                [ H.p_
+                    []
+                    [ text
+                        ( ms
+                            ( "Delete "
+                                <> show (selectedCount m)
+                                <> " selected bookmark(s)? A snapshot is kept, so you can undo this from the bar or Maintenance."
+                            )
+                        )
+                    ]
+                ]
+            , H.div_
+                [HP.class_ "modal-foot"]
+                [ btn "btn-ghost" [HE.onClick BulkDeleteCancel] [text "Cancel"]
+                , btn
+                    "btn-danger"
+                    ([HE.onClick BulkDeleteConfirm] ++ disabledAttr (mBulkBusy m))
+                    [icon iTrash, text "Delete bookmarks"]
+                ]
+            ]
+        ]
+
 guardModal :: Model -> View () () Model Action
 guardModal _m =
     H.div_
@@ -571,8 +772,20 @@ guardModal _m =
 toastsView :: Model -> View () () Model Action
 toastsView m =
     H.div_
-        [HP.class_ "toasts", HP.aria_ "live" "polite"]
+        [ HP.class_
+            ( "toasts"
+                <> (if selectedCount m > 0 && isListRoute m then " above-selection" else "")
+            )
+        , HP.aria_ "live" "polite"
+        ]
         (map toastView (mToasts m))
+
+-- | Library routes that support card selection.
+isListRoute :: Model -> Bool
+isListRoute m = case mRoute m of
+    Index -> True
+    Inbox -> True
+    _ -> False
 
 -- | Small fixed banner shown while navigator.onLine is false.
 offlineBanner :: View () () Model Action

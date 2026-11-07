@@ -36,6 +36,20 @@ services:
       EZA_RP_ID: ${EZA_RP_ID:-localhost}
       EZA_RP_NAME: ${EZA_RP_NAME:-eza}
       EZA_LOG_LEVEL: ${EZA_LOG_LEVEL:-info}
+      # Enrichment: in-process background workers (0 disables them), outbound
+      # fetch limits, favicon cache, and the public-share lifetime.
+      EZA_ENRICH_WORKERS: ${EZA_ENRICH_WORKERS:-2}
+      EZA_FETCH_TIMEOUT_MS: ${EZA_FETCH_TIMEOUT_MS:-8000}
+      EZA_FAVICON_MAX_BYTES: ${EZA_FAVICON_MAX_BYTES:-65536}
+      EZA_FAVICON_TTL_DAYS: ${EZA_FAVICON_TTL_DAYS:-90}
+      EZA_SHARE_TTL_DAYS: ${EZA_SHARE_TTL_DAYS:-7}
+      # SSRF guard: private/RFC1918 fetches stay disabled unless opted in.
+      EZA_ALLOW_PRIVATE_FETCH: ${EZA_ALLOW_PRIVATE_FETCH:-0}
+      # AI tagging: "none" disables it; "ollama" needs no API key.
+      EZA_AI_PROVIDER: ${EZA_AI_PROVIDER:-none}
+      EZA_OLLAMA_BASE_URL: ${EZA_OLLAMA_BASE_URL:-http://127.0.0.1:11434}
+      EZA_AI_MODEL: ${EZA_AI_MODEL:-llama3.2}
+      EZA_AI_AUTO_TAG: ${EZA_AI_AUTO_TAG:-0}
       # Optional AI-tagging keys; empty disables the feature.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

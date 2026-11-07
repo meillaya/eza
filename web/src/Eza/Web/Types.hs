@@ -12,6 +12,7 @@ module Eza.Web.Types (
     TagSuggestion (..),
     Credential (..),
     AccountInfo (..),
+    TokenView (..),
     mkApiError,
     fieldInt,
     fieldBool,
@@ -112,6 +113,29 @@ instance FromJSON Credential where
             <*> o .:? "created_at" .!= 0
             <*> o .:? "last_used_at"
             <*> o .:? "backup_eligible" .!= False
+
+-- | Bearer token metadata (the raw token is only returned on creation).
+data TokenView = TokenView
+    { tvId :: Int
+    , tvName :: Text
+    , tvPrefix :: Text
+    , tvScopes :: [Text]
+    , tvCreatedAt :: Int
+    , tvLastUsedAt :: Maybe Int
+    , tvRevokedAt :: Maybe Int
+    }
+    deriving (Eq, Show)
+
+instance FromJSON TokenView where
+    parseJSON = withObject "TokenView" $ \o ->
+        TokenView
+            <$> o .:? "id" .!= 0
+            <*> o .:? "name" .!= ""
+            <*> o .:? "prefix" .!= ""
+            <*> o .:? "scopes" .!= []
+            <*> o .:? "created_at" .!= 0
+            <*> o .:? "last_used_at"
+            <*> o .:? "revoked_at"
 
 -- | Account screen payload.
 data AccountInfo = AccountInfo

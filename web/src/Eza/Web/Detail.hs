@@ -90,7 +90,17 @@ hero m detail =
                 ++ [pill "" (ms (T.strip (bdSitename detail))) | not (T.null (T.strip (bdSitename detail)))]
                 ++ [pill "" (ms ("lang " <> T.strip (bdLanguage detail))) | not (T.null (T.strip (bdLanguage detail)))]
                 ++ [pill "" (ms ("opened " <> (fromMisoString (formatStamp t) :: String))) | Just t <- [bdLastOpenedAt detail], t > 0]
+                ++ [pill (enrichPillClass detail) label | Just label <- [enrichLabel detail]]
+                ++ [ pill "ok" (ms (show (bdReadingTimeMinutes detail) <> " min read"))
+                   | bdReadingTimeMinutes detail > 0
+                   ]
             )
+        , case T.strip (bdEnrichError detail) of
+            "" -> H.div_ [] []
+            message ->
+                H.p_
+                    [HP.class_ "enrich-error", HP.role_ "status"]
+                    [text (ms ("Enrichment: " <> message))]
         , H.div_
             [HP.class_ "detail-actions"]
             [ H.a_
@@ -110,8 +120,40 @@ hero m detail =
                     ++ [text (if mSaving m then "Saving…" else "Save")]
                 )
             , btn "btn-danger" [HE.onClick (DeleteBookmark (bdId detail))] [icon iTrash, text "Delete"]
+            , enrichRetryButton detail
             ]
         ]
+
+-- | Human label for the background enrichment state, when it is worth showing.
+enrichLabel :: BookmarkDetail -> Maybe MisoString
+enrichLabel detail = case T.strip (bdEnrichState detail) of
+    "queued" -> Just "Enrichment queued"
+    "pending" -> Just "Enrichment queued"
+    "running" -> Just "Enriching…"
+    "failed" -> Just "Enrichment failed"
+    _ -> Nothing
+
+enrichPillClass :: BookmarkDetail -> MisoString
+enrichPillClass detail = case T.strip (bdEnrichState detail) of
+    "failed" -> "danger"
+    "queued" -> "warn"
+    "pending" -> "warn"
+    "running" -> "warn"
+    _ -> ""
+
+-- | Retry enrichment for failed bookmarks; disabled while one is in flight.
+enrichRetryButton :: BookmarkDetail -> View () () Model Action
+enrichRetryButton detail =
+    case T.strip (bdEnrichState detail) of
+        "failed" ->
+            btn "" [HE.onClick (RetryEnrich (bdId detail))] [icon iRefresh, text "Retry enrich"]
+        "queued" ->
+            btn "" ([HE.onClick (RetryEnrich (bdId detail))] ++ disabledAttr True) [icon iRefresh, text "Retry enrich"]
+        "pending" ->
+            btn "" ([HE.onClick (RetryEnrich (bdId detail))] ++ disabledAttr True) [icon iRefresh, text "Retry enrich"]
+        "running" ->
+            btn "" ([HE.onClick (RetryEnrich (bdId detail))] ++ disabledAttr True) [icon iRefresh, text "Retry enrich"]
+        _ -> H.span_ [] []
 
 readerPanel :: Model -> BookmarkDetail -> View () () Model Action
 readerPanel _m detail =

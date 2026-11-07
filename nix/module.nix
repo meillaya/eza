@@ -71,6 +71,9 @@ let
   bindMatch = builtins.match "(.+):([0-9]+)" cfg.bind;
   bindHost = if bindMatch == null then "127.0.0.1" else builtins.elemAt bindMatch 0;
   bindPort = if bindMatch == null then 8080 else lib.toInt (builtins.elemAt bindMatch 1);
+  # Environment representation for booleans: the server accepts 1/0 and
+  # true/false; 1/0 is what the systemd unit and the container images use.
+  boolToEnv = b: if b then "1" else "0";
 
   # Host part of an origin (scheme://host[:port][/path]) for the default RP ID.
   originHost =
@@ -242,6 +245,106 @@ in
       default = "info";
       description = "Server log level (EZA_LOG_LEVEL: debug, info, warn, error).";
     };
+    allowPrivateFetch = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Allow the enrichment fetcher to request private/RFC1918 addresses
+        (EZA_ALLOW_PRIVATE_FETCH). Off by default: the server refuses to fetch
+        loopback, link-local and private-network URLs, so the server-side
+        fetcher cannot be used as an SSRF probe through the web UI.
+      '';
+    };
+
+    enrichWorkers = mkOption {
+      type = types.int;
+      default = 2;
+      description = ''
+        Number of in-process background enrichment workers
+        (EZA_ENRICH_WORKERS). Workers fetch titles, favicons and extracted
+        text for queued bookmarks; each opens its own SQLite connection inside
+        the server process, so no extra systemd unit is involved. 0 disables
+        the background workers (adding bookmarks still works; they stay
+        unenriched until re-queued).
+      '';
+    };
+
+    fetchTimeoutMs = mkOption {
+      type = types.int;
+      default = 8000;
+      example = 15000;
+      description = ''
+        Timeout for each outbound enrichment/fetch request in milliseconds
+        (EZA_FETCH_TIMEOUT_MS). The server clamps values below 1000.
+      '';
+    };
+
+    faviconMaxBytes = mkOption {
+      type = types.int;
+      default = 65536;
+      description = ''
+        Maximum favicon download size in bytes (EZA_FAVICON_MAX_BYTES); larger
+        responses are discarded. The server clamps values below 4096.
+      '';
+    };
+
+    faviconTtlDays = mkOption {
+      type = types.int;
+      default = 90;
+      description = ''
+        Favicon cache lifetime in days (EZA_FAVICON_TTL_DAYS); expired icons
+        are re-fetched on the next enrichment pass.
+      '';
+    };
+
+    shareTtlDays = mkOption {
+      type = types.int;
+      default = 7;
+      description = ''
+        Lifetime of public share links in days (EZA_SHARE_TTL_DAYS); links
+        stop resolving after this many days.
+      '';
+    };
+
+    aiProvider = mkOption {
+      type = types.enum [
+        "none"
+        "ollama"
+        "openai"
+        "openai-compatible"
+        "anthropic"
+      ];
+      default = "none";
+      description = ''
+        AI tagging provider (EZA_AI_PROVIDER). "none" disables AI tagging; the
+        AI endpoints then return an empty suggestion list with a notice.
+        "ollama" uses a local Ollama at `ollamaBaseUrl` and needs no API key;
+        "openai" and "openai-compatible" use OPENAI_API_KEY; "anthropic" uses
+        ANTHROPIC_API_KEY.
+      '';
+    };
+
+    ollamaBaseUrl = mkOption {
+      type = types.str;
+      default = "http://127.0.0.1:11434";
+      description = "Ollama base URL for AI tagging (EZA_OLLAMA_BASE_URL) when aiProvider is \"ollama\".";
+    };
+
+    aiModel = mkOption {
+      type = types.str;
+      default = "llama3.2";
+      description = "Model name used for AI tagging (EZA_AI_MODEL), e.g. for Ollama or an OpenAI-compatible endpoint.";
+    };
+
+    aiAutoTag = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Enable automatic AI tagging of newly added bookmarks
+        (EZA_AI_AUTO_TAG). Off by default: AI suggestions are only requested
+        explicitly from the UI.
+      '';
+    };
 
     environmentFile = mkOption {
       type = types.nullOr types.str;
@@ -389,6 +492,26 @@ in
           assertion = cfg.bind != "";
           message = "services.eza.bind must be a non-empty host:port string.";
         }
+        {
+          assertion = cfg.enrichWorkers >= 0;
+          message = "services.eza.enrichWorkers must be 0 (disabled) or greater.";
+        }
+        {
+          assertion = cfg.fetchTimeoutMs >= 1000;
+          message = "services.eza.fetchTimeoutMs must be at least 1000.";
+        }
+        {
+          assertion = cfg.faviconMaxBytes >= 4096;
+          message = "services.eza.faviconMaxBytes must be at least 4096.";
+        }
+        {
+          assertion = cfg.faviconTtlDays >= 1;
+          message = "services.eza.faviconTtlDays must be at least 1.";
+        }
+        {
+          assertion = cfg.shareTtlDays >= 1;
+          message = "services.eza.shareTtlDays must be at least 1.";
+        }
       ];
 
       # Fixed, non-root system user. No DynamicUser: the SQLite database and
@@ -448,6 +571,16 @@ in
               "EZA_SNAPSHOT_DIR=${dataDir}/snapshots"
               "EZA_BACKUP_DIR=${dataDir}/backups"
               "EZA_LOG_LEVEL=${cfg.logLevel}"
+              "EZA_ALLOW_PRIVATE_FETCH=${boolToEnv cfg.allowPrivateFetch}"
+              "EZA_ENRICH_WORKERS=${toString cfg.enrichWorkers}"
+              "EZA_FETCH_TIMEOUT_MS=${toString cfg.fetchTimeoutMs}"
+              "EZA_FAVICON_MAX_BYTES=${toString cfg.faviconMaxBytes}"
+              "EZA_FAVICON_TTL_DAYS=${toString cfg.faviconTtlDays}"
+              "EZA_SHARE_TTL_DAYS=${toString cfg.shareTtlDays}"
+              "EZA_AI_PROVIDER=${cfg.aiProvider}"
+              "EZA_OLLAMA_BASE_URL=${cfg.ollamaBaseUrl}"
+              "EZA_AI_MODEL=${cfg.aiModel}"
+              "EZA_AI_AUTO_TAG=${boolToEnv cfg.aiAutoTag}"
               "HOME=${dataDir}"
             ];
             EnvironmentFile = optional (cfg.environmentFile != null) cfg.environmentFile;

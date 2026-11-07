@@ -16,7 +16,8 @@ wraps it in `secretspec run --provider systemd-credential --profile production`.
 
 ## The manifest
 
-Two optional secrets, both only needed for AI-assisted tagging:
+Two optional secrets, both only needed when AI tagging uses a key-based
+provider (see [AI provider selection](#ai-provider-selection)):
 
 | Secret | Used by | Required |
 |---|---|---|
@@ -32,8 +33,27 @@ Profiles:
 | `production` | `systemd-credential`, then `env` | NixOS module, Docker/K8s wrappers |
 
 Because every secret is optional, **eza runs fine with no secrets at all**:
-the AI features are simply disabled. `secretspec check` reports
+AI tagging is off by default (`EZA_AI_PROVIDER=none`) and key-based providers
+report the missing key instead of failing. `secretspec check` reports
 `missing_optional` and exits 0.
+
+## AI provider selection
+
+The provider is chosen with `EZA_AI_PROVIDER` (default `none`), not with a
+secret:
+
+| `EZA_AI_PROVIDER` | Needs | Notes |
+|---|---|---|
+| `none` (default) | nothing | AI tagging is disabled; AI endpoints answer with an empty suggestion list and a notice. |
+| `ollama` | nothing | Talks to `EZA_OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`) with `EZA_AI_MODEL` (default `llama3.2`); no API key leaves the host. |
+| `openai` | `OPENAI_API_KEY` | Uses the OpenAI endpoint; select the model with `EZA_AI_MODEL`. |
+| `openai-compatible` | `OPENAI_API_KEY` | Self-hosted/OpenAI-compatible endpoint; also set `EZA_OPENAI_BASE_URL`. |
+| `anthropic` | `ANTHROPIC_API_KEY` | Anthropic Messages API. |
+
+`EZA_AI_AUTO_TAG=0` (default) keeps tagging on explicit requests only; set it
+to `1` to tag newly added bookmarks automatically. With a key-based provider
+selected but no key configured, the server starts normally and the AI
+endpoints report that the key is missing instead of failing.
 
 ## Development (devenv shell, env provider)
 

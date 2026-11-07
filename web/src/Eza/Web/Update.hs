@@ -6,6 +6,7 @@ module Eza.Web.Update (updateModel, subscriptions) where
 
 import Control.Monad (forM_, unless, void, when)
 import Data.Aeson (Value, object, (.=))
+import qualified Data.IntSet as IS
 import Data.List (nub)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, isJust, mapMaybe)
@@ -27,7 +28,7 @@ import Eza.Types (
  )
 import Eza.Web.Api
 import Eza.Web.Model
-import Eza.Web.Types (ApiError (..), ConsolGroup (..), DedupGroup (..), TagSuggestion (..), fieldInt)
+import Eza.Web.Types (ApiError (..), ConsolGroup (..), DedupGroup (..), TagSuggestion (..), TokenView (..), fieldInt)
 
 {- | Component subscriptions: URL changes (back/forward), window scroll for
 the virtualized grid, and window resize for the column count.
@@ -163,6 +164,13 @@ loadRoute route = do
             , mAccountLoading = route == Account
             , mAiTag = if route == AiTags then mAiTag m else Nothing
             , mSuggestions = if route == AiTags then mSuggestions m else []
+            , mSelection = IS.empty
+            , mSelectAnchor = Nothing
+            , mSelectingAll = False
+            , mBulkBusy = False
+            , mTagPrompt = Nothing
+            , mTagPromptValue = ""
+            , mConfirmBulkDelete = False
             }
     case route of
         Index -> reloadList
@@ -181,7 +189,10 @@ loadRoute route = do
             refreshTags
         AiTags -> refreshTags
         Maintenance -> fetchPruneCandidates PruneLoaded PruneFailed
-        Account -> fetchAccount AccountLoaded AccountFailed
+        Account -> do
+            fetchAccount AccountLoaded AccountFailed
+            putModel (\x -> x{mTokensLoading = True})
+            fetchTokens TokensLoaded TokensFailed
         NotFound -> pure ()
 
 scheduleSearch :: Int -> Effect () () Model Action
@@ -863,6 +874,186 @@ updateModel = \case
     AccountReload -> fetchAccount AccountLoaded AccountFailed
     Logout -> logout LoggedOut (\err -> ApiErrorRaised err)
     LoggedOut -> liftSinkIO (redirectTo "/login")
+    -- selection / bulk -----------------------------------------------------
+    SelectToggled bookmarkId shift -> do
+        m <- get
+        let current = mSelection m
+            ids = map bsId (mItems m)
+            indexOf target = case [i | (i, item) <- zip [0 ..] (mItems m), bsId item == target] of
+                (i : _) -> Just i
+                [] -> Nothing
+        case (shift, mSelectAnchor m >>= \anchor -> (,) anchor <$> indexOf anchor) of
+            (True, Just (anchor, anchorIndex)) ->
+                case indexOf bookmarkId of
+                    Just currentIndex -> do
+                        let (from, to) = (min anchorIndex currentIndex, max anchorIndex currentIndex)
+                            rangeIds = [bsId item | (i, item) <- zip [0 ..] (mItems m), i >= from, i <= to]
+                        putModel (\x -> x{mSelection = IS.union current (IS.fromList rangeIds)})
+                    Nothing -> pure ()
+            _ ->
+                let next =
+                        if IS.member bookmarkId current
+                            then IS.delete bookmarkId current
+                            else IS.insert bookmarkId current
+                 in putModel (\x -> x{mSelection = next, mSelectAnchor = Just bookmarkId})
+    SelectClear -> putModel (\m -> m{mSelection = IS.empty, mSelectAnchor = Nothing, mSelectingAll = False})
+    SelectAllLoaded -> do
+        m <- get
+        putModel (\x -> x{mSelection = IS.fromList (map bsId (mItems m)), mSelectAnchor = Nothing})
+    SelectAllMatchingStart -> do
+        m <- get
+        put
+            m
+                { mSelectingAll = True
+                , mSelection = IS.empty
+                , mSelectAnchor = Nothing
+                , mSelectFetched = 0
+                }
+        fetchBookmarks
+            ((listParams m False){lpOffset = 0, lpLimit = 200})
+            (\page -> SelectPageLoaded (map bsId (spItems page)) (spHasMore page))
+            SelectPageFailed
+    SelectPageLoaded ids hasMore -> do
+        m <- get
+        let fetched = mSelectFetched m + length ids
+            merged = IS.union (mSelection m) (IS.fromList ids)
+            capped = if IS.size merged > 10000 then IS.fromList (take 10000 (IS.toList merged)) else merged
+        put m{mSelection = capped, mSelectFetched = fetched}
+        if hasMore && IS.size capped < 10000
+            then
+                fetchBookmarks
+                    ((listParams m False){lpOffset = fetched, lpLimit = 200})
+                    (\page -> SelectPageLoaded (map bsId (spItems page)) (spHasMore page))
+                    SelectPageFailed
+            else do
+                putModel (\x -> x{mSelectingAll = False})
+                if IS.size capped >= 10000
+                    then notify "Selected the first 10,000 bookmarks" ToastInfo
+                    else notify (ms ("Selected " <> show (IS.size capped) <> " bookmarks")) ToastOk
+    SelectPageFailed err -> do
+        putModel (\m -> m{mSelectingAll = False})
+        handleApiError err
+    BulkTagPromptOpen adding -> putModel (\m -> m{mTagPrompt = Just adding, mTagPromptValue = ""})
+    BulkTagInput value -> putModel (\m -> m{mTagPromptValue = value})
+    BulkTagCancel -> putModel (\m -> m{mTagPrompt = Nothing, mTagPromptValue = ""})
+    BulkTagSubmit -> do
+        m <- get
+        let ids = IS.toList (mSelection m)
+            tags = splitTags (mTagPromptValue m)
+            adding = mTagPrompt m == Just True
+        if null ids
+            then notify "Select at least one bookmark first" ToastInfo
+            else
+                if null tags
+                    then notify "Type at least one tag" ToastInfo
+                    else do
+                        putModel (\x -> x{mBulkBusy = True, mTagPrompt = Nothing, mTagPromptValue = ""})
+                        bulkUpdate
+                            (if adding then BulkAddTags tags else BulkRemoveTags tags)
+                            ids
+                            BulkActionDone
+                            BulkActionFailed
+    BulkMark readFlag -> do
+        m <- get
+        let ids = IS.toList (mSelection m)
+        if null ids
+            then notify "Select at least one bookmark first" ToastInfo
+            else do
+                putModel (\x -> x{mBulkBusy = True})
+                bulkUpdate (BulkMarkRead readFlag) ids BulkActionDone BulkActionFailed
+    BulkDeleteRequest -> do
+        m <- get
+        if IS.null (mSelection m)
+            then notify "Select at least one bookmark first" ToastInfo
+            else putModel (\x -> x{mConfirmBulkDelete = True})
+    BulkDeleteCancel -> putModel (\m -> m{mConfirmBulkDelete = False})
+    BulkDeleteConfirm -> do
+        m <- get
+        putModel (\x -> x{mConfirmBulkDelete = False, mBulkBusy = True})
+        bulkUpdate BulkDelete (IS.toList (mSelection m)) BulkActionDone BulkActionFailed
+    BulkActionDone updated -> do
+        putModel
+            ( \m ->
+                m
+                    { mSelection = IS.empty
+                    , mSelectAnchor = Nothing
+                    , mSelectingAll = False
+                    , mBulkBusy = False
+                    , mTagPrompt = Nothing
+                    , mTagPromptValue = ""
+                    , mConfirmBulkDelete = False
+                    }
+            )
+        notify (ms ("Updated " <> show updated <> " bookmarks")) ToastOk
+        reloadList
+        refreshTags
+    BulkActionFailed err -> do
+        putModel (\m -> m{mBulkBusy = False})
+        handleApiError err
+    RetryEnrich bookmarkId -> do
+        putModel
+            ( \m ->
+                m
+                    { mDetail =
+                        fmap (\detail -> detail{bdEnrichState = "queued", bdEnrichError = ""}) (mDetail m)
+                    }
+            )
+        bookmarkAction bookmarkId "enrich" (DetailReload bookmarkId) DetailFailed
+    DetailReload bookmarkId -> fetchDetail bookmarkId DetailLoaded DetailFailed
+    -- api tokens -----------------------------------------------------------
+    TokensLoaded tokens -> putModel (\m -> m{mTokens = tokens, mTokensLoading = False})
+    TokensFailed err -> do
+        putModel (\m -> m{mTokensLoading = False})
+        handleApiError err
+    TokenNameInput value -> putModel (\m -> m{mTokenName = value})
+    TokenScopeToggled scope ->
+        putModel
+            ( \m ->
+                m
+                    { mTokenScopes =
+                        if scope `elem` mTokenScopes m
+                            then filter (/= scope) (mTokenScopes m)
+                            else mTokenScopes m ++ [scope]
+                    }
+            )
+    TokenCreate -> do
+        m <- get
+        let name = T.strip (fromMisoString (mTokenName m))
+        if T.null name
+            then notify "Give the token a name" ToastInfo
+            else
+                if null (mTokenScopes m)
+                    then notify "Pick at least one scope" ToastInfo
+                    else do
+                        putModel (\x -> x{mTokenBusy = True})
+                        createApiToken name (mTokenScopes m) TokenCreated TokenCreateFailed
+    TokenCreated raw info -> do
+        putModel
+            ( \m ->
+                m
+                    { mTokens = info : filter ((/= tvId info) . tvId) (mTokens m)
+                    , mTokenName = ""
+                    , mTokenBusy = False
+                    , mTokenSecret = Just (raw, info)
+                    }
+            )
+        notify "Token created — copy it now, it is shown only once" ToastOk
+    TokenCreateFailed err -> do
+        putModel (\m -> m{mTokenBusy = False})
+        handleApiError err
+    TokenRevoke tokenId -> revokeApiToken tokenId TokenRevoked TokenCreateFailed
+    TokenRevoked -> do
+        notify "Token revoked" ToastOk
+        fetchTokens TokensLoaded TokensFailed
+    TokenRevealDismiss -> putModel (\m -> m{mTokenSecret = Nothing})
+    TokenCopied raw -> withSink $ \sink -> do
+        copiedValue <- jsgf "ezaCopy" (ms raw)
+        copied <- fromMaybe False <$> (fromJSVal copiedValue :: IO (Maybe Bool))
+        sink
+            ( ToastAdd
+                (if copied then "Token copied" else "Copy failed — select the text instead")
+                (if copied then ToastOk else ToastError)
+            )
     -- toasts ---------------------------------------------------------------
     ToastAdd message kind -> notify message kind
     ToastDismiss dismissed -> putModel (\m -> m{mToasts = filter (\toast -> toastId toast /= dismissed) (mToasts m)})
@@ -871,7 +1062,10 @@ updateModel = \case
         | mPaletteOpen m = putModel (\x -> x{mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})
         | mAddOpen m = putModel (\x -> x{mAddOpen = False})
         | mGuardOpen m = putModel (\x -> x{mGuardOpen = False, mPendingRoute = Nothing})
+        | isJust (mTagPrompt m) = putModel (\x -> x{mTagPrompt = Nothing, mTagPromptValue = ""})
+        | mConfirmBulkDelete m = putModel (\x -> x{mConfirmBulkDelete = False})
         | isJust (mLinkQuery m) = putModel (\x -> x{mLinkQuery = Nothing, mLinkResults = []})
+        | not (IS.null (mSelection m)) = putModel (\x -> x{mSelection = IS.empty, mSelectAnchor = Nothing})
         | otherwise = pure ()
 
     initialChoices groups =

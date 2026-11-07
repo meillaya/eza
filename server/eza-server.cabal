@@ -39,12 +39,14 @@ library
                     Eza.Favicon
                     Eza.Fetch
                     Eza.Graph
+                    Eza.Highlights
                     Eza.Import
                     Eza.Jobs
                     Eza.Links
                     Eza.Pages
                     Eza.SavedSearches
                     Eza.Server
+                    Eza.Shares
                     Eza.Snapshot
                     Eza.Tags
                     Eza.Tokens

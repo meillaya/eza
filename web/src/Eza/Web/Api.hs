@@ -27,9 +27,14 @@ module Eza.Web.Api (
     fetchPruneCandidates,
     fetchAccount,
     fetchTags,
+    fetchTokens,
     -- writes
     createBookmark,
     quickSave,
+    BulkAction (..),
+    bulkUpdate,
+    createApiToken,
+    revokeApiToken,
     patchBookmark,
     deleteBookmark,
     markAllAbove,
@@ -85,9 +90,12 @@ import Eza.Web.Types (
     Credential,
     DedupGroup,
     TagSuggestion,
+    TokenView,
     fieldBool,
     fieldInt,
     fieldList,
+    fieldObject,
+    fieldText,
     mkApiError,
  )
 
@@ -667,6 +675,82 @@ submitImport onOk onErr = withSink $ \sink -> do
                 (\resp -> sink (onOk (body resp)))
                 (\resp -> sink (onErr (responseError resp)))
                 JSON
+
+-- ------------------------------------------------------------------ bulk --
+
+-- | Bulk bookmark mutations (selection bar).
+data BulkAction
+    = BulkAddTags [Text]
+    | BulkRemoveTags [Text]
+    | BulkMarkRead Bool
+    | BulkDelete
+    deriving (Eq, Show)
+
+{- | @POST /api/v1/bookmarks/bulk@ — one undo snapshot, one response with the
+number of updated rows.
+-}
+bulkUpdate ::
+    BulkAction ->
+    [Int] ->
+    (Int -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+bulkUpdate bulkAction ids onOk onErr =
+    sendValue
+        "POST"
+        "/api/v1/bookmarks/bulk"
+        (Just (object fields))
+        []
+        JSON
+        (\v -> onOk (fieldInt "updated" v))
+        onErr
+  where
+    fields = case bulkAction of
+        BulkAddTags tags -> base "add_tags" <> [("tags" .= tags)]
+        BulkRemoveTags tags -> base "remove_tags" <> [("tags" .= tags)]
+        BulkMarkRead True -> base "mark_read"
+        BulkMarkRead False -> base "mark_unread"
+        BulkDelete -> base "delete" <> [("confirm" .= True)]
+    base name =
+        [ "action" .= (name :: Text)
+        , "ids" .= ids
+        ]
+
+-- ---------------------------------------------------------------- tokens ---
+
+{- | @GET /api/v1/tokens@ — browser-session only (bearer tokens cannot manage
+tokens).
+-}
+fetchTokens ::
+    ([TokenView] -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+fetchTokens onOk onErr =
+    getValue "/api/v1/tokens" [] (\v -> onOk (fieldList "tokens" v)) onErr
+
+-- | @POST /api/v1/tokens@ — returns the raw token once plus its metadata.
+createApiToken ::
+    Text ->
+    [Text] ->
+    (Text -> TokenView -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+createApiToken name scopes onOk onErr =
+    sendValue
+        "POST"
+        "/api/v1/tokens"
+        (Just (object ["name" .= name, "scopes" .= scopes]))
+        []
+        JSON
+        ( \v -> case fieldObject "token_info" v of
+            Just info -> onOk (fieldText "token" v) info
+            Nothing -> onErr (mkApiError Nothing (Just "token response is missing token_info"))
+        )
+        onErr
+
+-- | @DELETE /api/v1/tokens/{id}@ — revoke (keeps the row, sets revoked_at).
+revokeApiToken :: Int -> action -> (ApiError -> action) -> Eff model action
+revokeApiToken tokenId = apiDelete ("/api/v1/tokens/" <> ms (show tokenId))
 
 -- ------------------------------------------------------------------ links --
 

@@ -20,10 +20,13 @@ module Eza.Web.Model (
     themeToMiso,
     themeOfMiso,
     paletteEntries,
+    isSelected,
+    selectedCount,
 ) where
 
 import Data.Aeson (Value)
 import qualified Data.ByteString as BS
+import qualified Data.IntSet as IS
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -46,7 +49,7 @@ import Miso
 import Miso.Router (Router (..), RoutingError (..), Token (..), parseURI, routes, toCapture, toPath, toQueryParam)
 import Miso.Subscription.History (getURI)
 
-import Eza.Web.Types (AccountInfo, ApiError, ConsolGroup, DedupGroup, TagSuggestion)
+import Eza.Web.Types (AccountInfo, ApiError, ConsolGroup, DedupGroup, TagSuggestion, TokenView)
 
 -- | Application routes.  @Bookmark@ carries the numeric bookmark id.
 data Route
@@ -379,6 +382,38 @@ data Action
     | AccountReload
     | Logout
     | LoggedOut
+    | -- selection / bulk actions
+      SelectToggled Int Bool
+    | SelectClear
+    | SelectAllLoaded
+    | SelectAllMatchingStart
+    | SelectPageLoaded [Int] Bool
+    | SelectPageFailed ApiError
+    | BulkTagPromptOpen Bool
+    | BulkTagInput MisoString
+    | BulkTagCancel
+    | BulkTagSubmit
+    | BulkMark Bool
+    | BulkDeleteRequest
+    | BulkDeleteCancel
+    | BulkDeleteConfirm
+    | BulkActionDone Int
+    | BulkActionFailed ApiError
+    | -- API tokens
+      TokensLoaded [TokenView]
+    | TokensFailed ApiError
+    | TokenNameInput MisoString
+    | TokenScopeToggled Text
+    | TokenCreate
+    | TokenCreated Text TokenView
+    | TokenCreateFailed ApiError
+    | TokenRevoke Int
+    | TokenRevoked
+    | TokenRevealDismiss
+    | TokenCopied Text
+    | -- enrichment
+      RetryEnrich Int
+    | DetailReload Int
     | -- toasts
       ToastAdd MisoString ToastKind
     | ToastDismiss Int
@@ -416,6 +451,15 @@ data Model = Model
     , mTags :: [TagStat]
     , mSaved :: [SavedSearch]
     , mSavedName :: MisoString
+    , -- selection / bulk
+      mSelection :: IS.IntSet
+    , mSelectAnchor :: Maybe Int
+    , mSelectingAll :: Bool
+    , mSelectFetched :: Int
+    , mBulkBusy :: Bool
+    , mTagPrompt :: Maybe Bool
+    , mTagPromptValue :: MisoString
+    , mConfirmBulkDelete :: Bool
     , -- add modal
       mAddOpen :: Bool
     , mAddUrl :: MisoString
@@ -474,6 +518,12 @@ data Model = Model
     , mAccountLoading :: Bool
     , mRecoveryCodes :: [Text]
     , mCredEdit :: Maybe (Text, MisoString)
+    , mTokens :: [TokenView]
+    , mTokensLoading :: Bool
+    , mTokenName :: MisoString
+    , mTokenScopes :: [Text]
+    , mTokenSecret :: Maybe (Text, TokenView)
+    , mTokenBusy :: Bool
     , -- import / export
       mImporting :: Bool
     , mImportReport :: Maybe ImportReport
@@ -514,6 +564,14 @@ initialModel =
         , mTags = []
         , mSaved = []
         , mSavedName = ""
+        , mSelection = IS.empty
+        , mSelectAnchor = Nothing
+        , mSelectingAll = False
+        , mSelectFetched = 0
+        , mBulkBusy = False
+        , mTagPrompt = Nothing
+        , mTagPromptValue = ""
+        , mConfirmBulkDelete = False
         , mAddOpen = False
         , mAddUrl = ""
         , mAddTitle = ""
@@ -564,6 +622,12 @@ initialModel =
         , mAccountLoading = False
         , mRecoveryCodes = []
         , mCredEdit = Nothing
+        , mTokens = []
+        , mTokensLoading = False
+        , mTokenName = ""
+        , mTokenScopes = ["read", "write"]
+        , mTokenSecret = Nothing
+        , mTokenBusy = False
         , mImporting = False
         , mImportReport = Nothing
         , mToasts = []
@@ -599,6 +663,14 @@ visibleRows m =
         first = max 0 (rel `div` rh - 3)
         viewRows = (mHeight m + rh - 1) `div` rh + 1
      in (first, first + viewRows + 6)
+
+-- | Is a bookmark currently selected for bulk actions?
+isSelected :: Model -> Int -> Bool
+isSelected m bookmarkId = IS.member bookmarkId (mSelection m)
+
+-- | How many bookmarks are selected.
+selectedCount :: Model -> Int
+selectedCount = IS.size . mSelection
 
 {- | Command-palette entries: navigation, actions, and recent bookmarks that
 match the current palette query.  Kept in the model layer so both the view

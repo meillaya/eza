@@ -14,6 +14,7 @@ import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
+import Data.List (isPrefixOf)
 import Data.Maybe (fromMaybe)
 import Data.String (fromString)
 import Data.Text (Text)
@@ -26,7 +27,8 @@ import Network.HTTP.Types.Header (hAuthorization, hCacheControl, hETag, hIfNoneM
 import Network.Wai
 import Network.Wai.Handler.Warp
 import qualified Web.Cookie as Cookie
-import System.Directory (doesFileExist)
+import System.Directory (canonicalizePath, doesFileExist)
+import System.Environment (lookupEnv)
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
 
@@ -41,10 +43,12 @@ import Eza.Enrich (enqueueEnrichment, runEnrichWorker)
 import Eza.Export (exportBookmarks)
 import Eza.Favicon (Favicon (..), getFavicon)
 import Eza.Graph (graphNeighborhood)
+import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateHighlight)
 import Eza.Import (defaultImportOptions, importParsed, parseNetscape)
 import Eza.Jobs (resetRunningJobs)
 import Eza.Pages (addPasskeyPage, loginPage, recoverPage, setupPage)
 import Eza.SavedSearches (createSavedSearch, deleteSavedSearch, listSavedSearches)
+import Eza.Shares (ShareRecord (..), createShare, listShares, resolveShare, revokeShare, shareBookmarkPage, shareSearchFeed, shareSearchPage)
 import Eza.Snapshot (captureSnapshot)
 import Eza.Tags (consolidationCandidates, deleteTag, mergeTags, renameTag)
 import Eza.Tokens (Token (..), TokenView (..), authenticateToken, createToken, listTokens, revokeToken, tokenAllows)
@@ -104,6 +108,7 @@ app cfg db req respond = do
       allowed <- Auth.setupAllowed conn
       if allowed then respond (htmlResponse setupPage) else respond (redirectTo "/login")
     ("GET", ["recover"]) -> respond (htmlResponse recoverPage)
+    ("GET", ["s", token]) -> withDb db $ \conn -> publicShareHandler conn token respond
     ("POST", ["api", "auth", "options"]) -> withDb db $ \conn -> do
       ensureOrigin cfg req
       r <- Auth.authenticationOptions conn (authConfig cfg)
@@ -208,6 +213,36 @@ authedRoute cfg _db req respond ctx conn =
       faviconHandler conn req domain respond
     ("POST", ["api", "v1", "quick-save"]) ->
       quickSaveHandler conn req respond
+    ("GET", ["api", "v1", "bookmarks", idTxt, "highlights"]) -> case readInt idTxt of
+      Nothing -> respond (jsonError status400 "bad_request" "invalid bookmark id")
+      Just bid -> do
+        highlights <- listHighlights conn bid
+        respond (jsonResponse status200 (object ["highlights" .= highlights]))
+    ("POST", ["api", "v1", "bookmarks", idTxt, "highlights"]) -> case readInt idTxt of
+      Nothing -> respond (jsonError status400 "bad_request" "invalid bookmark id")
+      Just bid -> highlightCreateHandler conn bid req respond
+    ("PATCH", ["api", "v1", "bookmarks", idTxt, "highlights", hidTxt]) ->
+      case (readInt idTxt, readInt hidTxt) of
+        (Just bid, Just hid) -> highlightUpdateHandler conn bid hid req respond
+        _ -> respond (jsonError status400 "bad_request" "invalid highlight id")
+    ("DELETE", ["api", "v1", "bookmarks", idTxt, "highlights", hidTxt]) ->
+      case (readInt idTxt, readInt hidTxt) of
+        (Just bid, Just hid) -> do
+          ok <- deleteHighlight conn bid hid
+          if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "highlight not found")
+        _ -> respond (jsonError status400 "bad_request" "invalid highlight id")
+    ("GET", ["api", "v1", "share-links"]) -> do
+      shares <- listShares conn
+      respond (jsonResponse status200 (object ["shares" .= shares]))
+    ("POST", ["api", "v1", "share-links"]) -> shareCreateHandler cfg conn req respond
+    ("DELETE", ["api", "v1", "share-links", idTxt]) -> case readInt idTxt of
+      Nothing -> respond (jsonError status400 "bad_request" "invalid share id")
+      Just shareId -> do
+        ok <- revokeShare conn shareId
+        if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "share not found")
+    ("GET", ["api", "v1", "bookmarks", idTxt, "snapshot"]) -> case readInt idTxt of
+      Nothing -> respond (jsonError status400 "bad_request" "invalid bookmark id")
+      Just bid -> snapshotHandler cfg conn bid respond
     ("GET", ["api", "v1", "tags"]) -> do
       tags <- allTags conn
       respond (jsonResponse status200 (object ["tags" .= tags]))
@@ -377,6 +412,26 @@ authedRoute cfg _db req respond ctx conn =
     ("GET", ["api", "v1", "export", "notes"]) ->
       respond (jsonError status501 "not_implemented" "Markdown note export is coming in a later milestone")
     ("GET", ["account", "add-passkey"]) -> respond (htmlResponse addPasskeyPage)
+    ("GET", ["api", "v1", "ai", "status"]) -> do
+      provider <- fromMaybe (cfgAiProvider cfg) <$> lookupEnv "EZA_AI_PROVIDER"
+      key <-
+        case provider of
+          "ollama" -> pure (Just "")
+          "openai" -> lookupEnv "OPENAI_API_KEY"
+          "openai-compatible" -> lookupEnv "OPENAI_API_KEY"
+          "none" -> pure Nothing
+          _ -> lookupEnv "ANTHROPIC_API_KEY"
+      let configured = maybe False (not . null) key
+      respond
+        ( jsonResponse
+            status200
+            ( object
+                [ "provider" .= provider
+                , "model" .= (if provider == "ollama" then T.pack (cfgAiModel cfg) else ("default" :: Text))
+                , "configured" .= configured
+                ]
+            )
+        )
     ("GET", ["api", "v1", "tokens"]) -> do
       tokens <- listTokens conn
       respond (jsonResponse status200 (object ["tokens" .= tokens]))
@@ -650,6 +705,136 @@ addBookmark conn req respond = do
             Right bid -> do
               enqueueEnrichment conn bid
               respond (jsonResponse status201 (object ["id" .= bid]))
+
+data HighlightCreateBody = HighlightCreateBody
+  { hcbQuote :: Text
+  , hcbPrefix :: Maybe Text
+  , hcbSuffix :: Maybe Text
+  , hcbStart :: Int
+  , hcbEnd :: Int
+  , hcbNote :: Maybe Text
+  , hcbColor :: Maybe Text
+  }
+
+instance FromJSON HighlightCreateBody where
+  parseJSON = withObject "HighlightCreateBody" $ \o ->
+    HighlightCreateBody
+      <$> o .: "quote"
+      <*> o .:? "prefix"
+      <*> o .:? "suffix"
+      <*> o .: "start_offset"
+      <*> o .: "end_offset"
+      <*> o .:? "note"
+      <*> o .:? "color"
+
+highlightCreateHandler :: Connection -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+highlightCreateHandler conn bid req respond = do
+  body <- strictRequestBody req
+  case eitherDecode body of
+    Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+    Right (HighlightCreateBody quote prefix suffix start end note color) -> do
+      result <- createHighlight conn bid quote (fromMaybe "" prefix) (fromMaybe "" suffix) start end (fromMaybe "" note) (fromMaybe "yellow" color)
+      case result of
+        Left err -> respond (jsonError status400 "bad_request" err)
+        Right highlight -> respond (jsonResponse status201 highlight)
+
+data HighlightPatchBody = HighlightPatchBody
+  { hpbNote :: Maybe Text
+  , hpbColor :: Maybe Text
+  }
+
+instance FromJSON HighlightPatchBody where
+  parseJSON = withObject "HighlightPatchBody" $ \o ->
+    HighlightPatchBody <$> o .:? "note" <*> o .:? "color"
+
+highlightUpdateHandler :: Connection -> Int -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+highlightUpdateHandler conn bid hid req respond = do
+  body <- strictRequestBody req
+  case eitherDecode body of
+    Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+    Right (HighlightPatchBody note color) -> do
+      ok <- updateHighlight conn bid hid note color
+      if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status404 "not_found" "highlight not found")
+
+data ShareCreateBody = ShareCreateBody
+  { scbScope :: Text
+  , scbTargetId :: Int
+  , scbIncludeNote :: Maybe Bool
+  , scbExpiresInDays :: Maybe Int
+  }
+
+instance FromJSON ShareCreateBody where
+  parseJSON = withObject "ShareCreateBody" $ \o ->
+    ShareCreateBody <$> o .: "scope" <*> o .: "target_id" <*> o .:? "include_note" <*> o .:? "expires_in_days"
+
+shareCreateHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+shareCreateHandler cfg conn req respond = do
+  body <- strictRequestBody req
+  case eitherDecode body of
+    Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+    Right (ShareCreateBody scope targetId includeNote expires) -> do
+      let days = fromMaybe (cfgShareTtlDays cfg) expires
+      result <- createShare conn scope targetId (fromMaybe False includeNote) days
+      case result of
+        Left err -> respond (jsonError status400 "bad_request" err)
+        Right (shareId, raw) ->
+          respond (jsonResponse status201 (object ["id" .= shareId, "url" .= (cfgPublicOrigin cfg <> "/s/" <> raw)]))
+
+publicShareHandler :: Connection -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+publicShareHandler conn token respond = do
+  let isFeed = T.isSuffixOf ".xml" token
+      raw = if isFeed then T.dropEnd 4 token else token
+  resolved <- resolveShare conn raw
+  case resolved of
+    Nothing -> respond (jsonError status404 "not_found" "share link is invalid or expired")
+    Just record
+      | srScope record == "bookmark" -> do
+          bookmark <- getBookmark conn (srTargetId record)
+          case bookmark of
+            Nothing -> respond (jsonError status404 "not_found" "bookmark not found")
+            Just detail
+              | isFeed -> respond (jsonError status404 "not_found" "feeds are only available for saved searches")
+              | otherwise -> respond (addShareHeaders (htmlResponse (shareBookmarkPage detail (srIncludeNote record))))
+      | srScope record == "saved_search" -> do
+          searches <- listSavedSearches conn
+          case [saved | saved <- searches, ssId saved == srTargetId record] of
+            [] -> respond (jsonError status404 "not_found" "saved search not found")
+            (saved : _) -> do
+              page <- listBookmarks conn (defaultListQuery {lqQ = ssQ saved, lqTags = ssTags saved, lqLimit = 100})
+              if isFeed
+                then respond (addShareHeaders (responseLBS status200 [(hContentType, "application/atom+xml; charset=utf-8")] (LBS.fromStrict (TE.encodeUtf8 (shareSearchFeed saved page)))))
+                else respond (addShareHeaders (htmlResponse (shareSearchPage saved page)))
+      | otherwise -> respond (jsonError status404 "not_found" "unknown share scope")
+  where
+    addShareHeaders = mapResponseHeaders (<> [("X-Robots-Tag", "noindex"), ("Cache-Control", "private, no-store")])
+
+snapshotHandler :: Config -> Connection -> Int -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+snapshotHandler cfg conn bid respond = do
+  bookmark <- getBookmark conn bid
+  case bookmark of
+    Just detail
+      | bdSnapshotKind detail /= "file" || T.null (bdSnapshotPath detail) ->
+          respond (jsonError status404 "not_found" "no local snapshot for this bookmark")
+      | otherwise -> do
+          let rawPath = T.unpack (bdSnapshotPath detail)
+              root = cfgSnapshotDir cfg
+          resolved <- canonicalizePath rawPath
+          rootResolved <- canonicalizePath root
+          exists <- doesFileExist resolved
+          if exists && isPrefixOf rootResolved resolved
+            then
+              respond
+                ( responseFile
+                    status200
+                    [ (hContentType, "text/html; charset=utf-8")
+                    , ("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data: https:")
+                    , ("X-Content-Type-Options", "nosniff")
+                    ]
+                    resolved
+                    Nothing
+                )
+            else respond (jsonError status404 "not_found" "snapshot file not found")
+    Nothing -> respond (jsonError status404 "not_found" "bookmark not found")
 
 data BulkBody = BulkBody
   { bbAction :: Text
