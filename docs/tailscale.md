@@ -1,7 +1,7 @@
 # Publishing eza over Tailscale Serve (HTTPS)
 
 eza uses WebAuthn passkeys. Browsers only allow passkey ceremonies on a
-**secure origin** — HTTPS (or `http://localhost`). Tailscale Serve gives you
+**secure origin**: HTTPS (or `http://localhost`). Tailscale Serve gives you
 that without opening ports: it terminates TLS with a certificate for your
 tailnet DNS name and proxies to eza's loopback listener. The result is
 `https://<machine>.<tailnet>.ts.net`, reachable only from your tailnet.
@@ -112,7 +112,7 @@ set, and turns on Secure cookies automatically for `https://` origins.
   release them for a different origin.
 - Pick a name you can keep: the machine name in the tailnet, a Tailscale
   custom domain, or a real domain via Caddy. Changing it later means
-  re-enrolling passkeys — which is exactly what the **one-time recovery codes**
+  re-enrolling passkeys. The one-time recovery codes is exactly what the **one-time recovery codes**
   are for.
 - The recovery codes are shown **once**, by the first-run setup page. Save them
   in a password manager. If a passkey is lost, a recovery code opens a scoped
@@ -135,7 +135,7 @@ curl -fsS https://eza.tail1234.ts.net/healthz
 
 Then open the URL in a browser and complete first-run enrollment. A
 "not secure" warning or a passkey prompt that never appears means the URL is
-not HTTPS or the RP ID does not match the host — fix `publicOrigin`/`rpId`
+not HTTPS or the RP ID does not match the host; fix `publicOrigin`/`rpId`
 and restart eza.
 
 ## Troubleshooting

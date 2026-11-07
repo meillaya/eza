@@ -24,7 +24,7 @@ The deployment binary is **eza-bookmarks**:
 - NixOS with flakes enabled (24.11+; tested on nixos-unstable).
 - A **secure origin** for passkeys: WebAuthn only works over HTTPS (or
   `http://localhost`). Use [Tailscale Serve](tailscale.md) or the module's
-  Caddy option — never expose plain HTTP to the internet.
+  Caddy option. Never expose plain HTTP to the internet.
 - The web client bundle. The flake pins it as a fixed-output release asset
   (see [Web assets](#web-assets)); until CI publishes a release for your
   version you must build it locally and point the module at the local package.

@@ -2,6 +2,7 @@
   "name": "eza-e2e",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "packageManager": "bun@1.4.2",
   "scripts": {
     "test:e2e": "playwright test",

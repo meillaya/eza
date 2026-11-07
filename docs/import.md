@@ -1,43 +1,67 @@
-# Importing browser bookmarks
+# Import browser bookmarks
 
-The importer accepts the Netscape `bookmarks.html` dialect written by Firefox,
-Chromium, Safari, and browser-extension exporters.
+The importer reads the Netscape `bookmarks.html` format that Firefox,
+Chromium, Safari, and browser-extension exporters write.
+
+## Before you start
+
+- Initialise the database with `eza-bookmarks init`, or let the server create
+  it on first start.
+- Keep the server stopped while a large import runs. The importer opens the
+  same SQLite file, and one writer keeps the transaction simple.
+- Save the source file outside `EZA_DATA_DIR`; the importer reads it once.
+
+## Run the import
 
 ```bash
-eza-bookmarks import netscape bookmarks_14_08_2026.html --report dist/import.json
+eza-bookmarks import netscape bookmarks_14_08_2026.html \
+  --report dist/import.json
 ```
 
-## Reference acceptance (2026-08-14 export)
+The command exits 0 after the transaction commits. The report file contains the
+same `ImportReport` JSON that the API returns. Run `eza-bookmarks verify` to
+compare `bookmarks` and `bookmarks_fts`; it exits non-zero when the counts
+differ.
+
+A second run reports `inserted=0`, `existing=8988`, and
+`tag_links_added=0`. The importer matches rows by normalized URL.
+
+## Reference result
+
+The 2026-08-14 export produced this result:
 
 | Metric | Value |
 |---|---|
 | file size | 4,557,817 bytes |
 | anchors | 9,457 |
 | http(s) anchors | 9,453 |
-| non-http anchors skipped | 4 (3 `chrome:`, 1 `chrome-extension:`) |
+| non-http anchors skipped | 4 |
 | duplicate anchors collapsed | 465 |
-| unique http(s) URLs | **8,988** |
-| tags | **75** |
-| bookmark-tag links | **21,316** |
-| untagged | **87** |
+| unique http(s) URLs | 8,988 |
+| tags | 75 |
+| bookmark-tag links | 21,316 |
+| untagged bookmarks | 87 |
 | folders skipped as noise | 56 |
-| ADD_DATE range | 2022-08-07 … 2026-08-13 |
+| `ADD_DATE` range | 2022-08-07 to 2026-08-13 |
 
-A second run reports `inserted=0`, `existing=8988`, `tag_links_added=0`.
+## Conversion rules
 
-## Rules
+Folder names become tags. The importer lowercases each tag and collapses
+whitespace. `PERSONAL_TOOLBAR_FOLDER` becomes `toolbar`, and
+`UNFILED_BOOKMARKS_FOLDER` becomes `unfiled`.
 
-- Folder names become tags (lowercased, whitespace-collapsed).
-- `PERSONAL_TOOLBAR_FOLDER` becomes `toolbar`; `UNFILED_BOOKMARKS_FOLDER`
-  becomes `unfiled`.
-- Noise folders are skipped by default: timestamp/date names,
-  `New folder …`, `temp`, `temp 2`, `/`, `1`, and a non-toolbar
-  `Bookmarks bar`. `--keep-noise` keeps them.
-- `TAGS="a,b"` attributes are unioned with folder tags.
-- Duplicate URLs within the file are collapsed: first non-empty title wins,
-  tags are unioned, and the earliest `ADD_DATE` becomes `created_at`.
-- `created_at` is the original save date; `added_at` is the import time.
-- Imported rows are unread by default (`--mark-read` to change) and are not
-  fetched/extracted automatically (use `enrich`/`extract` explicitly).
+The default tag mode is `leaf`. A bookmark under `Dev/Haskell/Web` receives
+`web`. Use `--tag-mode deepest` for the full folder path, `path` for the
+path segments as separate tags, or `none` to skip folder tags.
 
-Tag modes: `leaf` (default), `deepest`, `path` (hierarchical), `none`.
+Noise folders are skipped by default: timestamp and date names, `New folder`
+names, `temp`, `temp 2`, `/`, `1`, and a non-toolbar `Bookmarks bar`.
+Pass `--keep-noise` to keep them.
+
+The `TAGS="a,b"` attribute is unioned with the folder tags. Duplicate URLs
+are collapsed: the first non-empty title wins, the tag sets are unioned, and
+the earliest `ADD_DATE` becomes `created_at`.
+
+Imported rows are unread by default. Pass `--mark-read` to mark them read.
+The importer does not fetch pages or run extraction; use `enrich` or
+`extract` after the import when you want that text.

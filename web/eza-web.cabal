@@ -3,7 +3,7 @@ name:               eza-web
 version:            0.1.0.0
 synopsis:           eza Miso frontend
 description:        WebAssembly Miso client for eza.
-license:            MIT
+license:            Apache-2.0
 author:             eza
 maintainer:         eza
 build-type:         Simple

@@ -18,5 +18,5 @@ these files the Nix build fails at configure time, e.g.:
 
 Provenance: extracted verbatim from the `01-index.tar` (Hackage package index)
 cached by cabal in the devenv environment; each file corresponds to
-`<package>/<version>/<package>.cabal` in that index. Do not edit them — update
+`<package>/<version>/<package>.cabal` in that index. Do not edit them. Update
 by re-extracting the revision for the version pinned in `flake.nix`.

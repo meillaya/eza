@@ -5,7 +5,7 @@ synopsis:           Shared pure types and logic for eza
 description:        DTOs, JSON codecs, search-query parsing, wikilink parsing,
                     and URL normalization shared by the Haskell server and the
                     Miso client.
-license:            MIT
+license:            Apache-2.0
 author:             eza
 maintainer:         eza
 build-type:         Simple

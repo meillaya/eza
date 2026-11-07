@@ -1,7 +1,7 @@
 # Deploying eza with Docker
 
 The image is produced by Nix (`packages.<system>.docker` in the deployment
-flake) using `dockerTools.buildLayeredImage` — there is no Dockerfile, because
+flake) using `dockerTools.buildLayeredImage`. There is no Dockerfile, because
 the web client is a CI-built WASM release asset and the server is a GHC
 derivation.
 
@@ -12,7 +12,7 @@ stores all state under **/data**, and exposes **/healthz** for health checks.
 
 ```bash
 # In the eza checkout (deployment flake):
-# (Use `nix build path:.#docker` if the tree has uncommitted files — a git
+# (Use `nix build path:.#docker` if the tree has uncommitted files, a git
 # flake only sees tracked files. `.#docker-local` builds the same image with
 # the locally built web bundle instead of the released one.)
 nix build .#docker              # -> ./result is a gzip'd image tarball
@@ -144,7 +144,7 @@ All state is in the volume:
     /data/snapshots/      full-page HTML snapshots
     /data/backups/        online backups
 
-Online backup (safe while the server runs; no downtime) — uses the
+Online backup (safe while the server runs; no downtime). It uses the
 server's own `backup` command (`VACUUM INTO` + integrity check + 14-day prune):
 
 ```bash
@@ -217,7 +217,7 @@ nix build .#eza-web
 nix build .#docker              # rebuild the image with the pinned bundle
 ```
 
-Example CI job (illustrative — the dev toolchain comes from `devenv.nix`):
+Example CI job (illustrative, because the dev toolchain comes from `devenv.nix`):
 
 ```yaml
 name: web-assets
@@ -262,7 +262,7 @@ idempotent); take a backup first for major upgrades.
 
 | Symptom | Cause / fix |
 |---|---|
-| Container exits at start | `docker logs eza` — usually a bad `PUBLIC_ORIGIN`/`EZA_RP_ID` or unwritable `/data`. |
+| Container exits at start | `docker logs eza`: usually a bad `PUBLIC_ORIGIN`/`EZA_RP_ID` or unwritable `/data`. |
 | `healthy` never becomes true | `/healthz` 503 → database problem; run `docker compose exec eza eza-bookmarks verify`. |
 | Passkeys fail | Origin must be HTTPS and match `PUBLIC_ORIGIN`; `EZA_RP_ID` must be its host. |
 | Permission denied in /data | Host bind mount not owned by 10001; fix on the host. |

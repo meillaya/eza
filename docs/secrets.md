@@ -146,7 +146,7 @@ must match the manifest key exactly.
   only read by systemd as root at unit start.
 - Only set the options for keys you actually have. If both are `null`, the
   wrapper gives SecretSpec an empty private credential directory, every secret
-  resolves to "unset", and the AI features are disabled — the unit still
+  resolves to "unset", and the AI features are disabled. The unit still
   starts.
 
 ### Verify
@@ -213,5 +213,5 @@ keep the pod spec free of literal values.
 | `Provider backend '...' not found` | Typo in `--provider`; use `env`, `keyring` or `systemd-credential`. |
 | `CREDENTIALS_DIRECTORY is not set` | Running `-p systemd-credential` outside a unit with `LoadCredential`. The NixOS module's wrapper handles this; for manual checks use `systemd-run` as above. |
 | AI tagging returns 401 | Key has a trailing newline or is stale; re-write with `printf %s` and restart the service. |
-| `check` exits non-zero | A *required* secret is missing (none are required in eza's manifest) — inspect the JSON report. |
+| `check` exits non-zero | A *required* secret is missing (none are required in eza's manifest): inspect the JSON report. |
 | Secrets not injected into the server | The wrapper passes the environment only to the child; check the unit's ExecStart still starts with `secretspec run`. |

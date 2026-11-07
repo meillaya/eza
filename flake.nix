@@ -1,5 +1,5 @@
 {
-  description = "eza — self-hosted, tag-based bookmark manager (Haskell/Warp server, SQLite+FTS5, Miso web client). Deployment flake: server package, web assets, Docker image, NixOS module.";
+  description = "eza: self-hosted, tag-based bookmark manager (Haskell/Warp server, SQLite+FTS5, Miso web client). Deployment flake: server package, web assets, Docker image, NixOS module.";
 
   # Deployment-only flake: there is deliberately NO devShells output here.
   # The development environment is devenv.nix (run: devenv shell). This flake
@@ -166,7 +166,7 @@
             meta = (old.meta or { }) // {
               description = "eza bookmark manager (Warp server + command-line tools)";
               homepage = "https://github.com/meillaya/eza";
-              license = lib.licenses.mit;
+              license = lib.licenses.asl20;
               mainProgram = "eza-bookmarks";
               platforms = lib.platforms.linux;
             };

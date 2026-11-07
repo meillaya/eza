@@ -4,7 +4,7 @@ Kubernetes runs the same image as the Docker deployment:
 **eza-bookmarks** as non-root **uid/gid 10001**, state on a PVC mounted at
 **/data**, probes on **/healthz**. SQLite is a single-writer embedded database,
 so the deployment is deliberately **one replica** with the **Recreate**
-strategy and a **ReadWriteOnce** volume — do not scale it horizontally.
+strategy and a **ReadWriteOnce** volume. Do not scale it horizontally.
 
 Manifests live in [`deploy/k8s/`](../deploy/k8s/):
 
@@ -37,7 +37,7 @@ kustomize edit set image eza=registry.example.com/eza:0.1.0.0
 
 ## 2. Configure origin and secrets
 
-Edit `configmap.yaml` — `PUBLIC_ORIGIN` and `EZA_RP_ID` **must** be the
+Edit `configmap.yaml`: `PUBLIC_ORIGIN` and `EZA_RP_ID` **must** be the
 browser-visible HTTPS URL/host. Passkeys are bound to this origin, so decide it
 before the first enrollment.
 
@@ -109,10 +109,10 @@ Never expose plain HTTP: WebAuthn refuses insecure origins.
 All three probes hit `GET /healthz`, which returns 200 only when SQLite
 answers (`SELECT 1`) and 503 otherwise:
 
-- `startupProbe`: 30 × 2 s — covers first-boot migrations on large databases;
-- `readinessProbe`: every 10 s — removes the pod from the Service when the
+- `startupProbe`: 30 × 2 s. It covers first-boot migrations on large databases;
+- `readinessProbe`: every 10 s. It removes the pod from the Service when the
   database is unavailable;
-- `livenessProbe`: every 30 s after a 20 s delay — restarts a wedged server.
+- `livenessProbe`: every 30 s after a 20 s delay. It restarts a wedged server.
 
 HTTP probes are used here because Kubernetes supports them natively; for
 `exec` probes the image also ships `/bin/eza-bookmarks healthcheck` (same
@@ -144,10 +144,10 @@ kubectl -n eza exec "$POD" -- /bin/eza-bookmarks verify
 
 For scheduled off-cluster backups, use a separate Job/CronJob that mounts the
 same PVC (only possible while the eza pod is not mounting it, unless the volume
-is ReadWriteMany and the storage backend allows safe concurrent reads — SQLite
+is ReadWriteMany and the storage backend allows safe concurrent reads; SQLite
 reads are safe, but a second *writer* is not) or, more simply, a CronJob in the
 same node with an RWO volume and `strategy: Recreate` semantics via a
-`ReadWriteOncePod` claim. The simplest robust pattern is to copy backups off
+`ReadWriteOncePod` claim. The simplest safe pattern is to copy backups off
 the volume from a Job that uses `kubectl exec`-style access or an object-store
 sidecar; the image already ships `rclone` for the upload step:
 
