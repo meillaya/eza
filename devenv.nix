@@ -37,8 +37,8 @@ in
   env = {
     EZA_DATA_DIR = "${config.devenv.root}/data";
     EZA_STATIC_DIR = "${config.devenv.root}/static";
-    EZA_BIND = "127.0.0.1:8080";
-    PUBLIC_ORIGIN = "http://localhost:8080";
+    EZA_BIND = "127.0.0.1:8000";
+    PUBLIC_ORIGIN = "http://localhost:8000";
     CABAL_DIR = "${config.devenv.root}/.devenv/cabal";
     PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
     SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
@@ -66,7 +66,7 @@ in
     e2e.exec = "bun x playwright test";
     bench.exec = "cabal run eza-bench";
     db-init.exec = "cabal run eza-bookmarks -- init";
-    import.exec = "cabal run eza-bookmarks -- import netscape";
+    import.exec = "cabal run eza-bookmarks -- import";
     export.exec = "cabal run eza-bookmarks -- export";
     verify.exec = "cabal run eza-bookmarks -- verify";
     backup.exec = "cabal run eza-bookmarks -- backup";
@@ -75,6 +75,6 @@ in
 
   processes.server = {
     exec = "cabal run eza-bookmarks -- serve";
-    ready.exec = "curl -fsS http://127.0.0.1:8080/healthz";
+    ready.exec = "curl -fsS http://127.0.0.1:8000/healthz";
   };
 }

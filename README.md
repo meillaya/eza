@@ -64,10 +64,9 @@ bash scripts/build-web.sh
 cabal run eza-bookmarks -- serve
 ```
 
-Open <http://localhost:8080>. The first page is `/setup`: register a passkey
-and save the ten recovery codes. This working copy contains `data/eza.db` with
-the 2026-08-14 import and no registered passkey, so setup runs on the first
-boot.
+Open <http://localhost:8000>. This working copy contains `data/eza.db` with
+the 2026-08-14 import and a restored passkey. Sign in with that passkey, or use
+one of the recovery codes. A fresh database opens `/setup` instead.
 
 For a host other than localhost, set `PUBLIC_ORIGIN` and `EZA_RP_ID` before
 you register a passkey. The origin is part of the credential, so changing it
