@@ -41,6 +41,7 @@ library
                     Eza.Graph
                     Eza.Highlights
                     Eza.Import
+                    Eza.JsonExport
                     Eza.Jobs
                     Eza.Links
                     Eza.Pages

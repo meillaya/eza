@@ -13,6 +13,9 @@ module Eza.Web.Types (
     Credential (..),
     AccountInfo (..),
     TokenView (..),
+    ShareView (..),
+    AiStatus (..),
+    ReaderSelection (..),
     mkApiError,
     fieldInt,
     fieldBool,
@@ -113,6 +116,67 @@ instance FromJSON Credential where
             <*> o .:? "created_at" .!= 0
             <*> o .:? "last_used_at"
             <*> o .:? "backup_eligible" .!= False
+
+{- | A public share link (the raw token is only known at creation time; the
+server exposes a short prefix for identification afterwards).
+-}
+data ShareView = ShareView
+    { svId :: Int
+    , svPrefix :: Text
+    , svScope :: Text
+    , svTargetId :: Int
+    , svIncludeNote :: Bool
+    , svCreatedAt :: Int
+    , svExpiresAt :: Int
+    , svRevokedAt :: Maybe Int
+    , svLastAccessedAt :: Maybe Int
+    }
+    deriving (Eq, Show)
+
+instance FromJSON ShareView where
+    parseJSON = withObject "ShareView" $ \o ->
+        ShareView
+            <$> o .:? "id" .!= 0
+            <*> o .:? "prefix" .!= ""
+            <*> o .:? "scope" .!= ""
+            <*> o .:? "target_id" .!= 0
+            <*> o .:? "include_note" .!= False
+            <*> o .:? "created_at" .!= 0
+            <*> o .:? "expires_at" .!= 0
+            <*> o .:? "revoked_at"
+            <*> o .:? "last_accessed_at"
+
+-- | LLM provider status for the AI-tags page.
+data AiStatus = AiStatus
+    { asProvider :: Text
+    , asModel :: Text
+    , asConfigured :: Bool
+    }
+    deriving (Eq, Show)
+
+instance FromJSON AiStatus where
+    parseJSON = withObject "AiStatus" $ \o ->
+        AiStatus
+            <$> o .:? "provider" .!= "none"
+            <*> o .:? "model" .!= ""
+            <*> o .:? "configured" .!= False
+
+{- | A text selection inside the reader, with character offsets relative to
+the extracted text (used for highlight creation).
+-}
+data ReaderSelection = ReaderSelection
+    { rsStart :: Int
+    , rsEnd :: Int
+    , rsQuote :: Text
+    }
+    deriving (Eq, Show)
+
+instance FromJSON ReaderSelection where
+    parseJSON = withObject "ReaderSelection" $ \o ->
+        ReaderSelection
+            <$> o .:? "start" .!= 0
+            <*> o .:? "end" .!= 0
+            <*> o .:? "quote" .!= ""
 
 -- | Bearer token metadata (the raw token is only returned on creation).
 data TokenView = TokenView

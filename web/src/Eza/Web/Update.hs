@@ -21,6 +21,7 @@ import Eza.Types (
     BookmarkDetail (..),
     BookmarkSummary (..),
     BootPayload (..),
+    Highlight (..),
     ImportReport,
     SavedSearch (..),
     SearchPage (..),
@@ -28,7 +29,17 @@ import Eza.Types (
  )
 import Eza.Web.Api
 import Eza.Web.Model
-import Eza.Web.Types (ApiError (..), ConsolGroup (..), DedupGroup (..), TagSuggestion (..), TokenView (..), fieldInt)
+import Eza.Web.Types (
+    AiStatus (..),
+    ApiError (..),
+    ConsolGroup (..),
+    DedupGroup (..),
+    ReaderSelection (..),
+    ShareView (..),
+    TagSuggestion (..),
+    TokenView (..),
+    fieldInt,
+ )
 
 {- | Component subscriptions: URL changes (back/forward), window scroll for
 the virtualized grid, and window resize for the column count.
@@ -171,6 +182,14 @@ loadRoute route = do
             , mTagPrompt = Nothing
             , mTagPromptValue = ""
             , mConfirmBulkDelete = False
+            , mHighlights = if isDetailRoute route then mHighlights m else []
+            , mHighlightsLoading = isDetailRoute route
+            , mReaderSel = Nothing
+            , mHighlightNoteOpen = False
+            , mHighlightEdit = Nothing
+            , mShareDialogOpen = False
+            , mShareUrl = Nothing
+            , mSnapshotOpen = False
             }
     case route of
         Index -> reloadList
@@ -178,6 +197,8 @@ loadRoute route = do
         Bookmark bid -> do
             fetchDetail bid DetailLoaded DetailFailed
             fetchBacklinks bid BacklinksLoaded BacklinksFailed
+            fetchHighlights bid HighlightsLoaded HighlightsFailed
+            fetchShares SharesLoaded SharesFailed
         Graph -> do
             current <- get
             case mGraphSeed current of
@@ -187,12 +208,15 @@ loadRoute route = do
         Tags -> do
             fetchConsolidation ConsolLoaded ConsolFailed
             refreshTags
-        AiTags -> refreshTags
+        AiTags -> do
+            refreshTags
+            fetchAiStatus AiStatusLoaded (\_ -> Noop)
         Maintenance -> fetchPruneCandidates PruneLoaded PruneFailed
         Account -> do
             fetchAccount AccountLoaded AccountFailed
-            putModel (\x -> x{mTokensLoading = True})
+            putModel (\x -> x{mTokensLoading = True, mSharesLoading = True})
             fetchTokens TokensLoaded TokensFailed
+            fetchShares SharesLoaded SharesFailed
         NotFound -> pure ()
 
 scheduleSearch :: Int -> Effect () () Model Action
@@ -291,6 +315,24 @@ firstUrlIn (Just text) =
         case filter (\word -> "http://" `T.isPrefixOf` word || "https://" `T.isPrefixOf` word) (T.words text) of
             (url : _) -> Just (ms (T.strip url))
             [] -> Nothing
+
+{- | A few characters before/after a highlight selection, used by the server
+as drift anchors.
+-}
+readerPrefix :: BookmarkDetail -> ReaderSelection -> Text
+readerPrefix detail selection =
+    T.takeEnd 32 (T.take (max 0 (rsStart selection)) (bdExtractedText detail))
+
+readerSuffix :: BookmarkDetail -> ReaderSelection -> Text
+readerSuffix detail selection =
+    T.take 32 (T.drop (max 0 (rsEnd selection)) (bdExtractedText detail))
+
+-- | Keep highlights sorted by their start offset.
+insertHighlight :: Highlight -> [Highlight] -> [Highlight]
+insertHighlight highlight highlights =
+    takeWhile (\item -> hStartOffset item < hStartOffset highlight) highlights
+        ++ [highlight]
+        ++ dropWhile (\item -> hStartOffset item < hStartOffset highlight) highlights
 
 -- ------------------------------------------------------------- the update --
 
@@ -1054,11 +1096,187 @@ updateModel = \case
                 (if copied then "Token copied" else "Copy failed — select the text instead")
                 (if copied then ToastOk else ToastError)
             )
+    -- highlights -----------------------------------------------------------
+    HighlightsLoaded highlights -> putModel (\m -> m{mHighlights = highlights, mHighlightsLoading = False})
+    HighlightsFailed err -> do
+        putModel (\m -> m{mHighlightsLoading = False})
+        handleApiError err
+    ReaderMouseUp -> withSink $ \sink -> do
+        raw <- jsgf "ezaSelectionOffsets" ("reader-text" :: MisoString)
+        text <- fromJSVal raw
+        let selection = case (text :: Maybe MisoString) of
+                Nothing -> Nothing
+                Just json -> case MJ.eitherDecode json of
+                    Right parsed -> Just (parsed :: ReaderSelection)
+                    Left _ -> Nothing
+        sink (ReaderSelectionFound selection)
+    ReaderSelectionFound selection -> putModel (\m -> m{mReaderSel = selection})
+    ReaderSelectionClear -> putModel (\m -> m{mReaderSel = Nothing})
+    HighlightCreateQuick -> do
+        m <- get
+        case (mDetail m, mReaderSel m) of
+            (Just detail, Just selection) ->
+                createHighlight
+                    (bdId detail)
+                    (rsQuote selection)
+                    (readerPrefix detail selection)
+                    (readerSuffix detail selection)
+                    (rsStart selection)
+                    (rsEnd selection)
+                    ""
+                    "yellow"
+                    HighlightAdded
+                    HighlightFailed
+            _ -> notify "Select some reader text first" ToastInfo
+    HighlightNoteOpen -> putModel (\m -> m{mHighlightNoteOpen = True, mHighlightNote = ""})
+    HighlightNoteInput value -> putModel (\m -> m{mHighlightNote = value})
+    HighlightNoteCancel -> putModel (\m -> m{mHighlightNoteOpen = False, mHighlightNote = ""})
+    HighlightNoteSubmit -> do
+        m <- get
+        case (mDetail m, mReaderSel m) of
+            (Just detail, Just selection) -> do
+                putModel (\x -> x{mHighlightNoteOpen = False})
+                createHighlight
+                    (bdId detail)
+                    (rsQuote selection)
+                    (readerPrefix detail selection)
+                    (readerSuffix detail selection)
+                    (rsStart selection)
+                    (rsEnd selection)
+                    (fromMisoString (mHighlightNote m))
+                    "yellow"
+                    HighlightAdded
+                    HighlightFailed
+            _ -> putModel (\x -> x{mHighlightNoteOpen = False})
+    HighlightAdded highlight -> do
+        putModel
+            ( \m ->
+                m
+                    { mHighlights = insertHighlight highlight (mHighlights m)
+                    , mReaderSel = Nothing
+                    , mHighlightNoteOpen = False
+                    , mHighlightNote = ""
+                    }
+            )
+        notify "Highlight saved" ToastOk
+    HighlightEditStart highlightId -> do
+        m <- get
+        case [highlight | highlight <- mHighlights m, hId highlight == highlightId] of
+            (highlight : _) ->
+                putModel
+                    ( \x ->
+                        x
+                            { mHighlightEdit = Just highlightId
+                            , mHighlightEditNote = ms (hNote highlight)
+                            , mHighlightEditColor = hColor highlight
+                            }
+                    )
+            [] -> pure ()
+    HighlightEditInput value -> putModel (\m -> m{mHighlightEditNote = value})
+    HighlightEditColor color -> putModel (\m -> m{mHighlightEditColor = color})
+    HighlightEditCancel -> putModel (\m -> m{mHighlightEdit = Nothing, mHighlightEditNote = ""})
+    HighlightEditSave -> do
+        m <- get
+        case (mDetail m, mHighlightEdit m) of
+            (Just detail, Just highlightId) -> do
+                putModel (\x -> x{mHighlightEdit = Nothing})
+                patchHighlight
+                    (bdId detail)
+                    highlightId
+                    (Just (fromMisoString (mHighlightEditNote m)))
+                    (Just (mHighlightEditColor m))
+                    HighlightPatched
+                    HighlightFailed
+            _ -> putModel (\x -> x{mHighlightEdit = Nothing})
+    HighlightDelete highlightId -> do
+        m <- get
+        case mDetail m of
+            Just detail -> deleteHighlight (bdId detail) highlightId HighlightDeleted HighlightFailed
+            Nothing -> pure ()
+    HighlightPatched -> do
+        notify "Highlight updated" ToastOk
+        reloadHighlights
+    HighlightDeleted -> do
+        notify "Highlight deleted" ToastOk
+        reloadHighlights
+    HighlightFailed err -> handleApiError err
+    -- sharing --------------------------------------------------------------
+    SharesLoaded shares -> putModel (\m -> m{mShares = shares, mSharesLoading = False})
+    SharesFailed err -> do
+        putModel (\m -> m{mSharesLoading = False})
+        handleApiError err
+    ShareDialogOpen -> do
+        m <- get
+        case mDetail m of
+            Just detail -> do
+                putModel
+                    ( \x ->
+                        x
+                            { mShareDialogOpen = True
+                            , mShareIncludeNote = False
+                            , mShareExpiryDays = 30
+                            , mShareUrl = Nothing
+                            , mShareBusy = False
+                            }
+                    )
+                fetchShares SharesLoaded SharesFailed
+            Nothing -> pure ()
+    ShareDialogClose -> putModel (\m -> m{mShareDialogOpen = False, mShareUrl = Nothing})
+    ShareIncludeNoteToggle -> putModel (\m -> m{mShareIncludeNote = not (mShareIncludeNote m)})
+    ShareExpirySelected days -> putModel (\m -> m{mShareExpiryDays = days})
+    ShareCreate -> do
+        m <- get
+        case mDetail m of
+            Just detail -> do
+                putModel (\x -> x{mShareBusy = True})
+                createShareLink
+                    "bookmark"
+                    (bdId detail)
+                    (mShareIncludeNote m)
+                    (mShareExpiryDays m)
+                    ShareCreated
+                    ShareCreateFailed
+            Nothing -> pure ()
+    ShareCreated shareId url -> do
+        putModel (\m -> m{mShareBusy = False, mShareUrl = Just url})
+        notify (ms ("Share link created (#" <> show shareId <> ")")) ToastOk
+        fetchShares SharesLoaded SharesFailed
+    ShareCreateFailed err -> do
+        putModel (\m -> m{mShareBusy = False})
+        handleApiError err
+    ShareCopy url -> withSink $ \sink -> do
+        copiedValue <- jsgf "ezaCopy" (ms (url :: Text))
+        copied <- fromMaybe False <$> (fromJSVal copiedValue :: IO (Maybe Bool))
+        sink
+            ( ToastAdd
+                (if copied then "Share link copied" else "Copy failed — select the text instead")
+                (if copied then ToastOk else ToastError)
+            )
+    ShareRevoke shareId -> revokeShareLink shareId ShareRevoked ShareCreateFailed
+    ShareRevoked -> do
+        notify "Share link revoked" ToastOk
+        fetchShares SharesLoaded SharesFailed
+    -- snapshot -------------------------------------------------------------
+    SnapshotOpen -> putModel (\m -> m{mSnapshotOpen = True})
+    SnapshotClose -> putModel (\m -> m{mSnapshotOpen = False})
+    -- ai status ------------------------------------------------------------
+    AiStatusLoaded status -> putModel (\m -> m{mAiStatus = Just status})
+    AiStatusFailed _ -> pure ()
     -- toasts ---------------------------------------------------------------
     ToastAdd message kind -> notify message kind
     ToastDismiss dismissed -> putModel (\m -> m{mToasts = filter (\toast -> toastId toast /= dismissed) (mToasts m)})
   where
+    reloadHighlights = do
+        m <- get
+        case mDetail m of
+            Just detail -> fetchHighlights (bdId detail) HighlightsLoaded HighlightsFailed
+            Nothing -> pure ()
     closeTopLayer m
+        | mHighlightNoteOpen m = putModel (\x -> x{mHighlightNoteOpen = False, mHighlightNote = ""})
+        | isJust (mHighlightEdit m) = putModel (\x -> x{mHighlightEdit = Nothing, mHighlightEditNote = ""})
+        | mShareDialogOpen m = putModel (\x -> x{mShareDialogOpen = False, mShareUrl = Nothing})
+        | mSnapshotOpen m = putModel (\x -> x{mSnapshotOpen = False})
+        | isJust (mReaderSel m) = putModel (\x -> x{mReaderSel = Nothing})
         | mPaletteOpen m = putModel (\x -> x{mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})
         | mAddOpen m = putModel (\x -> x{mAddOpen = False})
         | mGuardOpen m = putModel (\x -> x{mGuardOpen = False, mPendingRoute = Nothing})

@@ -21,7 +21,7 @@ foreign export javascript "hs_start" main :: IO ()
 command palette, Ctrl/Cmd+S, and the global shortcuts.
 -}
 allEvents :: Events
-allEvents = defaultEvents <> keyboardEvents
+allEvents = defaultEvents <> keyboardEvents <> mouseEvents
 
 app :: App Model Action
 app =

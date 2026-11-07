@@ -14,8 +14,7 @@ Chromium, Safari, and browser-extension exporters write.
 ## Run the import
 
 ```bash
-eza-bookmarks import netscape bookmarks_14_08_2026.html \
-  --report dist/import.json
+eza-bookmarks import bookmarks_14_08_2026.html > dist/import.json
 ```
 
 The command exits 0 after the transaction commits. The report file contains the

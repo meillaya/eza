@@ -40,6 +40,7 @@ import Eza.Types (
     BookmarkSummary (..),
     BootPayload,
     GraphData,
+    Highlight (..),
     ImportReport,
     SavedSearch,
     SearchPage,
@@ -49,7 +50,7 @@ import Miso
 import Miso.Router (Router (..), RoutingError (..), Token (..), parseURI, routes, toCapture, toPath, toQueryParam)
 import Miso.Subscription.History (getURI)
 
-import Eza.Web.Types (AccountInfo, ApiError, ConsolGroup, DedupGroup, TagSuggestion, TokenView)
+import Eza.Web.Types (AccountInfo, AiStatus, ApiError, ConsolGroup, DedupGroup, ReaderSelection, ShareView, TagSuggestion, TokenView)
 
 -- | Application routes.  @Bookmark@ carries the numeric bookmark id.
 data Route
@@ -414,6 +415,46 @@ data Action
     | -- enrichment
       RetryEnrich Int
     | DetailReload Int
+    | -- highlights
+      HighlightsLoaded [Highlight]
+    | HighlightsFailed ApiError
+    | ReaderMouseUp
+    | ReaderSelectionFound (Maybe ReaderSelection)
+    | ReaderSelectionClear
+    | HighlightCreateQuick
+    | HighlightNoteOpen
+    | HighlightNoteInput MisoString
+    | HighlightNoteCancel
+    | HighlightNoteSubmit
+    | HighlightAdded Highlight
+    | HighlightEditStart Int
+    | HighlightEditInput MisoString
+    | HighlightEditColor Text
+    | HighlightEditCancel
+    | HighlightEditSave
+    | HighlightDelete Int
+    | HighlightPatched
+    | HighlightDeleted
+    | HighlightFailed ApiError
+    | -- sharing
+      SharesLoaded [ShareView]
+    | SharesFailed ApiError
+    | ShareDialogOpen
+    | ShareDialogClose
+    | ShareIncludeNoteToggle
+    | ShareExpirySelected Int
+    | ShareCreate
+    | ShareCreated Int Text
+    | ShareCreateFailed ApiError
+    | ShareCopy Text
+    | ShareRevoke Int
+    | ShareRevoked
+    | -- snapshot
+      SnapshotOpen
+    | SnapshotClose
+    | -- ai status
+      AiStatusLoaded AiStatus
+    | AiStatusFailed ApiError
     | -- toasts
       ToastAdd MisoString ToastKind
     | ToastDismiss Int
@@ -484,6 +525,23 @@ data Model = Model
     , mLinkResults :: [BookmarkSummary]
     , mLinkSel :: Int
     , mBacklinks :: [Backlink]
+    , mHighlights :: [Highlight]
+    , mHighlightsLoading :: Bool
+    , mReaderSel :: Maybe ReaderSelection
+    , mHighlightNoteOpen :: Bool
+    , mHighlightNote :: MisoString
+    , mHighlightEdit :: Maybe Int
+    , mHighlightEditNote :: MisoString
+    , mHighlightEditColor :: Text
+    , mSnapshotOpen :: Bool
+    , mShares :: [ShareView]
+    , mSharesLoading :: Bool
+    , mShareDialogOpen :: Bool
+    , mShareIncludeNote :: Bool
+    , mShareExpiryDays :: Int
+    , mShareBusy :: Bool
+    , mShareUrl :: Maybe Text
+    , mAiStatus :: Maybe AiStatus
     , mSaving :: Bool
     , mDirty :: Bool
     , mGuardOpen :: Bool
@@ -593,6 +651,23 @@ initialModel =
         , mLinkResults = []
         , mLinkSel = 0
         , mBacklinks = []
+        , mHighlights = []
+        , mHighlightsLoading = False
+        , mReaderSel = Nothing
+        , mHighlightNoteOpen = False
+        , mHighlightNote = ""
+        , mHighlightEdit = Nothing
+        , mHighlightEditNote = ""
+        , mHighlightEditColor = "yellow"
+        , mSnapshotOpen = False
+        , mShares = []
+        , mSharesLoading = False
+        , mShareDialogOpen = False
+        , mShareIncludeNote = False
+        , mShareExpiryDays = 30
+        , mShareBusy = False
+        , mShareUrl = Nothing
+        , mAiStatus = Nothing
         , mSaving = False
         , mDirty = False
         , mGuardOpen = False

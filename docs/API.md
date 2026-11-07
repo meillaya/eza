@@ -5,9 +5,13 @@ login, and recovery are separate routes. All JSON is UTF-8.
 
 ## Conventions
 
-- Authenticated routes require the `eza_session` cookie.
-- Unsafe methods (`POST`, `PATCH`, `DELETE`) require `X-CSRF-Token` to
-  match the `eza_csrf` cookie.
+- Authenticated routes accept the `eza_session` cookie or an
+  `Authorization: Bearer eza_pat_...` API token.
+- Cookie requests with unsafe methods (`POST`, `PATCH`, `DELETE`) require
+  `X-CSRF-Token` to match the `eza_csrf` cookie. Bearer requests do not use
+  CSRF.
+- Tokens have `read`, `write`, and `capture` scopes. Account and token
+  management routes require a browser session.
 - An unauthenticated API request returns 401.
 - An HTML request without a session redirects to `/login`.
 - Errors use `{"error":{"code":"...","message":"..."}}`.
@@ -58,6 +62,10 @@ GET    /healthz
 GET    /api/v1/boot
 GET    /api/v1/bookmarks
 POST   /api/v1/bookmarks
+POST   /api/v1/quick-save
+POST   /api/v1/bookmarks/bulk
+GET    /api/v1/stats
+GET    /api/v1/favicons/{domain}
 GET    /api/v1/bookmarks/{id}
 PATCH  /api/v1/bookmarks/{id}
 DELETE /api/v1/bookmarks/{id}
@@ -79,8 +87,19 @@ The route returns a `SearchPage`. `POST /api/v1/bookmarks` takes
 `{"url","title","tags"}` and returns 201 `{"id":N}`. It returns 409 when the
 normalized URL already exists.
 
-`GET /api/v1/bookmarks/{id}` returns a `BookmarkDetail`. `PATCH` accepts any
-of `title`, `note_body`, `is_read`, and `tags`, and returns
+`POST /api/v1/quick-save` takes `{"url","title","tags"}`, normalizes the URL,
+returns 200 with `{"id","existing":true}` for a duplicate, or inserts a
+minimal row, queues enrichment, and returns 201 `{"id","existing":false}`.
+The route accepts a capture or write token.
+
+`POST /api/v1/bookmarks/bulk` takes `{"action","ids","tags","confirm"}` for
+`add_tags`, `remove_tags`, `mark_read`, `mark_unread`, or `delete`. It
+accepts at most 10,000 ids, writes an undo snapshot first, and returns
+`{"updated","snapshot_id"}`. Delete requires `"confirm":true`.
+
+`GET /api/v1/bookmarks/{id}` returns a `BookmarkDetail`, including
+`enrich_state`, `enrich_error`, and `reading_time_minutes`. `PATCH` accepts
+any of `title`, `note_body`, `is_read`, and `tags`, and returns
 `{"ok":true}`. When `note_body` is present, the server rebuilds the
 `[[wikilink]]` rows for that bookmark.
 
@@ -129,6 +148,8 @@ POST   /api/v1/bookmarks/{id}/enrich
 POST   /api/v1/bookmarks/{id}/extract
 POST   /api/v1/bookmarks/{id}/snapshot
 POST   /api/v1/import
+POST   /api/v1/import/json
+GET    /api/v1/export?format=json
 GET    /api/v1/export
 ```
 
@@ -137,12 +158,44 @@ snapshot before deleting. `POST /api/v1/undo` restores the most recent
 snapshot and returns `{"restored":N}`.
 
 `POST /api/v1/import` accepts a multipart body with one `file` field in the
-Netscape format. It returns an `ImportReport`. `GET /api/v1/export` returns
-the same format.
+Netscape format. It returns an `ImportReport`. `POST /api/v1/import/json`
+takes a versioned eza JSON document.
 
-## Account
+`GET /api/v1/export` returns Netscape HTML. Add `?format=json` for a JSON
+document with bookmarks, tags, highlights, saved searches, and rules.
+`GET /api/v1/stats` returns bookmark, tag, unread, dead, highlight, share,
+queue, and favicon byte counts.
+
+## Highlights and shares
 
 ```
+GET    /api/v1/bookmarks/{id}/highlights
+POST   /api/v1/bookmarks/{id}/highlights
+PATCH  /api/v1/bookmarks/{id}/highlights/{highlightId}
+DELETE /api/v1/bookmarks/{id}/highlights/{highlightId}
+GET    /api/v1/share-links
+POST   /api/v1/share-links
+DELETE /api/v1/share-links/{id}
+GET    /s/{token}
+GET    /s/{token}.xml
+GET    /api/v1/bookmarks/{id}/snapshot
+```
+
+A highlight body contains `quote`, `prefix`, `suffix`, `start_offset`,
+`end_offset`, `note`, and `color`. A share body contains `scope`
+(`bookmark` or `saved_search`), `target_id`, `include_note`, and
+`expires_in_days`. The create response returns the public URL once.
+
+`GET /s/{token}` is a public, noindex page. A saved-search share also exposes
+`/s/{token}.xml` as an Atom feed. The snapshot route returns the local
+monolith file inside a sandboxed CSP.
+
+## Account and tokens
+
+```
+GET    /api/v1/tokens
+POST   /api/v1/tokens
+DELETE /api/v1/tokens/{id}
 GET    /api/v1/account
 POST   /api/v1/account/passkeys/options
 POST   /api/v1/account/passkeys/verify
@@ -154,7 +207,9 @@ POST   /api/v1/account/recovery/regenerate
 `GET /api/v1/account` returns
 `{"credentials":[CredentialInfo],"recovery_codes_remaining":N}`.
 `POST /api/v1/account/recovery/regenerate` invalidates the unused codes and
-returns ten new codes.
+returns ten new codes. `POST /api/v1/tokens` takes
+`{"name","scopes":["read","write","capture"]}` and returns the raw token once
+plus its metadata. Tokens are stored by hash and revoke immediately.
 
 ## DTOs
 

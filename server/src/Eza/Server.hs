@@ -20,7 +20,7 @@ import Data.String (fromString)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Database.SQLite.Simple (Connection)
+import Database.SQLite.Simple (Connection, Query (..))
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types
 import Network.HTTP.Types.Header (hAuthorization, hCacheControl, hETag, hIfNoneMatch)
@@ -46,6 +46,7 @@ import Eza.Graph (graphNeighborhood)
 import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateHighlight)
 import Eza.Import (defaultImportOptions, importParsed, parseNetscape)
 import Eza.Jobs (resetRunningJobs)
+import Eza.JsonExport (exportJson, importJson)
 import Eza.Pages (addPasskeyPage, loginPage, recoverPage, setupPage)
 import Eza.SavedSearches (createSavedSearch, deleteSavedSearch, listSavedSearches)
 import Eza.Shares (ShareRecord (..), createShare, listShares, resolveShare, revokeShare, shareBookmarkPage, shareSearchFeed, shareSearchPage)
@@ -399,19 +400,67 @@ authedRoute cfg _db req respond ctx conn =
       n <- undoLast conn
       respond (jsonResponse status200 (object ["restored" .= n]))
     ("POST", ["api", "v1", "import"]) -> importHandler conn req respond
-    ("GET", ["api", "v1", "export"]) -> do
-      content <- exportBookmarks conn
-      respond
-        ( responseLBS
-            status200
-            [ (hContentType, "text/html; charset=utf-8")
-            , (hContentDisposition, "attachment; filename=\"bookmarks.html\"")
-            ]
-            (LBS.fromStrict (TE.encodeUtf8 content))
-        )
+    ("POST", ["api", "v1", "import", "json"]) -> do
+      body <- strictRequestBody req
+      case eitherDecode body of
+        Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+        Right value -> do
+          result <- importJson conn value
+          case result of
+            Left err -> respond (jsonError status400 "bad_request" err)
+            Right report -> respond (jsonResponse status200 report)
+    ("GET", ["api", "v1", "export"]) ->
+      if param "format" req == Just "json"
+        then do
+          value <- exportJson conn
+          respond
+            ( responseLBS
+                status200
+                [ (hContentType, "application/json; charset=utf-8")
+                , (hContentDisposition, "attachment; filename=\"eza-export.json\"")
+                ]
+                (encode value)
+            )
+        else do
+          content <- exportBookmarks conn
+          respond
+            ( responseLBS
+                status200
+                [ (hContentType, "text/html; charset=utf-8")
+                , (hContentDisposition, "attachment; filename=\"bookmarks.html\"")
+                ]
+                (LBS.fromStrict (TE.encodeUtf8 content))
+            )
     ("GET", ["api", "v1", "export", "notes"]) ->
       respond (jsonError status501 "not_implemented" "Markdown note export is coming in a later milestone")
     ("GET", ["account", "add-passkey"]) -> respond (htmlResponse addPasskeyPage)
+    ("GET", ["api", "v1", "stats"]) -> do
+      counts <- bookmarkStats conn
+      let value key = fromMaybe 0 (lookup key counts)
+          scalar sql = Db.queryScalar conn (Query sql)
+      highlights <- scalar "SELECT COUNT(*) FROM highlights"
+      shares <- scalar "SELECT COUNT(*) FROM share_links WHERE revoked_at IS NULL"
+      pendingJobs <- scalar "SELECT COUNT(*) FROM jobs WHERE state IN ('queued','running')"
+      faviconBytes <- scalar "SELECT COALESCE(SUM(LENGTH(bytes)),0) FROM favicons"
+      unread <- scalar "SELECT COUNT(*) FROM bookmarks WHERE is_read = 0"
+      dead <- scalar "SELECT COUNT(*) FROM bookmarks WHERE is_dead = 1"
+      respond
+        ( jsonResponse
+            status200
+            ( object
+                [ "bookmarks" .= value "bookmarks"
+                , "tags" .= value "tags"
+                , "bookmark_tags" .= value "bookmark_tags"
+                , "links" .= value "links"
+                , "unread" .= unread
+                , "dead" .= dead
+                , "highlights" .= highlights
+                , "shares" .= shares
+                , "jobs_pending" .= pendingJobs
+                , "favicon_bytes" .= faviconBytes
+                ]
+            )
+        )
     ("GET", ["api", "v1", "ai", "status"]) -> do
       provider <- fromMaybe (cfgAiProvider cfg) <$> lookupEnv "EZA_AI_PROVIDER"
       key <-

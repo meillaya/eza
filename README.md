@@ -36,10 +36,11 @@ dead-link checks, and an undo stack for destructive actions.
 |---|---|
 | **Search** | `tag:`, `is:unread`, `is:dead`, `link:`, and `-term` operators over FTS5. Results order by bm25, then save date. |
 | **Library** | A virtualized card grid, a tag rail with counts, saved searches, and unread and dead filters. |
-| **Reading** | Extracted article text, a notes editor with markdown preview, `[[wikilinks]]`, and backlinks. |
-| **Maintenance** | Duplicate groups, tag consolidation, dead-link sweeps, and a prune flow. Every merge or prune writes an undo snapshot. |
-| **Capture** | Add a bookmark by URL, import a Netscape export, or let the importer fetch metadata with `enrich`. |
-| **Access** | WebAuthn passkeys, ten recovery codes, per-session CSRF checks, and a deny-by-default API. |
+| **Reading** | Extracted article text, highlight spans with notes, a markdown notes editor, `[[wikilinks]]`, and backlinks. |
+| **Maintenance** | Bulk tag, read-state, and delete actions with side-table undo. Duplicate groups, tag consolidation, dead-link sweeps, and a prune flow also write undo snapshots. |
+| **Capture** | A bookmarklet, PWA share target, quick-save API, cached favicons, and background metadata and article extraction. Netscape import remains. |
+| **Sharing** | Signed read-only bookmark and saved-search pages, Atom feeds, and a sandboxed local archive viewer. |
+| **Access** | WebAuthn passkeys, recovery codes, CSRF checks, and hashed API tokens with read, write, and capture scopes. |
 | **Ownership** | One SQLite file, WAL mode, online backups, a Docker image, a NixOS module, and Kubernetes manifests. |
 
 <div align="center">
@@ -74,7 +75,7 @@ later requires recovery or a new setup.
 The same binary runs the import and maintenance commands:
 
 ```bash
-eza-bookmarks import netscape bookmarks_14_08_2026.html --report dist/import.json
+eza-bookmarks import bookmarks_14_08_2026.html > dist/import.json
 eza-bookmarks verify
 eza-bookmarks backup
 eza-bookmarks check-dead --limit 200

@@ -90,4 +90,48 @@
       return false;
     }
   };
+
+  // ------------------------------------------------ reader selections -----
+  // Character offsets of a DOM selection inside a container, used by the
+  // bookmark detail page to create highlights. Returns JSON or null.
+  window.ezaSelectionOffsets = function (containerId) {
+    try {
+      var container = document.getElementById(containerId);
+      var selection = window.getSelection ? window.getSelection() : null;
+      if (!container || !selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+      var range = selection.getRangeAt(0);
+      if (!container.contains(range.startContainer) || !container.contains(range.endContainer)) return null;
+      function offsetAt(node, offset) {
+        var total = 0;
+        var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+        var current = null;
+        while ((current = walker.nextNode())) {
+          if (current === node) {
+            if (node.nodeType === 3) return total + offset;
+            var childTotal = total;
+            for (var i = 0; i < offset && i < node.childNodes.length; i++) {
+              childTotal += (node.childNodes[i].textContent || "").length;
+            }
+            return childTotal;
+          }
+          if (current.nodeType === 3) total += current.textContent.length;
+        }
+        return null;
+      }
+      var start = offsetAt(range.startContainer, range.startOffset);
+      var end = offsetAt(range.endContainer, range.endOffset);
+      if (start === null || end === null) return null;
+      if (start > end) {
+        var swap = start;
+        start = end;
+        end = swap;
+      }
+      var quote = (container.textContent || "").substring(start, end);
+      if (!quote.trim()) return null;
+      return JSON.stringify({ start: start, end: end, quote: quote });
+    } catch (error) {
+      return null;
+    }
+  };
+
 })();

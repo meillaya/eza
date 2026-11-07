@@ -28,6 +28,9 @@ module Eza.Web.Api (
     fetchAccount,
     fetchTags,
     fetchTokens,
+    fetchHighlights,
+    fetchShares,
+    fetchAiStatus,
     -- writes
     createBookmark,
     quickSave,
@@ -35,6 +38,11 @@ module Eza.Web.Api (
     bulkUpdate,
     createApiToken,
     revokeApiToken,
+    createHighlight,
+    patchHighlight,
+    deleteHighlight,
+    createShareLink,
+    revokeShareLink,
     patchBookmark,
     deleteBookmark,
     markAllAbove,
@@ -78,6 +86,7 @@ import Eza.Types (
     BookmarkSummary,
     BootPayload,
     GraphData,
+    Highlight,
     SavedSearch,
     SearchPage,
     TagStat,
@@ -85,10 +94,12 @@ import Eza.Types (
 
 import Eza.Web.Types (
     AccountInfo,
+    AiStatus,
     ApiError,
     ConsolGroup,
     Credential,
     DedupGroup,
+    ShareView,
     TagSuggestion,
     TokenView,
     fieldBool,
@@ -751,6 +762,158 @@ createApiToken name scopes onOk onErr =
 -- | @DELETE /api/v1/tokens/{id}@ — revoke (keeps the row, sets revoked_at).
 revokeApiToken :: Int -> action -> (ApiError -> action) -> Eff model action
 revokeApiToken tokenId = apiDelete ("/api/v1/tokens/" <> ms (show tokenId))
+
+-- ------------------------------------------------------------ highlights --
+
+-- | @GET /api/v1/bookmarks/{id}/highlights@
+fetchHighlights ::
+    Int ->
+    ([Highlight] -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+fetchHighlights bookmarkId onOk onErr =
+    getValue
+        ("/api/v1/bookmarks/" <> ms (show bookmarkId) <> "/highlights")
+        []
+        (\v -> onOk (fieldList "highlights" v))
+        onErr
+
+{- | @POST /api/v1/bookmarks/{id}/highlights@ — offsets are character offsets
+into the extracted text; prefix/suffix are the server's drift anchors.
+-}
+createHighlight ::
+    Int ->
+    Text ->
+    Text ->
+    Text ->
+    Int ->
+    Int ->
+    Text ->
+    Text ->
+    (Highlight -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+createHighlight bookmarkId quote prefix suffix startOffset endOffset note color onOk onErr =
+    sendValue
+        "POST"
+        url
+        (Just (object fields))
+        []
+        JSON
+        ( \v -> case decodeHighlight v of
+            Just highlight -> onOk highlight
+            Nothing -> onErr (mkApiError Nothing (Just "invalid highlight response"))
+        )
+        onErr
+  where
+    url = "/api/v1/bookmarks/" <> ms (show bookmarkId) <> "/highlights"
+    fields =
+        [ "quote" .= quote
+        , "prefix" .= prefix
+        , "suffix" .= suffix
+        , "start_offset" .= startOffset
+        , "end_offset" .= endOffset
+        , "note" .= note
+        , "color" .= color
+        ]
+
+-- | Decode a raw 'Value' into the shared 'Highlight' DTO.
+decodeHighlight :: Value -> Maybe Highlight
+decodeHighlight value = case MJ.fromJSON value of
+    MJ.Success highlight -> Just highlight
+    MJ.Error _ -> Nothing
+
+-- | @PATCH /api/v1/bookmarks/{id}/highlights/{highlightId}@
+patchHighlight ::
+    Int ->
+    Int ->
+    (Maybe Text) ->
+    (Maybe Text) ->
+    action ->
+    (ApiError -> action) ->
+    Eff model action
+patchHighlight bookmarkId highlightId note color onOk onErr =
+    sendValue "PATCH" url (Just payload) [] JSON (\_ -> onOk) onErr
+  where
+    url =
+        "/api/v1/bookmarks/"
+            <> ms (show bookmarkId)
+            <> "/highlights/"
+            <> ms (show highlightId)
+    payload =
+        object
+            ( [("note" .= value) | Just value <- [note]]
+                ++ [("color" .= value) | Just value <- [color]]
+            )
+
+-- | @DELETE /api/v1/bookmarks/{id}/highlights/{highlightId}@
+deleteHighlight ::
+    Int ->
+    Int ->
+    action ->
+    (ApiError -> action) ->
+    Eff model action
+deleteHighlight bookmarkId highlightId onOk onErr =
+    apiDelete
+        ( "/api/v1/bookmarks/"
+            <> ms (show bookmarkId)
+            <> "/highlights/"
+            <> ms (show highlightId)
+        )
+        onOk
+        onErr
+
+-- ---------------------------------------------------------------- shares ---
+
+-- | @GET /api/v1/share-links@ (all share links for the account).
+fetchShares ::
+    ([ShareView] -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+fetchShares onOk onErr =
+    getValue "/api/v1/share-links" [] (\v -> onOk (fieldList "shares" v)) onErr
+
+{- | @POST /api/v1/share-links@ — returns the share id and the public URL
+(the raw token is only ever shown here).
+-}
+createShareLink ::
+    Text ->
+    Int ->
+    Bool ->
+    Int ->
+    (Int -> Text -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+createShareLink scope targetId includeNote expiresInDays onOk onErr =
+    sendValue
+        "POST"
+        "/api/v1/share-links"
+        ( Just
+            ( object
+                [ "scope" .= scope
+                , "target_id" .= targetId
+                , "include_note" .= includeNote
+                , "expires_in_days" .= expiresInDays
+                ]
+            )
+        )
+        []
+        JSON
+        (\v -> onOk (fieldInt "id" v) (fieldText "url" v))
+        onErr
+
+-- | @DELETE /api/v1/share-links/{id}@ — revoke a share link.
+revokeShareLink :: Int -> action -> (ApiError -> action) -> Eff model action
+revokeShareLink shareId = apiDelete ("/api/v1/share-links/" <> ms (show shareId))
+
+-- ---------------------------------------------------------------- ai ------
+
+-- | @GET /api/v1/ai/status@ — provider/model/configured for the AI-tags page.
+fetchAiStatus ::
+    (AiStatus -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+fetchAiStatus = apiGet "/api/v1/ai/status"
 
 -- ------------------------------------------------------------------ links --
 

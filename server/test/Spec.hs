@@ -17,6 +17,7 @@ import Eza.Db (openDb, queryScalar, schemaV1, schemaVersion)
 import Eza.Favicon (parseDataIcon, parseIconLinks, sniffImage)
 import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateHighlight)
 import Eza.Import
+import Eza.JsonExport (JsonImportReport (..), exportJson, importJson)
 import Eza.SearchQuery
 import Eza.Shares (ShareRecord (..), createShare, resolveShare, revokeShare)
 import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), Highlight (..), ImportReport (..), SearchPage (..))
@@ -67,6 +68,22 @@ main = hspec $ do
         backups <- listDirectory (dir </> "backups")
         length backups `shouldBe` 1
         close migrated
+
+  describe "JSON export" $ do
+    it "round-trips a bookmark into a new database" $
+      withSystemTempDirectory "eza-json" $ \dir -> do
+        source <- openDb (dir </> "source.db")
+        Sqlite.execute_ source "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://example.test/json','JSON','example.test',1,1,1)"
+        document <- exportJson source
+        close source
+        target <- openDb (dir </> "target.db")
+        result <- importJson target document
+        case result of
+          Left err -> expectationFailure (T.unpack err)
+          Right report -> jrBookmarks report `shouldBe` 1
+        count <- queryScalar target "SELECT COUNT(*) FROM bookmarks"
+        count `shouldBe` 1
+        close target
 
   describe "highlights" $ do
     it "creates, lists, updates, and deletes a highlight" $

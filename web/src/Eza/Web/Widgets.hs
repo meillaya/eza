@@ -15,6 +15,7 @@ module Eza.Web.Widgets (
     iGraph,
     iTag,
     iInbox,
+    iShare,
     icon,
     btn,
     btnPrimary,
@@ -48,7 +49,7 @@ import Eza.Web.Model
 
 -- ------------------------------------------------------------------ icons --
 
-iSearch, iPlus, iSun, iMoon, iUser, iUpload, iDownload, iBack, iTrash, iExternal, iRefresh, iCheck, iGraph, iTag, iInbox :: MisoString
+iSearch, iPlus, iSun, iMoon, iUser, iUpload, iDownload, iBack, iTrash, iExternal, iRefresh, iCheck, iGraph, iTag, iInbox, iShare :: MisoString
 iSearch = "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.35-4.35"
 iPlus = "M12 5v14M5 12h14"
 iSun = "M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"
@@ -64,6 +65,7 @@ iCheck = "M20 6L9 17l-5-5"
 iGraph = "M12 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM5 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM19 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM12 9v3M8 16l3-2M16 16l-3-2"
 iTag = "M20.6 13.4 12 22l-9-9V4h9l8.6 8.6a1 1 0 0 1 0 1.4zM7.5 7.5h.01"
 iInbox = "M4 13h4l2 3h4l2-3h4M5 5h14l2 8v6H3v-6l2-8z"
+iShare = "M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 6l-4-4-4 4M12 2v13"
 
 icon :: MisoString -> View () () Model Action
 icon path =

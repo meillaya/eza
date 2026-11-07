@@ -30,7 +30,7 @@ import Eza.Types (
     TagStat (..),
  )
 import Eza.Web.Model
-import Eza.Web.Types (AccountInfo (..), ConsolGroup (..), Credential (..), DedupGroup (..), TagSuggestion (..), TokenView (..))
+import Eza.Web.Types (AccountInfo (..), AiStatus (..), ConsolGroup (..), Credential (..), DedupGroup (..), ShareView (..), TagSuggestion (..), TokenView (..))
 import Eza.Web.Widgets
 
 pageHeader :: MisoString -> [View () () Model Action] -> View () () Model Action
@@ -329,6 +329,7 @@ aiTagsPage m =
     H.div_
         [HP.class_ "stack"]
         [ pageHeader "AI tags" [btnSm "Refresh" (Navigate AiTags)]
+        , aiStatusBanner m
         , H.p_
             [HP.class_ "muted"]
             [text "Advisory suggestions only — nothing is written until you press Apply."]
@@ -484,6 +485,7 @@ accountPage m =
         [ pageHeader "Account" [btn "btn-danger btn-sm" [HE.onClick Logout] [text "Sign out"]]
         , capturePanel m
         , tokensPanel m
+        , sharesPanel m
         , case mAccount m of
             Nothing
                 | mAccountLoading m -> spinnerRow "Loading account…"
@@ -687,6 +689,82 @@ tokensPanel m =
                 then pill "warn" "revoked"
                 else iconBtnDanger iTrash "Revoke token" (TokenRevoke (tvId token))
             ]
+
+-- | Provider / configured banner for the AI-tags page.
+aiStatusBanner :: Model -> View () () Model Action
+aiStatusBanner m = case mAiStatus m of
+    Nothing -> H.span_ [] []
+    Just status ->
+        H.div_
+            [ HP.class_
+                ("banner " <> if asConfigured status then "info" else "")
+            , HP.role_ "status"
+            ]
+            [ H.span_
+                []
+                [ text
+                    ( ms
+                        ( "AI provider: "
+                            <> asProvider status
+                            <> (if T.null (asModel status) then "" else " · " <> asModel status)
+                            <> if asConfigured status then " · configured" else " · not configured (set ANTHROPIC_API_KEY/OPENAI_API_KEY or EZA_AI_PROVIDER=ollama)"
+                        )
+                    )
+                ]
+            ]
+
+-- | Account-level list of public share links (scope, target, expiry, revoke).
+sharesPanel :: Model -> View () () Model Action
+sharesPanel m =
+    panelWithHead
+        "Shares"
+        [ H.span_ [HP.class_ "muted"] [text (ms (show (length activeShares) <> " active")) | not (null activeShares)]
+        ]
+        ( [ H.p_
+                [HP.class_ "muted"]
+                [text "Public share links render a read-only page (and an Atom feed for saved searches). Revoking a link stops it immediately."]
+          , if mSharesLoading m && null (mShares m)
+                then spinnerRow "Loading share links…"
+                else
+                    H.div_
+                        [HP.class_ "stack"]
+                        ( [shareAccountRow share | share <- mShares m]
+                            ++ [ H.p_ [HP.class_ "muted"] [text "No share links yet. Create one from a bookmark's Share dialog."]
+                               | null (mShares m)
+                               ]
+                        )
+          ]
+        )
+  where
+    activeShares = [share | share <- mShares m, isJust (svRevokedAt share) == False]
+    shareAccountRow share =
+        H.div_
+            [HP.class_ ("cred" <> if isJust (svRevokedAt share) then " is-revoked" else "")]
+            [ H.div_
+                [HP.class_ "cred-main"]
+                [ H.div_
+                    [HP.class_ "cred-title"]
+                    [ text (ms (shareTargetLabel share))
+                    , H.span_ [HP.class_ "token-prefix mono"] [text (ms (svPrefix share))]
+                    ]
+                , H.div_
+                    [HP.class_ "cred-meta"]
+                    [ text (ms ("Created " <> (fromMisoString (formatStamp (svCreatedAt share)) :: String)))
+                    , text (ms (" · expires " <> (fromMisoString (formatStamp (svExpiresAt share)) :: String)))
+                    , text (ms (if svIncludeNote share then " · includes note" else "" :: String))
+                    , text (ms (maybe "" (\accessed -> " · last opened " <> (fromMisoString (formatStamp accessed) :: String)) (svLastAccessedAt share)))
+                    , text (ms (if isJust (svRevokedAt share) then " · revoked" else "" :: String))
+                    ]
+                ]
+            , if isJust (svRevokedAt share)
+                then pill "warn" "revoked"
+                else btnSm "Revoke" (ShareRevoke (svId share))
+            ]
+    shareTargetLabel share =
+        case svScope share of
+            "bookmark" -> "Bookmark #" <> T.pack (show (svTargetId share))
+            "saved_search" -> "Saved search #" <> T.pack (show (svTargetId share))
+            other -> other
 
 credentialRow :: Model -> Credential -> View () () Model Action
 credentialRow m credential =
