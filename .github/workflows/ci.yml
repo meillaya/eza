@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main, haskell-rewrite]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: cachix/cachix-action@v16
+        with:
+          name: devenv
+      - name: Install devenv
+        run: nix profile install nixpkgs#devenv
+      - name: Haskell tests
+        run: devenv shell -- cabal test all
+      - name: Build server
+        run: devenv shell -- cabal build all
+      - name: Build Miso client
+        run: devenv shell -- bash scripts/build-web.sh

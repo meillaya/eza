@@ -1,24 +1,33 @@
-# Python
-__pycache__/
-*.pyc
-.venv/
-venv/
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+# Haskell
+dist-newstyle/
+dist-mcabal/
+*.hi
+*.o
+*.dyn_hi
+*.dyn_o
+cabal.project.local
+cabal.project.local~
+.ghc.environment.*
+.hie/
+*.prof
+*.aux
+*.hp
 
-# Database
+# Devenv / Nix / caches
+.devenv/
+.direnv/
+.dsh-cache/
+.cache/
+result
+result-*
+
+# Database / data
 *.db
 *.db-wal
 *.db-shm
 data/
 *.extract-marker
 bookmarks_*.html
-
-# Environments / secrets
-.env
-.env.local
 
 # Node / e2e harness
 node_modules/
@@ -30,6 +39,22 @@ bun.lockb
 # Build artifacts
 dist/
 *.log
+static/app/*
+!static/app/index.js
+
+# Environments / secrets
+.env
+.env.local
+
+# Python legacy (kept until parity)
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Editor / OS
 .DS_Store

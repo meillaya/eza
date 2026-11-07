@@ -1,0 +1,29 @@
+# eza on Kubernetes — one replica, Recreate strategy, RWO PVC.
+#
+#   kubectl apply -k deploy/k8s
+#
+# The image is built and loaded/pushed outside the cluster:
+#   nix build .#docker && docker load < result
+#   docker tag eza:0.1.0.0 registry.example.com/eza:0.1.0.0
+#   docker push registry.example.com/eza:0.1.0.0
+# Then set the image in deployment.yaml (or with kustomize edit set image).
+#
+# Full runbook (Secret/ConfigMap, probes, backups, Tailscale): docs/deployment-k8s.md
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: eza
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: eza
+      app.kubernetes.io/part-of: eza
+    includeSelectors: false

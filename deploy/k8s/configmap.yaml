@@ -1,0 +1,14 @@
+# Non-secret runtime configuration. Secrets live in eza-secrets (secret.yaml).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eza-config
+data:
+  EZA_DATA_DIR: /data
+  EZA_BIND: 0.0.0.0:8080
+  # Browser-visible origin — MUST be the URL users open (https in production).
+  # Passkeys are bound to this origin; changing it after enrollment breaks them.
+  PUBLIC_ORIGIN: https://eza.example.com
+  EZA_RP_ID: eza.example.com
+  EZA_RP_NAME: eza
+  EZA_LOG_LEVEL: info

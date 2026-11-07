@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f7f7f5" />
+    <meta name="description" content="eza — a search-first, tag-based bookmark library." />
+    <title>eza — bookmarks</title>
+    <link rel="icon" href="/assets/favicon-fallback.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/eza.css" />
+    <script src="/assets/theme.js"></script>
+  </head>
+  <body>
+    <div id="boot-splash" aria-hidden="true">
+      <div class="splash-card">
+        <div class="splash-mark">eza</div>
+        <div class="splash-bar"><span></span></div>
+        <p class="splash-caption">Loading your library&hellip;</p>
+      </div>
+    </div>
+    <div id="app"></div>
+    <div id="boot-error" class="boot-error" hidden>
+      <h1>eza could not start</h1>
+      <p id="boot-error-message">The WebAssembly client failed to load.</p>
+      <p class="muted"><a href="/login">Sign in</a> &middot; <a href="/">Reload</a></p>
+    </div>
+    <noscript>
+      <p class="noscript">eza needs JavaScript and WebAssembly enabled to run.</p>
+    </noscript>
+    <script type="module" src="/assets/app/index.js"></script>
+  </body>
+</html>

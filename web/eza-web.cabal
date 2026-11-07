@@ -1,0 +1,47 @@
+cabal-version:      3.0
+name:               eza-web
+version:            0.1.0.0
+synopsis:           eza Miso frontend
+description:        WebAssembly Miso client for eza.
+license:            MIT
+author:             eza
+maintainer:         eza
+build-type:         Simple
+
+common web-common
+  default-language: Haskell2010
+  default-extensions:
+    DeriveAnyClass
+    DeriveGeneric
+    LambdaCase
+    OverloadedStrings
+    RecordWildCards
+    ScopedTypeVariables
+    TypeApplications
+  ghc-options:      -Wall
+  if arch(wasm32)
+    ghc-options:
+      -no-hs-main
+      -optl-mexec-model=reactor
+      "-optl-Wl,--export=hs_start"
+    cpp-options: -DWASM
+
+executable eza-web
+  import:           web-common
+  hs-source-dirs:   src
+  main-is:          Main.hs
+  other-modules:    Eza.Web.Api
+                    Eza.Web.Detail
+                    Eza.Web.Markdown
+                    Eza.Web.Model
+                    Eza.Web.Panels
+                    Eza.Web.Types
+                    Eza.Web.Update
+                    Eza.Web.View
+                    Eza.Web.Widgets
+  build-depends:    base >=4.18 && <5
+                  , aeson
+                  , containers
+                  , eza-core
+                  , miso
+                  , text

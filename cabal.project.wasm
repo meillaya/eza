@@ -1,0 +1,8 @@
+packages: core
+          web
+
+with-compiler: wasm32-wasi-ghc
+with-hc-pkg: wasm32-wasi-ghc-pkg
+
+package miso
+  flags: +aeson
