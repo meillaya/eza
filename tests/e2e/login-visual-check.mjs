@@ -1,0 +1,11 @@
+import { chromium } from "@playwright/test";
+const BASE = process.env.EZA_BASE || "http://localhost:8080";
+const browser = await chromium.launch({ headless: true });
+const page = await browser.newPage({ viewport: { width: 1280, height: 860 } });
+const response = await page.goto(BASE + "/login", { waitUntil: "networkidle" });
+console.log("status", response?.status(), "url", page.url());
+console.log("title", await page.title());
+console.log("body", (await page.locator("body").innerText()).slice(0, 300));
+console.log("passkey button", await page.locator("#passkey-login").count());
+await page.screenshot({ path: ".dsh-cache/login-fixed.png" });
+await browser.close();

@@ -278,13 +278,21 @@ existingDescriptors conn = do
 
 authenticationOptions :: Connection -> AuthConfig -> IO (Either AuthError Value)
 authenticationOptions conn ac = do
-  n <- countCredentials conn
-  if n == 0
+  credentialRows <- query_ conn "SELECT credential_id FROM passkey_credentials ORDER BY created_at" :: IO [Only BS.ByteString]
+  if null credentialRows
     then pure (Left (authError 400 "no_credentials" "no passkeys are registered"))
     else do
       challenge <- getRandomBytes 32
       storeChallenge conn "authentication" challenge
-      let opts = authenticationOptionsFor ac challenge
+      let descriptors =
+            [ WA.CredentialDescriptor
+                { WA.cdTyp = WA.CredentialTypePublicKey
+                , WA.cdId = WA.CredentialId raw
+                , WA.cdTransports = Nothing
+                }
+            | Only raw <- credentialRows
+            ]
+          opts = (authenticationOptionsFor ac challenge) {WA.coaAllowCredentials = descriptors}
       pure (Right (toJSON (WA.wjEncodeCredentialOptionsAuthentication opts)))
 
 addPasskeyOptions :: Connection -> AuthConfig -> IO (Either AuthError Value)
