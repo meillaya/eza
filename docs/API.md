@@ -176,6 +176,11 @@ DELETE /api/v1/bookmarks/{id}/highlights/{highlightId}
 GET    /api/v1/share-links
 POST   /api/v1/share-links
 DELETE /api/v1/share-links/{id}
+GET    /api/v1/rules
+POST   /api/v1/rules
+POST   /api/v1/rules/test
+PATCH  /api/v1/rules/{id}
+DELETE /api/v1/rules/{id}
 GET    /s/{token}
 GET    /s/{token}.xml
 GET    /api/v1/bookmarks/{id}/snapshot
@@ -189,6 +194,11 @@ A highlight body contains `quote`, `prefix`, `suffix`, `start_offset`,
 `GET /s/{token}` is a public, noindex page. A saved-search share also exposes
 `/s/{token}.xml` as an Atom feed. The snapshot route returns the local
 monolith file inside a sandboxed CSP.
+
+Rules take `name`, `enabled`, `field` (`url`, `domain`, or `title`),
+`pattern`, `add_tags`, and `mark_read`. They run inside the save
+transaction. `POST /api/v1/rules/test` returns matching bookmark ids without
+changing anything.
 
 ## Account and tokens
 

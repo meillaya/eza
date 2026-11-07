@@ -46,6 +46,7 @@ library
                     Eza.Links
                     Eza.Pages
                     Eza.SavedSearches
+                    Eza.Rules
                     Eza.Server
                     Eza.Shares
                     Eza.Snapshot

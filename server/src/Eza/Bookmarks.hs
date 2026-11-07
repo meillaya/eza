@@ -38,6 +38,7 @@ import Database.SQLite.Simple
 import Database.SQLite.Simple (Query (..))
 
 import Eza.Links (syncLinks)
+import Eza.Rules (applyRules)
 import Eza.Url (hostOf, normalizeUrl)
 import Eza.SearchQuery
 import Eza.Types
@@ -368,6 +369,7 @@ insertBookmark conn url title tags = do
             case idRows of
               (Only tid : _) -> execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (newId, tid)
               _ -> pure ()
+          _ <- applyRules conn newId url title
           pure newId
       pure (Right bid)
 

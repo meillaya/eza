@@ -48,6 +48,7 @@ import Eza.Import (defaultImportOptions, importParsed, parseNetscape)
 import Eza.Jobs (resetRunningJobs)
 import Eza.JsonExport (exportJson, importJson)
 import Eza.Pages (addPasskeyPage, loginPage, recoverPage, setupPage)
+import Eza.Rules (Rule (..), createRule, deleteRule, listRules, matchingBookmarks, updateRule)
 import Eza.SavedSearches (createSavedSearch, deleteSavedSearch, listSavedSearches)
 import Eza.Shares (ShareRecord (..), createShare, listShares, resolveShare, revokeShare, shareBookmarkPage, shareSearchFeed, shareSearchPage)
 import Eza.Snapshot (captureSnapshot)
@@ -481,6 +482,37 @@ authedRoute cfg _db req respond ctx conn =
                 ]
             )
         )
+    ("GET", ["api", "v1", "rules"]) -> do
+      rules <- listRules conn
+      respond (jsonResponse status200 (object ["rules" .= rules]))
+    ("POST", ["api", "v1", "rules"]) -> do
+      body <- strictRequestBody req
+      case eitherDecode body of
+        Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+        Right rule -> do
+          created <- createRule conn (sanitizeRule rule)
+          respond (jsonResponse status201 created)
+    ("POST", ["api", "v1", "rules", "test"]) -> do
+      body <- strictRequestBody req
+      case eitherDecode body of
+        Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+        Right rule -> do
+          ids <- matchingBookmarks conn (ruleField rule) (rulePattern rule)
+          respond (jsonResponse status200 (object ["matches" .= length ids, "bookmark_ids" .= ids]))
+    ("PATCH", ["api", "v1", "rules", idTxt]) -> case readInt idTxt of
+      Nothing -> respond (jsonError status400 "bad_request" "invalid rule id")
+      Just rid -> do
+        body <- strictRequestBody req
+        case eitherDecode body of
+          Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+          Right rule -> do
+            ok <- updateRule conn (sanitizeRule rule) {ruleId = rid}
+            if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status404 "not_found" "rule not found")
+    ("DELETE", ["api", "v1", "rules", idTxt]) -> case readInt idTxt of
+      Nothing -> respond (jsonError status400 "bad_request" "invalid rule id")
+      Just rid -> do
+        ok <- deleteRule conn rid
+        if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "rule not found")
     ("GET", ["api", "v1", "tokens"]) -> do
       tokens <- listTokens conn
       respond (jsonResponse status200 (object ["tokens" .= tokens]))
@@ -592,6 +624,7 @@ requiresSession path = case path of
   ("account" : _) -> True
   ("api" : "v1" : "account" : _) -> True
   ("api" : "v1" : "tokens" : _) -> True
+  ("api" : "v1" : "rules" : _) -> True
   ["save"] -> True
   _ -> False
 
@@ -754,6 +787,15 @@ addBookmark conn req respond = do
             Right bid -> do
               enqueueEnrichment conn bid
               respond (jsonResponse status201 (object ["id" .= bid]))
+
+sanitizeRule :: Rule -> Rule
+sanitizeRule rule =
+  rule
+    { ruleName = T.strip (ruleName rule)
+    , ruleField = if T.toLower (ruleField rule) `elem` ["url", "domain", "title"] then T.toLower (ruleField rule) else "url"
+    , rulePattern = T.strip (rulePattern rule)
+    , ruleAddTags = [T.toLower (T.strip tag) | tag <- ruleAddTags rule, not (T.null (T.strip tag))]
+    }
 
 data HighlightCreateBody = HighlightCreateBody
   { hcbQuote :: Text

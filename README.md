@@ -40,6 +40,7 @@ dead-link checks, and an undo stack for destructive actions.
 | **Maintenance** | Bulk tag, read-state, and delete actions with side-table undo. Duplicate groups, tag consolidation, dead-link sweeps, and a prune flow also write undo snapshots. |
 | **Capture** | A bookmarklet, PWA share target, quick-save API, cached favicons, and background metadata and article extraction. Netscape import remains. |
 | **Sharing** | Signed read-only bookmark and saved-search pages, Atom feeds, and a sandboxed local archive viewer. |
+| **Rules** | Deterministic save rules on URL, domain, or title that add tags or mark a bookmark read, with a dry-run check. |
 | **Access** | WebAuthn passkeys, recovery codes, CSRF checks, and hashed API tokens with read, write, and capture scopes. |
 | **Ownership** | One SQLite file, WAL mode, online backups, a Docker image, a NixOS module, and Kubernetes manifests. |
 

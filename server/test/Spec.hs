@@ -18,6 +18,7 @@ import Eza.Favicon (parseDataIcon, parseIconLinks, sniffImage)
 import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateHighlight)
 import Eza.Import
 import Eza.JsonExport (JsonImportReport (..), exportJson, importJson)
+import Eza.Rules (Rule (..), createRule, listRules, matchingBookmarks)
 import Eza.SearchQuery
 import Eza.Shares (ShareRecord (..), createShare, resolveShare, revokeShare)
 import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), Highlight (..), ImportReport (..), SearchPage (..))
@@ -68,6 +69,23 @@ main = hspec $ do
         backups <- listDirectory (dir </> "backups")
         length backups `shouldBe` 1
         close migrated
+
+  describe "save rules" $ do
+    it "adds tags and marks a matching save as read" $
+      withSystemTempDirectory "eza-rules" $ \dir -> do
+        conn <- openDb (dir </> "test.db")
+        _ <- createRule conn (Rule 0 "domain rule" True "domain" "example.test" ["ruled"] True 0)
+        _ <- insertBookmark conn "https://example.test/rule" "Rule test" []
+        _ <- insertBookmark conn "https://other.test/rule" "Other" []
+        rules <- listRules conn
+        length rules `shouldBe` 1
+        matches <- matchingBookmarks conn "domain" "example.test"
+        matches `shouldBe` [1]
+        page <- listBookmarks conn (defaultListQuery {lqTags = ["ruled"]})
+        spTotal page `shouldBe` 1
+        detail <- getBookmark conn 1
+        fmap bdIsRead detail `shouldBe` Just True
+        close conn
 
   describe "JSON export" $ do
     it "round-trips a bookmark into a new database" $
