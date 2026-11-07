@@ -16,6 +16,7 @@ module Eza.Web.Types (
     ShareView (..),
     AiStatus (..),
     ReaderSelection (..),
+    Rule (..),
     mkApiError,
     fieldInt,
     fieldBool,
@@ -116,6 +117,33 @@ instance FromJSON Credential where
             <*> o .:? "created_at" .!= 0
             <*> o .:? "last_used_at"
             <*> o .:? "backup_eligible" .!= False
+
+{- | A deterministic save rule: when a saved URL/domain/title contains the
+pattern, the listed tags are added and/or the bookmark is marked read.
+-}
+data Rule = Rule
+    { ruleId :: Int
+    , ruleName :: Text
+    , ruleEnabled :: Bool
+    , ruleField :: Text
+    , rulePattern :: Text
+    , ruleAddTags :: [Text]
+    , ruleMarkRead :: Bool
+    , ruleCreatedAt :: Int
+    }
+    deriving (Eq, Show)
+
+instance FromJSON Rule where
+    parseJSON = withObject "Rule" $ \o ->
+        Rule
+            <$> o .:? "id" .!= 0
+            <*> o .:? "name" .!= ""
+            <*> o .:? "enabled" .!= True
+            <*> o .:? "field" .!= "url"
+            <*> o .:? "pattern" .!= ""
+            <*> o .:? "add_tags" .!= []
+            <*> o .:? "mark_read" .!= False
+            <*> o .:? "created_at" .!= 0
 
 {- | A public share link (the raw token is only known at creation time; the
 server exposes a short prefix for identification afterwards).

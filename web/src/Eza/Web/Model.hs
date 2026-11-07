@@ -50,7 +50,7 @@ import Miso
 import Miso.Router (Router (..), RoutingError (..), Token (..), parseURI, routes, toCapture, toPath, toQueryParam)
 import Miso.Subscription.History (getURI)
 
-import Eza.Web.Types (AccountInfo, AiStatus, ApiError, ConsolGroup, DedupGroup, ReaderSelection, ShareView, TagSuggestion, TokenView)
+import Eza.Web.Types (AccountInfo, AiStatus, ApiError, ConsolGroup, DedupGroup, ReaderSelection, Rule (..), ShareView, TagSuggestion, TokenView)
 
 -- | Application routes.  @Bookmark@ carries the numeric bookmark id.
 data Route
@@ -455,6 +455,25 @@ data Action
     | -- ai status
       AiStatusLoaded AiStatus
     | AiStatusFailed ApiError
+    | -- rules
+      RulesLoaded [Rule]
+    | RulesFailed ApiError
+    | RuleNameInput MisoString
+    | RuleFieldSelected Text
+    | RulePatternInput MisoString
+    | RuleTagsInput MisoString
+    | RuleMarkReadToggled
+    | RuleCreate
+    | RuleCreated Rule
+    | RuleCreateFailed ApiError
+    | RuleToggleEnabled Rule
+    | RuleToggled Rule
+    | RuleDelete Int
+    | RuleDeleted Int
+    | RuleDryRun
+    | RuleDryRunResult Int [Int]
+    | RuleDryRunFailed ApiError
+    | RuleFailed ApiError
     | -- toasts
       ToastAdd MisoString ToastKind
     | ToastDismiss Int
@@ -542,6 +561,15 @@ data Model = Model
     , mShareBusy :: Bool
     , mShareUrl :: Maybe Text
     , mAiStatus :: Maybe AiStatus
+    , mRules :: [Rule]
+    , mRulesLoading :: Bool
+    , mRuleName :: MisoString
+    , mRuleField :: Text
+    , mRulePattern :: MisoString
+    , mRuleTags :: MisoString
+    , mRuleMarkRead :: Bool
+    , mRuleBusy :: Bool
+    , mRuleDryRun :: Maybe (Int, [Int])
     , mSaving :: Bool
     , mDirty :: Bool
     , mGuardOpen :: Bool
@@ -668,6 +696,15 @@ initialModel =
         , mShareBusy = False
         , mShareUrl = Nothing
         , mAiStatus = Nothing
+        , mRules = []
+        , mRulesLoading = False
+        , mRuleName = ""
+        , mRuleField = "url"
+        , mRulePattern = ""
+        , mRuleTags = ""
+        , mRuleMarkRead = False
+        , mRuleBusy = False
+        , mRuleDryRun = Nothing
         , mSaving = False
         , mDirty = False
         , mGuardOpen = False

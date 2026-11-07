@@ -30,7 +30,7 @@ import Eza.Types (
     TagStat (..),
  )
 import Eza.Web.Model
-import Eza.Web.Types (AccountInfo (..), AiStatus (..), ConsolGroup (..), Credential (..), DedupGroup (..), ShareView (..), TagSuggestion (..), TokenView (..))
+import Eza.Web.Types (AccountInfo (..), AiStatus (..), ConsolGroup (..), Credential (..), DedupGroup (..), Rule (..), ShareView (..), TagSuggestion (..), TokenView (..))
 import Eza.Web.Widgets
 
 pageHeader :: MisoString -> [View () () Model Action] -> View () () Model Action
@@ -486,6 +486,7 @@ accountPage m =
         , capturePanel m
         , tokensPanel m
         , sharesPanel m
+        , rulesPanel m
         , case mAccount m of
             Nothing
                 | mAccountLoading m -> spinnerRow "Loading account…"
@@ -765,6 +766,145 @@ sharesPanel m =
             "bookmark" -> "Bookmark #" <> T.pack (show (svTargetId share))
             "saved_search" -> "Saved search #" <> T.pack (show (svTargetId share))
             other -> other
+
+{- | Deterministic save rules: list + enable/disable + delete + create form
+with a dry run against the existing library.
+-}
+rulesPanel :: Model -> View () () Model Action
+rulesPanel m =
+    panelWithHead
+        "Rules"
+        [ H.span_
+            [HP.class_ "muted"]
+            [text (ms (show (length (mRules m)) <> " rule(s)")) | not (null (mRules m))]
+        ]
+        [ H.p_
+            [HP.class_ "muted"]
+            [text "Rules run when a new bookmark is saved: a case-insensitive substring match on the URL, domain, or title adds tags and can mark the bookmark read."]
+        , H.div_
+            [HP.class_ "rule-form"]
+            [ H.input_
+                [ HP.id_ "rule-name"
+                , HP.class_ "input"
+                , HP.placeholder_ "Rule name"
+                , HP.value_ (mRuleName m)
+                , HP.autocomplete_ "off"
+                , HE.onInput RuleNameInput
+                ]
+            , H.select_
+                [ HP.class_ "select"
+                , HE.onChange (\raw -> RuleFieldSelected (fromMisoString raw))
+                ]
+                [ fieldOption "url" "URL"
+                , fieldOption "domain" "Domain"
+                , fieldOption "title" "Title"
+                ]
+            , H.input_
+                [ HP.id_ "rule-pattern"
+                , HP.class_ "input"
+                , HP.placeholder_ "Pattern (case-insensitive substring)"
+                , HP.value_ (mRulePattern m)
+                , HP.autocomplete_ "off"
+                , HE.onInput RulePatternInput
+                ]
+            , H.input_
+                [ HP.id_ "rule-tags"
+                , HP.class_ "input"
+                , HP.placeholder_ "Tags, comma separated"
+                , HP.value_ (mRuleTags m)
+                , HP.autocomplete_ "off"
+                , HE.onInput RuleTagsInput
+                ]
+            , H.label_
+                [HP.class_ "share-option rule-read"]
+                [ H.input_
+                    [ HP.type_ "checkbox"
+                    , HP.checked_ (mRuleMarkRead m)
+                    , HE.onClick RuleMarkReadToggled
+                    ]
+                , text "Mark read"
+                ]
+            , H.div_
+                [HP.class_ "row-wrap"]
+                [ btn
+                    "btn-primary"
+                    ([HE.onClick RuleCreate] <> disabledAttr (mRuleBusy m))
+                    [text (if mRuleBusy m then "Working…" else "Create rule")]
+                , btn
+                    "btn-sm"
+                    ([HE.onClick RuleDryRun] <> disabledAttr (mRuleBusy m))
+                    [text "Dry run"]
+                ]
+            , case mRuleDryRun m of
+                Nothing -> H.span_ [] []
+                Just (matches, ids) ->
+                    H.span_
+                        [HP.class_ "rule-result", HP.role_ "status"]
+                        [ text
+                            ( ms
+                                ( "Dry run: "
+                                    <> show matches
+                                    <> " matching bookmark(s)"
+                                    <> if null ids then "" else " — e.g. #" <> show (head ids)
+                                )
+                            )
+                        ]
+            ]
+        , if mRulesLoading m && null (mRules m)
+            then spinnerRow "Loading rules…"
+            else
+                if null (mRules m)
+                    then H.p_ [HP.class_ "muted"] [text "No rules yet."]
+                    else
+                        H.table_
+                            [HP.class_ "table rules-table"]
+                            [ H.thead_
+                                []
+                                [ H.tr_
+                                    []
+                                    [ H.th_ [] [text "Name"]
+                                    , H.th_ [] [text "Match"]
+                                    , H.th_ [] [text "Tags"]
+                                    , H.th_ [] [text "Read"]
+                                    , H.th_ [] [text "State"]
+                                    , H.th_ [] [text ""]
+                                    ]
+                                ]
+                            , H.tbody_ [] (map ruleRow (mRules m))
+                            ]
+        ]
+  where
+    fieldOption value label =
+        H.option_
+            [HP.value_ (ms (value :: Text)), HP.selected_ (mRuleField m == value)]
+            [text label]
+    ruleRow rule =
+        H.tr_
+            [HP.class_ (if ruleEnabled rule then "" else "is-disabled")]
+            [ H.td_ [] [H.span_ [HP.class_ "rule-name"] [text (ms (ruleName rule))]]
+            , H.td_
+                []
+                [ H.span_ [HP.class_ "rule-field"] [text (ms (T.toUpper (ruleField rule)))]
+                , H.code_ [HP.class_ "rule-pattern"] [text (ms (rulePattern rule))]
+                ]
+            , H.td_
+                []
+                ( if null (ruleAddTags rule)
+                    then [H.span_ [HP.class_ "muted"] [text "—"]]
+                    else [H.span_ [HP.class_ "tag-chip"] [text (ms tag)] | tag <- ruleAddTags rule]
+                )
+            , H.td_ [] [if ruleMarkRead rule then pill "ok" "read" else H.span_ [HP.class_ "muted"] [text "—"]]
+            , H.td_
+                []
+                [ btnSm
+                    (if ruleEnabled rule then "Disable" else "Enable")
+                    (RuleToggleEnabled rule)
+                ]
+            , H.td_
+                []
+                [ iconBtnDanger iTrash "Delete rule" (RuleDelete (ruleId rule))
+                ]
+            ]
 
 credentialRow :: Model -> Credential -> View () () Model Action
 credentialRow m credential =

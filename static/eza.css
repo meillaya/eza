@@ -2508,3 +2508,53 @@ img {
   border: 0;
   background: #fff;
 }
+
+/* ------------------------------------------------------------- rules --- */
+.rule-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 12px;
+}
+.rule-form .input {
+  flex: 1 1 160px;
+  min-width: 120px;
+}
+.rule-form .select {
+  height: 36px;
+}
+.rule-form .rule-read {
+  margin: 0;
+}
+.rule-result {
+  width: 100%;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.rules-table {
+  margin-top: 4px;
+}
+.rules-table td {
+  vertical-align: middle;
+}
+.rules-table .rule-name {
+  font-weight: 600;
+}
+.rules-table .rule-field {
+  margin-right: 8px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+}
+.rules-table .rule-pattern {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.rules-table tr.is-disabled {
+  opacity: 0.6;
+}

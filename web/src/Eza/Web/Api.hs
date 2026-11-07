@@ -31,6 +31,7 @@ module Eza.Web.Api (
     fetchHighlights,
     fetchShares,
     fetchAiStatus,
+    fetchRules,
     -- writes
     createBookmark,
     quickSave,
@@ -43,6 +44,10 @@ module Eza.Web.Api (
     deleteHighlight,
     createShareLink,
     revokeShareLink,
+    createRule,
+    patchRule,
+    deleteRule,
+    testRule,
     patchBookmark,
     deleteBookmark,
     markAllAbove,
@@ -99,6 +104,7 @@ import Eza.Web.Types (
     ConsolGroup,
     Credential,
     DedupGroup,
+    Rule (..),
     ShareView,
     TagSuggestion,
     TokenView,
@@ -914,6 +920,98 @@ fetchAiStatus ::
     (ApiError -> action) ->
     Eff model action
 fetchAiStatus = apiGet "/api/v1/ai/status"
+
+-- ----------------------------------------------------------------- rules ---
+
+-- | @GET /api/v1/rules@
+fetchRules ::
+    ([Rule] -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+fetchRules onOk onErr =
+    getValue "/api/v1/rules" [] (\v -> onOk (fieldList "rules" v)) onErr
+
+ruleBody :: Text -> Bool -> Text -> Text -> [Text] -> Bool -> Value
+ruleBody name enabled field patternText addTags markRead =
+    object
+        [ "name" .= name
+        , "enabled" .= enabled
+        , "field" .= field
+        , "pattern" .= patternText
+        , "add_tags" .= addTags
+        , "mark_read" .= markRead
+        ]
+
+decodeRule :: Value -> Maybe Rule
+decodeRule value = case MJ.fromJSON value of
+    MJ.Success rule -> Just rule
+    MJ.Error _ -> Nothing
+
+-- | @POST /api/v1/rules@
+createRule ::
+    Text ->
+    Bool ->
+    Text ->
+    Text ->
+    [Text] ->
+    Bool ->
+    (Rule -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+createRule name enabled field patternText addTags markRead onOk onErr =
+    sendValue
+        "POST"
+        "/api/v1/rules"
+        (Just (ruleBody name enabled field patternText addTags markRead))
+        []
+        JSON
+        ( \v -> case decodeRule v of
+            Just rule -> onOk rule
+            Nothing -> onErr (mkApiError Nothing (Just "invalid rule response"))
+        )
+        onErr
+
+{- | @PATCH /api/v1/rules/{id}@ — the API replaces all fields, so callers pass
+the complete rule with the change applied.
+-}
+patchRule ::
+    Int ->
+    Rule ->
+    action ->
+    (ApiError -> action) ->
+    Eff model action
+patchRule ruleId rule onOk onErr =
+    sendValue "PATCH" ("/api/v1/rules/" <> ms (show ruleId)) (Just body) [] JSON (\_ -> onOk) onErr
+  where
+    body =
+        ruleBody
+            (ruleName rule)
+            (ruleEnabled rule)
+            (ruleField rule)
+            (rulePattern rule)
+            (ruleAddTags rule)
+            (ruleMarkRead rule)
+
+-- | @DELETE /api/v1/rules/{id}@
+deleteRule :: Int -> action -> (ApiError -> action) -> Eff model action
+deleteRule ruleId = apiDelete ("/api/v1/rules/" <> ms (show ruleId))
+
+-- | @POST /api/v1/rules/test@ — dry run against the existing library.
+testRule ::
+    Text ->
+    Text ->
+    (Int -> [Int] -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+testRule field patternText onOk onErr =
+    sendValue
+        "POST"
+        "/api/v1/rules/test"
+        (Just (ruleBody "" True field patternText [] False))
+        []
+        JSON
+        (\v -> onOk (fieldInt "matches" v) (fieldList "bookmark_ids" v))
+        onErr
 
 -- ------------------------------------------------------------------ links --
 

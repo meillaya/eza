@@ -35,6 +35,7 @@ import Eza.Web.Types (
     ConsolGroup (..),
     DedupGroup (..),
     ReaderSelection (..),
+    Rule (..),
     ShareView (..),
     TagSuggestion (..),
     TokenView (..),
@@ -214,9 +215,10 @@ loadRoute route = do
         Maintenance -> fetchPruneCandidates PruneLoaded PruneFailed
         Account -> do
             fetchAccount AccountLoaded AccountFailed
-            putModel (\x -> x{mTokensLoading = True, mSharesLoading = True})
+            putModel (\x -> x{mTokensLoading = True, mSharesLoading = True, mRulesLoading = True})
             fetchTokens TokensLoaded TokensFailed
             fetchShares SharesLoaded SharesFailed
+            fetchRules RulesLoaded RulesFailed
         NotFound -> pure ()
 
 scheduleSearch :: Int -> Effect () () Model Action
@@ -1262,6 +1264,77 @@ updateModel = \case
     -- ai status ------------------------------------------------------------
     AiStatusLoaded status -> putModel (\m -> m{mAiStatus = Just status})
     AiStatusFailed _ -> pure ()
+    -- rules ----------------------------------------------------------------
+    RulesLoaded rules -> putModel (\m -> m{mRules = rules, mRulesLoading = False})
+    RulesFailed err -> do
+        putModel (\m -> m{mRulesLoading = False})
+        handleApiError err
+    RuleNameInput value -> putModel (\m -> m{mRuleName = value})
+    RuleFieldSelected field -> putModel (\m -> m{mRuleField = field})
+    RulePatternInput value -> putModel (\m -> m{mRulePattern = value})
+    RuleTagsInput value -> putModel (\m -> m{mRuleTags = value})
+    RuleMarkReadToggled -> putModel (\m -> m{mRuleMarkRead = not (mRuleMarkRead m)})
+    RuleCreate -> do
+        m <- get
+        let name = T.strip (fromMisoString (mRuleName m))
+            patternText = T.strip (fromMisoString (mRulePattern m))
+        if T.null name || T.null patternText
+            then notify "Rule name and pattern are required" ToastInfo
+            else do
+                putModel (\x -> x{mRuleBusy = True})
+                createRule
+                    name
+                    True
+                    (mRuleField m)
+                    patternText
+                    (splitTags (mRuleTags m))
+                    (mRuleMarkRead m)
+                    RuleCreated
+                    RuleCreateFailed
+    RuleCreated rule -> do
+        putModel
+            ( \m ->
+                m
+                    { mRules = mRules m ++ [rule]
+                    , mRuleName = ""
+                    , mRulePattern = ""
+                    , mRuleTags = ""
+                    , mRuleMarkRead = False
+                    , mRuleBusy = False
+                    , mRuleDryRun = Nothing
+                    }
+            )
+        notify (ms ("Rule “" <> ruleName rule <> "” created")) ToastOk
+    RuleCreateFailed err -> do
+        putModel (\m -> m{mRuleBusy = False})
+        handleApiError err
+    RuleToggleEnabled rule -> patchRule (ruleId rule) rule{ruleEnabled = not (ruleEnabled rule)} (RuleToggled rule{ruleEnabled = not (ruleEnabled rule)}) RuleFailed
+    RuleToggled updated ->
+        putModel
+            ( \m ->
+                m
+                    { mRules = map (\rule -> if ruleId rule == ruleId updated then updated else rule) (mRules m)
+                    }
+            )
+    RuleDelete ruleIdToDelete -> deleteRule ruleIdToDelete (RuleDeleted ruleIdToDelete) RuleFailed
+    RuleDeleted ruleIdToDelete -> do
+        putModel (\m -> m{mRules = filter (\rule -> ruleId rule /= ruleIdToDelete) (mRules m)})
+        notify "Rule deleted" ToastOk
+    RuleFailed err -> handleApiError err
+    RuleDryRun -> do
+        m <- get
+        let patternText = T.strip (fromMisoString (mRulePattern m))
+        if T.null patternText
+            then notify "Enter a pattern to dry-run" ToastInfo
+            else do
+                putModel (\x -> x{mRuleBusy = True, mRuleDryRun = Nothing})
+                testRule (mRuleField m) patternText RuleDryRunResult RuleDryRunFailed
+    RuleDryRunResult matches ids -> do
+        putModel (\m -> m{mRuleBusy = False, mRuleDryRun = Just (matches, ids)})
+        notify (ms (show matches <> " bookmark(s) would match")) ToastOk
+    RuleDryRunFailed err -> do
+        putModel (\m -> m{mRuleBusy = False})
+        handleApiError err
     -- toasts ---------------------------------------------------------------
     ToastAdd message kind -> notify message kind
     ToastDismiss dismissed -> putModel (\m -> m{mToasts = filter (\toast -> toastId toast /= dismissed) (mToasts m)})
