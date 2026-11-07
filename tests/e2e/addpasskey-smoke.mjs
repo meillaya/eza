@@ -1,0 +1,23 @@
+import { chromium } from "@playwright/test";
+const BASE = process.env.EZA_BASE || "http://localhost:8092";
+const browser = await chromium.launch({ headless: true });
+const context = await browser.newContext();
+const page = await context.newPage();
+const cdp = await context.newCDPSession(page);
+await cdp.send("WebAuthn.enable", { enableUI: false });
+await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
+await page.goto(BASE + "/setup", { waitUntil: "networkidle" });
+await page.click("#passkey-setup");
+await page.waitForSelector("#recovery:not([hidden])", { timeout: 30000 });
+const before = await page.evaluate(async () => (await (await fetch("/api/v1/account")).json()).credentials.length);
+await page.goto(BASE + "/account/add-passkey", { waitUntil: "networkidle" });
+console.log("add page title:", await page.title(), "button:", await page.locator("#passkey-add").count());
+await page.click("#passkey-add");
+await page.waitForTimeout(3000);
+console.log("error:", await page.locator("#auth-error").innerText().catch(() => "?"));
+console.log("url:", page.url());
+await page.screenshot({ path: ".dsh-cache/addpasskey.png" });
+try { await page.waitForURL("**/account", { timeout: 5000 }); } catch (_) {}
+const after = await page.evaluate(async () => (await (await fetch("/api/v1/account")).json()).credentials.length);
+console.log("passkeys before/after:", before, after);
+await browser.close();

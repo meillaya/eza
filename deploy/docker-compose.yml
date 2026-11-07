@@ -1,0 +1,78 @@
+# eza — Docker Compose deployment (single host, SQLite on a named volume).
+#
+# The image is built by Nix (the web client is a CI-built WASM release asset,
+# so there is no Dockerfile):
+#
+#   nix build .#docker          # produces <name>.tar.gz in the Nix store
+#   docker load < result        # result is a symlink to that tarball
+#
+# Then:
+#
+#   cp deploy/docker-compose.yml ./docker-compose.eza.yml   # or use -f directly
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+# The container runs as uid/gid 10001 (non-root) and stores everything in the
+# /data volume (eza.db, snapshots/, backups/).
+#
+# Full runbook: docs/deployment-docker.md
+name: eza
+
+services:
+  eza:
+    # Tag of `nix build .#docker` (flake version). Override with EZA_IMAGE.
+    image: ${EZA_IMAGE:-eza:0.1.0.0}
+    container_name: eza
+    restart: unless-stopped
+    ports:
+      # Bind to loopback and put a TLS proxy (Caddy / Tailscale Serve) in
+      # front: passkeys require a secure origin.
+      - "127.0.0.1:${EZA_PORT:-8080}:8080"
+    environment:
+      EZA_DATA_DIR: /data
+      EZA_BIND: 0.0.0.0:8080
+      # Must be the browser-visible origin (https in production); passkeys are
+      # bound to it. EZA_RP_ID defaults to this origin's host in the server.
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:8080}
+      EZA_RP_ID: ${EZA_RP_ID:-localhost}
+      EZA_RP_NAME: ${EZA_RP_NAME:-eza}
+      EZA_LOG_LEVEL: ${EZA_LOG_LEVEL:-info}
+      # Optional AI-tagging keys; empty disables the feature.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    # Optional: resolve secrets through SecretSpec's env provider instead of
+    # plain environment variables. The image ships the manifest at
+    # /etc/eza/secretspec.toml.
+    # command:
+    #   - /bin/secretspec
+    #   - run
+    #   - --file
+    #   - /etc/eza/secretspec.toml
+    #   - --provider
+    #   - env
+    #   - --profile
+    #   - production
+    #   - --
+    #   - /bin/eza-bookmarks
+    #   - serve
+    healthcheck:
+      # eza-bookmarks healthcheck: GET /healthz on EZA_BIND (200 = healthy).
+      test: ["CMD", "/bin/eza-bookmarks", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    volumes:
+      - eza-data:/data
+
+volumes:
+  # The image pre-creates /data owned by 10001:10001, so a fresh named volume
+  # is writable by the non-root container user without a manual chown.
+  eza-data:

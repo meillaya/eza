@@ -16,26 +16,9 @@
         "type": "github"
       }
     },
-    "nixpkgs-playwright": {
-      "locked": {
-        "lastModified": 1786089901,
-        "narHash": "sha256-M41peY3v+TUL2gJ1yRdSlqQFKqYdVqpKj2v3N0znLc8=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "590d737e9e7cfbc6ee5c569a7683eaa67456a761",
-        "type": "github"
-      },
-      "original": {
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "590d737e9e7cfbc6ee5c569a7683eaa67456a761",
-        "type": "github"
-      }
-    },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs",
-        "nixpkgs-playwright": "nixpkgs-playwright"
+        "nixpkgs": "nixpkgs"
       }
     }
   },

@@ -1,0 +1,804 @@
+-- | The MVU update function: every action's state transition and side effect.
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+
+module Eza.Web.Update (updateModel, subscriptions) where
+
+import Control.Monad (forM_, unless, void, when)
+import Data.Aeson (Value, object, (.=))
+import Data.List (nub)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
+import Data.Text (Text)
+import qualified Data.Map.Strict as M
+import qualified Data.Text as T
+
+import Miso
+import qualified Miso.JSON as MJ
+
+import Eza.Types
+  ( Backlinks (..)
+  , BookmarkDetail (..)
+  , BookmarkSummary (..)
+  , BootPayload (..)
+  , ImportReport
+  , SavedSearch (..)
+  , SearchPage (..)
+  , TagStat (..)
+  )
+import Eza.Web.Api
+import Eza.Web.Model
+import Eza.Web.Types (ApiError (..), ConsolGroup (..), DedupGroup (..), TagSuggestion (..), fieldInt)
+
+-- | Component subscriptions: URL changes (back/forward), window scroll for
+-- the virtualized grid, and window resize for the column count.
+subscriptions :: [Sub Model Action]
+subscriptions =
+  [ routerSub RouteChanged
+  , windowSub "scroll" emptyDecoder (\() -> Scrolled)
+  , windowSub "resize" emptyDecoder (\() -> Resized)
+  -- Global keydown lives on window (not the VDOM root) so shortcuts work even
+  -- when focus is on <body> or outside the mounted tree.
+  , windowSub "keydown" keyInfoDecoder GlobalKey
+  ]
+
+-- ---------------------------------------------------------------- helpers --
+
+putModel :: (Model -> Model) -> Effect () () Model Action
+putModel f = get >>= put . f
+
+liftSinkIO :: IO () -> Effect () () Model Action
+liftSinkIO io = withSink $ \_ -> io
+
+notify :: MisoString -> ToastKind -> Effect () () Model Action
+notify message kind = do
+  m <- get
+  let tid = mToastNext m
+      toast = Toast tid message kind
+      keep = drop (max 0 (length (mToasts m) - 3)) (mToasts m ++ [toast])
+  put m {mToasts = keep, mToastNext = tid + 1}
+  withSink $ \sink -> do
+    _ <- jsgf "setTimeout" (asyncCallback1 (\_ -> sink (ToastDismiss tid)), 4800 :: Int)
+    pure ()
+
+handleApiError :: ApiError -> Effect () () Model Action
+handleApiError err = do
+  let message = ms (aeMessage err)
+  case aeStatus err of
+    Just 401 -> do
+      putModel (\m -> m {mSignedOut = True})
+      notify "Session expired — sign in again to continue." ToastError
+    Just 404 -> do
+      putModel (\m -> m {mNotice = Just message})
+      notify message ToastInfo
+    _ -> notify message ToastError
+
+redirectTo :: MisoString -> IO ()
+redirectTo url = do
+  location <- jsg "window" ! "location"
+  _ <- location # "assign" $ (url :: MisoString)
+  pure ()
+
+isHttpUrlText :: MisoString -> Bool
+isHttpUrlText value =
+  let lowered = T.toLower (T.strip (fromMisoString value))
+   in "http://" `T.isPrefixOf` lowered || "https://" `T.isPrefixOf` lowered
+
+splitTags :: MisoString -> [Text]
+splitTags raw =
+  nub
+    [ T.toLower tag
+    | tag <- T.words (T.map replaceSep (fromMisoString raw))
+    , not (T.null tag)
+    ]
+  where
+    replaceSep c = if c == ',' || c == ';' then ' ' else c
+
+parseTagInput :: MisoString -> Maybe Text
+parseTagInput raw =
+  let tag = T.toLower (T.strip (fromMisoString raw))
+   in if T.null tag then Nothing else Just tag
+
+toggleMember :: Eq a => a -> [a] -> [a]
+toggleMember x xs
+  | x `elem` xs = filter (/= x) xs
+  | otherwise = xs ++ [x]
+
+isDetailRoute :: Route -> Bool
+isDetailRoute = \case
+  Bookmark _ -> True
+  _ -> False
+
+isListRoute :: Route -> Bool
+isListRoute = \case
+  Index -> True
+  Inbox -> True
+  _ -> False
+
+listParams :: Model -> Bool -> ListParams
+listParams m append =
+  defaultListParams
+    { lpQ = mQ m
+    , lpTags = mTagsFilter m
+    , lpSort = mSort m
+    , lpUnreadOnly = mRoute m == Inbox || mUnreadOnly m
+    , lpOffset = if append then length (mItems m) else 0
+    }
+
+reloadList :: Effect () () Model Action
+reloadList = do
+  m <- get
+  put m {mLoading = True, mLoadingMore = False, mError = Nothing}
+  fetchBookmarks (listParams m False) (ListLoaded False) (ListFailed False)
+
+loadMore :: Effect () () Model Action
+loadMore = do
+  m <- get
+  unless (mLoading m || mLoadingMore m || not (mHasMore m)) $ do
+    put m {mLoadingMore = True}
+    fetchBookmarks (listParams m True) (ListLoaded True) (ListFailed True)
+
+refreshTags :: Effect () () Model Action
+refreshTags = fetchTags TagsRefreshed (\_ -> Noop)
+
+loadRoute :: Route -> Effect () () Model Action
+loadRoute route = do
+  m <- get
+  put
+    m
+      { mRoute = route
+      , mLoading = isListRoute route
+      , mLoadingMore = False
+      , mError = Nothing
+      , mNotice = Nothing
+      , mDetail = if isDetailRoute route then mDetail m else Nothing
+      , mDetailLoading = isDetailRoute route
+      , mDirty = if isDetailRoute route then mDirty m else False
+      , mGraphLoading = route == Graph
+      , mDedupLoading = route == Dedup
+      , mConsolLoading = route == Tags
+      , mAccountLoading = route == Account
+      , mAiTag = if route == AiTags then mAiTag m else Nothing
+      , mSuggestions = if route == AiTags then mSuggestions m else []
+      }
+  case route of
+    Index -> reloadList
+    Inbox -> reloadList
+    Bookmark bid -> do
+      fetchDetail bid DetailLoaded DetailFailed
+      fetchBacklinks bid BacklinksLoaded BacklinksFailed
+    Graph -> do
+      current <- get
+      case mGraphSeed current of
+        Nothing -> putModel (\x -> x {mGraph = Nothing, mGraphLoading = False})
+        Just seed -> fetchGraph (Just seed) (mGraphDepth current) GraphLoaded GraphFailed
+    Dedup -> fetchDedup DedupLoaded DedupFailed
+    Tags -> do
+      fetchConsolidation ConsolLoaded ConsolFailed
+      refreshTags
+    AiTags -> refreshTags
+    Maintenance -> fetchPruneCandidates PruneLoaded PruneFailed
+    Account -> fetchAccount AccountLoaded AccountFailed
+    NotFound -> pure ()
+
+scheduleSearch :: Int -> Effect () () Model Action
+scheduleSearch delayMs = do
+  m <- get
+  put m {mDebounce = Nothing}
+  withSink $ \sink -> do
+    case mDebounce m of
+      Just oldTimer -> void $ jsgf "clearTimeout" (oldTimer :: Int)
+      Nothing -> pure ()
+    timer <- fromJSValUnchecked =<< jsgf "setTimeout" (asyncCallback1 (\_ -> sink DebouncedSearch), delayMs :: Int)
+    sink (TimerRegistered (timer :: Int))
+
+measureGrid :: IO (Maybe (Int, Int, Int))
+measureGrid = do
+  document <- jsg "document"
+  win <- jsg "window"
+  scrollY <- asDouble =<< (getProperty win "scrollY")
+  innerHeight <- windowInnerHeight
+  element <- getElementById "card-grid"
+  isNothingElement <- isNull element
+  if isNothingElement
+    then pure Nothing
+    else do
+      rect <- element # "getBoundingClientRect" $ ([] :: [JSVal])
+      top <- asDouble =<< getProperty rect "top"
+      pure (Just (round scrollY, innerHeight, round (top + scrollY)))
+  where
+    asDouble value = fromMaybe 0 <$> (fromJSVal value :: IO (Maybe Double))
+
+isEditableFocused :: IO Bool
+isEditableFocused = do
+  document <- jsg "document"
+  active <- document ! "activeElement"
+  tagM <- fromJSVal =<< getProperty active "tagName"
+  pure $ case (tagM :: Maybe MisoString) of
+    Nothing -> False
+    Just tag -> fromMisoString tag `elem` (["INPUT", "TEXTAREA", "SELECT"] :: [String])
+
+readTheme :: IO Theme
+readTheme = do
+  holder <- jsg "EzaTheme"
+  value <- holder # "get" $ ()
+  themeM <- fromJSVal value
+  pure $ maybe ThemeLight (themeOfMiso . fromMisoStringUnsafe) (themeM :: Maybe MisoString)
+  where
+    fromMisoStringUnsafe = fromMisoString
+
+-- | Detect an open @[[query@ immediately before the cursor.
+wikilinkQueryAt :: Text -> Int -> Maybe Text
+wikilinkQueryAt body cursor =
+  let before = T.take (max 0 cursor) body
+      (prefix, suffix) = T.breakOnEnd "[[" before
+   in if T.null prefix
+        then Nothing
+        else
+          if "]]" `T.isInfixOf` suffix || T.any (== '\n') suffix
+            then Nothing
+            else
+              let query = suffix
+               in if T.length query > 80 then Nothing else Just query
+
+-- | Replace the open @[[query@ with a completed wikilink.
+completeWikilink :: Text -> Int -> Text -> (Text, Int)
+completeWikilink body cursor title =
+  let before = T.take (max 0 cursor) body
+      (prefix, _) = T.breakOnEnd "[[" before
+      start = T.length prefix - 2
+      (headPart, _) = T.splitAt (max 0 start) body
+      inserted = headPart <> "[[" <> title <> "]] "
+      remainder = T.drop cursor body
+   in (inserted <> remainder, T.length inserted)
+
+-- ------------------------------------------------------------- the update --
+
+updateModel :: Action -> Effect () () Model Action
+updateModel = \case
+  -- lifecycle -------------------------------------------------------------
+  Mounted -> do
+    putModel (\m -> m {mBooted = True})
+    fetchBoot BootLoaded BootFailed
+    withSink $ \sink -> do
+      uri <- getURI
+      width <- windowInnerWidth
+      height <- windowInnerHeight
+      theme <- readTheme
+      sink (ThemeLoaded theme)
+      sink (LayoutChanged width height)
+      sink (RouteChanged (Right (routeOfUri uri)))
+  RouteChanged routeResult -> do
+    m <- get
+    case routeResult of
+      Left _ -> loadRoute NotFound
+      Right route ->
+        if mDirty m && route /= mRoute m && isDetailRoute (mRoute m)
+          then put m {mGuardOpen = True, mPendingRoute = Just route}
+          else loadRoute route
+  Navigate route -> do
+    m <- get
+    if route == mRoute m
+      then pure ()
+      else
+        if mDirty m && isDetailRoute (mRoute m)
+          then put m {mGuardOpen = True, mPendingRoute = Just route}
+          else withSink $ \_ -> pushRoute route
+  ThemeToggled -> withSink $ \sink -> do
+    holder <- jsg "EzaTheme"
+    value <- holder # "toggle" $ ()
+    themeM <- fromJSVal value
+    sink (ThemeLoaded (maybe ThemeLight (themeOfMiso . fromMisoString) (themeM :: Maybe MisoString)))
+  ThemeLoaded theme -> putModel (\m -> m {mTheme = theme})
+  LayoutChanged width height -> do
+    putModel (\m -> m {mWidth = width, mHeight = height})
+    withSink $ \sink -> do
+      measured <- measureGrid
+      sink (ScrollMetrics measured)
+  Resized -> withSink $ \sink -> do
+    width <- windowInnerWidth
+    height <- windowInnerHeight
+    measured <- measureGrid
+    sink (LayoutChanged width height)
+    sink (ScrollMetrics measured)
+  Scrolled -> withSink $ \sink -> do
+    measured <- measureGrid
+    sink (ScrollMetrics measured)
+  ScrollMetrics Nothing -> pure ()
+  ScrollMetrics (Just (scrollY, height, gridTop)) -> do
+    putModel (\m -> m {mScrollY = scrollY, mHeight = height, mGridTop = gridTop})
+    m <- get
+    let (_, lastRow) = visibleRows m
+    when (mHasMore m && not (mLoading m) && not (mLoadingMore m) && lastRow + 5 >= gridRows m) $
+      loadMore
+  GlobalKey info -> withSink $ \sink -> do
+    editable <- isEditableFocused
+    sink (KeyHandled info editable)
+  KeyHandled info editable -> do
+    m <- get
+    let code = case keyCode info of KeyCode n -> n
+        withModifier = ctrlKey info || metaKey info
+        go action = updateModel action
+    case code of
+      27 -> closeTopLayer m
+      83 | withModifier && isDetailRoute (mRoute m) -> go SaveBookmark
+      75 | not editable && not withModifier -> go PaletteOpen
+      191 | not editable -> do
+        go PaletteClose
+        liftSinkIO (focus "search-input")
+      13 | mPaletteOpen m -> go PaletteSelect
+      38 | mPaletteOpen m -> go PalettePrev
+      40 | mPaletteOpen m -> go PaletteNext
+      _ -> pure ()
+  Noop -> pure ()
+  -- boot ------------------------------------------------------------------
+  BootLoaded payload -> do
+    putModel
+      ( \m ->
+          m
+            { mVersion = ms (bpVersion payload)
+            , mOrigin = ms (bpOrigin payload)
+            , mTags = bpTags payload
+            , mSaved = bpSavedSearches payload
+            }
+      )
+  BootFailed err -> do
+    handleApiError err
+    when (aeStatus err == Just 401) $ liftSinkIO (redirectTo "/login")
+  ApiUnauthorized -> putModel (\m -> m {mSignedOut = True})
+  ApiErrorRaised err -> handleApiError err
+  TagsRefreshed stats -> putModel (\m -> m {mTags = stats})
+  -- library ---------------------------------------------------------------
+  SearchInput query -> do
+    putModel (\m -> m {mQ = query})
+    scheduleSearch 180
+  SearchCommit -> reloadList
+  DebouncedSearch -> do
+    putModel (\m -> m {mDebounce = Nothing})
+    reloadList
+  TimerRegistered timer -> putModel (\m -> m {mDebounce = Just timer})
+  TagToggled tag -> do
+    putModel (\m -> m {mTagsFilter = toggleMember tag (mTagsFilter m)})
+    reloadList
+  ClearFilters -> do
+    putModel (\m -> m {mQ = "", mTagsFilter = [], mUnreadOnly = False})
+    reloadList
+  SortSelected sort -> do
+    putModel (\m -> m {mSort = sort})
+    reloadList
+  UnreadToggled -> do
+    putModel (\m -> m {mUnreadOnly = not (mUnreadOnly m)})
+    reloadList
+  ListLoaded append page -> do
+    m <- get
+    let fresh =
+          if append
+            then mItems m ++ spItems page
+            else spItems page
+    put
+      m
+        { mItems = fresh
+        , mTotal = spTotal page
+        , mHasMore = spHasMore page
+        , mLoading = False
+        , mLoadingMore = False
+        , mOffset = spOffset page + length (spItems page)
+        , mError = Nothing
+        }
+  ListFailed _ err -> do
+    putModel (\m -> m {mLoading = False, mLoadingMore = False})
+    handleApiError err
+  LoadMore -> loadMore
+  MarkAllAbove -> do
+    m <- get
+    let above = case mItems m of
+          (firstItem : _) -> Just (bsId firstItem)
+          [] -> Nothing
+    markAllAbove above (\updated -> ToastAdd (ms ("Marked " <> show updated <> " as read")) ToastOk) (\err -> ToastAdd ("Could not mark as read: " <> ms (aeMessage err)) ToastError)
+  SavedSearchApply saved -> do
+    putModel
+      ( \m ->
+          m
+            { mQ = ms (ssQ saved)
+            , mTagsFilter = if null (ssTags saved) then mTagsFilter m else ssTags saved
+            }
+      )
+    reloadList
+  ExportClicked -> liftSinkIO (redirectTo exportUrl)
+  -- add modal -------------------------------------------------------------
+  AddOpen -> do
+    putModel (\m -> m {mAddOpen = True, mAddError = Nothing})
+    liftSinkIO (focus "add-url")
+  AddClose -> putModel (\m -> m {mAddOpen = False, mAddError = Nothing})
+  AddUrlInput url -> putModel (\m -> m {mAddUrl = url})
+  AddTitleInput title -> putModel (\m -> m {mAddTitle = title})
+  AddTagsInput tags -> putModel (\m -> m {mAddTags = tags})
+  AddSubmit -> do
+    m <- get
+    if not (isHttpUrlText (mAddUrl m))
+      then putModel (\x -> x {mAddError = Just "Enter a valid http(s) URL."})
+      else do
+        putModel (\x -> x {mAddBusy = True, mAddError = Nothing})
+        createBookmark (mAddUrl m) (mAddTitle m) (splitTags (mAddTags m)) AddSucceeded AddFailed
+  AddSucceeded bookmarkId -> do
+    putModel (\m -> m {mAddOpen = False, mAddBusy = False, mAddUrl = "", mAddTitle = "", mAddTags = "", mAddError = Nothing})
+    notify (ms ("Saved bookmark #" <> show bookmarkId)) ToastOk
+    reloadList
+    refreshTags
+  AddFailed err -> do
+    putModel (\m -> m {mAddBusy = False, mAddError = Just (ms (aeMessage err))})
+    handleApiError err
+  -- command palette -------------------------------------------------------
+  PaletteOpen -> do
+    putModel (\m -> m {mPaletteOpen = True, mPaletteQ = "", mPaletteSel = 0})
+    liftSinkIO (focus "palette-input")
+  PaletteClose -> putModel (\m -> m {mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})
+  PaletteInput query -> putModel (\m -> m {mPaletteQ = query, mPaletteSel = 0})
+  PalettePrev -> do
+    m <- get
+    let count = length (paletteEntries m)
+    putModel (\x -> x {mPaletteSel = if count == 0 then 0 else max 0 (mPaletteSel x - 1)})
+  PaletteNext -> do
+    m <- get
+    let count = length (paletteEntries m)
+    putModel (\x -> x {mPaletteSel = if count == 0 then 0 else min (count - 1) (mPaletteSel x + 1)})
+  PaletteSelect -> do
+    m <- get
+    let entries = paletteEntries m
+        selection = max 0 (mPaletteSel m)
+    case drop selection entries of
+      ((_, _, nextAction) : _) -> do
+        putModel (\x -> x {mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})
+        updateModel nextAction
+      [] -> pure ()
+  -- detail ----------------------------------------------------------------
+  DetailLoaded detail -> do
+    putModel
+      ( \m ->
+          m
+            { mDetail = Just detail
+            , mDetailLoading = False
+            , mEditTitle = ms (bdTitle detail)
+            , mEditNote = ms (bdNoteBody detail)
+            , mEditTags = bdTags detail
+            , mDirty = False
+            , mNoteMode = NoteWrite
+            , mLinkQuery = Nothing
+            , mLinkResults = []
+            }
+      )
+  DetailFailed err -> do
+    putModel (\m -> m {mDetailLoading = False})
+    handleApiError err
+  TitleInput title -> putModel (\m -> m {mEditTitle = title, mDirty = True})
+  NoteChanged text domRef -> do
+    putModel (\m -> m {mEditNote = text, mDirty = True})
+    withSink $ \sink -> do
+      selection <- fromMaybe 0 <$> (fromJSVal =<< getProperty domRef "selectionStart")
+      let cursor = round (selection :: Double)
+          query = wikilinkQueryAt (fromMisoString text) cursor
+      sink (NoteMeta cursor query)
+  NoteMeta cursor query -> do
+    m <- get
+    putModel (\x -> x {mNoteCursor = cursor, mLinkQuery = fmap ms query})
+    case query of
+      Nothing -> putModel (\x -> x {mLinkResults = []})
+      Just rawQuery ->
+        if T.null rawQuery
+          then putModel (\x -> x {mLinkResults = take 6 (mItems m)})
+          else fetchAutocomplete (ms rawQuery) LinkSuggestions (\_ -> Noop)
+  NoteModeChanged mode -> putModel (\m -> m {mNoteMode = mode})
+  TagDraftInput draft -> putModel (\m -> m {mNewTag = draft})
+  TagAdd -> do
+    m <- get
+    case parseTagInput (mNewTag m) of
+      Nothing -> pure ()
+      Just tag ->
+        putModel
+          ( \x ->
+              x
+                { mEditTags = if tag `elem` mEditTags x then mEditTags x else mEditTags x ++ [tag]
+                , mNewTag = ""
+                , mDirty = True
+                }
+          )
+  TagRemove tag -> putModel (\m -> m {mEditTags = filter (/= tag) (mEditTags m), mDirty = True})
+  SaveBookmark -> do
+    m <- get
+    case mDetail m of
+      Nothing -> pure ()
+      Just detail -> do
+        putModel (\x -> x {mSaving = True})
+        patchBookmark
+          (bdId detail)
+          ( object
+              [ "title" .= mEditTitle m
+              , "note_body" .= mEditNote m
+              , "is_read" .= bdIsRead detail
+              , "tags" .= mEditTags m
+              ]
+          )
+          SavedOk
+          SaveFailed
+  SavedOk -> do
+    putModel (\m -> m {mSaving = False, mDirty = False})
+    notify "Saved" ToastOk
+  SaveFailed err -> do
+    putModel (\m -> m {mSaving = False})
+    handleApiError err
+  ReadToggled -> do
+    m <- get
+    case mDetail m of
+      Nothing -> pure ()
+      Just detail -> do
+        let nextRead = not (bdIsRead detail)
+        putModel (\x -> x {mDetail = Just detail {bdIsRead = nextRead}})
+        patchBookmark (bdId detail) (object ["is_read" .= nextRead]) SavedOk SaveFailed
+  OpenToggled -> pure ()
+  BacklinksLoaded links -> putModel (\m -> m {mBacklinks = links})
+  BacklinksFailed _ -> pure ()
+  LinkPrev -> putModel (\m -> m {mLinkSel = max 0 (mLinkSel m - 1)})
+  LinkNext -> do
+    m <- get
+    let count = length (mLinkResults m)
+    putModel (\x -> x {mLinkSel = if count == 0 then 0 else min (count - 1) (mLinkSel x + 1)})
+  LinkChoose index -> do
+    m <- get
+    case drop index (mLinkResults m) of
+      [] -> pure ()
+      (bookmark : _) -> do
+        let (newNote, newCursor) = completeWikilink (fromMisoString (mEditNote m)) (mNoteCursor m) (bsTitle bookmark)
+        putModel
+          ( \x ->
+              x
+                { mEditNote = ms newNote
+                , mNoteCursor = newCursor
+                , mLinkQuery = Nothing
+                , mLinkResults = []
+                , mDirty = True
+                }
+          )
+        liftSinkIO (setSelectionRange "note-editor" newCursor newCursor)
+  LinkSuggestions suggestions -> putModel (\m -> m {mLinkResults = suggestions, mLinkSel = 0})
+  RunBookmarkAction bookmarkId verb -> bookmarkAction bookmarkId verb (ToastAdd (ms (T.toTitle verb <> " queued")) ToastOk) (\err -> ApiErrorRaised err)
+  DeleteBookmark bookmarkId -> deleteBookmark bookmarkId (DeletedOk bookmarkId) DeleteFailed
+  DeletedOk bookmarkId -> do
+    m <- get
+    notify "Bookmark deleted" ToastOk
+    case mRoute m of
+      Bookmark currentId | currentId == bookmarkId -> withSink $ \_ -> pushRoute Index
+      _ -> reloadList
+  DeleteFailed err -> handleApiError err
+  DirtyGuardOpen route -> putModel (\m -> m {mGuardOpen = True, mPendingRoute = Just route})
+  DirtyGuardClose -> putModel (\m -> m {mGuardOpen = False, mPendingRoute = Nothing})
+  DirtyGuardDiscard -> do
+    m <- get
+    putModel (\x -> x {mGuardOpen = False, mPendingRoute = Nothing, mDirty = False})
+    case mPendingRoute m of
+      Nothing -> pure ()
+      Just route -> withSink $ \_ -> pushRoute route
+  -- import / export -------------------------------------------------------
+  ImportStart -> liftSinkIO $ do
+    element <- getElementById "import-file"
+    click () element
+  ImportFileChosen -> do
+    putModel (\m -> m {mImporting = True})
+    submitImport ImportDone ImportFailed
+  ImportDone value -> do
+    putModel (\m -> m {mImporting = False})
+    let inserted = fieldInt "inserted" value
+        existing = fieldInt "existing" value
+        found = fieldInt "found" value
+    notify
+      ( ms
+          ( "Imported "
+              <> show inserted
+              <> " of "
+              <> show found
+              <> " links ("
+              <> show existing
+              <> " already saved)"
+          )
+      )
+      ToastOk
+    reloadList
+    refreshTags
+  ImportFailed err -> do
+    putModel (\m -> m {mImporting = False})
+    handleApiError err
+  -- saved searches --------------------------------------------------------
+  SavedSearchSave -> do
+    m <- get
+    let name = if T.null (T.strip (fromMisoString (mSavedName m))) then mQ m else mSavedName m
+    saveSavedSearch name (mQ m) (mTagsFilter m) (\_ -> SavedSearchDone) SavedSearchFailed
+  SavedSearchNameInput name -> putModel (\m -> m {mSavedName = name})
+  SavedSearchDelete savedSearchId -> deleteSavedSearch savedSearchId SavedSearchDone SavedSearchFailed
+  SavedSearchDone -> do
+    notify "Saved searches updated" ToastOk
+    putModel (\m -> m {mSavedName = ""})
+    fetchSavedSearches SavedSearchesLoaded (\_ -> Noop)
+  SavedSearchFailed err -> handleApiError err
+  SavedSearchesLoaded saved -> putModel (\m -> m {mSaved = saved})
+  -- graph ----------------------------------------------------------------
+  GraphLoaded graph -> putModel (\m -> m {mGraph = Just graph, mGraphLoading = False})
+  GraphFailed err -> do
+    putModel (\m -> m {mGraphLoading = False})
+    handleApiError err
+  GraphDepthSelected depth -> do
+    putModel (\m -> m {mGraphDepth = max 1 (min 3 depth), mGraphLoading = True})
+    m <- get
+    fetchGraph (mGraphSeed m) (mGraphDepth m) GraphLoaded GraphFailed
+  GraphSeed seed -> do
+    putModel (\m -> m {mGraphSeed = seed, mGraphLoading = True})
+    m <- get
+    fetchGraph (mGraphSeed m) (mGraphDepth m) GraphLoaded GraphFailed
+  GraphZoom zoomPercent -> putModel (\m -> m {mGraphZoom = max 40 (min 260 zoomPercent)})
+  OpenGraphAt bookmarkId -> do
+    putModel (\m -> m {mGraphSeed = Just bookmarkId, mGraphLoading = True})
+    m <- get
+    fetchGraph (mGraphSeed m) (mGraphDepth m) GraphLoaded GraphFailed
+    updateModel (Navigate Graph)
+  GraphQueryChanged query -> do
+    putModel (\m -> m {mGraphQuery = query, mGraphResults = []})
+    if T.null (T.strip (fromMisoString query))
+      then pure ()
+      else fetchAutocomplete query GraphResults (\_ -> Noop)
+  GraphResults results -> putModel (\m -> m {mGraphResults = results})
+  GraphPickSeed bookmarkId -> do
+    putModel (\m -> m {mGraphSeed = Just bookmarkId, mGraphQuery = "", mGraphResults = [], mGraphLoading = True, mGraph = Nothing})
+    m <- get
+    fetchGraph (Just bookmarkId) (mGraphDepth m) GraphLoaded GraphFailed
+  GraphRefresh -> do
+    m <- get
+    case mGraphSeed m of
+      Nothing -> notify "Search for a bookmark to seed the graph first." ToastInfo
+      Just _ -> do
+        putModel (\x -> x {mGraphLoading = True})
+        fetchGraph (mGraphSeed m) (mGraphDepth m) GraphLoaded GraphFailed
+  -- dedup ----------------------------------------------------------------
+  DedupLoaded groups -> putModel (\m -> m {mDedup = groups, mDedupLoading = False, mDedupChoice = initialChoices groups})
+  DedupFailed err -> do
+    putModel (\m -> m {mDedupLoading = False})
+    handleApiError err
+  DedupKeep groupIndex bookmarkId -> putModel (\m -> m {mDedupChoice = M.insert groupIndex bookmarkId (mDedupChoice m)})
+  DedupMerge groupIndex -> do
+    m <- get
+    case drop groupIndex (mDedup m) of
+      (group : _) -> case dgItems group of
+        [] -> pure ()
+        (firstItem : rest) -> do
+          let keep = fromMaybe (bsId firstItem) (M.lookup groupIndex (mDedupChoice m))
+              mergeIds = [bsId item | item <- rest, bsId item /= keep]
+          if null mergeIds
+            then notify "Nothing to merge in this group" ToastInfo
+            else mergeDedup keep mergeIds (\merged -> DedupMerged merged) DedupFailed
+      [] -> pure ()
+  DedupMerged merged -> do
+    notify (ms ("Merged " <> show merged <> " duplicate(s)")) ToastOk
+    fetchDedup DedupLoaded DedupFailed
+  -- tags -----------------------------------------------------------------
+  TagStatsLoaded stats -> putModel (\m -> m {mTags = stats})
+  ConsolLoaded groups -> putModel (\m -> m {mConsol = groups, mConsolLoading = False})
+  ConsolFailed err -> do
+    putModel (\m -> m {mConsolLoading = False})
+    handleApiError err
+  TagMerge from into -> mergeTags from into TagMerged TagOpFailed
+  TagRenamed old newName -> renameTag old (fromMisoString newName) TagMerged TagOpFailed
+  TagDeleted tag -> deleteTag tag TagMerged TagOpFailed
+  FilterByTag tag -> do
+    putModel (\m -> m {mTagsFilter = [tag]})
+    updateModel (Navigate Index)
+  TagMerged -> do
+    notify "Tag vocabulary updated" ToastOk
+    fetchConsolidation ConsolLoaded ConsolFailed
+    refreshTags
+    reloadList
+  TagOpFailed err -> handleApiError err
+  -- ai tags ---------------------------------------------------------------
+  AiTagSelected tag -> do
+    putModel (\m -> m {mAiTag = tag, mSuggestions = [], mSuggestionsLoading = isJust tag})
+    case tag of
+      Nothing -> pure ()
+      Just selected -> fetchSuggestions selected SuggestionsLoaded SuggestionsFailed
+  SuggestionsLoaded suggestions -> putModel (\m -> m {mSuggestions = suggestions, mSuggestionsLoading = False})
+  SuggestionsFailed err -> do
+    putModel (\m -> m {mSuggestionsLoading = False})
+    handleApiError err
+  SuggestionApply bookmarkId tags -> applyTagSuggestion bookmarkId tags SuggestionsApplied SuggestionsFailed
+  SuggestionsApplied -> do
+    notify "Tags applied" ToastOk
+    m <- get
+    case mAiTag m of
+      Nothing -> pure ()
+      Just tag -> fetchSuggestions tag SuggestionsLoaded SuggestionsFailed
+  -- maintenance ----------------------------------------------------------
+  PruneLoaded items -> putModel (\m -> m {mPrune = items, mPruneSel = [], mConfirmPrune = False})
+  PruneFailed err -> handleApiError err
+  PruneToggle bookmarkId -> putModel (\m -> m {mPruneSel = toggleMember bookmarkId (mPruneSel m)})
+  PruneAll -> do
+    m <- get
+    let allIds = map bsId (mPrune m)
+    putModel (\x -> x {mPruneSel = if length (mPruneSel x) == length allIds then [] else allIds})
+  PruneRun -> do
+    m <- get
+    if null (mPruneSel m)
+      then notify "Select at least one candidate to prune" ToastInfo
+      else
+        if not (mConfirmPrune m)
+          then do
+            putModel (\x -> x {mConfirmPrune = True})
+            notify "Prune is destructive (undo available). Click again to confirm." ToastInfo
+          else do
+            putModel (\x -> x {mMaintBusy = True, mConfirmPrune = False})
+            runPrune (mPruneSel m) PruneDone MaintFailed
+  PruneCancel -> putModel (\m -> m {mConfirmPrune = False})
+  PruneDone pruned -> do
+    putModel (\m -> m {mMaintBusy = False})
+    notify (ms ("Pruned " <> show pruned <> " bookmark(s) — undo available")) ToastOk
+    fetchPruneCandidates PruneLoaded PruneFailed
+    refreshTags
+  DeadCheckRun -> do
+    putModel (\m -> m {mMaintBusy = True})
+    checkDead
+      (\(checked, dead) -> DeadCheckDone checked dead)
+      MaintFailed
+  DeadCheckDone checked dead -> do
+    putModel (\m -> m {mMaintBusy = False, mCheckedCount = Just checked, mDeadCount = Just dead})
+    notify (ms ("Checked " <> show checked <> " links, " <> show dead <> " dead")) ToastOk
+    reloadList
+  UndoRun -> do
+    putModel (\m -> m {mMaintBusy = True})
+    runUndo UndoDone MaintFailed
+  UndoDone restored -> do
+    putModel (\m -> m {mMaintBusy = False})
+    notify (ms ("Restored " <> show restored <> " bookmark(s)")) ToastOk
+    fetchPruneCandidates PruneLoaded PruneFailed
+    reloadList
+  MaintFailed err -> do
+    putModel (\m -> m {mMaintBusy = False})
+    handleApiError err
+  -- account --------------------------------------------------------------
+  AccountLoaded info -> putModel (\m -> m {mAccount = Just info, mAccountLoading = False})
+  AccountFailed err -> do
+    putModel (\m -> m {mAccountLoading = False})
+    handleApiError err
+  RecoveryRegenerate -> regenerateRecovery RecoveryLoaded AccountFailed
+  RecoveryLoaded codes -> do
+    putModel (\m -> m {mRecoveryCodes = codes})
+    notify "New recovery codes generated — store them now" ToastOk
+  CredentialRenamed credentialId nickname -> do
+    renameCredential credentialId (fromMisoString nickname) (ToastAdd "Passkey renamed" ToastOk) CredentialOpFailed
+  CredentialDeleted credentialId -> deleteCredential credentialId (CredentialRemoved credentialId) CredentialOpFailed
+  CredentialRemoved _ -> do
+    notify "Passkey deleted" ToastOk
+    fetchAccount AccountLoaded AccountFailed
+  CredentialOpFailed err -> handleApiError err
+  CredentialEditStart credentialId -> putModel (\m -> m {mCredEdit = Just (credentialId, "")})
+  CredentialNameInput nickname -> putModel (\m -> m {mCredEdit = fmap (\(cid, _) -> (cid, nickname)) (mCredEdit m)})
+  CredentialEditSave -> do
+    m <- get
+    case mCredEdit m of
+      Nothing -> pure ()
+      Just (credentialId, nickname) -> do
+        putModel (\x -> x {mCredEdit = Nothing})
+        renameCredential credentialId (fromMisoString nickname) AccountReload CredentialOpFailed
+  CredentialEditCancel -> putModel (\m -> m {mCredEdit = Nothing})
+  AccountReload -> fetchAccount AccountLoaded AccountFailed
+  Logout -> logout LoggedOut (\err -> ApiErrorRaised err)
+  LoggedOut -> liftSinkIO (redirectTo "/login")
+  -- toasts ---------------------------------------------------------------
+  ToastAdd message kind -> notify message kind
+  ToastDismiss dismissed -> putModel (\m -> m {mToasts = filter (\toast -> toastId toast /= dismissed) (mToasts m)})
+  where
+    closeTopLayer m
+      | mPaletteOpen m = putModel (\x -> x {mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})
+      | mAddOpen m = putModel (\x -> x {mAddOpen = False})
+      | mGuardOpen m = putModel (\x -> x {mGuardOpen = False, mPendingRoute = Nothing})
+      | isJust (mLinkQuery m) = putModel (\x -> x {mLinkQuery = Nothing, mLinkResults = []})
+      | otherwise = pure ()
+
+    initialChoices groups =
+      M.fromList
+        [ (index, bsId firstItem)
+        | (index, group) <- zip [0 ..] groups
+        , (firstItem : _) <- [dgItems group]
+        ]

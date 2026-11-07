@@ -1,0 +1,115 @@
+cabal-version:      3.0
+name:               eza-server
+version:            0.1.0.0
+synopsis:           eza bookmark server
+description:        Warp/WAI server, SQLite data layer, WebAuthn auth, and
+                    command-line tools for eza.
+license:            Apache-2.0
+author:             eza
+maintainer:         eza
+build-type:         Simple
+
+common exe-common
+  default-language: Haskell2010
+  default-extensions:
+    DeriveAnyClass
+    DeriveGeneric
+    LambdaCase
+    OverloadedStrings
+    RecordWildCards
+    ScopedTypeVariables
+    TypeApplications
+  ghc-options:      -Wall -Wcompat -Wincomplete-uni-patterns -threaded -rtsopts
+
+library
+  import:           exe-common
+  hs-source-dirs:   src
+  exposed-modules:  Eza.AiTag
+                    Eza.Auth
+                    Eza.Backup
+                    Eza.Bench
+                    Eza.Bookmarks
+                    Eza.Config
+                    Eza.Db
+                    Eza.DeadLinks
+                    Eza.Dedup
+                    Eza.Export
+                    Eza.Extract
+                    Eza.Graph
+                    Eza.Import
+                    Eza.Links
+                    Eza.Pages
+                    Eza.SavedSearches
+                    Eza.Server
+                    Eza.Snapshot
+                    Eza.Tags
+                    Eza.Undo
+  build-depends:    base >=4.18 && <5
+                  , aeson >=2.1 && <2.4
+                  , async
+                  , base64-bytestring
+                  , bytestring
+                  , containers
+                  , cookie
+                  , crypton
+                  , directory
+                  , eza-core
+                  , fast-logger
+                  , filepath
+                  , http-client
+                  , http-client-tls
+                  , http-types
+                  , network-uri
+                  , optparse-applicative
+                  , process
+                  , resource-pool
+                  , sqlite-simple
+                  , stm
+                  , tagsoup
+                  , temporary
+                  , text
+                  , time
+                  , time-hourglass
+                  , unordered-containers
+                  , validation
+                  , wai
+                  , wai-extra
+                  , warp
+                  , webauthn
+  ghc-options:      -Wall
+
+executable eza-bookmarks
+  import:           exe-common
+  hs-source-dirs:   app
+  main-is:          Main.hs
+  build-depends:    base
+                  , aeson
+                  , bytestring
+                  , eza-core
+                  , eza-server
+                  , http-client
+                  , http-client-tls
+                  , http-types
+                  , optparse-applicative
+                  , sqlite-simple
+                  , text
+  ghc-options:      -threaded -rtsopts
+
+test-suite eza-test
+  import:           exe-common
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test
+  main-is:          Spec.hs
+  build-depends:    base
+                  , aeson
+                  , bytestring
+                  , directory
+                  , eza-core
+                  , eza-server
+                  , filepath
+                  , hspec
+                  , QuickCheck
+                  , sqlite-simple
+                  , temporary
+                  , text
+  ghc-options:      -threaded
