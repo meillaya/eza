@@ -62,3 +62,5 @@ venv/
 # Local tooling state
 .omo
 .codegraph
+
+data-demo/

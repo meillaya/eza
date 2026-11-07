@@ -1,14 +1,58 @@
-# eza
+<div align="center">
+
+<img src="static/favicon.svg" alt="eza" width="64" height="64">
+
+<h1 align="center">eza</h1>
+
+<p align="center">A self-hosted bookmark library that stays fast at 10,000 links.</p>
+
+<p>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/meillaya/eza?style=flat-square&amp;label=license" alt="License"></a>
+  <a href="https://www.haskell.org"><img src="https://img.shields.io/badge/Haskell-9.10-5e5086?style=flat-square&amp;logo=haskell&amp;logoColor=white" alt="Haskell"></a>
+  <a href="https://haskell-miso.org"><img src="https://img.shields.io/badge/client-Miso%20%2B%20WASM-8b5cf6?style=flat-square" alt="Miso and WebAssembly"></a>
+  <a href="https://sqlite.org/fts5.html"><img src="https://img.shields.io/badge/storage-SQLite%20FTS5-003b57?style=flat-square&amp;logo=sqlite&amp;logoColor=white" alt="SQLite FTS5"></a>
+  <a href="docs/deployment-nixos.md"><img src="https://img.shields.io/badge/deploy-NixOS%20%7C%20Docker%20%7C%20k8s-5277c3?style=flat-square&amp;logo=nixos&amp;logoColor=white" alt="Deployment targets"></a>
+</p>
+
+<img src="docs/screenshots/library.png" alt="eza library with a tag rail and rounded bookmark cards" width="100%">
+
+</div>
 
 eza stores bookmarks in SQLite and serves a searchable library from one
-Haskell process. It is built for one person with thousands of links. The
+Haskell process. It is built for one person with thousands of links: the
 reference database holds 8,988 bookmarks, 75 tags, and 21,316 tag links.
+Search runs on FTS5, the client is Miso compiled to WebAssembly, and passkeys
+replace passwords.
 
-The client is Miso compiled to WebAssembly. The server owns the database,
-WebAuthn passkeys, import and export, and the JSON API. There is no separate
-database service.
+The interface puts search, tags, notes, and backlinks on one screen. It has
+light and dark themes, a command palette, a graph view, duplicate detection,
+dead-link checks, and an undo stack for destructive actions.
 
-## Run it
+---
+
+## What you get
+
+| Area | What it does |
+|---|---|
+| **Search** | `tag:`, `is:unread`, `is:dead`, `link:`, and `-term` operators over FTS5. Results order by bm25, then save date. |
+| **Library** | A virtualized card grid, a tag rail with counts, saved searches, and unread and dead filters. |
+| **Reading** | Extracted article text, a notes editor with markdown preview, `[[wikilinks]]`, and backlinks. |
+| **Maintenance** | Duplicate groups, tag consolidation, dead-link sweeps, and a prune flow. Every merge or prune writes an undo snapshot. |
+| **Capture** | Add a bookmark by URL, import a Netscape export, or let the importer fetch metadata with `enrich`. |
+| **Access** | WebAuthn passkeys, ten recovery codes, per-session CSRF checks, and a deny-by-default API. |
+| **Ownership** | One SQLite file, WAL mode, online backups, a Docker image, a NixOS module, and Kubernetes manifests. |
+
+<div align="center">
+
+<img src="docs/screenshots/detail.png" alt="Bookmark detail with reader, notes, tags, and backlinks" width="100%">
+
+<sub>The detail view keeps the reader, notes, tags, and backlinks in one place.</sub>
+
+</div>
+
+---
+
+## Quick start
 
 You need Nix and devenv.
 
@@ -39,6 +83,17 @@ eza-bookmarks check-dead --limit 200
 To build a database from scratch, run `eza-bookmarks init` before the import.
 The import is idempotent: a second run reports `inserted=0`.
 
+<div align="center">
+
+<img src="docs/screenshots/palette.png" alt="Command palette over the library" width="49%">
+<img src="docs/screenshots/dark.png" alt="eza library in dark mode" width="49%">
+
+<sub>Press <code>k</code> for the command palette. Toggle the theme from the top bar.</sub>
+
+</div>
+
+---
+
 ## How it fits together
 
 One Warp/WAI process serves the client assets, the auth pages, and
@@ -48,43 +103,33 @@ FTS5 triggers over the title, description, URL, note body, and extracted text.
 The CLI opens the same database file for import, export, verification, and
 backup.
 
-![Architecture: one process, one SQLite file](docs/figures/architecture.png)
+<div align="center">
 
-The server owns the database, so the client never opens SQLite. The browser
-sends JSON, the server writes through one connection, and the WAL checkpoint
-keeps the file self-contained. The backup and snapshot commands read the live
-database without stopping the server.
+<img src="docs/figures/architecture.png" alt="Architecture: one process, one SQLite file" width="100%">
 
-## Importing the reference export
+</div>
 
 The 2026-08-14 export contains 9,457 anchors. The importer skips 4 non-http
 anchors, collapses 465 duplicate anchors, and writes 8,988 bookmarks, 75 tags,
-and 21,316 tag links in one transaction. A second import writes nothing.
-
-![Import: 9,457 anchors collapse to 8,988 rows](docs/figures/import.png)
-
-Folder names become tags. `TAGS="a,b"` attributes are unioned with the folder
-tags. The earliest `ADD_DATE` becomes `created_at`, and the import time
-becomes `added_at`. Noise folders are skipped by default; `--keep-noise`
-keeps them. See [docs/import.md](docs/import.md) for the counts and options.
-
-## Search
-
-Search parses `tag:`, `is:unread`, `is:dead`, `link:`, and `-term`, then
-sends the remaining terms to FTS5. Tag filters run as an `AND` subquery over
-`bookmark_tags`. Results order by `bm25(bookmarks_fts)`, then by
-`created_at DESC`.
-
-![Search: query parsing, FTS, tag filters, and rank](docs/figures/search.png)
-
-The storage model and the equations are in
+and 21,316 tag links in one transaction. The equations and storage rules are in
 [docs/architecture.md](docs/architecture.md).
 
-## Measured performance
+---
 
-On an AMD Ryzen 7 5700X with GHC 9.10.3 and `-O1`, against the 8,988-row
-database, FTS queries had a p95 of 0.67 to 1.19 ms, and tag-filtered queries
-had a p95 of 9.5 to 12.2 ms. Run the same benchmark with:
+## Performance
+
+Measured on an AMD Ryzen 7 5700X with GHC 9.10.3 and `-O1`, against the
+8,988-row database:
+
+| Query | p95 |
+|---|---|
+| `all` | 0.67 ms |
+| `fts-rust` | 0.86 ms |
+| `fts-github` | 1.19 ms |
+| `tag-imported` | 12.15 ms |
+| `tag-imported-books` | 9.52 ms |
+
+Run the same benchmark:
 
 ```bash
 EZA_DATA_DIR=$PWD/data EZA_DB=$PWD/data/eza.db \
@@ -92,22 +137,30 @@ EZA_DATA_DIR=$PWD/data EZA_DB=$PWD/data/eza.db \
 ```
 
 The method and raw output are in [docs/performance.md](docs/performance.md).
-The import takes about 2.5 to 3.0 seconds on the same host.
+
+---
 
 ## Deploy
 
 The deployment flake builds the server, the NixOS module, and a local Docker
-image. The Docker image runs as uid 10001, keeps state under `/data`, and uses
-`eza-bookmarks healthcheck` for its health check. The Kubernetes manifests run
-one replica with a ReadWriteOnce volume, because SQLite has one writer.
+image. The Docker image runs as uid 10001, keeps state under `/data`, and
+uses `eza-bookmarks healthcheck` for its health check. The Kubernetes
+manifests run one replica with a ReadWriteOnce volume, because SQLite has one
+writer.
 
-![Deployment: one binary across NixOS, Docker, and Kubernetes](docs/figures/deployment.png)
+<div align="center">
 
-- [NixOS module and systemd unit](docs/deployment-nixos.md)
-- [Docker image and compose](docs/deployment-docker.md)
-- [Kubernetes manifests](docs/deployment-k8s.md)
-- [Tailscale Serve and HTTPS](docs/tailscale.md)
-- [SecretSpec and API keys](docs/secrets.md)
+<img src="docs/figures/deployment.png" alt="Deployment: one binary across NixOS, Docker, and Kubernetes" width="100%">
+
+</div>
+
+| Target | Guide |
+|---|---|
+| NixOS module and systemd unit | [docs/deployment-nixos.md](docs/deployment-nixos.md) |
+| Docker image and compose | [docs/deployment-docker.md](docs/deployment-docker.md) |
+| Kubernetes manifests | [docs/deployment-k8s.md](docs/deployment-k8s.md) |
+| Tailscale Serve and HTTPS | [docs/tailscale.md](docs/tailscale.md) |
+| SecretSpec and API keys | [docs/secrets.md](docs/secrets.md) |
 
 The flake has no devShell. Use `devenv.nix` for development and the flake for
 deployment outputs. The release web-asset path expects a published
@@ -115,33 +168,31 @@ deployment outputs. The release web-asset path expects a published
 (`.#eza-web-local`, `.#docker-local`) use `./static` and need no release
 asset.
 
-## Repository
+---
 
-| Path | Contents |
+## Documentation
+
+| Document | Contents |
 |---|---|
-| `core/` | Shared types, JSON codecs, search parser, wikilinks |
-| `server/` | Warp server, SQLite, WebAuthn, importer, CLI, tests |
-| `web/` | Miso client |
-| `static/` | CSS, auth pages, WASI loader, built WASM |
-| `nix/` | NixOS module and vendored Cabal revisions |
-| `deploy/` | Compose file and Kubernetes manifests |
-| `docs/` | API, architecture, deployment, import, performance, figures |
-| `tests/` | Fixtures and Playwright smoke tests |
+| [docs/architecture.md](docs/architecture.md) | Request path, import math, search model, storage invariants |
+| [docs/API.md](docs/API.md) | Auth, library, tags, maintenance, account, and DTO reference |
+| [docs/UI.md](docs/UI.md) | Layout, tokens, screens, accessibility, and shortcuts |
+| [docs/import.md](docs/import.md) | Netscape import rules and the reference result |
+| [docs/performance.md](docs/performance.md) | Benchmark method, raw output, and limits |
+| [docs/figures](docs/figures/README.md) | Excalidraw sources, generator, and render script |
 
-## Tests
+## Keyboard shortcuts
 
-```bash
-devenv shell -- cabal test all
-EZA_IMPORT_FIXTURE=$PWD/bookmarks_14_08_2026.html \
-  devenv shell -- cabal test all
-devenv shell -- bash scripts/build-web.sh
-devenv shell -- node tests/e2e/auth-smoke.mjs
-devenv shell -- node tests/e2e/api-smoke.mjs
-```
+| Key | Action |
+|---|---|
+| `/` | Focus search |
+| `k` | Open the command palette |
+| `Esc` | Close the palette or a dialog |
+| arrows, Enter | Move and confirm in the palette |
+| Ctrl+S, Cmd+S | Save the current bookmark |
 
-The Playwright scripts expect a server on the URL they print. Set
-`EZA_BASE` to point them at another port.
+---
 
-## License
-
-The project is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
+<div align="center">
+<sub>Apache-2.0 · Built with Haskell, Miso, SQLite, and Nix</sub>
+</div>
