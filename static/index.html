@@ -5,11 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#f7f7f5" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f0f11" />
     <meta name="description" content="eza — a search-first, tag-based bookmark library." />
     <title>eza — bookmarks</title>
-    <link rel="icon" href="/assets/favicon-fallback.svg" type="image/svg+xml" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="alternate icon" href="/assets/favicon-fallback.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/assets/icons/icon-192.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <link rel="stylesheet" href="/assets/eza.css" />
     <script src="/assets/theme.js"></script>
+    <script src="/assets/pwa.js" defer></script>
   </head>
   <body>
     <div id="boot-splash" aria-hidden="true">

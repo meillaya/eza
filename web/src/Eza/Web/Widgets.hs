@@ -1,40 +1,40 @@
 -- | Small shared view widgets: icons, buttons, chips, panels, empty states.
-module Eza.Web.Widgets
-  ( iSearch
-  , iPlus
-  , iSun
-  , iMoon
-  , iUser
-  , iUpload
-  , iDownload
-  , iBack
-  , iTrash
-  , iExternal
-  , iRefresh
-  , iCheck
-  , iGraph
-  , iTag
-  , iInbox
-  , icon
-  , btn
-  , btnPrimary
-  , btnGhost
-  , btnSm
-  , iconBtn
-  , iconBtnDanger
-  , tagChip
-  , pill
-  , statBox
-  , panel
-  , panelWithHead
-  , emptyState
-  , spinnerRow
-  , bannerView
-  , segBtn
-  , formatCount
-  , disabledAttr
-  , checkedAttr
-  ) where
+module Eza.Web.Widgets (
+    iSearch,
+    iPlus,
+    iSun,
+    iMoon,
+    iUser,
+    iUpload,
+    iDownload,
+    iBack,
+    iTrash,
+    iExternal,
+    iRefresh,
+    iCheck,
+    iGraph,
+    iTag,
+    iInbox,
+    icon,
+    btn,
+    btnPrimary,
+    btnGhost,
+    btnSm,
+    iconBtn,
+    iconBtnDanger,
+    tagChip,
+    pill,
+    statBox,
+    panel,
+    panelWithHead,
+    emptyState,
+    spinnerRow,
+    bannerView,
+    segBtn,
+    formatCount,
+    disabledAttr,
+    checkedAttr,
+) where
 
 import Data.Text (Text)
 import Miso
@@ -67,26 +67,26 @@ iInbox = "M4 13h4l2 3h4l2-3h4M5 5h14l2 8v6H3v-6l2-8z"
 
 icon :: MisoString -> View () () Model Action
 icon path =
-  H.span_
-    [HP.class_ "icon", HP.aria_ "hidden" "true"]
-    [ Svg.svg_
-        [ SP.viewBox_ "0 0 24 24"
-        , HP.width_ "18"
-        , HP.height_ "18"
-        , SP.fill_ "none"
-        , SP.stroke_ "currentColor"
-        , SP.strokeWidth_ "1.8"
-        , SP.strokeLinecap_ "round"
-        , SP.strokeLinejoin_ "round"
+    H.span_
+        [HP.class_ "icon", HP.aria_ "hidden" "true"]
+        [ Svg.svg_
+            [ SP.viewBox_ "0 0 24 24"
+            , HP.width_ "18"
+            , HP.height_ "18"
+            , SP.fill_ "none"
+            , SP.stroke_ "currentColor"
+            , SP.strokeWidth_ "1.8"
+            , SP.strokeLinecap_ "round"
+            , SP.strokeLinejoin_ "round"
+            ]
+            [Svg.path_ [SP.d_ path]]
         ]
-        [Svg.path_ [SP.d_ path]]
-    ]
 
 -- ---------------------------------------------------------------- buttons --
 
 btn :: MisoString -> [Attribute Model Action] -> [View () () Model Action] -> View () () Model Action
 btn extraClass attrs children =
-  H.button_ ([HP.class_ ("btn " <> extraClass), HP.type_ "button"] ++ attrs) children
+    H.button_ ([HP.class_ ("btn " <> extraClass), HP.type_ "button"] ++ attrs) children
 
 btnPrimary :: MisoString -> Action -> View () () Model Action
 btnPrimary label action = btn "btn-primary" [HE.onClick action] [text label]
@@ -99,15 +99,15 @@ btnSm label action = btn "btn-sm" [HE.onClick action] [text label]
 
 iconBtn :: MisoString -> MisoString -> Action -> View () () Model Action
 iconBtn path title action =
-  H.button_
-    [HP.class_ "icon-btn", HP.type_ "button", HP.title_ title, HP.aria_ "label" title, HE.onClick action]
-    [icon path]
+    H.button_
+        [HP.class_ "icon-btn", HP.type_ "button", HP.title_ title, HP.aria_ "label" title, HE.onClick action]
+        [icon path]
 
 iconBtnDanger :: MisoString -> MisoString -> Action -> View () () Model Action
 iconBtnDanger path title action =
-  H.button_
-    [HP.class_ "icon-btn danger", HP.type_ "button", HP.title_ title, HP.aria_ "label" title, HE.onClick action]
-    [icon path]
+    H.button_
+        [HP.class_ "icon-btn danger", HP.type_ "button", HP.title_ title, HP.aria_ "label" title, HE.onClick action]
+        [icon path]
 
 -- ------------------------------------------------------------------ chips --
 
@@ -116,63 +116,71 @@ tagChip tag = H.span_ [HP.class_ "tag-chip", HP.title_ (ms tag)] [text (ms tag)]
 
 pill :: MisoString -> MisoString -> View () () Model Action
 pill extraClass label =
-  H.span_ [HP.class_ ("pill " <> extraClass)] [text label]
+    H.span_ [HP.class_ ("pill " <> extraClass)] [text label]
 
 statBox :: MisoString -> MisoString -> View () () Model Action
 statBox number label =
-  H.div_ [HP.class_ "stat"]
-    [ H.div_ [HP.class_ "stat-num"] [text number]
-    , H.div_ [HP.class_ "stat-label"] [text label]
-    ]
+    H.div_
+        [HP.class_ "stat"]
+        [ H.div_ [HP.class_ "stat-num"] [text number]
+        , H.div_ [HP.class_ "stat-label"] [text label]
+        ]
 
 -- ----------------------------------------------------------------- panels --
 
 panel :: MisoString -> [View () () Model Action] -> View () () Model Action
 panel title body =
-  H.section_ [HP.class_ "panel"]
-    [ H.div_ [HP.class_ "panel-head"] [H.h2_ [HP.class_ "panel-title"] [text title]]
-    , H.div_ [HP.class_ "panel-body"] body
-    ]
+    H.section_
+        [HP.class_ "panel"]
+        [ H.div_ [HP.class_ "panel-head"] [H.h2_ [HP.class_ "panel-title"] [text title]]
+        , H.div_ [HP.class_ "panel-body"] body
+        ]
 
 panelWithHead :: MisoString -> [View () () Model Action] -> [View () () Model Action] -> View () () Model Action
 panelWithHead title headActions body =
-  H.section_ [HP.class_ "panel"]
-    [ H.div_ [HP.class_ "panel-head"]
-        [H.h2_ [HP.class_ "panel-title"] [text title], H.div_ [HP.class_ "panel-actions"] headActions]
-    , H.div_ [HP.class_ "panel-body"] body
-    ]
+    H.section_
+        [HP.class_ "panel"]
+        [ H.div_
+            [HP.class_ "panel-head"]
+            [H.h2_ [HP.class_ "panel-title"] [text title], H.div_ [HP.class_ "panel-actions"] headActions]
+        , H.div_ [HP.class_ "panel-body"] body
+        ]
 
 -- ------------------------------------------------------------ empty/load --
 
 emptyState :: MisoString -> MisoString -> [View () () Model Action] -> View () () Model Action
 emptyState emoji title actions =
-  H.div_ [HP.class_ "empty"]
-    ( [H.div_ [HP.class_ "empty-icon"] [text emoji], H.h2_ [] [text title]]
-        ++ actions
-    )
+    H.div_
+        [HP.class_ "empty"]
+        ( [H.div_ [HP.class_ "empty-icon"] [text emoji], H.h2_ [] [text title]]
+            ++ actions
+        )
 
 spinnerRow :: MisoString -> View () () Model Action
 spinnerRow label =
-  H.div_ [HP.class_ "loading-row", HP.aria_ "live" "polite"]
-    [H.span_ [HP.class_ "spinner"] [], text label]
+    H.div_
+        [HP.class_ "loading-row", HP.aria_ "live" "polite"]
+        [H.span_ [HP.class_ "spinner"] [], text label]
 
 bannerView :: MisoString -> MisoString -> [View () () Model Action] -> View () () Model Action
 bannerView extraClass message actions =
-  H.div_ [HP.class_ ("banner " <> extraClass), HP.role_ "status"]
-    (H.span_ [] [text message] : actions)
+    H.div_
+        [HP.class_ ("banner " <> extraClass), HP.role_ "status"]
+        (H.span_ [] [text message] : actions)
 
 -- ------------------------------------------------------------- segmented --
 
 segBtn :: Bool -> MisoString -> Action -> View () () Model Action
 segBtn active label action =
-  H.button_
-    [HP.class_ (if active then "active" else ""), HP.type_ "button", HE.onClick action]
-    [text label]
+    H.button_
+        [HP.class_ (if active then "active" else ""), HP.type_ "button", HE.onClick action]
+        [text label]
 
 -- ---------------------------------------------------------------- format --
 
--- | Boolean attributes in Miso are plain 'Attribute' values; build the list
--- conditionally instead of applying them like a setter.
+{- | Boolean attributes in Miso are plain 'Attribute' values; build the list
+conditionally instead of applying them like a setter.
+-}
 disabledAttr :: Bool -> [Attribute Model Action]
 disabledAttr True = [HP.disabled_]
 disabledAttr False = []
@@ -182,6 +190,6 @@ checkedAttr value = [HP.checked_ value]
 
 formatCount :: Int -> MisoString
 formatCount n
-  | n >= 1000000 = ms (show (n `div` 100000)) <> "." <> ms (show ((n `div` 10000) `mod` 10)) <> "M"
-  | n >= 1000 = ms (show (n `div` 1000)) <> "." <> ms (show ((n `div` 100) `mod` 10)) <> "k"
-  | otherwise = ms (show n)
+    | n >= 1000000 = ms (show (n `div` 100000)) <> "." <> ms (show ((n `div` 10000) `mod` 10)) <> "M"
+    | n >= 1000 = ms (show (n `div` 1000)) <> "." <> ms (show ((n `div` 100) `mod` 10)) <> "k"
+    | otherwise = ms (show n)

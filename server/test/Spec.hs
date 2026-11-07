@@ -3,19 +3,67 @@ module Main (main) where
 import Control.Exception (bracket)
 import qualified Data.ByteString as BS
 import Database.SQLite.Simple (close)
+import qualified Database.SQLite.Simple as Sqlite
+import System.Directory (listDirectory)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 import Eza.Bookmarks
-import Eza.Db (openDb)
+import Eza.Db (openDb, queryScalar, schemaV1, schemaVersion)
+import Eza.Favicon (parseDataIcon, parseIconLinks, sniffImage)
 import Eza.Import
 import Eza.SearchQuery
 import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), ImportReport (..), SearchPage (..))
+import Eza.Url (normalizeUrl)
 
 main :: IO ()
 main = hspec $ do
+  describe "URL normalization" $ do
+    it "lowercases scheme and host, drops the default port and fragment, and trims a root slash" $ do
+      normalizeUrl "HTTPS://Example.COM:443/a/#frag" `shouldBe` "https://example.com/a"
+      normalizeUrl "https://example.com/" `shouldBe` "https://example.com"
+      normalizeUrl "http://example.com:80/path/" `shouldBe` "http://example.com/path"
+
+  describe "favicon parsing" $ do
+    it "resolves relative icon links against a directory URL" $ do
+      let html = "<html><head><link rel=\"icon\" href=\"assets/favicon.png\"></head></html>"
+      parseIconLinks html "https://www.haskell.org/ghcup" `shouldContain` ["https://www.haskell.org/ghcup/assets/favicon.png"]
+    it "accepts a data URL and recognizes PNG magic bytes" $ do
+      case parseDataIcon "data:image/png;base64,iVBORw0KGgo=" of
+        Nothing -> expectationFailure "expected a data icon"
+        Just (mime, bytes) -> do
+          mime `shouldBe` "image/png"
+          sniffImage bytes `shouldBe` Just "image/png"
+    it "rejects an SVG body" $ do
+      sniffImage (BS.pack [0x3c, 0x73, 0x76, 0x67]) `shouldBe` Nothing
+
+  describe "schema migration" $ do
+    it "backs up a v1 database and migrates it to the current version without losing rows" $
+      withSystemTempDirectory "eza-migrate" $ \dir -> do
+        let path = dir </> "test.db"
+        bracket (Sqlite.open path) Sqlite.close $ \conn -> do
+          mapM_ (Sqlite.execute_ conn) schemaV1
+          Sqlite.execute_ conn "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://example.test','Example','example.test',1,1,1)"
+          Sqlite.execute_ conn "INSERT INTO tags (name,created_at) VALUES ('test',1)"
+          Sqlite.execute_ conn "INSERT INTO bookmark_tags (bookmark_id,tag_id) VALUES (1,1)"
+          Sqlite.execute_ conn "PRAGMA user_version = 1"
+        migrated <- openDb path
+        version <- schemaVersion migrated
+        version `shouldBe` 5
+        books <- queryScalar migrated "SELECT COUNT(*) FROM bookmarks"
+        books `shouldBe` 1
+        tags <- queryScalar migrated "SELECT COUNT(*) FROM tags"
+        tags `shouldBe` 1
+        links <- queryScalar migrated "SELECT COUNT(*) FROM bookmark_tags"
+        links `shouldBe` 1
+        fts <- queryScalar migrated "SELECT COUNT(*) FROM bookmarks_fts"
+        fts `shouldBe` 1
+        backups <- listDirectory (dir </> "backups")
+        length backups `shouldBe` 1
+        close migrated
+
   describe "parseSearchQuery" $ do
     it "extracts tags and unread" $ do
       let q = parseSearchQuery "rust tag:code is:unread"

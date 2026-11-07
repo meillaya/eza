@@ -41,6 +41,7 @@ executable eza-web
                     Eza.Web.Widgets
   build-depends:    base >=4.18 && <5
                   , aeson
+                  , bytestring
                   , containers
                   , eza-core
                   , miso

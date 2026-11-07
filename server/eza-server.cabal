@@ -33,10 +33,14 @@ library
                     Eza.Db
                     Eza.DeadLinks
                     Eza.Dedup
+                    Eza.Enrich
                     Eza.Export
                     Eza.Extract
+                    Eza.Favicon
+                    Eza.Fetch
                     Eza.Graph
                     Eza.Import
+                    Eza.Jobs
                     Eza.Links
                     Eza.Pages
                     Eza.SavedSearches
@@ -59,6 +63,7 @@ library
                   , http-client
                   , http-client-tls
                   , http-types
+                  , network
                   , network-uri
                   , optparse-applicative
                   , process

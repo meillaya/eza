@@ -68,6 +68,9 @@ data BookmarkDetail = BookmarkDetail
   , bdSnapshotKind :: Text
   , bdLastOpenedAt :: Maybe Int
   , bdLastCheckedAt :: Maybe Int
+  , bdEnrichState :: Text
+  , bdEnrichError :: Text
+  , bdReadingTimeMinutes :: Int
   , bdLinks :: [Backlink]
   }
   deriving stock (Show, Eq, Generic)

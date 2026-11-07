@@ -35,6 +35,15 @@ data Config = Config
   , cfgMonolith :: String
   , cfgLogLevel :: String
   , cfgAllowPrivateFetch :: Bool
+  , cfgEnrichWorkers :: Int
+  , cfgFetchTimeoutMs :: Int
+  , cfgFaviconMaxBytes :: Int
+  , cfgFaviconTtlDays :: Int
+  , cfgShareTtlDays :: Int
+  , cfgAiProvider :: String
+  , cfgOllamaBaseUrl :: String
+  , cfgAiModel :: String
+  , cfgAiAutoTag :: Bool
   }
   deriving (Show)
 
@@ -69,7 +78,16 @@ loadConfig = do
   backupDir <- fromMaybe (dataDir </> "backups") <$> lookupEnv "EZA_BACKUP_DIR"
   monolith <- fromMaybe "monolith" <$> lookupEnv "EZA_MONOLITH"
   logLevel <- fromMaybe "info" <$> lookupEnv "EZA_LOG_LEVEL"
-  allowPrivate <- maybe False (== "1") <$> lookupEnv "EZA_ALLOW_PRIVATE_FETCH"
+  allowPrivate <- readBoolEnv "EZA_ALLOW_PRIVATE_FETCH" False
+  enrichWorkers <- readIntEnv "EZA_ENRICH_WORKERS" 2
+  fetchTimeout <- readIntEnv "EZA_FETCH_TIMEOUT_MS" 8000
+  faviconMax <- readIntEnv "EZA_FAVICON_MAX_BYTES" 65536
+  faviconTtl <- readIntEnv "EZA_FAVICON_TTL_DAYS" 90
+  shareTtl <- readIntEnv "EZA_SHARE_TTL_DAYS" 7
+  aiProvider <- fromMaybe "none" <$> lookupEnv "EZA_AI_PROVIDER"
+  ollamaUrl <- fromMaybe "http://127.0.0.1:11434" <$> lookupEnv "EZA_OLLAMA_BASE_URL"
+  aiModel <- fromMaybe "llama3.2" <$> lookupEnv "EZA_AI_MODEL"
+  aiAutoTag <- readBoolEnv "EZA_AI_AUTO_TAG" False
   pure
     Config
       { cfgDataDir = dataDir
@@ -87,6 +105,15 @@ loadConfig = do
       , cfgMonolith = monolith
       , cfgLogLevel = logLevel
       , cfgAllowPrivateFetch = allowPrivate
+      , cfgEnrichWorkers = max 0 enrichWorkers
+      , cfgFetchTimeoutMs = max 1000 fetchTimeout
+      , cfgFaviconMaxBytes = max 4096 faviconMax
+      , cfgFaviconTtlDays = max 1 faviconTtl
+      , cfgShareTtlDays = max 1 shareTtl
+      , cfgAiProvider = aiProvider
+      , cfgOllamaBaseUrl = ollamaUrl
+      , cfgAiModel = aiModel
+      , cfgAiAutoTag = aiAutoTag
       }
 
 originHost :: Text -> Text
@@ -116,6 +143,18 @@ readIntEnv name fallback = do
   pure $ case raw >>= readMaybe of
     Just n -> n
     Nothing -> fallback
+
+readBoolEnv :: String -> Bool -> IO Bool
+readBoolEnv name fallback = do
+  raw <- lookupEnv name
+  pure $ case fmap (map toLower) raw of
+    Just "1" -> True
+    Just "true" -> True
+    Just "yes" -> True
+    Just "0" -> False
+    Just "false" -> False
+    Just "no" -> False
+    _ -> fallback
 
 splitOn :: Char -> String -> [String]
 splitOn sep s = case break (== sep) s of

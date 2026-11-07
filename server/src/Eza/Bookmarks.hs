@@ -9,6 +9,8 @@ module Eza.Bookmarks
   , getBookmark
   , allTags
   , insertBookmark
+  , findBookmarkIdByUrl
+  , quickSave
   , updateBookmark
   , addTagsToBookmark
   , deleteBookmark
@@ -34,7 +36,7 @@ import Database.SQLite.Simple
 import Database.SQLite.Simple (Query (..))
 
 import Eza.Links (syncLinks)
-import Eza.Url (hostOf)
+import Eza.Url (hostOf, normalizeUrl)
 import Eza.SearchQuery
 import Eza.Types
 import Eza.Undo (recordUndo, snapshotBookmarks)
@@ -248,6 +250,9 @@ getBookmark conn bid = do
               , bdSnapshotKind = drSnapshotKind r
               , bdLastOpenedAt = drLastOpenedAt r
               , bdLastCheckedAt = drLastCheckedAt r
+              , bdEnrichState = drEnrichState r
+              , bdEnrichError = drEnrichError r
+              , bdReadingTimeMinutes = drReadingTimeMinutes r
               , bdLinks = links
               }
         )
@@ -257,7 +262,7 @@ detailColumns =
   "b.id, b.url, b.title, b.domain, b.favicon_url, b.created_at, b.added_at, "
     <> "b.is_read, b.is_dead, b.note_body, b.extracted_text, b.author, b.sitename, "
     <> "b.published_at, b.language, b.image_url, b.final_url, b.snapshot_path, "
-    <> "b.snapshot_kind, b.last_opened_at, b.last_checked_at"
+    <> "b.snapshot_kind, b.last_opened_at, b.last_checked_at, b.enrich_state, b.enrich_error, b.reading_time_minutes"
 
 data DetailRow = DetailRow
   { drId :: Int
@@ -281,6 +286,9 @@ data DetailRow = DetailRow
   , drSnapshotKind :: Text
   , drLastOpenedAt :: Maybe Int
   , drLastCheckedAt :: Maybe Int
+  , drEnrichState :: Text
+  , drEnrichError :: Text
+  , drReadingTimeMinutes :: Int
   }
 
 instance FromRow DetailRow where
@@ -289,6 +297,7 @@ instance FromRow DetailRow where
       <$> field <*> field <*> field <*> field <*> field <*> field <*> field
       <*> field <*> field <*> field <*> field <*> field <*> field <*> field
       <*> field <*> field <*> field <*> field <*> field <*> field <*> field
+      <*> field <*> field <*> field
 
 outgoingLinks :: Connection -> Int -> IO [Backlink]
 outgoingLinks conn bid = do
@@ -315,6 +324,27 @@ allTags conn = do
       conn
       "SELECT t.name, COUNT(bt.bookmark_id) FROM tags t LEFT JOIN bookmark_tags bt ON bt.tag_id = t.id GROUP BY t.id ORDER BY COUNT(bt.bookmark_id) DESC, t.name ASC" :: IO [(Text, Int)]
   pure [TagStat name count | (name, count) <- rows]
+
+findBookmarkIdByUrl :: Connection -> Text -> IO (Maybe Int)
+findBookmarkIdByUrl conn url = do
+  rows <- query conn "SELECT id FROM bookmarks WHERE url = ?" (Only url) :: IO [Only Int]
+  pure (case rows of [Only i] -> Just i; _ -> Nothing)
+
+-- | Fast save path: normalize, return an existing row, or insert a minimal
+-- row. Enrichment is queued by the caller after a successful insert.
+quickSave :: Connection -> Text -> Text -> [Text] -> IO (Either Text (Int, Bool))
+quickSave conn rawUrl title tags = do
+  let url = normalizeUrl rawUrl
+  existing <- findBookmarkIdByUrl conn url
+  case existing of
+    Just bid -> pure (Right (bid, True))
+    Nothing -> do
+      result <- insertBookmark conn url title tags
+      case result of
+        Right bid -> pure (Right (bid, False))
+        Left message -> do
+          raced <- findBookmarkIdByUrl conn url
+          pure (maybe (Left message) (\bid -> Right (bid, True)) raced)
 
 insertBookmark :: Connection -> Text -> Text -> [Text] -> IO (Either Text Int)
 insertBookmark conn url title tags = do

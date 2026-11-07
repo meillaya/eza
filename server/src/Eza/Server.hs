@@ -6,7 +6,9 @@ module Eza.Server
   ( runServer
   ) where
 
+import Control.Concurrent.Async (async)
 import Control.Concurrent.MVar
+import Control.Monad (forM_, void)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString as BS
@@ -18,7 +20,9 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Database.SQLite.Simple (Connection)
+import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types
+import Network.HTTP.Types.Header (hCacheControl, hETag, hIfNoneMatch)
 import Network.Wai
 import Network.Wai.Handler.Warp
 import qualified Web.Cookie as Cookie
@@ -33,10 +37,12 @@ import Eza.Config
 import qualified Eza.Db as Db
 import Eza.DeadLinks (checkDead)
 import Eza.Dedup (dedupCandidates, mergeBookmarks)
+import Eza.Enrich (enqueueEnrichment, runEnrichWorker)
 import Eza.Export (exportBookmarks)
-import Eza.Extract (enrichBookmark, extractBookmark)
+import Eza.Favicon (Favicon (..), getFavicon)
 import Eza.Graph (graphNeighborhood)
 import Eza.Import (defaultImportOptions, importParsed, parseNetscape)
+import Eza.Jobs (resetRunningJobs)
 import Eza.Pages (addPasskeyPage, loginPage, recoverPage, setupPage)
 import Eza.SavedSearches (createSavedSearch, deleteSavedSearch, listSavedSearches)
 import Eza.Snapshot (captureSnapshot)
@@ -48,6 +54,9 @@ import Network.Wai.Parse (FileInfo (..), defaultParseRequestBodyOptions, lbsBack
 runServer :: Config -> Connection -> IO ()
 runServer cfg conn = do
   Auth.cleanupExpired conn
+  resetRunningJobs conn
+  manager <- newTlsManager
+  forM_ [1 .. cfgEnrichWorkers cfg] $ \_ -> void (async (runEnrichWorker manager cfg))
   db <- newMVar conn
   let settings =
         setHost (fromString (bindHost (cfgBind cfg)))
@@ -146,6 +155,17 @@ app cfg db req respond = do
     ("GET", ("assets" : rest)) -> serveAsset cfg rest respond
     ("GET", ["favicon.svg"]) -> serveAsset cfg ["favicon.svg"] respond
     ("GET", ["theme.js"]) -> serveAsset cfg ["theme.js"] respond
+    ("GET", ["manifest.webmanifest"]) ->
+      serveStaticFile cfg "manifest.webmanifest" [("Content-Type", "application/manifest+json")] respond
+    ("GET", ["sw.js"]) ->
+      serveStaticFile
+        cfg
+        "sw.js"
+        [ ("Content-Type", "text/javascript; charset=utf-8")
+        , ("Service-Worker-Allowed", "/")
+        , ("Cache-Control", "no-cache")
+        ]
+        respond
     ("GET", []) -> withDb db $ \conn -> do
       msess <- sessionFromReq conn req
       case msess of
@@ -157,6 +177,7 @@ app cfg db req respond = do
 authedRoute :: Config -> DbVar -> Request -> (Response -> IO ResponseReceived) -> Auth.Session -> Connection -> IO ResponseReceived
 authedRoute cfg _db req respond _sess conn =
   case (requestMethod req, pathInfo req) of
+    ("GET", ["save"]) -> respond (indexResponse cfg)
     ("GET", ["api", "v1", "boot"]) -> do
       page <- listBookmarks conn defaultListQuery
       tags <- allTags conn
@@ -177,6 +198,10 @@ authedRoute cfg _db req respond _sess conn =
       Just bid -> do
         ok <- deleteBookmark conn bid
         if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "bookmark not found")
+    ("GET", ["api", "v1", "favicons", domain]) ->
+      faviconHandler conn req domain respond
+    ("POST", ["api", "v1", "quick-save"]) ->
+      quickSaveHandler conn req respond
     ("GET", ["api", "v1", "tags"]) -> do
       tags <- allTags conn
       respond (jsonResponse status200 (object ["tags" .= tags]))
@@ -190,11 +215,11 @@ authedRoute cfg _db req respond _sess conn =
         case action of
           "open" -> recordOpen conn bid >> respond (jsonResponse status200 (object ["ok" .= True]))
           "enrich" -> do
-            ok <- enrichBookmark conn bid
-            respond (jsonResponse status200 (object ["ok" .= ok]))
+            enqueueEnrichment conn bid
+            respond (jsonResponse status200 (object ["ok" .= True, "queued" .= True]))
           "extract" -> do
-            ok <- extractBookmark conn bid
-            respond (jsonResponse status200 (object ["ok" .= ok]))
+            enqueueEnrichment conn bid
+            respond (jsonResponse status200 (object ["ok" .= True, "queued" .= True]))
           "snapshot" -> do
             m <- captureSnapshot cfg conn bid
             case m of
@@ -390,7 +415,7 @@ authedRoute cfg _db req respond _sess conn =
       respond (clearAuthCookies cfg (emptyResponse status204))
     ("GET", path)
       | not ("api" `elem` path)
-      , acceptsHtml req -> respond (indexResponse cfg)
+      , not ("assets" `elem` path) -> respond (indexResponse cfg)
     _ -> respond (jsonError status404 "not_found" "No such route")
 
 -- ---------------------------------------------------------------------------
@@ -526,6 +551,27 @@ health db respond = do
     then respond (jsonResponse status200 (object ["status" .= ("ok" :: Text), "version" .= ("0.1.0" :: Text)]))
     else respond (jsonError status503 "unavailable" "database is unavailable")
 
+faviconHandler :: Connection -> Request -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+faviconHandler conn req domain respond = do
+  cached <- getFavicon conn domain
+  case cached of
+    Nothing -> respond (redirectTo "/assets/favicon-fallback.svg")
+    Just favicon -> do
+      let etag = TE.encodeUtf8 (fvEtag favicon)
+      case lookup hIfNoneMatch (requestHeaders req) of
+        Just raw | raw == etag -> respond (emptyResponse status304)
+        _ ->
+          respond
+            ( responseLBS
+                status200
+                [ (hContentType, TE.encodeUtf8 (fvMime favicon))
+                , (hETag, etag)
+                , (hCacheControl, "private, max-age=604800, immutable")
+                , ("Vary", "Cookie")
+                ]
+                (LBS.fromStrict (fvBytes favicon))
+            )
+
 data AddBody = AddBody
   { abUrl :: Text
   , abTitle :: Maybe Text
@@ -548,7 +594,36 @@ addBookmark conn req respond = do
           result <- insertBookmark conn url (fromMaybe "" title) (fromMaybe [] tags)
           case result of
             Left msg -> respond (jsonError status409 "conflict" msg)
-            Right bid -> respond (jsonResponse status201 (object ["id" .= bid]))
+            Right bid -> do
+              enqueueEnrichment conn bid
+              respond (jsonResponse status201 (object ["id" .= bid]))
+
+data QuickBody = QuickBody
+  { qbUrl :: Text
+  , qbTitle :: Maybe Text
+  , qbTags :: Maybe [Text]
+  }
+
+instance FromJSON QuickBody where
+  parseJSON = withObject "QuickBody" $ \o ->
+    QuickBody <$> o .: "url" <*> o .:? "title" <*> o .:? "tags"
+
+quickSaveHandler :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+quickSaveHandler conn req respond = do
+  body <- strictRequestBody req
+  case eitherDecode body of
+    Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+    Right (QuickBody url title tags)
+      | not (isHttpUrl url) -> respond (jsonError status400 "bad_request" "url must be http(s)")
+      | otherwise -> do
+          result <- quickSave conn url (fromMaybe "" title) (fromMaybe [] tags)
+          case result of
+            Left message -> respond (jsonError status409 "conflict" message)
+            Right (bid, existing) -> do
+              if existing
+                then pure ()
+                else enqueueEnrichment conn bid
+              respond (jsonResponse (if existing then status200 else status201) (object ["id" .= bid, "existing" .= existing]))
 
 data MarkAboveBody = MarkAboveBody {mabAboveId :: Maybe Int}
 
@@ -663,6 +738,16 @@ isHttpUrl t =
 -- Static
 -- ---------------------------------------------------------------------------
 
+serveStaticFile :: Config -> FilePath -> [(HeaderName, BS.ByteString)] -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+serveStaticFile cfg relative headers respond = case cfgStaticDir cfg of
+  Nothing -> respond (jsonError status404 "not_found" "static assets are not configured")
+  Just root -> do
+    let path = root </> relative
+    exists <- doesFileExist path
+    if exists
+      then respond (responseFile status200 headers path Nothing)
+      else respond (jsonError status404 "not_found" "asset not found")
+
 serveAsset :: Config -> [Text] -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 serveAsset cfg rest respond = case cfgStaticDir cfg of
   Nothing -> respond (jsonError status404 "not_found" "static assets are not configured")
@@ -691,6 +776,8 @@ mimeFor p
   | ".html" `endOf` p = BSC.pack "text/html; charset=utf-8"
   | ".svg" `endOf` p = BSC.pack "image/svg+xml"
   | ".json" `endOf` p = BSC.pack "application/json"
+  | ".png" `endOf` p = BSC.pack "image/png"
+  | ".webmanifest" `endOf` p = BSC.pack "application/manifest+json"
   | otherwise = BSC.pack "application/octet-stream"
   where
     endOf suffix s =

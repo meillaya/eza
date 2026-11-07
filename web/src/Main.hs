@@ -1,7 +1,7 @@
--- | Entry point for the eza Miso/WebAssembly client.
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+-- | Entry point for the eza Miso/WebAssembly client.
 module Main (main) where
 
 import Miso
@@ -17,15 +17,16 @@ main = startApp allEvents app
 foreign export javascript "hs_start" main :: IO ()
 #endif
 
--- | Globally delegated events: the default set plus keyboard events for the
--- command palette, Ctrl/Cmd+S, and the global shortcuts.
+{- | Globally delegated events: the default set plus keyboard events for the
+command palette, Ctrl/Cmd+S, and the global shortcuts.
+-}
 allEvents :: Events
 allEvents = defaultEvents <> keyboardEvents
 
 app :: App Model Action
 app =
-  (component initialModel updateModel viewModel)
-    { mount = Just Mounted
-    , subs = subscriptions
-    , mountPoint = Just "app"
-    }
+    (component initialModel updateModel viewModel)
+        { mount = Just Mounted
+        , subs = subscriptions
+        , mountPoint = Just "app"
+        }

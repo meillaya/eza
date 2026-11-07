@@ -2092,3 +2092,85 @@ img {
     transform: none;
   }
 }
+
+/* ------------------------------------------------------------------ PWA --- */
+.offline-banner {
+  position: fixed;
+  left: 20px;
+  bottom: 20px;
+  z-index: 90;
+  max-width: calc(100vw - 24px);
+  padding: 8px 16px;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in srgb, var(--warn) 34%, var(--border));
+  background: var(--warn-soft);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 550;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: var(--shadow);
+  pointer-events: none;
+  animation: fade-in 140ms var(--ease);
+}
+
+.install-fab {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 85;
+  height: 40px;
+  padding: 0 16px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--shadow-lg);
+}
+.install-fab:hover {
+  background: var(--accent-strong);
+}
+[data-theme="dark"] .install-fab {
+  color: #14142b;
+}
+
+.capture-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.capture-code {
+  display: block;
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 96px;
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.capture-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.capture-bookmarklet {
+  align-self: flex-start;
+  cursor: grab;
+}
+.capture-note {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+}

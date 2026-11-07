@@ -34,8 +34,9 @@ extractHtml :: Text -> Extracted
 extractHtml html =
   let tags = parseTags html :: [Tag Text]
       st = foldl step initial tags
+      titleTag = titleFromTags tags
    in Extracted
-        { exTitle = clean (esTitle st)
+        { exTitle = clean (if T.null (T.strip (esTitle st)) then titleTag else esTitle st)
         , exDescription = clean (esDescription st)
         , exText = T.take 100000 (clean (esText st))
         , exAuthor = clean (esAuthor st)
@@ -67,6 +68,14 @@ extractHtml html =
     lname = T.toLower
     attr key attrs = maybe "" id (lookup (T.toLower key) [(T.toLower k, v) | (k, v) <- attrs])
     clean = T.unwords . T.words . T.strip
+    titleFromTags input =
+      case dropWhile (not . isTitleOpen) input of
+        (TagOpen _ _ : rest) -> T.concat [t | TagText t <- takeWhile (not . isTitleClose) rest]
+        _ -> ""
+    isTitleOpen (TagOpen name _) = lname name == "title"
+    isTitleOpen _ = False
+    isTitleClose (TagClose name) = lname name == "title"
+    isTitleClose _ = False
 
 fetchHtml :: Text -> IO (Maybe Text)
 fetchHtml url = do
