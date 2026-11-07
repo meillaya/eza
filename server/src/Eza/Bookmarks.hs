@@ -14,6 +14,8 @@ module Eza.Bookmarks
   , updateBookmark
   , addTagsToBookmark
   , deleteBookmark
+  , BulkAction (..)
+  , bulkUpdate
   , markAllAbove
   , recordOpen
   , autocomplete
@@ -39,7 +41,7 @@ import Eza.Links (syncLinks)
 import Eza.Url (hostOf, normalizeUrl)
 import Eza.SearchQuery
 import Eza.Types
-import Eza.Undo (recordUndo, snapshotBookmarks)
+import Eza.Undo (recordUndo, recordUndoIds, snapshotBookmarks)
 import qualified Data.Text.Encoding as TE
 
 data ListQuery = ListQuery
@@ -372,9 +374,80 @@ insertBookmark conn url title tags = do
 deleteBookmark :: Connection -> Int -> IO Bool
 deleteBookmark conn bid = do
   n <- withImmediateTransaction conn $ do
-    execute conn "DELETE FROM bookmarks WHERE id = ?" (Only bid)
-    changes conn
+    exists <- query conn "SELECT 1 FROM bookmarks WHERE id = ?" (Only bid) :: IO [Only Int]
+    if null exists
+      then pure 0
+      else do
+        _ <- recordUndoIds conn "delete" [bid]
+        execute conn "DELETE FROM bookmarks WHERE id = ?" (Only bid)
+        changes conn
   pure (n > 0)
+
+data BulkAction
+  = BulkAddTags [Text]
+  | BulkRemoveTags [Text]
+  | BulkMarkRead Bool
+  | BulkDelete
+  deriving (Show, Eq)
+
+-- | Apply one action to at most 10,000 bookmarks and snapshot the rows first.
+bulkUpdate :: Connection -> BulkAction -> [Int] -> IO (Either Text (Int, Int))
+bulkUpdate conn action ids
+  | null ids = pure (Left "no bookmark ids supplied")
+  | length ids > 10000 = pure (Left "at most 10,000 bookmarks per bulk request")
+  | otherwise =
+      let uniqueIds = dedupeTextIds ids
+          op = case action of
+            BulkAddTags _ -> "bulk_add_tags"
+            BulkRemoveTags _ -> "bulk_remove_tags"
+            BulkMarkRead True -> "bulk_mark_read"
+            BulkMarkRead False -> "bulk_mark_unread"
+            BulkDelete -> "bulk_delete"
+       in withImmediateTransaction conn $ do
+            snapshotId <- recordUndoIds conn op uniqueIds
+            updated <- applyBulk uniqueIds
+            pure (Right (updated, snapshotId))
+  where
+    applyBulk uniqueIds = case action of
+      BulkAddTags tags -> do
+        now <- (floor <$> getPOSIXTime) :: IO Int
+        forM_ (dedupeText tags) $ \tag -> do
+          execute conn "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, ?)" (tag, now)
+          idRows <- query conn "SELECT id FROM tags WHERE name = ?" (Only tag) :: IO [Only Int]
+          case idRows of
+            (Only tid : _) ->
+              forM_ uniqueIds $ \bid ->
+                execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (bid, tid)
+            _ -> pure ()
+        pure (length uniqueIds)
+      BulkRemoveTags tags -> do
+        let idNames = [":bid" <> T.pack (show i) | i <- [0 .. length uniqueIds - 1]]
+            tagNames = [":tag" <> T.pack (show i) | i <- [0 .. length tags - 1]]
+            marks = T.intercalate "," idNames
+            tagMarks = T.intercalate "," tagNames
+            params = zipWith (\name bid -> name := bid) idNames uniqueIds <> zipWith (\name tag -> name := tag) tagNames tags
+        executeNamed
+          conn
+          (Query ("DELETE FROM bookmark_tags WHERE bookmark_id IN (" <> marks <> ") AND tag_id IN (SELECT id FROM tags WHERE name IN (" <> tagMarks <> "))"))
+          params
+        pure (length uniqueIds)
+      BulkMarkRead value -> do
+        let marks = T.intercalate "," (replicate (length uniqueIds) "?")
+        execute
+          conn
+          (Query ("UPDATE bookmarks SET is_read = ?, updated_at = strftime('%s','now') WHERE id IN (" <> marks <> "))"))
+          ((if value then 1 else 0 :: Int) : uniqueIds)
+        pure (length uniqueIds)
+      BulkDelete -> do
+        let marks = T.intercalate "," (replicate (length uniqueIds) "?")
+        execute conn (Query ("DELETE FROM bookmarks WHERE id IN (" <> marks <> ")")) uniqueIds
+        pure (length uniqueIds)
+
+dedupeTextIds :: [Int] -> [Int]
+dedupeTextIds = go []
+  where
+    go seen [] = reverse seen
+    go seen (x : xs) = if x <= 0 || x `elem` seen then go seen xs else go (x : seen) xs
 
 markAllAbove :: Connection -> Maybe Int -> IO Int
 markAllAbove conn Nothing =

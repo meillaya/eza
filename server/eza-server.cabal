@@ -47,6 +47,7 @@ library
                     Eza.Server
                     Eza.Snapshot
                     Eza.Tags
+                    Eza.Tokens
                     Eza.Undo
   build-depends:    base >=4.18 && <5
                   , aeson >=2.1 && <2.4

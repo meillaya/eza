@@ -2,6 +2,7 @@
 module Eza.Undo
   ( snapshotBookmarks
   , recordUndo
+  , recordUndoIds
   , restoreBookmarks
   , undoLast
   ) where
@@ -132,19 +133,76 @@ restoreBookmarks conn payload = do
       _ -> pure ()
   pure (length rows)
 
+recordUndoIds :: Connection -> Text -> [Int] -> IO Int
+recordUndoIds conn op ids = do
+  now <- floor <$> getPOSIXTime
+  execute
+    conn
+    "INSERT INTO undo_snapshots (payload_json, op, row_count, created_at) VALUES ('{}', ?, ?, ?)"
+    (op, length ids, (now :: Int))
+  snapshotId <- fromIntegral <$> lastInsertRowId conn
+  if null ids
+    then pure snapshotId
+    else do
+      let marks = T.intercalate "," (replicate (length ids) "?")
+          columns = "snapshot_id,id,url,title,description,favicon_url,domain,source,created_at,added_at,updated_at,last_opened_at,last_checked_at,open_count,is_dead,is_read,note_body,extracted_text,author,sitename,published_at,language,image_url,final_url,snapshot_path,snapshot_kind,snapshot_captured_at,enrich_state,enrich_error,enrich_attempts,enriched_at,reading_time_minutes,ai_summary,ai_tagged_at"
+          selectColumns = "id,url,title,description,favicon_url,domain,source,created_at,added_at,updated_at,last_opened_at,last_checked_at,open_count,is_dead,is_read,note_body,extracted_text,author,sitename,published_at,language,image_url,final_url,snapshot_path,snapshot_kind,snapshot_captured_at,enrich_state,enrich_error,enrich_attempts,enriched_at,reading_time_minutes,ai_summary,ai_tagged_at"
+      execute
+        conn
+        (Query ("INSERT INTO undo_bookmark_rows (" <> columns <> ") SELECT ?," <> selectColumns <> " FROM bookmarks WHERE id IN (" <> marks <> ")"))
+        (snapshotId : ids)
+      execute
+        conn
+        (Query ("INSERT OR IGNORE INTO undo_bookmark_tags (snapshot_id,bookmark_id,tag_name) SELECT ?, bt.bookmark_id, t.name FROM bookmark_tags bt JOIN tags t ON t.id = bt.tag_id WHERE bt.bookmark_id IN (" <> marks <> ")"))
+        (snapshotId : ids)
+      pure snapshotId
+
+restoreSideSnapshot :: Connection -> Int -> IO Int
+restoreSideSnapshot conn snapshotId = do
+  let bookmarkColumns = "id,url,title,description,favicon_url,domain,source,created_at,added_at,updated_at,last_opened_at,last_checked_at,open_count,is_dead,is_read,note_body,extracted_text,author,sitename,published_at,language,image_url,final_url,snapshot_path,snapshot_kind,snapshot_captured_at,enrich_state,enrich_error,enrich_attempts,enriched_at,reading_time_minutes,ai_summary,ai_tagged_at"
+  execute
+    conn
+    (Query ("INSERT OR REPLACE INTO bookmarks (" <> bookmarkColumns <> ") SELECT " <> bookmarkColumns <> " FROM undo_bookmark_rows WHERE snapshot_id = ?"))
+    (Only snapshotId)
+  execute
+    conn
+    "DELETE FROM bookmark_tags WHERE bookmark_id IN (SELECT id FROM undo_bookmark_rows WHERE snapshot_id = ?)"
+    (Only snapshotId)
+  execute
+    conn
+    "INSERT OR IGNORE INTO tags (name, created_at) SELECT DISTINCT tag_name, strftime('%s','now') FROM undo_bookmark_tags WHERE snapshot_id = ?"
+    (Only snapshotId)
+  execute
+    conn
+    "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) SELECT r.id, t.id FROM undo_bookmark_rows r JOIN undo_bookmark_tags ut ON ut.snapshot_id = r.snapshot_id AND ut.bookmark_id = r.id JOIN tags t ON t.name = ut.tag_name WHERE r.snapshot_id = ?"
+    (Only snapshotId)
+  execute conn "DELETE FROM undo_snapshots WHERE id = ?" (Only snapshotId)
+  pure 0
+
 undoLast :: Connection -> IO Int
 undoLast conn = do
   rows <-
     query_ conn "SELECT id, CAST(payload_json AS TEXT) FROM undo_snapshots ORDER BY id DESC LIMIT 1" :: IO [(Int, Text)]
   case rows of
     [] -> pure 0
-    ((snapshotId, raw) : _) ->
-      case decode (LBS.fromStrict (TE.encodeUtf8 raw)) :: Maybe Value of
-        Nothing -> pure 0
-        Just value ->
-          case parseMaybe (withObject "undo" (.: "snapshot")) value of
+    ((snapshotId, raw) : _) -> do
+      sideCount <- queryScalarInt conn "SELECT COUNT(*) FROM undo_bookmark_rows WHERE snapshot_id = ?" snapshotId
+      if sideCount > 0
+        then do
+          n <- queryScalarInt conn "SELECT COUNT(*) FROM undo_bookmark_rows WHERE snapshot_id = ?" snapshotId
+          _ <- restoreSideSnapshot conn snapshotId
+          pure n
+        else
+          case decode (LBS.fromStrict (TE.encodeUtf8 raw)) :: Maybe Value of
             Nothing -> pure 0
-            Just snapshot -> do
-              n <- restoreBookmarks conn snapshot
-              execute conn "DELETE FROM undo_snapshots WHERE id = ?" (Only snapshotId)
-              pure n
+            Just value ->
+              case parseMaybe (withObject "undo" (.: "snapshot")) value of
+                Nothing -> pure 0
+                Just snapshot -> do
+                  n <- restoreBookmarks conn snapshot
+                  execute conn "DELETE FROM undo_snapshots WHERE id = ?" (Only snapshotId)
+                  pure n
+  where
+    queryScalarInt connection sql value = do
+      result <- query connection sql (Only value) :: IO [Only Int]
+      pure (case result of [Only n] -> n; _ -> 0)

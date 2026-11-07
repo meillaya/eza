@@ -1,0 +1,22 @@
+import { chromium } from "@playwright/test";
+const BASE = process.env.EZA_BASE || "http://localhost:8107";
+const browser = await chromium.launch({ headless: true });
+const context = await browser.newContext();
+const page = await context.newPage();
+const cdp = await context.newCDPSession(page);
+await cdp.send("WebAuthn.enable", { enableUI: false });
+await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
+await page.goto(BASE + "/setup", { waitUntil: "networkidle" });
+await page.click("#passkey-setup");
+await page.waitForSelector("#recovery:not([hidden])", { timeout: 30000 });
+const result = await page.evaluate(async () => {
+  const csrf = document.cookie.split("; ").find((c) => c.startsWith("eza_csrf="))?.split("=")[1] || "";
+  const create = await fetch("/api/v1/tokens", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ name: "extension", scopes: ["capture"] }) });
+  const created = await create.json();
+  const save = await fetch("/api/v1/quick-save", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + created.token }, body: JSON.stringify({ url: "https://www.haskell.org/ghcup/" }) });
+  const saved = await save.json();
+  const list = await fetch("/api/v1/tokens", { headers: { Authorization: "Bearer " + created.token } });
+  return { createStatus: create.status, token: created.token, id: created.token_info?.id, saveStatus: save.status, saved, listStatus: list.status };
+});
+console.log(result);
+await browser.close();

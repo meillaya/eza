@@ -22,7 +22,7 @@ import qualified Data.Text.Encoding as TE
 import Database.SQLite.Simple (Connection)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types
-import Network.HTTP.Types.Header (hCacheControl, hETag, hIfNoneMatch)
+import Network.HTTP.Types.Header (hAuthorization, hCacheControl, hETag, hIfNoneMatch)
 import Network.Wai
 import Network.Wai.Handler.Warp
 import qualified Web.Cookie as Cookie
@@ -47,6 +47,7 @@ import Eza.Pages (addPasskeyPage, loginPage, recoverPage, setupPage)
 import Eza.SavedSearches (createSavedSearch, deleteSavedSearch, listSavedSearches)
 import Eza.Snapshot (captureSnapshot)
 import Eza.Tags (consolidationCandidates, deleteTag, mergeTags, renameTag)
+import Eza.Tokens (Token (..), TokenView (..), authenticateToken, createToken, listTokens, revokeToken, tokenAllows)
 import Eza.Types
 import Eza.Undo (undoLast)
 import Network.Wai.Parse (FileInfo (..), defaultParseRequestBodyOptions, lbsBackEnd, parseRequestBodyEx)
@@ -172,10 +173,14 @@ app cfg db req respond = do
         Nothing -> respond (redirectTo "/login")
         Just _ -> respond (indexResponse cfg)
     -- Authenticated API.
-    _ -> withAuthed cfg db req respond $ \sess conn -> authedRoute cfg db req respond sess conn
+    _ -> withAuthed cfg db req respond $ \ctx conn -> authedRoute cfg db req respond ctx conn
 
-authedRoute :: Config -> DbVar -> Request -> (Response -> IO ResponseReceived) -> Auth.Session -> Connection -> IO ResponseReceived
-authedRoute cfg _db req respond _sess conn =
+data AuthContext
+  = CookieSession Auth.Session
+  | BearerToken Token
+
+authedRoute :: Config -> DbVar -> Request -> (Response -> IO ResponseReceived) -> AuthContext -> Connection -> IO ResponseReceived
+authedRoute cfg _db req respond ctx conn =
   case (requestMethod req, pathInfo req) of
     ("GET", ["save"]) -> respond (indexResponse cfg)
     ("GET", ["api", "v1", "boot"]) -> do
@@ -186,6 +191,7 @@ authedRoute cfg _db req respond _sess conn =
       page <- listBookmarks conn (listQueryFrom req)
       respond (jsonResponse status200 page)
     ("POST", ["api", "v1", "bookmarks"]) -> addBookmark conn req respond
+    ("POST", ["api", "v1", "bookmarks", "bulk"]) -> bulkHandler conn req respond
     ("GET", ["api", "v1", "bookmarks", idTxt]) -> case readInt idTxt of
       Nothing -> respond (jsonError status400 "bad_request" "invalid bookmark id")
       Just bid -> do
@@ -371,6 +377,21 @@ authedRoute cfg _db req respond _sess conn =
     ("GET", ["api", "v1", "export", "notes"]) ->
       respond (jsonError status501 "not_implemented" "Markdown note export is coming in a later milestone")
     ("GET", ["account", "add-passkey"]) -> respond (htmlResponse addPasskeyPage)
+    ("GET", ["api", "v1", "tokens"]) -> do
+      tokens <- listTokens conn
+      respond (jsonResponse status200 (object ["tokens" .= tokens]))
+    ("POST", ["api", "v1", "tokens"]) -> do
+      body <- strictRequestBody req
+      case eitherDecode body of
+        Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+        Right (TokenCreateBody name scopes) -> do
+          (_, raw, view) <- createToken conn name (fromMaybe ["read", "write"] scopes)
+          respond (jsonResponse status201 (object ["token" .= raw, "token_info" .= view]))
+    ("DELETE", ["api", "v1", "tokens", idTxt]) -> case readInt idTxt of
+      Nothing -> respond (jsonError status400 "bad_request" "invalid token id")
+      Just tokenId -> do
+        ok <- revokeToken conn tokenId
+        if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "token not found")
     ("GET", ["api", "v1", "account"]) -> do
       creds <- Auth.listCredentials conn
       remaining <- Auth.recoveryCodesRemaining conn
@@ -410,9 +431,11 @@ authedRoute cfg _db req respond _sess conn =
     ("POST", ["api", "v1", "account", "recovery", "regenerate"]) -> do
       codes <- Auth.regenerateRecoveryCodes conn
       respond (jsonResponse status200 (object ["codes" .= codes]))
-    ("POST", ["api", "auth", "logout"]) -> do
-      Auth.deleteSessionHash conn (Auth.sessId _sess)
-      respond (clearAuthCookies cfg (emptyResponse status204))
+    ("POST", ["api", "auth", "logout"]) -> case ctx of
+      CookieSession sess -> do
+        Auth.deleteSessionHash conn (Auth.sessId sess)
+        respond (clearAuthCookies cfg (emptyResponse status204))
+      BearerToken _ -> respond (jsonError status403 "session_required" "a bearer token cannot end a browser session")
     ("GET", path)
       | not ("api" `elem` path)
       , not ("assets" `elem` path) -> respond (indexResponse cfg)
@@ -422,21 +445,51 @@ authedRoute cfg _db req respond _sess conn =
 -- Auth guard
 -- ---------------------------------------------------------------------------
 
-withAuthed :: Config -> DbVar -> Request -> (Response -> IO ResponseReceived) -> (Auth.Session -> Connection -> IO ResponseReceived) -> IO ResponseReceived
+withAuthed :: Config -> DbVar -> Request -> (Response -> IO ResponseReceived) -> (AuthContext -> Connection -> IO ResponseReceived) -> IO ResponseReceived
 withAuthed cfg db req respond action = withMVar db $ \conn -> do
-  msess <- sessionFromReq conn req
-  case msess of
-    Nothing -> respond (unauthorized req)
-    Just sess -> do
-      if not (recoveryScopeAllowed (requestMethod req) (pathInfo req) (Auth.sessScope sess))
-        then respond (jsonError status403 "recovery_scope" "this recovery session may only re-enroll a passkey")
-        else
-          if not (originAllowed cfg req)
-            then respond (jsonError status403 "origin" "origin is not allowed")
+  case bearerToken req of
+    Just raw -> do
+      mtoken <- authenticateToken conn raw
+      case mtoken of
+        Nothing -> respond (jsonError status401 "unauthenticated" "invalid bearer token")
+        Just token
+          | requiresSession (pathInfo req) ->
+              respond (jsonError status403 "session_required" "this route requires a browser session")
+          | not (tokenAllows token (TE.decodeUtf8 (requestMethod req)) (pathInfo req)) ->
+              respond (jsonError status403 "token_scope" "this token does not allow the request")
+          | not (originAllowed cfg req) ->
+              respond (jsonError status403 "origin" "origin is not allowed")
+          | otherwise -> action (BearerToken token) conn
+    Nothing -> do
+      msess <- sessionFromReq conn req
+      case msess of
+        Nothing -> respond (unauthorized req)
+        Just sess -> do
+          if not (recoveryScopeAllowed (requestMethod req) (pathInfo req) (Auth.sessScope sess))
+            then respond (jsonError status403 "recovery_scope" "this recovery session may only re-enroll a passkey")
             else
-              if not (csrfOk req sess)
-                then respond (jsonError status403 "csrf" "missing or invalid CSRF token")
-                else action sess conn
+              if not (originAllowed cfg req)
+                then respond (jsonError status403 "origin" "origin is not allowed")
+                else
+                  if not (csrfOk req sess)
+                    then respond (jsonError status403 "csrf" "missing or invalid CSRF token")
+                    else action (CookieSession sess) conn
+
+bearerToken :: Request -> Maybe Text
+bearerToken req =
+  case lookup hAuthorization (requestHeaders req) of
+    Nothing -> Nothing
+    Just raw ->
+      let value = TE.decodeUtf8 raw
+       in if "Bearer " `T.isPrefixOf` value then Just (T.drop 7 value) else Nothing
+
+requiresSession :: [Text] -> Bool
+requiresSession path = case path of
+  ("account" : _) -> True
+  ("api" : "v1" : "account" : _) -> True
+  ("api" : "v1" : "tokens" : _) -> True
+  ["save"] -> True
+  _ -> False
 
 recoveryScopeAllowed :: Method -> [Text] -> Text -> Bool
 recoveryScopeAllowed method path scope
@@ -597,6 +650,49 @@ addBookmark conn req respond = do
             Right bid -> do
               enqueueEnrichment conn bid
               respond (jsonResponse status201 (object ["id" .= bid]))
+
+data BulkBody = BulkBody
+  { bbAction :: Text
+  , bbIds :: [Int]
+  , bbTags :: Maybe [Text]
+  , bbConfirm :: Maybe Bool
+  }
+
+instance FromJSON BulkBody where
+  parseJSON = withObject "BulkBody" $ \o ->
+    BulkBody <$> o .: "action" <*> o .:? "ids" .!= [] <*> o .:? "tags" <*> o .:? "confirm"
+
+bulkHandler :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+bulkHandler conn req respond = do
+  body <- strictRequestBody req
+  case eitherDecode body of
+    Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+    Right (BulkBody action ids tags confirm) -> do
+      let parsed = case action of
+            "add_tags" -> Right (BulkAddTags (fromMaybe [] tags))
+            "remove_tags" -> Right (BulkRemoveTags (fromMaybe [] tags))
+            "mark_read" -> Right (BulkMarkRead True)
+            "mark_unread" -> Right (BulkMarkRead False)
+            "delete" | confirm == Just True -> Right BulkDelete
+            "delete" -> Left "delete requires confirm: true"
+            _ -> Left "unknown bulk action"
+      case parsed of
+        Left err -> respond (jsonError status400 "bad_request" err)
+        Right bulkAction -> do
+          result <- bulkUpdate conn bulkAction ids
+          case result of
+            Left err -> respond (jsonError status400 "bad_request" err)
+            Right (updated, snapshotId) ->
+              respond (jsonResponse status200 (object ["updated" .= updated, "snapshot_id" .= snapshotId]))
+
+data TokenCreateBody = TokenCreateBody
+  { tcbName :: Text
+  , tcbScopes :: Maybe [Text]
+  }
+
+instance FromJSON TokenCreateBody where
+  parseJSON = withObject "TokenCreateBody" $ \o ->
+    TokenCreateBody <$> o .: "name" <*> o .:? "scopes"
 
 data QuickBody = QuickBody
   { qbUrl :: Text
