@@ -14,11 +14,9 @@ module Eza.Jobs
   , jobStats
   ) where
 
-import Control.Monad (when)
 import Data.Text (Text)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
-import qualified Database.SQLite.Simple as Sqlite
 
 data Job = Job
   { jobId :: Int

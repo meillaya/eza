@@ -11,7 +11,6 @@ module Eza.Sidecar
 
 import Control.Exception (SomeException, try)
 import Data.Aeson
-import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.Text (Text)
 import qualified Data.Text as T

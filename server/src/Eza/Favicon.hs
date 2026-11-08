@@ -17,7 +17,7 @@ module Eza.Favicon
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import Data.List (sortBy, sortOn)
+import Data.List (sortOn)
 import qualified Data.ByteString.Base64 as B64
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -112,14 +112,14 @@ parseIconLinks html baseUrl =
           Just baseUri -> case parseURIReference (T.unpack href) of
             Just resolved -> Just (T.pack (show (resolved `relativeTo` baseUri)))
             Nothing -> Nothing
+          Nothing -> Nothing
     ensureDirectoryBase base =
-      let (path, query) = T.breakOn "?" base
+      let (path, queryPart) = T.breakOn "?" base
           lastSegment = snd (T.breakOnEnd "/" path)
-       in if T.null query && not (T.null lastSegment) && not ("." `T.isInfixOf` lastSegment)
-            then path <> "/" <> query
+       in if T.null queryPart && not (T.null lastSegment) && not ("." `T.isInfixOf` lastSegment)
+            then path <> "/" <> queryPart
             else base
     dedupe = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
-    sortOn f = sortBy (\a b -> compare (f a) (f b))
 
 parseDataIcon :: Text -> Maybe (Text, ByteString)
 parseDataIcon value

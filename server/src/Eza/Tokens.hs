@@ -16,6 +16,7 @@ import Crypto.Hash (Digest, SHA256, hash)
 import qualified Crypto.Random as Random
 import Data.Aeson
 import qualified Data.ByteString.Base64.URL as B64
+import Data.List (isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -102,7 +103,7 @@ authenticateToken conn raw = do
       (Only (hashToken raw)) :: IO [(Int, Text, Text)]
   case rows of
     [] -> pure Nothing
-    [(tid, name, scopes)] -> do
+    (tid, name, scopes) : _ -> do
       now <- epoch
       withImmediateTransaction conn $
         execute conn "UPDATE api_tokens SET last_used_at = ? WHERE id = ?" (now, tid)
@@ -132,7 +133,7 @@ tokenAllows token method path =
             then allowed ["read", "write"]
             else allowed ["write"]
   where
-    prefix pre path = take (length pre) path == pre
+    prefix pre candidate = pre `isPrefixOf` candidate
 
 splitScopes :: Text -> [Text]
 splitScopes = filter (not . T.null) . map T.strip . T.splitOn ","

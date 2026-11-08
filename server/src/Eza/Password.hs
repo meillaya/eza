@@ -30,7 +30,6 @@ import Data.Bits (xor, (.|.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as B64
 import Data.Char (isAlphaNum)
-import Data.List (foldl')
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE

@@ -5,7 +5,6 @@ module Eza.Links
 
 import Control.Monad (forM_)
 import Data.Text (Text)
-import qualified Data.Text as T
 import Database.SQLite.Simple
 
 import Eza.Wikilink (Wikilink (..), parseWikilinks)

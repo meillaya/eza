@@ -70,8 +70,8 @@ listRules conn = do
       "SELECT id,name,enabled,field,pattern,add_tags,mark_read,created_at FROM rules ORDER BY id" :: IO [(Int, Text, Int, Text, Text, Text, Int, Int)]
   pure [toRule row | row <- rows]
   where
-    toRule (rid, name, enabled, field, rulePattern, tags, markRead, created) =
-      Rule rid name (enabled /= 0) field rulePattern (parseTags tags) (markRead /= 0) created
+    toRule (rid, name, enabled, ruleFieldName, rulePattern, tags, markRead, created) =
+      Rule rid name (enabled /= 0) ruleFieldName rulePattern (parseTags tags) (markRead /= 0) created
 
 createRule :: Connection -> Rule -> IO Rule
 createRule conn rule = do
@@ -119,17 +119,17 @@ applyRules conn bookmarkId url title = do
       execute conn "UPDATE bookmarks SET is_read = 1 WHERE id = ?" (Only bookmarkId)
   pure (map ruleId matched)
   where
-    matches url title rule =
+    matches candidateUrl candidateTitle rule =
       let haystack = T.toLower $ case T.toLower (ruleField rule) of
-            "domain" -> domainOf url
-            "title" -> title
-            _ -> url
+            "domain" -> domainOf candidateUrl
+            "title" -> candidateTitle
+            _ -> candidateUrl
           needle = T.toLower (T.strip (rulePattern rule))
        in ruleEnabled rule && not (T.null needle) && needle `T.isInfixOf` haystack
 
 matchingBookmarks :: Connection -> Text -> Text -> IO [Int]
-matchingBookmarks conn field rulePattern = do
-  let column = case T.toLower field of
+matchingBookmarks conn fieldName rulePattern = do
+  let column = case T.toLower fieldName of
         "domain" -> "domain"
         "title" -> "title"
         _ -> "url"
