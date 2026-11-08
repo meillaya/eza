@@ -278,10 +278,22 @@
   // The keyboard cursor moves by row index, and the target row may not be in
   // the DOM yet (the ledger is virtualized), so the client asks for an absolute
   // container offset instead of scrollIntoView.
+  // Two frames: the model update that asked for the scroll schedules the DOM
+  // patch, and setting scrollTop before the taller content exists would be
+  // clamped by the browser. The second frame runs after the patch has landed.
   window.ezaScrollLedger = function (pixels) {
-    var ledger = document.querySelector(".ledger");
-    if (!ledger) return;
-    ledger.scrollTop = Math.max(0, Number(pixels) || 0);
+    var target = Math.max(0, Number(pixels) || 0);
+    function apply() {
+      var ledger = document.querySelector(".ledger");
+      if (ledger) ledger.scrollTop = target;
+    }
+    if (window.requestAnimationFrame) {
+      window.requestAnimationFrame(function () {
+        window.requestAnimationFrame(apply);
+      });
+    } else {
+      apply();
+    }
   };
 
   window.ezaSelectionOffsets = function (containerId) {

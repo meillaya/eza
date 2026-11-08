@@ -136,6 +136,15 @@ The style lives at the end of `static/eza.css` under `QUIET CATALOGUE`.
 When adding a surface, reach for spacing or a type change before adding a
 border. The palette shows labels only; its hints stay as tooltips.
 
+## Navigation
+
+Opening a record stores the ledger offset. Returning refetches the first page,
+then loads further pages until the saved offset is reachable and restores it;
+the first paint starts at the top so the ledger is never blank while that
+happens. A manual scroll cancels a pending restore. Moving between list routes
+that are already mounted keeps the live offset. `tests/e2e/navigation-smoke.mjs`
+covers the deep case (a 4,000px return that needs extra pages).
+
 ## About
 
 The About panel is the one place that names the software behind the library:

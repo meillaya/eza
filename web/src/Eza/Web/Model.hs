@@ -60,11 +60,9 @@ import Eza.Types (
     SearchPage,
     TagStat,
  )
+import Eza.Web.Types (AccountInfo, AiStatus, ApiError, ConsolGroup, ReaderSelection, Rule (..), SessionInfo, ShareView, TagSuggestion, TokenView)
 import Miso
 import Miso.Router (Router (..), RoutingError (..), Token (..), parseURI, routes, toCapture, toPath, toQueryParam)
-import Miso.Subscription.History (getURI)
-
-import Eza.Web.Types (AccountInfo, AiStatus, ApiError, ConsolGroup, ReaderSelection, Rule (..), SessionInfo, ShareView, TagSuggestion, TokenView)
 
 -- | Application routes.  @Bookmark@ carries the numeric bookmark id.
 data Route
@@ -97,7 +95,7 @@ instance Router Route where
         Maintenance -> [toPath "maintenance"]
         Account -> [toPath "account"]
         Accessions -> [toPath "accessions"]
-        Save title text url ->
+        Save title body url ->
             [toPath "save"]
                 ++ concat
                     [ [toQueryParam "title" value]
@@ -105,7 +103,7 @@ instance Router Route where
                     ]
                 ++ concat
                     [ [toQueryParam "text" value]
-                    | Just value <- [text]
+                    | Just value <- [body]
                     ]
                 ++ concat
                     [ [toQueryParam "url" value]
@@ -118,11 +116,11 @@ instance Router Route where
     routeParser = routes []
 
 splitPath :: String -> [String]
-splitPath = filter (not . null) . go
+splitPath = filter (not . null) . step
   where
-    go s = case break (== '/') s of
+    step s = case break (== '/') s of
         (a, []) -> [a]
-        (a, _ : rest) -> a : go rest
+        (a, _ : rest) -> a : step rest
 
 {- | Decode a URL query value (@%XX@ escapes and @+@ as space, UTF-8 aware).
 miso's URI lexer keeps query values percent-encoded, and the PWA
@@ -130,17 +128,17 @@ share_target passes title/url through the query string.
 -}
 percentDecode :: Text -> Text
 percentDecode raw =
-    case decodeUtf8' (BS.pack (map fromIntegral (go (T.unpack raw)))) of
-        Right text -> text
+    case decodeUtf8' (BS.pack (map fromIntegral (decode (T.unpack raw)))) of
+        Right decoded -> decoded
         Left _ -> raw
   where
-    go [] = []
-    go ('%' : a : b : rest)
+    decode [] = []
+    decode ('%' : a : b : rest)
         | Just hi <- hexValue a
         , Just lo <- hexValue b =
-            hi * 16 + lo : go rest
-    go ('+' : rest) = 32 : go rest
-    go (c : rest) = utf8 (fromEnum c) ++ go rest
+            hi * 16 + lo : decode rest
+    decode ('+' : rest) = 32 : decode rest
+    decode (c : rest) = utf8 (fromEnum c) ++ decode rest
 
     hexValue c
         | c >= '0' && c <= '9' = Just (fromEnum c - fromEnum '0')
@@ -647,6 +645,7 @@ data Model = Model
       mWidth :: Int
     , mHeight :: Int
     , mScrollY :: Int
+    , mScrollRestore :: Maybe Int
     , mGridTop :: Int
     , -- library query state
       mQ :: MisoString
@@ -834,6 +833,7 @@ initialModel =
         , mWidth = 1200
         , mHeight = 900
         , mScrollY = 0
+        , mScrollRestore = Nothing
         , mGridTop = 240
         , mQ = ""
         , mTagsFilter = []

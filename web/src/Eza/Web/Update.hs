@@ -284,12 +284,22 @@ refreshTags = fetchTags TagsRefreshed (\_ -> Noop)
 loadRoute :: Route -> Effect () () Model Action
 loadRoute route = do
     m <- get
-    let enteringNewDetail = case route of
-            Bookmark bookmarkId -> case mRoute m of
+    let previousRoute = mRoute m
+        enteringNewDetail = case route of
+            Bookmark bookmarkId -> case previousRoute of
                 Bookmark currentId -> currentId /= bookmarkId
                 _ -> True
             _ -> True
-        enteringList = isListRoute route && not (isListRoute (mRoute m))
+        enteringList = isListRoute route && not (isListRoute previousRoute)
+        -- Returning from a record page restores the ledger position once
+        -- enough rows exist again. The first paint starts at the top so the
+        -- ledger is never blank while the pages reload.
+        restoreTarget
+            | enteringList
+            , isDetailRoute previousRoute
+            , mScrollY m > 0 =
+                Just (mScrollY m)
+            | otherwise = Nothing
         keepDetail = isDetailRoute route && not enteringNewDetail
         epoch = mDetailEpoch m + 1
     put
@@ -301,6 +311,7 @@ loadRoute route = do
             , mLoading = isListRoute route
             , mLoadingMore = False
             , mScrollY = if enteringList then 0 else mScrollY m
+            , mScrollRestore = restoreTarget
             , mError = Nothing
             , mNotice = Nothing
             , mStatsError = Nothing
@@ -670,7 +681,7 @@ updateModel = \case
         sink (ScrollMetrics measured)
     ScrollMetrics Nothing -> pure ()
     ScrollMetrics (Just (scrollY, height, gridTop)) -> do
-        putModel (\m -> m{mScrollY = scrollY, mHeight = height, mGridTop = gridTop})
+        putModel (\m -> m{mScrollY = scrollY, mHeight = height, mGridTop = gridTop, mScrollRestore = Nothing})
         m <- get
         let content = gridTop + ledgerContentHeight m
         when (mHasMore m && not (mLoading m) && not (mLoadingMore m) && scrollY + height + 600 >= content) $
@@ -834,6 +845,7 @@ updateModel = \case
                             (True, Just idx) | idx < length fresh -> Just idx
                             _ -> Nothing
                     }
+            continueScrollRestore
     ListFailed _append epoch err -> do
         m <- get
         when (epoch == mListEpoch m) $ do
@@ -842,6 +854,7 @@ updateModel = \case
                     x
                         { mLoading = False
                         , mLoadingMore = False
+                        , mScrollRestore = Nothing
                         , mError = Just (ms (aeMessage err))
                         , mConfirmMarkAll = False
                         }
@@ -2410,6 +2423,26 @@ updateModel = \case
     decodeImportReport value = case fromJSON value of
         Error message -> Left message
         Success report -> Right report
+
+    -- \| Continue a return-to-position after a list page arrived. If the
+    -- loaded content cannot reach the saved offset yet, fetch pages until it
+    -- can (or until the list has no more rows), then set the model offset and
+    -- the container together.
+    continueScrollRestore :: Effect () () Model Action
+    continueScrollRestore = do
+        m <- get
+        case mScrollRestore m of
+            Nothing -> pure ()
+            Just target -> do
+                let content = ledgerContentHeight m
+                    viewport = max 1 (mHeight m)
+                    maxScroll = max 0 (content - viewport)
+                    seek = min target maxScroll
+                if target <= maxScroll || not (mHasMore m)
+                    then do
+                        putModel (\x -> x{mScrollY = seek, mScrollRestore = Nothing})
+                        liftSinkIO (ezaScrollLedger seek)
+                    else loadMore
 
     -- \| Scroll the ledger container to an absolute pixel offset. The helper
     -- lives in pwa.js because the target row may not be in the virtual DOM.

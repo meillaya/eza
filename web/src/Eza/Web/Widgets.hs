@@ -21,13 +21,13 @@ formatCount n
     | otherwise = ms (grouped n)
   where
     grouped :: Int -> String
-    grouped value = go (show value)
-    go :: String -> String
-    go digits
+    grouped value = groupedDigits (show value)
+    groupedDigits :: String -> String
+    groupedDigits digits
         | length digits <= 3 = digits
         | otherwise =
             let (prefix, lastThree) = splitAt (length digits - 3) digits
-             in go prefix <> "," <> lastThree
+             in groupedDigits prefix <> "," <> lastThree
 
 {- | Boolean attributes are plain 'Attribute' values; build the list
 conditionally instead of applying them like a setter.

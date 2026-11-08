@@ -1,10 +1,11 @@
 // Ledger navigation smoke test.
 //
 // The ledger is a virtual window: it renders a slice of the loaded rows at an
-// offset computed from the model's scroll position. The browser mounts a fresh
-// .ledger at scrollTop 0 when a route is entered, so the model offset has to be
-// reset too. This test scrolls the ledger, opens a record, waits, comes back
-// and checks the rows are visible before any scroll event arrives.
+// offset computed from the model's scroll position. Opening a record unmounts
+// the scroller, so returning has to (a) never paint blank rows and (b) restore
+// the previous offset once enough pages are loaded again. This seeds a deep
+// ledger, leaves it at 4000px, opens a record, waits, comes back and checks the
+// rows are visible and the offset is restored.
 import { SEL, launchBrowser, launchPage, enterLibrary, newChecker } from "./lib/dom.mjs";
 
 const browser = await launchBrowser();
@@ -42,19 +43,30 @@ const ledgerState = () =>
     return {
       top: ledger ? Math.round(ledger.scrollTop) : null,
       height: ledger ? ledger.scrollHeight : null,
+      client: ledger ? ledger.clientHeight : null,
       rows: rows.length,
       visible,
-      firstRowTop: rows.length ? Math.round(rows[0].getBoundingClientRect().top) : null,
       spacers: [...document.querySelectorAll(".ledger-vspace")].map((el) => Math.round(el.getBoundingClientRect().height)),
     };
   });
+
+async function loadPages(count) {
+  for (let i = 0; i < count; i += 1) {
+    await page.evaluate(() => {
+      const ledger = document.querySelector(".ledger");
+      if (ledger) ledger.scrollTop = ledger.scrollHeight;
+    });
+    await sleep(500);
+  }
+}
 
 try {
   await enterLibrary(page);
   await page.waitForSelector(SEL.row, { timeout: 30000 });
   await sleep(800);
 
-  // Seed a ledger long enough to scroll, then reload so the app boots on it.
+  // Seed a ledger long enough to restore a deep offset, then reload so the app
+  // boots on it.
   const imported = await page.evaluate(async (html) => {
     const csrf =
       document.cookie
@@ -69,40 +81,66 @@ try {
       headers: { Accept: "application/json", "X-CSRF-Token": csrf },
     });
     return response.status;
-  }, netscapeHtml(200));
+  }, netscapeHtml(400));
   check("bulk fixture imported", imported === 200, "status " + imported);
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.waitForSelector(SEL.row, { timeout: 30000 });
   await sleep(900);
+  await loadPages(4);
 
-  // Leave the list at a deep position: the model's mScrollY is now non-zero.
+  // Leave the list at a deep offset. Clicking through the DOM avoids the
+  // browser scrolling the target row into view before navigation.
   await page.evaluate(() => {
     const ledger = document.querySelector(".ledger");
-    if (ledger) ledger.scrollTop = 1600;
+    if (ledger) ledger.scrollTop = 4000;
   });
   await sleep(600);
-  const scrolled = await ledgerState();
-  check("the ledger scrolled before opening a record", scrolled.top > 500, "top " + scrolled.top);
+  const clicked = await page.evaluate(() => {
+    const ledger = document.querySelector(".ledger");
+    const box = ledger.getBoundingClientRect();
+    const row = [...document.querySelectorAll('[data-testid="ledger-row"]')].find((candidate) => {
+      const r = candidate.getBoundingClientRect();
+      return r.top > box.top + 120 && r.bottom < box.bottom - 60;
+    });
+    if (!row) return null;
+    const top = Math.round(ledger.scrollTop);
+    const acc = row.querySelector(".ledg-acc");
+    if (!acc) return null;
+    acc.click();
+    return { id: row.getAttribute("data-bookmark-id"), top };
+  });
+  check("opened a record from a deep ledger position", clicked !== null, "clicked " + JSON.stringify(clicked));
+  const savedTop = clicked ? clicked.top : 0;
+  check("the ledger was deep before opening", savedTop >= 3500, "top " + savedTop);
 
-  await page.locator('[data-testid="ledger-row"] .ledg-acc').first().click();
   await page.waitForSelector(".detail-back", { timeout: 20000 });
-  await sleep(1500); // what the report described as "wait a couple of seconds"
+  await sleep(1500); // the reported "wait a couple of seconds"
   await page.locator(".detail-back").first().click();
   await page.waitForSelector(SEL.row, { timeout: 20000 });
-  await sleep(1000);
 
-  const returned = await ledgerState();
-  check("returning to the ledger starts at the top", returned.top === 0, "top " + returned.top);
-  check("the virtual window reset with the container", (returned.spacers[0] || 0) < 200, "spacers " + JSON.stringify(returned.spacers));
+  // The restore loads pages until the old offset is reachable.
+  let returned = await ledgerState();
+  for (let i = 0; i < 40; i += 1) {
+    if (returned.top !== null && Math.abs(returned.top - savedTop) <= 4 && returned.visible > 0) break;
+    await sleep(200);
+    returned = await ledgerState();
+  }
   check("rows are visible before any scroll", returned.visible > 0, "visible " + returned.visible + " of " + returned.rows);
-  check("the first row is inside the viewport", returned.firstRowTop !== null && returned.firstRowTop < 900, "first row top " + returned.firstRowTop);
+  check("the previous scroll position is restored", Math.abs(returned.top - savedTop) <= 4, "top " + returned.top + " expected " + savedTop);
+  const topSpacer = returned.spacers[0] || 0;
+  check(
+    "the window offset matches the restored position",
+    topSpacer <= savedTop + 50 && topSpacer >= savedTop - 600,
+    "spacer " + topSpacer + " for top " + returned.top
+  );
 
   // A wheel gesture still behaves.
+  const beforeWheel = returned.top === null ? 0 : returned.top;
   await page.mouse.move(700, 500);
-  await page.mouse.wheel(0, 600);
+  await page.mouse.wheel(0, 300);
   await sleep(500);
   const afterWheel = await ledgerState();
-  check("the ledger still scrolls after the reset", afterWheel.top > 0, "top " + afterWheel.top);
+  check("the ledger still scrolls after the restore", afterWheel.top > beforeWheel, "top " + afterWheel.top);
 
   const parseErrors = errors.filter((error) => /parse error/i.test(error));
   check("no Miso parse errors in the console", parseErrors.length === 0, parseErrors.join(" | ").slice(0, 300));
