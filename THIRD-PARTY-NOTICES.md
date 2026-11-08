@@ -4,11 +4,10 @@ eza itself is licensed under the Apache License 2.0 ([LICENSE](LICENSE)).
 This file lists the third-party software, fonts, and other assets that are
 distributed with, compiled into, or required at runtime by eza.
 
-The server is a Haskell program; its dependency tree is resolved by Cabal and
-recorded in `cabal.project.freeze` when a release is cut. The versions below
-are the ones in the development environment used for this release. The client
-is written in Haskell with Miso and compiled to WebAssembly with GHC's
-WebAssembly backend.
+The server is a Haskell program; its dependency tree is resolved by Cabal. The
+versions below are the ones in the development environment used for this
+release. The client is written in Haskell with Miso and compiled to WebAssembly
+with GHC's WebAssembly backend.
 
 ## Haskell libraries (server and client)
 
@@ -100,13 +99,16 @@ eza invokes them at runtime only when configured:
   Node.js MIT; Defuddle and its dependencies are installed by `npm` from that
   directory's lockfile, and their notices live with those packages.
 
-## Regenerating this list
+## Keeping this list current
+
+The table is maintained by hand. After a dependency change, read the version and
+license from the installed package database:
 
 ```bash
-cabal build all
-cabal-plan license-report exe:eza-bookmarks --via=hackage
+ghc-pkg field <package> version license
 ```
 
-For the WebAssembly client, run the same command with
-`--project-file=cabal.project.wasm` in the `wasm32-wasi` toolchain. Dependency
-versions change with the lockfile; update the table above when that happens.
+For the WebAssembly client, use the same query with `wasm32-wasi-ghc-pkg`.
+Hackage links carry the full license text. The Cabal files in the repository
+are the source of truth for the direct dependencies; this table records the
+resolution used for the release in the repository history.
