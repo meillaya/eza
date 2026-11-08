@@ -13,21 +13,25 @@ import Control.Exception (IOException, throwIO, try)
 import Control.Monad (forM_, void)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
+import Data.Char (toLower)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
 import Data.List (isInfixOf, isPrefixOf)
 import Data.Maybe (fromMaybe)
+import Data.Pool (Pool, defaultPoolConfig, newPool, withResource)
 import Data.String (fromString)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Database.SQLite.Simple (Connection, Only (..), query)
+import qualified Database.SQLite.Simple as Sqlite
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types
 import Network.Wai
 import Network.Wai.Handler.Warp
+import Network.Wai.Middleware.Gzip (GzipFiles (..), GzipSettings (..), defaultGzipSettings, gzip)
 import System.Directory (canonicalizePath, doesFileExist, getFileSize, getModificationTime)
 import System.Environment (lookupEnv)
 import System.Exit (exitFailure)
@@ -42,7 +46,7 @@ import Eza.Clip (ClipError, ClipRequest (..), ClipTemplate (..), SaveClipResult 
 import Eza.Config
 import qualified Eza.Db as Db
 import Eza.DeadLinks (checkDead)
-import Eza.Dedup (dedupCandidates, mergeBookmarks)
+import Eza.Dedup (DedupQuery (..), dedupCandidates, mergeBookmarks, mergeUrlDuplicatesAll)
 import Eza.Enrich (enqueueEnrichment, runEnrichWorker)
 import Eza.Export (exportBookmarks)
 import Eza.Favicon (Favicon (..), getFavicon)
@@ -71,14 +75,23 @@ runServer cfg conn = do
     recoveryLimiter <- Auth.newRateLimiter 5 900
     manager <- newTlsManager
     forM_ [1 .. cfgEnrichWorkers cfg] $ \_ -> void (async (runEnrichWorker manager cfg))
-    db <- newMVar conn
+    writeVar <- newMVar conn
+    readPool <-
+        newPool
+            ( defaultPoolConfig
+                (openReadConnection (cfgDbPath cfg))
+                Sqlite.close
+                60
+                4
+            )
+    let db = ServerDb writeVar readPool
     let settings =
             setHost (fromString (bindHost (cfgBind cfg)))
                 . setPort (bindPort (cfgBind cfg))
                 . setServerName "eza"
                 . setBeforeMainLoop (hPutStrLn stderr ("eza listening on " <> cfgBind cfg))
                 $ defaultSettings
-    outcome <- try (runSettings settings (securityMiddleware cfg (app cfg db recoveryLimiter))) :: IO (Either IOException ())
+    outcome <- try (runSettings settings (gzip gzipSettings (securityMiddleware cfg (app cfg db recoveryLimiter)))) :: IO (Either IOException ())
     case outcome of
         Right () -> pure ()
         Left err
@@ -88,6 +101,12 @@ runServer cfg conn = do
                 hPutStrLn stderr ("Open " <> T.unpack (cfgPublicOrigin cfg) <> " to use it, or stop the other process and start again.")
                 exitFailure
             | otherwise -> throwIO err
+
+-- | Compress dynamic text responses (JSON, HTML) above 512 bytes. Static files
+-- are served from precompressed sidecars by 'sendFile'; @GzipIgnore@ keeps the
+-- middleware off the responseFile path so that work is not repeated.
+gzipSettings :: GzipSettings
+gzipSettings = defaultGzipSettings {gzipFiles = GzipIgnore, gzipSizeThreshold = 512}
 
 -- | Security headers applied to every response (API, HTML, assets).
 securityMiddleware :: Config -> Middleware
@@ -120,7 +139,29 @@ isSnapshotRequest r = case pathInfo r of
     ["api", "v1", "bookmarks", _, "snapshot"] -> requestMethod r == "GET"
     _ -> False
 
-type DbVar = MVar Connection
+-- | The single writer plus a small pool of query-only readers. Reads (GET and
+-- HEAD) run on the pool so a large merge, import or export does not stall
+-- browsing; every mutation still goes through the one writer connection.
+data ServerDb = ServerDb
+    { sdbWrite :: MVar Connection
+    , sdbRead :: Pool Connection
+    }
+
+-- | A pooled read-only connection. WAL lets these run alongside the writer;
+-- @query_only@ turns an accidental write from a GET route into a loud error
+-- instead of a lock.
+openReadConnection :: FilePath -> IO Connection
+openReadConnection path = do
+    conn <- Sqlite.open path
+    mapM_
+        (Sqlite.execute_ conn)
+        [ "PRAGMA busy_timeout = 5000"
+        , "PRAGMA temp_store = MEMORY"
+        , "PRAGMA mmap_size = 268435456"
+        , "PRAGMA cache_size = -65536"
+        , "PRAGMA query_only = ON"
+        ]
+    pure conn
 
 authConfig :: Config -> Auth.AuthConfig
 authConfig cfg =
@@ -134,7 +175,7 @@ authConfig cfg =
         , Auth.acLoginLockoutSeconds = cfgLoginLockoutSeconds cfg
         }
 
-app :: Config -> DbVar -> Auth.RateLimiter -> Application
+app :: Config -> ServerDb -> Auth.RateLimiter -> Application
 app cfg db recoveryLimiter req respond = do
     case (requestMethod req, pathInfo req) of
         -- CORS preflight for the browser clipper. This must run before the
@@ -488,7 +529,7 @@ data AuthContext
     = CookieSession Auth.Session
     | BearerToken Token
 
-authedRoute :: Config -> DbVar -> Request -> (Response -> IO ResponseReceived) -> AuthContext -> Connection -> IO ResponseReceived
+authedRoute :: Config -> ServerDb -> Request -> (Response -> IO ResponseReceived) -> AuthContext -> Connection -> IO ResponseReceived
 authedRoute cfg _db req respond ctx conn =
     case (requestMethod req, pathInfo req) of
         ("GET", ["api", "v1", "whoami"]) -> whoAmI cfg conn req ctx respond
@@ -635,8 +676,18 @@ authedRoute cfg _db req respond ctx conn =
                 ok <- deleteSavedSearch conn sid
                 if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "saved search not found")
         ("GET", ["api", "v1", "dedup", "candidates"]) -> do
-            report <- dedupCandidates conn
+            report <- dedupCandidates conn (dedupQueryFrom req)
             respond (jsonResponse status200 report)
+        ("POST", ["api", "v1", "dedup", "merge-all"]) -> do
+            body <- jsonBody req
+            case body of
+                Left e -> respond (jsonError status400 "bad_request" e)
+                Right v -> case parseMaybeObj v of
+                    Just o
+                        | (parseMaybe (.: "confirm") o :: Maybe Bool) == Just True -> do
+                            report <- mergeUrlDuplicatesAll conn
+                            respond (jsonResponse status200 report)
+                    _ -> respond (jsonError status400 "bad_request" "confirm is required")
         ("POST", ["api", "v1", "dedup", "merge"]) -> do
             body <- jsonBody req
             case body of
@@ -1096,35 +1147,45 @@ templateErrorResponse :: TemplateError -> Response
 templateErrorResponse err =
     jsonError (mkStatus (templateErrorStatus err) "") (templateErrorCode err) (templateErrorMessage err)
 
-withAuthed :: Config -> DbVar -> Request -> (Response -> IO ResponseReceived) -> (AuthContext -> Connection -> IO ResponseReceived) -> IO ResponseReceived
-withAuthed cfg db req respond action = withMVar db $ \conn -> do
+withAuthed :: Config -> ServerDb -> Request -> (Response -> IO ResponseReceived) -> (AuthContext -> Connection -> IO ResponseReceived) -> IO ResponseReceived
+withAuthed cfg db req respond action = do
+    authResult <- withMVar (sdbWrite db) $ \conn -> authenticateRequest cfg conn req
+    case authResult of
+        Left response -> respond response
+        Right ctx
+            | requestMethod req `elem` ["GET", "HEAD"] -> withReadDb db (action ctx)
+            | otherwise -> withDb db (action ctx)
+
+-- | Resolve the bearer token or session and apply the scope/CSRF/origin
+-- checks. Runs on the writer connection because session lookup may touch
+-- @last_seen_at@; the handler itself runs on the read pool for GET/HEAD.
+authenticateRequest :: Config -> Connection -> Request -> IO (Either Response AuthContext)
+authenticateRequest cfg conn req =
     case bearerToken req of
         Just raw -> do
             mtoken <- authenticateToken conn raw
-            case mtoken of
-                Nothing -> respond (jsonError status401 "unauthenticated" "invalid bearer token")
+            pure $ case mtoken of
+                Nothing -> Left (jsonError status401 "unauthenticated" "invalid bearer token")
                 Just token
                     | requiresSession (pathInfo req) ->
-                        respond (jsonError status403 "session_required" "this route requires a browser session")
+                        Left (jsonError status403 "session_required" "this route requires a browser session")
                     | not (tokenAllows token (TE.decodeUtf8 (requestMethod req)) (pathInfo req)) ->
-                        respond (jsonError status403 "token_scope" "this token does not allow the request")
+                        Left (jsonError status403 "token_scope" "this token does not allow the request")
                     | not (requestOriginAllowed cfg req) ->
-                        respond (jsonError status403 "origin" "origin is not allowed")
-                    | otherwise -> action (BearerToken token) conn
+                        Left (jsonError status403 "origin" "origin is not allowed")
+                    | otherwise -> Right (BearerToken token)
         Nothing -> do
             msess <- sessionFromReq conn req
-            case msess of
-                Nothing -> respond (unauthorized req)
-                Just sess -> do
-                    if not (Auth.scopeAllows (Auth.sessScope sess) (TE.decodeUtf8 (requestMethod req)) (pathInfo req))
-                        then respond (jsonError status403 "session_scope" "this session may not use this route")
-                        else
-                            if not (requestOriginAllowed cfg req)
-                                then respond (jsonError status403 "origin" "origin is not allowed")
-                                else
-                                    if not (csrfOk req sess)
-                                        then respond (jsonError status403 "csrf" "missing or invalid CSRF token")
-                                        else action (CookieSession sess) conn
+            pure $ case msess of
+                Nothing -> Left (unauthorized req)
+                Just sess
+                    | not (Auth.scopeAllows (Auth.sessScope sess) (TE.decodeUtf8 (requestMethod req)) (pathInfo req)) ->
+                        Left (jsonError status403 "session_scope" "this session may not use this route")
+                    | not (requestOriginAllowed cfg req) ->
+                        Left (jsonError status403 "origin" "origin is not allowed")
+                    | not (csrfOk req sess) ->
+                        Left (jsonError status403 "csrf" "missing or invalid CSRF token")
+                    | otherwise -> Right (CookieSession sess)
 
 bearerToken :: Request -> Maybe Text
 bearerToken req =
@@ -1277,9 +1338,9 @@ clearAuthCookies cfg =
 -- Handlers
 -- ---------------------------------------------------------------------------
 
-health :: DbVar -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+health :: ServerDb -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 health db respond = do
-    ok <- withMVar db Db.ping
+    ok <- withResource (sdbRead db) Db.ping
     if ok
         then respond (jsonResponse status200 (object ["status" .= ("ok" :: Text), "version" .= ("0.1.0" :: Text)]))
         else respond (jsonError status503 "unavailable" "database is unavailable")
@@ -1292,7 +1353,17 @@ faviconHandler conn req domain respond = do
         Just favicon -> do
             let etag = TE.encodeUtf8 (fvEtag favicon)
             case lookup hIfNoneMatch (requestHeaders req) of
-                Just raw | raw == etag -> respond (emptyResponse status304)
+                Just raw | raw == etag ->
+                    respond
+                        ( responseLBS
+                            status304
+                            [ (hContentType, TE.encodeUtf8 (fvMime favicon))
+                            , (hETag, etag)
+                            , (hCacheControl, "private, max-age=604800, immutable")
+                            , ("Vary", "Cookie")
+                            ]
+                            ""
+                        )
                 _ ->
                     respond
                         ( responseLBS
@@ -1705,6 +1776,15 @@ listQueryFrom req =
   where
     splitTags = filter (not . T.null) . map (T.toLower . T.strip) . T.splitOn ","
 
+dedupQueryFrom :: Request -> DedupQuery
+dedupQueryFrom req =
+    DedupQuery
+        { dqUrlOffset = max 0 (fromMaybe 0 (readInt =<< param "url_offset" req))
+        , dqUrlLimit = min 200 (max 1 (fromMaybe 60 (readInt =<< param "url_limit" req)))
+        , dqTitleOffset = max 0 (fromMaybe 0 (readInt =<< param "title_offset" req))
+        , dqTitleLimit = min 200 (max 1 (fromMaybe 40 (readInt =<< param "title_limit" req)))
+        }
+
 param :: BS.ByteString -> Request -> Maybe Text
 param key req =
     case [v | (k, Just v) <- queryString req, k == key] of
@@ -1742,15 +1822,34 @@ copy after a rebuild. @no-store@ is reserved for the client shell.
 -}
 sendFile :: Request -> BS.ByteString -> [(HeaderName, BS.ByteString)] -> FilePath -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 sendFile req cachePolicy headers path respond = do
-    size <- getFileSize path
-    modified <- getModificationTime path
+    gzipExists <- doesFileExist (path <> ".gz")
+    let useGzip = gzipExists && acceptsGzip req
+        servedPath = if useGzip then path <> ".gz" else path
+        compressionHeaders =
+            [ (hVary, "Accept-Encoding")
+            | gzipExists
+            ]
+                <> [ (hContentEncoding, "gzip")
+                   | useGzip
+                   ]
+    size <- getFileSize servedPath
+    modified <- getModificationTime servedPath
     let tag = BSC.pack ("\"" <> show size <> "-" <> show (round (utcTimeToPOSIXSeconds modified) :: Integer) <> "\"")
         cacheable = cachePolicy /= "no-store"
         fresh = cacheable && lookup hIfNoneMatch (requestHeaders req) == Just tag
-        allHeaders = headers <> [(hCacheControl, cachePolicy)] <> [(hETag, tag) | cacheable]
+        allHeaders = headers <> compressionHeaders <> [(hCacheControl, cachePolicy)] <> [(hETag, tag) | cacheable]
     if fresh
         then respond (responseLBS status304 allHeaders "")
-        else respond (responseFile status200 allHeaders path Nothing)
+        else respond (responseFile status200 allHeaders servedPath Nothing)
+
+-- | Whether the request's @Accept-Encoding@ allows gzip. Header values are
+-- tokens; browsers send lowercase, so a lowercase-insensitive containment
+-- check is enough here.
+acceptsGzip :: Request -> Bool
+acceptsGzip req =
+    case lookup hAcceptEncoding (requestHeaders req) of
+        Nothing -> False
+        Just value -> BSC.isInfixOf "gzip" (BSC.map toLower value)
 
 serveStaticFile :: Config -> FilePath -> [(HeaderName, BS.ByteString)] -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 serveStaticFile cfg relative headers req respond = case cfgStaticDir cfg of
@@ -1915,5 +2014,8 @@ escapeHtml :: Text -> Text
 escapeHtml value =
     T.replace "\"" "&quot;" (T.replace ">" "&gt;" (T.replace "<" "&lt;" (T.replace "&" "&amp;" value)))
 
-withDb :: DbVar -> (Connection -> IO ResponseReceived) -> IO ResponseReceived
-withDb db action = withMVar db action
+withDb :: ServerDb -> (Connection -> IO ResponseReceived) -> IO ResponseReceived
+withDb db = withMVar (sdbWrite db)
+
+withReadDb :: ServerDb -> (Connection -> IO ResponseReceived) -> IO ResponseReceived
+withReadDb db = withResource (sdbRead db)

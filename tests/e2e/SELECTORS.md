@@ -18,7 +18,10 @@ server-rendered pages keep are used directly. Shared selectors live in
 | `[data-testid="section-<name>"]` | section link: ledger, inbox, graph, dedup, tags, ai-tags, maintenance, accessions, account |
 | `#search-input` | query line input |
 | `[data-testid="theme-toggle"]` | paper/night switch, toggles `data-theme` |
-| `[data-testid="palette"]`, `#palette-input`, `[data-testid="palette-row"]` | command palette; opens on Cmd/Ctrl+K or Shift+K |
+| `[data-testid="palette"]`, `#palette-input`, `[data-testid="palette-row"]` | command palette; opens on Cmd/Ctrl+K, Shift+K, or the `⇧K` hint button |
+| `[data-testid="palette-open"]` | the `⇧K` hint under the search line |
+| `[data-testid="section-sign-out"]`, `[data-testid="m-nav-sign-out"]`, `[data-testid="account-sign-out"]` | sign-out controls in the running head, mobile bar, and account head |
+| `[data-testid="dialog-logout"]` | sign-out confirmation when a note is unsaved |
 | `[data-testid="toast"]` | toast; the `.toast` class stays for styling |
 | `.offline-banner` | offline/status banner |
 | `.install-fab` | PWA install button, created by `static/pwa.js` |
@@ -82,6 +85,9 @@ as non-mapping steps and undo stays covered by `undo-smoke.mjs` and
 | `#/accessions` + `[data-testid="accessions"]` | accessions index |
 | `#/tags/ai` + `[data-testid="ai-banner"]` | AI tags and its provider banner |
 | `[data-testid="share-page"]` / `[data-testid="share-unavailable"]` | server-rendered public share page and its invalid/revoked state |
+| `[data-testid="dedup-url-section"]`, `[data-testid="dedup-title-section"]` | duplicates page: same-URL groups and advisory same-title groups |
+| `[data-testid="dedup-merge-all"]`, `[data-testid="dialog-dedup-merge-all"]`, `[data-testid="dedup-merge-all-after"]` | confirmed one-shot merge, its dialog, and the after-merge banner |
+| `[data-testid="dedup-more-url"]`, `[data-testid="dedup-more-title"]` | independent "show more" for each duplicates section |
 | `#auth-form`, `#username`, `#password`, `#confirm-password`, `#password-login`, `#password-setup`, `#recovery`, `#codes`, `#copy-codes`, `#continue`, `#recovery-code`, `#redeem`, `#auth-error`, legacy `#passkey-login`, `#passkey-add` | auth pages |
 | `#boot-splash`, `#boot-error` | shell boot states |
 

@@ -21,7 +21,7 @@ module Eza.Web.Api (
     fetchAutocomplete,
     fetchGraph,
     fetchSavedSearches,
-    fetchDedup,
+    fetchDedupReport,
     fetchConsolidation,
     fetchSuggestions,
     fetchPruneCandidates,
@@ -57,6 +57,7 @@ module Eza.Web.Api (
     saveSavedSearch,
     deleteSavedSearch,
     mergeDedup,
+    mergeDedupAll,
     mergeTags,
     renameTag,
     deleteTag,
@@ -99,11 +100,13 @@ import Eza.Types (
     BookmarkDetail,
     BookmarkSummary,
     BootPayload,
+    DedupMergeAllReport,
+    DedupReport,
     GraphData (..),
     GraphEdge (..),
     GraphNode (..),
     Highlight,
-    LibraryStats,
+    LibraryStats (..),
     SavedSearch,
     SearchPage,
     TagStat,
@@ -115,7 +118,6 @@ import Eza.Web.Types (
     ApiError,
     ConsolGroup,
     Credential,
-    DedupGroup,
     Rule (..),
     ShareView,
     TagSuggestion,
@@ -493,12 +495,49 @@ fetchSavedSearches ::
 fetchSavedSearches onOk onErr =
     getValue "/api/v1/saved-searches" [] (\v -> onOk (fieldList "saved_searches" v)) onErr
 
-fetchDedup ::
-    ([DedupGroup] -> action) ->
+{- | One page of duplicate candidates. The two sections carry independent
+offsets and limits, and the report repeats the exact whole-library counts on
+every page, so the client never sums loaded groups to invent a total.
+-}
+fetchDedupReport ::
+    Int ->
+    Int ->
+    Int ->
+    Int ->
+    (DedupReport -> action) ->
     (ApiError -> action) ->
     Eff model action
-fetchDedup onOk onErr =
-    getValue "/api/v1/dedup/candidates" [] (\v -> onOk (fieldList "groups" v)) onErr
+fetchDedupReport urlOffset urlLimit titleOffset titleLimit onOk onErr =
+    getValue
+        (dedupCandidatesUrl urlOffset urlLimit titleOffset titleLimit)
+        []
+        (\v -> either onErr onOk (decode v))
+        onErr
+
+dedupCandidatesUrl :: Int -> Int -> Int -> Int -> MisoString
+dedupCandidatesUrl urlOffset urlLimit titleOffset titleLimit =
+    "/api/v1/dedup/candidates?url_offset="
+        <> ms (show (max 0 urlOffset))
+        <> "&url_limit="
+        <> ms (show urlLimit)
+        <> "&title_offset="
+        <> ms (show (max 0 titleOffset))
+        <> "&title_limit="
+        <> ms (show titleLimit)
+
+{- | The confirmed one-shot merge of every same-URL group. The server writes
+one undo snapshot and answers the report the interface shows.
+-}
+mergeDedupAll :: (DedupMergeAllReport -> action) -> (ApiError -> action) -> Eff model action
+mergeDedupAll onOk onErr =
+    sendValue
+        "POST"
+        "/api/v1/dedup/merge-all"
+        (Just (object ["confirm" .= True]))
+        []
+        JSON
+        (\v -> either onErr onOk (decode v))
+        onErr
 
 fetchConsolidation ::
     ([ConsolGroup] -> action) ->
@@ -564,9 +603,9 @@ fetchTags onOk onErr =
     getValue "/api/v1/tags" [] (\v -> onOk (fieldList "tags" v)) onErr
 
 {- | @GET /api/v1/stats@ — the whole library count read again after a write.
-The server names its fields for the API (``bookmarks``, ``bookmark_tags``,
-``jobs_pending``); rename them onto the shared 'LibraryStats' decoder so the
-client keeps one DTO, then decode with the shared instance.
+The API names three fields differently from the shared DTO (@bookmarks@,
+@bookmark_tags@, @jobs_pending@); decode the payload straight onto
+'LibraryStats' rather than round-tripping through an intermediate 'Value'.
 -}
 fetchStats ::
     (Maybe LibraryStats -> action) ->
@@ -576,33 +615,27 @@ fetchStats onOk onErr =
     getValue "/api/v1/stats" [] (\value -> onOk (statsFromPayload value)) onErr
 
 statsFromPayload :: Value -> Maybe LibraryStats
-statsFromPayload value =
-    case (MJ.eitherDecode (MJ.encode (statsObject value)) :: Either MisoString LibraryStats) of
-        Right stats -> Just stats
-        Left _ -> Nothing
-
--- | The API's field names, mapped onto the shared DTO's names.
-statsObject :: Value -> Value
-statsObject value =
-    object
-        [ "total" .= fieldInt "bookmarks" value
-        , "tags" .= fieldInt "tags" value
-        , "tag_links" .= fieldInt "bookmark_tags" value
-        , "sources" .= fieldInt "sources" value
-        , "top_sources" .= (fieldList "top_sources" value :: [(Text, Int)])
-        , "sources_once" .= fieldInt "sources_once" value
-        , "first_day" .= fieldText "first_day" value
-        , "last_day" .= fieldText "last_day" value
-        , "days" .= fieldInt "days" value
-        , "years" .= (fieldList "years" value :: [(Int, Int)])
-        , "filing_days" .= (fieldList "filing_days" value :: [(Text, Int)])
-        , "unread" .= fieldInt "unread" value
-        , "dead" .= fieldInt "dead" value
-        , "queued" .= fieldInt "jobs_pending" value
-        , "favicon_bytes" .= fieldInt "favicon_bytes" value
-        , "highlights" .= fieldInt "highlights" value
-        , "shares" .= fieldInt "shares" value
-        ]
+statsFromPayload =
+    MJ.parseMaybe $
+        MJ.withObject "LibraryStats" $ \o ->
+            LibraryStats
+                <$> o MJ..: "bookmarks"
+                <*> o MJ..: "tags"
+                <*> o MJ..: "bookmark_tags"
+                <*> o MJ..: "sources"
+                <*> o MJ..: "top_sources"
+                <*> o MJ..: "sources_once"
+                <*> o MJ..: "first_day"
+                <*> o MJ..: "last_day"
+                <*> o MJ..: "days"
+                <*> o MJ..: "years"
+                <*> o MJ..: "filing_days"
+                <*> o MJ..: "unread"
+                <*> o MJ..: "dead"
+                <*> o MJ..: "jobs_pending"
+                <*> o MJ..: "favicon_bytes"
+                <*> o MJ..: "highlights"
+                <*> o MJ..: "shares"
 
 -- ----------------------------------------------------------------- writes --
 

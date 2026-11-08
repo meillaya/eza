@@ -268,7 +268,11 @@ journalctl -u eza.service -f
 Nix cannot build the Miso/WASM client (it needs the wasm32-wasi GHC toolchain,
 which is not in nixpkgs). CI builds it with `scripts/build-web.sh` and
 publishes `eza-web-<version>.tar.gz` as a GitHub release asset; the flake pins
-it as a fixed-output derivation (`packages.<system>.eza-web`).
+it as a fixed-output derivation (`packages.<system>.eza-web`). The tarball must
+include the `<file>.gz` sidecars the script writes next to the WASM, CSS, shell
+and loader JavaScript; the server serves those with `Content-Encoding: gzip`
+and `Vary: Accept-Encoding`, and without them the WASM crosses the wire at its
+raw 6.7 MB instead of about 1.5 MB.
 
 In `flake.nix` the hash is a placeholder (`lib.fakeHash`). After publishing
 the asset:

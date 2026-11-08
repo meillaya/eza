@@ -4114,3 +4114,90 @@ main.auth, main.share { min-height: 100vh; display: flex; flex-direction: column
     justify-content: center;
   }
 }
+
+/* ============================================================
+   Shell additions: the palette hint is a button, sign-out sits in the
+   running head and the mobile bar, and the ledger is virtualized.
+   ============================================================ */
+
+/* The search-line hint opens the palette; keep the kbd chrome, drop the
+   button chrome. */
+.query-hint--act {
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+}
+.query-hint--act:hover kbd {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Sign-out is part of the running head, pushed to the right edge. */
+.sections-signout {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 18px;
+  letter-spacing: .02em;
+  color: var(--muted);
+  padding: 9px 12px 8px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  margin-left: auto;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.sections-signout:hover { color: var(--accent); }
+
+.m-nav-a--signout { font-size: 11px; color: var(--muted); }
+
+.account-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+.account-headline { min-width: 0; }
+.account-signout {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 18px;
+  letter-spacing: .02em;
+  color: var(--muted);
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  padding: 2px 0;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.account-signout:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ---------------------------------------------------- virtualized ledger ---
+   The virtual ledger computes offsets with Eza.Web.Model.entryHeight, so on
+   the table layout every row and year divider must be exactly that tall. The
+   title is one line on the sheet; the record page carries the full title. */
+@media (min-width: 768px) {
+  .ledg-app .ledger .ledg-rowline { height: 48px; }
+  .ledg-app .ledger .ledg-rowline .row { height: 100%; min-height: 0; }
+  .ledg-app .ledger .year { height: 74px; }
+  .ledg-app .ledger .c-title {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ledger-vspace { flex: none; }
+}
+
+/* ------------------------------------------------------ duplicates page ---
+   Two sections: same-URL groups (bulk merge behind one confirmation) and
+   same-title groups (review only, one merge per group). */
+.dd-sec { padding: 0 0 26px; }
+.dd-sec + .dd-sec {
+  border-top: 1px solid var(--rule);
+  padding-top: 20px;
+}
+.dd-lede { margin: 0 0 12px; max-width: 760px; }
+.dd-toolbar { padding: 0 0 14px; }
+.dd-more { padding: 12px 0 0; }

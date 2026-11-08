@@ -17,7 +17,7 @@ module Eza.Web.Panels (
 import Data.Char (toUpper)
 import Data.List (sortOn)
 import qualified Data.Map.Strict as M
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
 
@@ -31,6 +31,9 @@ import qualified Miso.Svg.Property as SP
 
 import Eza.Types (
     BookmarkSummary (..),
+    DedupCounts (..),
+    DedupGroup (..),
+    DedupMergeAllReport (..),
     GraphData (..),
     GraphEdge (..),
     GraphNode (..),
@@ -45,7 +48,6 @@ import Eza.Web.Types (
     AiStatus (..),
     ConsolGroup (..),
     Credential (..),
-    DedupGroup (..),
     Rule (..),
     SessionInfo (..),
     ShareView (..),
@@ -656,50 +658,46 @@ dedupPage :: Model -> View () () Model Action
 dedupPage m =
     pageWith
         "Duplicates"
-        "The same page, saved more than once. Two tests run over the whole library: the normalised URL (the protocol, a leading www. and trailing slashes do not make a different source), then, for records the URL test does not catch, the same normalised title on the same source. Keep one copy and merge the rest."
+        "The same page, saved more than once. Two tests run over the whole library: the normalised URL (the protocol, a leading www. and trailing slashes do not make a different source), then, for records the URL test does not catch, the same normalised title on the same source. The same-URL groups can be merged in one confirmed pass; title matches are a review list, because different pages can share a title."
         (dedupFigures m)
-        [ "normalised URLs and titles"
-        , "merges write an undo snapshot"
+        [ "exact counts, paged groups"
+        , "merge all writes one undo snapshot"
         , "undo lives in maintenance"
         ]
         ( dedupBody m
             ++ [dedupMergeDialog m | isJust (mDedupConfirm m)]
+            ++ [dedupMergeAllDialog m | mDedupMergeAllOpen m]
         )
 
 dedupFigures :: Model -> [View () () Model Action]
 dedupFigures m =
-    [ figure "groups" (countOrNotYet (loadingGuard (Just (length (mDedup m)))))
-    , figure "records" (countOrNotYet (loadingGuard (Just (sum (map (length . dgItems) (mDedup m))))))
-    , figure "after merge" (countOrNotYet (loadingGuard (dedupAfterMerge m)))
+    [ figure "same-URL groups" (numOrDash (dcUrlGroups <$> mDedupCounts m))
+    , figure "URL records" (numOrDash (dcUrlRecords <$> mDedupCounts m))
+    , figure "after merge all" (numOrDash (dedupAfterMergeAll m))
     ]
   where
-    loadingGuard :: Maybe Int -> Maybe Int
-    loadingGuard value
-        | mDedupLoading m && null (mDedup m) = Nothing
-        | otherwise = value
+    numOrDash Nothing = "–"
+    numOrDash (Just value) = num value
 
-{- | The size the library would have if every group were merged into its
-keeper: each group loses one record per absorbed copy. This is the number the
-old figure repeated from the group count.
+{- | The size the library would have after every same-URL group is merged:
+each group loses its absorbed copies, and the keeper stays.
 -}
-dedupAfterMerge :: Model -> Maybe Int
-dedupAfterMerge m = do
+dedupAfterMergeAll :: Model -> Maybe Int
+dedupAfterMergeAll m = do
     stats <- mStats m
-    let records = sum (map (length . dgItems) (mDedup m))
-        groups = length (mDedup m)
-        surplus = max 0 (records - groups)
+    counts <- mDedupCounts m
+    let surplus = max 0 (dcUrlRecords counts - dcUrlGroups counts)
     pure (max 0 (lsTotal stats - surplus))
 
 dedupBody :: Model -> [View () () Model Action]
 dedupBody m
-    | mDedupLoading m && null (mDedup m) = [H.p_ [HP.class_ "pnl-quiet"] [text "Finding duplicate candidates."]]
-    | Just message <- mDedupError m =
+    | mDedupLoading m && isNothing (mDedupCounts m) && null (mDedupUrlGroups m) && null (mDedupTitleGroups m) =
+        [H.p_ [HP.class_ "pnl-quiet"] [text "Finding duplicate candidates."]]
+    | Just message <- mDedupError m
+    , isNothing (mDedupCounts m) =
         [panelError "read failed" "The duplicate test did not run." (Just message)]
-    | null (mDedup m) =
-        [ case mDedupLast m of
-            Just _ -> dedupAfterBanner m
-            Nothing -> H.span_ [] []
-        , emptyPanel
+    | dedupIsEmpty m =
+        [ emptyPanel
             "0 groups"
             "No duplicates."
             "Every saved URL is unique after normalisation, and no two records on one source share a title. The test runs over the whole library: strip the protocol, a leading www. and trailing slashes, then compare."
@@ -708,67 +706,232 @@ dedupBody m
             "0 records to merge"
         ]
     | otherwise =
-        [ case mDedupLast m of
-            Just _ -> dedupAfterBanner m
-            Nothing -> H.span_ [] []
-        , H.div_
-            [HP.class_ "dd-note"]
-            [ secHead "The test" (ms (show (length (mDedup m)) <> " groups in the library"))
+        dedupAfterBanner m
+            ++ [dedupUrlSection m, dedupTitleSection m]
+
+dedupIsEmpty :: Model -> Bool
+dedupIsEmpty m =
+    null (mDedupUrlGroups m)
+        && null (mDedupTitleGroups m)
+        && case mDedupCounts m of
+            Nothing -> False
+            Just counts -> dcUrlGroups counts == 0 && dcTitleGroups counts == 0
+
+{- | After a merge the panel names what changed and offers the two exits: undo
+the snapshot, or read the candidates again. No silent refetch.
+-}
+dedupAfterBanner :: Model -> [View () () Model Action]
+dedupAfterBanner m =
+    case mDedupMergeAllReport m of
+        Just report -> [mergeAllBanner report]
+        Nothing -> case mDedupLast m of
+            Just (merged, keeper) -> [singleMergeBanner merged keeper]
+            Nothing -> []
+
+mergeAllBanner :: DedupMergeAllReport -> View () () Model Action
+mergeAllBanner report =
+    H.div_
+        [HP.class_ "dd-after", HP.role_ "status", HP.data_ "testid" "dedup-merge-all-after"]
+        [ H.p_
+            [HP.class_ "dd-after-text"]
+            [ text
+                ( ms
+                    ( "Merged "
+                        <> show (dmGroups report)
+                        <> (if dmGroups report == 1 then " URL duplicate group into one record." else " URL duplicate groups into one record each.")
+                        <> " "
+                        <> show (dmRecords report)
+                        <> " records in all, "
+                        <> show (dmAffected report)
+                        <> " affected. Undo snapshot #"
+                        <> show (dmSnapshotId report)
+                        <> " ("
+                        <> show (dmElapsedMs report)
+                        <> " ms)."
+                    )
+                )
             ]
-        , H.div_ [HP.class_ "dd-groups"] (map (uncurry (dedupGroupView m)) (zip [0 ..] (mDedup m)))
-        , H.p_
-            [HP.class_ "dd-note-foot"]
-            [ H.span_ [HP.class_ "meta"] [text (ms (show (length (mDedup m)) <> " groups remain"))]
-            , H.span_ [HP.class_ "meta"] [text "each merge writes an undo snapshot"]
+        , H.div_
+            [HP.class_ "dd-actions"]
+            [ H.button_
+                [HP.class_ "btn btn--sm", HP.type_ "button", HP.data_ "testid" "dedup-undo", HE.onClick UndoRun]
+                [text "undo the merge"]
+            , H.button_
+                [HP.class_ "btn btn--sm", HP.type_ "button", HP.data_ "testid" "dedup-refresh", HE.onClick DedupRefresh]
+                [text "refresh the candidates"]
             ]
         ]
 
-{- | After a merge the panel offers the two exits the old page omitted: undo
-the snapshot, or read the candidates again.
--}
-dedupAfterBanner :: Model -> View () () Model Action
-dedupAfterBanner m = case mDedupLast m of
-    Nothing -> H.span_ [] []
-    Just (merged, keeper) ->
-        H.div_
-            [HP.class_ "dd-after", HP.role_ "status", HP.data_ "testid" "dedup-after-merge"]
-            [ H.p_
-                [HP.class_ "dd-after-text"]
-                [ text
-                    ( ms
-                        ( "Merged "
-                            <> show merged
-                            <> (if merged == 1 then " duplicate record into " else " duplicate records into ")
-                            <> fromMisoString (accno keeper)
-                            <> ". The snapshot is the most recent undo record."
-                        )
+singleMergeBanner :: Int -> Int -> View () () Model Action
+singleMergeBanner merged keeper =
+    H.div_
+        [HP.class_ "dd-after", HP.role_ "status", HP.data_ "testid" "dedup-after-merge"]
+        [ H.p_
+            [HP.class_ "dd-after-text"]
+            [ text
+                ( ms
+                    ( "Merged "
+                        <> show merged
+                        <> (if merged == 1 then " duplicate record into " else " duplicate records into ")
+                        <> fromMisoString (accno keeper)
+                        <> ". The snapshot is the most recent undo record."
                     )
-                ]
-            , H.div_
-                [HP.class_ "dd-actions"]
-                [ H.button_
-                    [HP.class_ "btn btn--sm", HP.type_ "button", HP.data_ "testid" "dedup-undo", HE.onClick UndoRun]
-                    [text "undo the merge"]
-                , H.button_
-                    [HP.class_ "btn btn--sm", HP.type_ "button", HP.data_ "testid" "dedup-refresh", HE.onClick DedupRefresh]
-                    [text "refresh the candidates"]
-                ]
+                )
             ]
+        , H.div_
+            [HP.class_ "dd-actions"]
+            [ H.button_
+                [HP.class_ "btn btn--sm", HP.type_ "button", HP.data_ "testid" "dedup-undo", HE.onClick UndoRun]
+                [text "undo the merge"]
+            , H.button_
+                [HP.class_ "btn btn--sm", HP.type_ "button", HP.data_ "testid" "dedup-refresh", HE.onClick DedupRefresh]
+                [text "refresh the candidates"]
+            ]
+        ]
+
+-- ------------------------------------------------------ same-URL section ---
+
+dedupUrlSection :: Model -> View () () Model Action
+dedupUrlSection m =
+    H.section_
+        [HP.class_ "dd-sec", HP.data_ "testid" "dedup-url-section"]
+        ( [ secHead "Same URL" countLine
+          , H.p_
+                [HP.class_ "dd-lede meta"]
+                [text "One page under different addresses: the protocol, a leading www. and a trailing slash do not make a different source. Merge all keeps the oldest record in each group, upgrades the keeper to https when a copy has it, unions tags and notes, and writes one undo snapshot. Title matches are never touched."]
+          , H.div_
+                [HP.class_ "dd-toolbar"]
+                [ H.button_
+                    ( [ HP.class_ "btn btn--strong"
+                      , HP.type_ "button"
+                      , HP.data_ "testid" "dedup-merge-all"
+                      , HE.onClick DedupMergeAllOpen
+                      ]
+                        ++ attrDisabled (mergeAllBlocked m)
+                    )
+                    [text (mergeAllLabel m)]
+                ]
+          ]
+            ++ ( if null (mDedupUrlGroups m)
+                    then
+                        [ H.p_
+                            [HP.class_ "dd-note meta"]
+                            [text "No same-URL duplicates left. The title matches below are a review list."]
+                        | urlGroups > 0
+                        ]
+                    else
+                        [ H.div_
+                            [HP.class_ "dd-groups", HP.data_ "testid" "dedup-url-groups"]
+                            (zipWith (dedupGroupView m) [0 :: Int ..] (mDedupUrlGroups m))
+                        , showMoreButton "dedup-more-url" DedupMoreUrl (mDedupMoreBusy m) (dedupHasMoreUrl m)
+                        ]
+               )
+        )
+  where
+    counts = mDedupCounts m
+    urlGroups = maybe 0 dcUrlGroups counts
+    urlRecords = maybe 0 dcUrlRecords counts
+    countLine =
+        ms
+            ( show urlGroups
+                <> (if urlGroups == 1 then " group · " else " groups · ")
+                <> show urlRecords
+                <> " records in all"
+            )
+    mergeAllBlocked model =
+        mDedupBusy model
+            || mDedupLoading model
+            || urlGroups == 0
+            || null (mDedupUrlGroups model)
+    mergeAllLabel model
+        | mDedupBusy model = "merging..."
+        | otherwise =
+            "merge all "
+                <> num urlGroups
+                <> " URL duplicate group"
+                <> (if urlGroups == 1 then "" else "s")
+
+-- ------------------------------------------------ title review section ---
+
+dedupTitleSection :: Model -> View () () Model Action
+dedupTitleSection m =
+    H.section_
+        [HP.class_ "dd-sec", HP.data_ "testid" "dedup-title-section"]
+        ( [ secHead "Same title, review only" countLine
+          , H.p_
+                [HP.class_ "dd-lede meta"]
+                [text "These records share a normalised title on one source, but they may be different pages. Nothing here is merged in bulk: open the group, check the addresses, and merge only the groups that are truly the same."]
+          ]
+            ++ ( if null (mDedupTitleGroups m)
+                    then
+                        [ H.p_
+                            [HP.class_ "dd-note meta"]
+                            [text "No same-title groups left. The URL duplicates above are safe to merge."]
+                        | titleGroups > 0
+                        ]
+                    else
+                        [ H.div_
+                            [HP.class_ "dd-groups", HP.data_ "testid" "dedup-title-groups"]
+                            (zipWith (dedupGroupView m) [0 :: Int ..] (mDedupTitleGroups m))
+                        , showMoreButton "dedup-more-title" DedupMoreTitle (mDedupMoreBusy m) (dedupHasMoreTitle m)
+                        ]
+               )
+        )
+  where
+    counts = mDedupCounts m
+    titleGroups = maybe 0 dcTitleGroups counts
+    titleRecords = maybe 0 dcTitleRecords counts
+    countLine =
+        ms
+            ( show titleGroups
+                <> (if titleGroups == 1 then " group · " else " groups · ")
+                <> show titleRecords
+                <> " records in all"
+            )
+
+showMoreButton :: MisoString -> Action -> Bool -> Bool -> View () () Model Action
+showMoreButton hook action busy more =
+    H.div_
+        [HP.class_ "dd-more"]
+        [ H.button_
+            ( [ HP.class_ "btn btn--sm"
+              , HP.type_ "button"
+              , HP.data_ "testid" hook
+              , HE.onClick action
+              ]
+                ++ attrDisabled (busy || not more)
+            )
+            [text (if busy then "reading..." else "show more")]
+        | more
+        ]
+
+dedupHasMoreUrl :: Model -> Bool
+dedupHasMoreUrl m = case mDedupCounts m of
+    Nothing -> False
+    Just counts -> length (mDedupUrlGroups m) < dcUrlGroups counts
+
+dedupHasMoreTitle :: Model -> Bool
+dedupHasMoreTitle m = case mDedupCounts m of
+    Nothing -> False
+    Just counts -> length (mDedupTitleGroups m) < dcTitleGroups counts
 
 dedupGroupView :: Model -> Int -> DedupGroup -> View () () Model Action
-dedupGroupView m groupIndex (DedupGroup key items) =
+dedupGroupView m groupIndex group@(DedupGroup key _ items) =
     H.section_
-        [key_ groupIndex, HP.class_ "dd-group"]
+        [ key_ key
+        , HP.class_ "dd-group"
+        , HP.data_ "testid" "dedup-group"
+        ]
         [ H.div_
             [HP.class_ "dd-head"]
             [ H.span_ [HP.class_ "dd-no mono"] [text (pad2 (groupIndex + 1))]
-            , H.span_ [HP.class_ "dd-reason"] [text (ms key)]
+            , H.span_ [HP.class_ "dd-reason"] [text (ms (T.unpack key))]
             , H.span_ [HP.class_ "dd-count meta"] [text (ms (show (length items) <> if length items == 1 then " record" else " records"))]
             , H.span_ [HP.class_ "dd-act"] []
             ]
         , H.div_
             [HP.class_ "dd-rows", HP.role_ "radiogroup", HP.aria_ "label" "Keep one copy"]
-            (map (dedupRow m groupIndex kept) (zip [0 :: Int ..] items))
+            (map (dedupRow m key kept) items)
         , H.div_
             [HP.class_ "dd-foot"]
             [ H.span_ [HP.class_ "dd-sum"] [text (ms (keepSummary kept items))]
@@ -778,25 +941,25 @@ dedupGroupView m groupIndex (DedupGroup key items) =
                 , strongAction
                     (ms ("merge " <> show (max 0 (length items - 1)) <> " into 1"))
                     [HP.data_ "testid" "dedup-merge"]
-                    (DedupMerge groupIndex)
+                    (DedupMerge key)
                 ]
             ]
         ]
   where
-    kept = dedupKeep m groupIndex items
+    kept = dedupKeep m group
 
-dedupRow :: Model -> Int -> Int -> (Int, BookmarkSummary) -> View () () Model Action
-dedupRow _ groupIndex kept (_itemIndex, item) =
+dedupRow :: Model -> Text -> Int -> BookmarkSummary -> View () () Model Action
+dedupRow _m key kept item =
     H.label_
         [HP.class_ ("dd-row" <> if kept == bsId item then " is-keep" else "")]
         [ H.input_
             ( [ key_ (bsId item)
               , HP.class_ "dd-radio"
               , HP.type_ "radio"
-              , HP.name_ (ms ("keep-" <> show groupIndex))
+              , HP.name_ (ms ("keep-" <> T.unpack key))
               , HP.aria_ "label" (ms ("Keep " <> T.unpack (bsTitle item)))
               , HP.data_ "testid" "dedup-keep"
-              , HE.onClick (DedupKeep groupIndex (bsId item))
+              , HE.onClick (DedupKeep key (bsId item))
               ]
                 ++ attrChecked (kept == bsId item)
             )
@@ -812,84 +975,150 @@ dedupRow _ groupIndex kept (_itemIndex, item) =
         , H.span_ [HP.class_ "dd-c-tags meta"] [text (tagLine (bsTags item))]
         ]
 
-{- | The merge confirmation: the keeper and every absorbed copy named, and the
-side effects on notes, highlights, tags and cross-references stated before the
-write. Nothing is merged until the confirm button is pressed.
+{- | The merge confirmation for one group: the keeper and every absorbed copy
+named, and the side effects stated before the write. Nothing is merged until
+the confirm button is pressed.
 -}
 dedupMergeDialog :: Model -> View () () Model Action
-dedupMergeDialog m = case mDedupConfirm m of
+dedupMergeDialog m = case mDedupConfirm m >>= dedupFindGroup m of
     Nothing -> H.span_ [] []
-    Just groupIndex -> case drop groupIndex (mDedup m) of
-        [] -> H.span_ [] []
-        (group : _) ->
-            let items = dgItems group
-                keep = dedupKeep m groupIndex items
-                absorbed = filter ((/= keep) . bsId) items
-                keeper =
-                    [ item
-                    | item <- items
-                    , bsId item == keep
+    Just group ->
+        let items = dgItems group
+            keep = dedupKeep m group
+            absorbed = filter ((/= keep) . bsId) items
+            keeper =
+                [ item
+                | item <- items
+                , bsId item == keep
+                ]
+         in H.div_
+                [HP.class_ "overlay is-open", HP.data_ "testid" "dialog", HE.onClick DedupMergeCancel]
+                [ H.div_
+                    [ HP.class_ "dialog"
+                    , HP.data_ "testid" "dialog-dedup-merge"
+                    , HP.role_ "dialog"
+                    , HP.aria_ "modal" "true"
+                    , HP.aria_ "label" "Merge duplicate records"
+                    , HE.onClickWithOptions stopPropagation Noop
                     ]
-             in H.div_
-                    [HP.class_ "overlay is-open", HP.data_ "testid" "dialog", HE.onClick DedupMergeCancel]
-                    [ H.div_
-                        [ HP.class_ "dialog"
-                        , HP.data_ "testid" "dialog-dedup-merge"
-                        , HP.role_ "dialog"
-                        , HP.aria_ "modal" "true"
-                        , HP.aria_ "label" "Merge duplicate records"
-                        , HE.onClickWithOptions stopPropagation Noop
-                        ]
-                        [ confirmationHead "Merge duplicates"
-                        , H.div_
-                            [HP.class_ "dialog__body", HP.data_ "testid" "dialog-body"]
-                            ( [ H.p_
-                                    [HP.class_ "read"]
-                                    [ text
-                                        ( ms
-                                            ( "Keep one copy and absorb "
-                                                <> show (length absorbed)
-                                                <> (if length absorbed == 1 then " record into it." else " records into it.")
-                                            )
-                                        )
-                                    ]
-                              , H.div_
-                                    [HP.class_ "dd-dialog-list"]
-                                    ( [ dedupDialogRow "keeper" item
-                                      | item <- keeper
-                                      ]
-                                        ++ [ dedupDialogRow "absorbed" item
-                                           | item <- absorbed
-                                           ]
+                    [ confirmationHead "Merge duplicates"
+                    , H.div_
+                        [HP.class_ "dialog__body", HP.data_ "testid" "dialog-body"]
+                        [ H.p_
+                            [HP.class_ "read"]
+                            [ text
+                                ( ms
+                                    ( "Keep one copy and absorb "
+                                        <> show (length absorbed)
+                                        <> (if length absorbed == 1 then " record into it." else " records into it.")
                                     )
-                              , H.p_
-                                    [HP.class_ "dd-dialog-warn read"]
-                                    [text "Notes, highlights, tags and cross-references from the absorbed copies are folded onto the keeper. The merge writes an undo snapshot first, so it can be undone from Maintenance."]
-                              ]
-                            )
-                        , H.div_
-                            [HP.class_ "dialog__foot"]
-                            [ H.span_ [HP.class_ "spacer"] []
-                            , H.button_
-                                [ HP.class_ "btn"
-                                , HP.type_ "button"
-                                , HP.data_ "testid" "dialog-cancel"
-                                , HP.autofocus_ True
-                                , HE.onClick DedupMergeCancel
-                                ]
-                                [text "cancel"]
-                            , H.button_
-                                ( [ HP.class_ "btn btn--strong"
-                                  , HP.type_ "button"
-                                  , HP.data_ "testid" "dialog-confirm"
-                                  , HE.onClick DedupMergeConfirm
-                                  ]
-                                    ++ attrDisabled (null absorbed)
                                 )
-                                [text "merge the records"]
                             ]
+                        , H.div_
+                            [HP.class_ "dd-dialog-list"]
+                            ( [dedupDialogRow "keeper" item | item <- keeper]
+                                ++ [dedupDialogRow "absorbed" item | item <- absorbed]
+                            )
+                        , H.p_
+                            [HP.class_ "dd-dialog-warn read"]
+                            [text "Notes, highlights, tags and cross-references from the absorbed copies are folded onto the keeper. The merge writes an undo snapshot first, so it can be undone from Maintenance."]
+                        ]
+                    , H.div_
+                        [HP.class_ "dialog__foot"]
+                        [ H.span_ [HP.class_ "spacer"] []
+                        , H.button_
+                            [ HP.class_ "btn"
+                            , HP.type_ "button"
+                            , HP.data_ "testid" "dialog-cancel"
+                            , HP.autofocus_ True
+                            , HE.onClick DedupMergeCancel
+                            ]
+                            [text "cancel"]
+                        , H.button_
+                            ( [ HP.class_ "btn btn--strong"
+                              , HP.type_ "button"
+                              , HP.data_ "testid" "dialog-confirm"
+                              , HE.onClick DedupMergeConfirm
+                              ]
+                                ++ attrDisabled (null absorbed || mDedupBusy m)
+                            )
+                            [text "merge the records"]
                         ]
                     ]
+                ]
+
+-- --------------------------------------------------- merge-all dialog ----
+
+{- | The one-shot URL merge confirmation: exact counts, the keeper policy, the
+title-match exclusion, and the single undo snapshot. Cancel is focused first;
+confirm is disabled while the write is in flight.
+-}
+dedupMergeAllDialog :: Model -> View () () Model Action
+dedupMergeAllDialog m =
+    H.div_
+        [HP.class_ "overlay is-open", HP.data_ "testid" "dialog", HE.onClick DedupMergeAllCancel]
+        [ H.div_
+            [ HP.class_ "dialog"
+            , HP.data_ "testid" "dialog-dedup-merge-all"
+            , HP.role_ "dialog"
+            , HP.aria_ "modal" "true"
+            , HP.aria_ "label" "Merge all URL duplicates"
+            , HE.onClickWithOptions stopPropagation Noop
+            ]
+            [ confirmationHead "Merge all URL duplicates"
+            , H.div_
+                [HP.class_ "dialog__body", HP.data_ "testid" "dialog-body"]
+                [ H.p_
+                    [HP.class_ "read"]
+                    [ text
+                        ( ms
+                            ( "Merge "
+                                <> show urlGroups
+                                <> (if urlGroups == 1 then " URL duplicate group (" else " URL duplicate groups (")
+                                <> show urlRecords
+                                <> " records) into one record each, absorbing "
+                                <> show (max 0 (urlRecords - urlGroups))
+                                <> " duplicate records."
+                            )
+                        )
+                    ]
+                , H.p_
+                    [HP.class_ "read"]
+                    [text "The oldest record in each group is kept, and its address is upgraded to https when a copy has that form. Title matches are not touched. Tags, notes, highlights and links from the absorbed copies are folded onto the keeper, and the whole pass writes one undo snapshot."]
+                ]
+            , H.div_
+                [HP.class_ "dialog__foot"]
+                [ H.span_ [HP.class_ "spacer"] []
+                , H.button_
+                    [ HP.class_ "btn"
+                    , HP.type_ "button"
+                    , HP.data_ "testid" "dialog-cancel"
+                    , HP.autofocus_ True
+                    , HE.onClick DedupMergeAllCancel
+                    ]
+                    [text "cancel"]
+                , H.button_
+                    ( [ HP.class_ "btn btn--strong"
+                      , HP.type_ "button"
+                      , HP.data_ "testid" "dialog-confirm"
+                      , HE.onClick DedupMergeAllConfirm
+                      ]
+                        ++ attrDisabled (mDedupBusy m || urlGroups == 0)
+                    )
+                    [text (if mDedupBusy m then "merging..." else "merge all " <> num urlGroups <> " groups")]
+                ]
+            ]
+        ]
+  where
+    counts = mDedupCounts m
+    urlGroups = maybe 0 dcUrlGroups counts
+    urlRecords = maybe 0 dcUrlRecords counts
+
+dedupFindGroup :: Model -> Text -> Maybe DedupGroup
+dedupFindGroup m key =
+    case filter ((== key) . dgKey) (mDedupUrlGroups m ++ mDedupTitleGroups m) of
+        (group : _) -> Just group
+        [] -> Nothing
 
 dedupDialogRow :: MisoString -> BookmarkSummary -> View () () Model Action
 dedupDialogRow roleLabel bookmark =
@@ -904,10 +1133,11 @@ dedupDialogRow roleLabel bookmark =
 {- | The keeper the client action will use: the explicit choice when there is
 one, otherwise the first member of the group (matching Update's fallback).
 -}
-dedupKeep :: Model -> Int -> [BookmarkSummary] -> Int
-dedupKeep _ _ [] = 0
-dedupKeep m groupIndex (first : _) =
-    fromMaybe (bsId first) (M.lookup groupIndex (mDedupChoice m))
+dedupKeep :: Model -> DedupGroup -> Int
+dedupKeep m group = case dgItems group of
+    [] -> 0
+    (firstItem : _) ->
+        fromMaybe (bsId firstItem) (M.lookup (dgKey group) (mDedupChoice m))
 
 keepSummary :: Int -> [BookmarkSummary] -> String
 keepSummary kept items =
@@ -1725,10 +1955,21 @@ accountPage m =
             [HP.class_ "account"]
             [ H.header_
                 [HP.class_ "account-head"]
-                [ H.h1_ [HP.class_ "account-title display"] [text "Account"]
-                , H.p_
-                    [HP.class_ "account-lede"]
-                    [text "Who may enter the catalogue, and what leaves it. Everything here is stored in the same SQLite file as the entries."]
+                [ H.div_
+                    [HP.class_ "account-headline"]
+                    [ H.h1_ [HP.class_ "account-title display"] [text "Account"]
+                    , H.p_
+                        [HP.class_ "account-lede"]
+                        [text "Who may enter the catalogue, and what leaves it. Everything here is stored in the same SQLite file as the entries."]
+                    ]
+                , H.button_
+                    [ HP.class_ "account-signout"
+                    , HP.type_ "button"
+                    , HP.data_ "testid" "account-sign-out"
+                    , HP.title_ "End this browser's session"
+                    , HE.onClick LogoutRequest
+                    ]
+                    [text "sign out"]
                 ]
             , ruleLine
             , H.div_
@@ -2195,7 +2436,7 @@ sessionsPanel m =
                 )
                 [text "revoke other sessions"]
             , H.button_
-                [HP.class_ "btn", HP.type_ "button", HE.onClick Logout]
+                [HP.class_ "btn", HP.type_ "button", HE.onClick LogoutRequest]
                 [text "sign out"]
             ]
         , H.p_

@@ -21,6 +21,10 @@ import Eza.Types (
     BookmarkDetail (..),
     BookmarkSummary (..),
     BootPayload (..),
+    DedupCounts (..),
+    DedupGroup (..),
+    DedupMergeAllReport (..),
+    DedupReport (..),
     Highlight (..),
     ImportReport,
     SavedSearch (..),
@@ -31,7 +35,6 @@ import Eza.Web.Model
 import Eza.Web.Types (
     AccountInfo (..),
     ApiError (..),
-    DedupGroup (..),
     ReaderSelection (..),
     Rule (..),
     TokenView (..),
@@ -46,13 +49,31 @@ subscriptions =
     [ routerSub RouteChanged
     , windowSub "scroll" emptyDecoder (\() -> Scrolled)
     , windowSub "resize" emptyDecoder (\() -> Resized)
-    , -- Global keydown lives on window (not the VDOM root) so shortcuts work even
-      -- when focus is on <body> or outside the mounted tree.
-      windowSub "keydown" keyInfoDecoder GlobalKey
+    , -- The keyboard bridge in pwa.js normalises @event.key@ and the modifier
+      -- and focus state into one @eza-key@ event. Listening here, on window,
+      -- keeps shortcuts working when focus is on <body>; the bridge also
+      -- suppresses the browser's own Ctrl/Cmd+K and Ctrl/Cmd+S.
+      windowSub "eza-key" ezaKeyDecoder KeyPressed
     , -- Connectivity drives the offline banner.
       windowSub "online" emptyDecoder (\() -> ConnectivityChanged True)
     , windowSub "offline" emptyDecoder (\() -> ConnectivityChanged False)
     ]
+
+{- | Decode the @detail@ object the keyboard bridge puts on the custom event.
+Every field is present on the detail object; the decoder keeps the client free
+of the DOM and of the deprecated @keyCode@ numbers.
+-}
+ezaKeyDecoder :: Decoder KeyEvent
+ezaKeyDecoder =
+    at ["detail"] $
+        MJ.withObject "eza-key" $ \o ->
+            KeyEvent
+                <$> o MJ..: "key"
+                <*> (o MJ..:? "shiftKey" MJ..!= False)
+                <*> (o MJ..:? "ctrlKey" MJ..!= False)
+                <*> (o MJ..:? "metaKey" MJ..!= False)
+                <*> (o MJ..:? "altKey" MJ..!= False)
+                <*> (o MJ..:? "editable" MJ..!= False)
 
 -- ---------------------------------------------------------------- helpers --
 
@@ -60,7 +81,7 @@ putModel :: (Model -> Model) -> Effect () () Model Action
 putModel f = get >>= put . f
 
 liftSinkIO :: IO () -> Effect () () Model Action
-liftSinkIO io = withSink $ \_ -> io
+liftSinkIO action = withSink $ \_ -> action
 
 notify :: MisoString -> ToastKind -> Effect () () Model Action
 notify message kind = do
@@ -116,6 +137,13 @@ the panels stop showing a pre-write number.
 -}
 refreshStats :: Effect () () Model Action
 refreshStats = fetchStats StatsRefreshed (\_ -> Noop)
+
+{- | The first page of both duplicate sections. The server's defaults are 60
+same-URL groups and 40 review-only title groups; the counts in the report always
+cover the whole library.
+-}
+dedupFirstPage :: (DedupReport -> Action) -> (ApiError -> Action) -> Effect () () Model Action
+dedupFirstPage = fetchDedupReport 0 60 0 40
 
 -- | Reload the current route: the retry path for panel read errors.
 reloadRoute :: Effect () () Model Action
@@ -193,14 +221,30 @@ listParams m append =
         , lpOffset = if append then length (mItems m) else 0
         }
 
+{- | Can the default page @/boot@ returns stand in for the current ledger?
+Only the unfiltered, newest-filed @/@ view matches the boot query; an inbox
+or a searched ledger needs its own request.
+-}
+bootPageMatchesLedger :: Model -> Bool
+bootPageMatchesLedger m =
+    mRoute m == Index
+        && T.null (T.strip (fromMisoString (mQ m)))
+        && null (mTagsFilter m)
+        && mSort m == "created"
+        && not (mUnreadOnly m)
+
 reloadList :: Effect () () Model Action
 reloadList = do
     m <- get
+    let epoch = mListEpoch m + 1
     put
         m
             { mLoading = True
             , mLoadingMore = False
             , mError = Nothing
+            , mListDeferred = False
+            , mBootSeeded = False
+            , mListEpoch = epoch
             , -- a new result set invalidates the old selection
               mSelection = IS.empty
             , mSelectAnchor = Nothing
@@ -209,14 +253,30 @@ reloadList = do
             , mBulkBusy = False
             , mConfirmBulkDelete = False
             }
-    fetchBookmarks (listParams m False) (ListLoaded False) (ListFailed False)
+    fetchBookmarks (listParams m False) (ListLoaded False epoch) (ListFailed False epoch)
+
+{- | Load the ledger for @/@. On the first paint the boot payload already
+carries the same default page, so the fetch is deferred until @/boot@ answers
+and only issued when the route is filtered or the boot page was consumed
+elsewhere.
+-}
+loadIndexList :: Effect () () Model Action
+loadIndexList = do
+    m <- get
+    if mBootSeeded m
+        then putModel (\x -> x{mBootSeeded = False, mListDeferred = False, mLoading = False, mError = Nothing})
+        else
+            if not (mBootReady m)
+                then putModel (\x -> x{mLoading = True, mListDeferred = True, mError = Nothing})
+                else reloadList
 
 loadMore :: Effect () () Model Action
 loadMore = do
     m <- get
     unless (mLoading m || mLoadingMore m || not (mHasMore m)) $ do
         put m{mLoadingMore = True}
-        fetchBookmarks (listParams m True) (ListLoaded True) (ListFailed True)
+        let epoch = mListEpoch m
+        fetchBookmarks (listParams m True) (ListLoaded True epoch) (ListFailed True epoch)
 
 refreshTags :: Effect () () Model Action
 refreshTags = fetchTags TagsRefreshed (\_ -> Noop)
@@ -234,6 +294,8 @@ loadRoute route = do
     put
         m
             { mRoute = route
+            , mRouted = True
+            , mListDeferred = isListRoute route && mListDeferred m
             , mDetailEpoch = epoch
             , mLoading = isListRoute route
             , mLoadingMore = False
@@ -295,6 +357,10 @@ loadRoute route = do
             , mTagDialogError = Nothing
             , mDedupConfirm = Nothing
             , mDedupLast = Nothing
+            , mDedupMoreBusy = False
+            , mDedupBusy = False
+            , mDedupMergeAllOpen = False
+            , mDedupMergeAllReport = Nothing
             , mSuggestionNotice = Nothing
             , mSuggestionError = Nothing
             , mPruneError = Nothing
@@ -319,7 +385,7 @@ loadRoute route = do
             }
     withSink $ \_ -> setDocumentTitle (documentTitle route)
     case route of
-        Index -> reloadList
+        Index -> loadIndexList
         Inbox -> reloadList
         Bookmark bookmarkId -> do
             fetchDetail bookmarkId (DetailLoaded epoch) (DetailFailed epoch)
@@ -331,7 +397,7 @@ loadRoute route = do
             case mGraphSeed current of
                 Nothing -> putModel (\x -> x{mGraph = Nothing, mGraphLoading = False})
                 Just seed -> fetchGraph (Just seed) (mGraphDepth current) GraphLoaded GraphFailed
-        Dedup -> fetchDedup DedupLoaded DedupFailed
+        Dedup -> dedupFirstPage DedupLoaded DedupFailed
         Tags -> do
             fetchConsolidation ConsolLoaded ConsolFailed
             refreshTags
@@ -355,10 +421,10 @@ loadRoute route = do
                     ms
                         ( fromMaybe "" $
                             case fmap T.strip sharedText of
-                                Just text
-                                    | T.null text -> Nothing
-                                    | "http://" `T.isPrefixOf` text || "https://" `T.isPrefixOf` text -> Nothing
-                                    | otherwise -> Just text
+                                Just shared
+                                    | T.null shared -> Nothing
+                                    | "http://" `T.isPrefixOf` shared || "https://" `T.isPrefixOf` shared -> Nothing
+                                    | otherwise -> Just shared
                                 Nothing -> Nothing
                         )
             putModel
@@ -403,15 +469,6 @@ measureGrid = do
             pure (Just (round scrollTop, round clientHeight, 0))
   where
     asDouble value = fromMaybe 0 <$> (fromJSVal value :: IO (Maybe Double))
-
-isEditableFocused :: IO Bool
-isEditableFocused = do
-    document <- jsg "document"
-    active <- document ! "activeElement"
-    tagM <- fromJSVal =<< getProperty active "tagName"
-    pure $ case (tagM :: Maybe MisoString) of
-        Nothing -> False
-        Just tag -> fromMisoString tag `elem` (["INPUT", "TEXTAREA", "SELECT"] :: [String])
 
 -- | Current navigator.onLine value (true when the API is unavailable).
 readOnline :: IO Bool
@@ -503,9 +560,9 @@ completeWikilink body cursor title =
 -- | Pick the first http(s) URL out of share_target "text".
 firstUrlIn :: Maybe Text -> MisoString
 firstUrlIn Nothing = ""
-firstUrlIn (Just text) =
+firstUrlIn (Just queryText) =
     fromMaybe "" $
-        case filter (\word -> "http://" `T.isPrefixOf` word || "https://" `T.isPrefixOf` word) (T.words text) of
+        case filter (\word -> "http://" `T.isPrefixOf` word || "https://" `T.isPrefixOf` word) (T.words queryText) of
             (url : _) -> Just (ms (T.strip url))
             [] -> Nothing
 
@@ -616,28 +673,36 @@ updateModel = \case
         let content = gridTop + ledgerContentHeight m
         when (mHasMore m && not (mLoading m) && not (mLoadingMore m) && scrollY + height + 600 >= content) $
             loadMore
-    GlobalKey info -> withSink $ \sink -> do
-        editable <- isEditableFocused
-        sink (KeyHandled info editable)
-    KeyHandled info editable -> do
+    KeyPressed key -> do
         m <- get
-        let code = case keyCode info of KeyCode n -> n
-            withModifier = ctrlKey info || metaKey info
-            go action = updateModel action
-        case code of
-            27 -> closeTopLayer m
-            83 | withModifier && isDetailRoute (mRoute m) -> go SaveBookmark
-            75 | not editable && (withModifier || shiftKey info) -> go PaletteOpen
-            75 | not editable && isListRoute (mRoute m) -> moveCursor (-1)
-            74 | not editable && isListRoute (mRoute m) -> moveCursor 1
-            191 | not editable -> do
-                go PaletteClose
+        let withModifier = keCtrl key || keMeta key
+            editable = keEditable key
+            plain = not withModifier && not (keAlt key)
+            ledger = isListRoute (mRoute m)
+            runAction action = updateModel action
+        -- event.key is upper case for a shifted letter; the shortcut names
+        -- below are the unshifted ones.
+        case T.toLower (keKey key) of
+            -- Escape closes the top layer from any focus, including a field.
+            "escape" -> closeTopLayer m
+            -- The command palette is reachable from every screen: the command
+            -- mods always, Shift+K outside fields, and a bare k off the ledger
+            -- (so the hint on the search line is not the only way in).
+            "k" | withModifier -> runAction PaletteOpen
+            "k" | not editable && keShift key -> runAction PaletteOpen
+            "k" | not editable && plain && ledger -> moveCursor (-1)
+            "k" | not editable && plain && not (hasModalLayer m) -> runAction PaletteOpen
+            "j" | not editable && plain && ledger -> moveCursor 1
+            -- The search line: focus it from any screen, but never steal a
+            -- slash the user is typing into a field.
+            "/" | not editable -> do
+                runAction PaletteClose
                 liftSinkIO (focus "search-input")
-            13 | mPaletteOpen m -> go PaletteSelect
-            13 | editable -> go SearchCommit
-            13 | isListRoute (mRoute m) -> openCursorRecord m
-            38 | mPaletteOpen m -> go PalettePrev
-            40 | mPaletteOpen m -> go PaletteNext
+            "enter" | mPaletteOpen m -> runAction PaletteSelect
+            "enter" | not editable && ledger -> openCursorRecord m
+            "arrowup" | mPaletteOpen m -> runAction PalettePrev
+            "arrowdown" | mPaletteOpen m -> runAction PaletteNext
+            "s" | withModifier && isDetailRoute (mRoute m) -> runAction SaveBookmark
             _ -> pure ()
     Noop -> pure ()
     -- boot ------------------------------------------------------------------
@@ -650,9 +715,46 @@ updateModel = \case
                     , mTags = bpTags payload
                     , mStats = Just (bpStats payload)
                     , mSaved = bpSavedSearches payload
+                    , mBootReady = True
                     }
             )
+        m <- get
+        let page = bpInitial payload
+            deferred = mListDeferred m
+            canSeed =
+                bootPageMatchesLedger m
+                    && (deferred || not (mRouted m))
+        if canSeed
+            then
+                put
+                    m
+                        { mItems = spItems page
+                        , mTotal = spTotal page
+                        , mYearHere = spYearCounts page
+                        , mHasMore = spHasMore page
+                        , mOffset = spOffset page + length (spItems page)
+                        , mLoading = False
+                        , mLoadingMore = False
+                        , mListDeferred = False
+                        , mError = Nothing
+                        , mSelection = IS.empty
+                        , mSelectAnchor = Nothing
+                        , mSelectingAll = False
+                        , mConfirmMarkAll = False
+                        , mLedgerCursor = Nothing
+                        , -- A route loaded before the boot answer consumed the
+                          -- seed immediately; a route still to come consumes the
+                          -- flag in loadIndexList instead of refetching.
+                          mBootSeeded = not deferred
+                        }
+            else when deferred $ do
+                putModel (\x -> x{mListDeferred = False})
+                when (isListRoute (mRoute m)) reloadList
     BootFailed err -> do
+        m <- get
+        let deferred = mListDeferred m
+        putModel (\x -> x{mBootReady = True, mListDeferred = False})
+        when (deferred && isListRoute (mRoute m)) reloadList
         handleApiError err
         when (aeStatus err == Just 401) $ liftSinkIO (redirectTo "/login")
     ApiUnauthorized -> putModel (\m -> m{mSignedOut = True})
@@ -701,43 +803,48 @@ updateModel = \case
     UnreadToggled -> do
         putModel (\m -> m{mUnreadOnly = not (mUnreadOnly m)})
         reloadList
-    ListLoaded append page -> do
+    ListLoaded append epoch page -> do
         m <- get
-        let fresh =
-                if append
-                    then mItems m ++ spItems page
-                    else spItems page
-        put
-            m
-                { mItems = fresh
-                , mTotal = spTotal page
-                , mYearHere = spYearCounts page
-                , mHasMore = spHasMore page
-                , mLoading = False
-                , mLoadingMore = False
-                , mOffset = spOffset page + length (spItems page)
-                , mError = Nothing
-                , mConfirmMarkAll = False
-                , mSelection = if append then mSelection m else IS.empty
-                , mSelectAnchor = if append then mSelectAnchor m else Nothing
-                , mSelectingAll = False
-                , mLedgerCursor =
-                    case (append, mLedgerCursor m) of
-                        (False, _) -> Nothing
-                        (True, Just idx) | idx < length fresh -> Just idx
-                        _ -> Nothing
-                }
-    ListFailed _ err -> do
-        putModel
-            ( \m ->
+        -- A response for an older query no longer paints: the user may have
+        -- typed again, changed the sort, or left the list route entirely.
+        when (epoch == mListEpoch m) $ do
+            let fresh =
+                    if append
+                        then mItems m ++ spItems page
+                        else spItems page
+            put
                 m
-                    { mLoading = False
+                    { mItems = fresh
+                    , mTotal = spTotal page
+                    , mYearHere = spYearCounts page
+                    , mHasMore = spHasMore page
+                    , mLoading = False
                     , mLoadingMore = False
-                    , mError = Just (ms (aeMessage err))
+                    , mOffset = spOffset page + length (spItems page)
+                    , mError = Nothing
                     , mConfirmMarkAll = False
+                    , mSelection = if append then mSelection m else IS.empty
+                    , mSelectAnchor = if append then mSelectAnchor m else Nothing
+                    , mSelectingAll = False
+                    , mLedgerCursor =
+                        case (append, mLedgerCursor m) of
+                            (False, _) -> Nothing
+                            (True, Just idx) | idx < length fresh -> Just idx
+                            _ -> Nothing
                     }
-            )
-        handleApiError err
+    ListFailed _append epoch err -> do
+        m <- get
+        when (epoch == mListEpoch m) $ do
+            putModel
+                ( \x ->
+                    x
+                        { mLoading = False
+                        , mLoadingMore = False
+                        , mError = Just (ms (aeMessage err))
+                        , mConfirmMarkAll = False
+                        }
+                )
+            handleApiError err
     LoadMore -> loadMore
     -- The old call sent the first row's id to an id-cutoff endpoint and marked
     -- rows the reader could not see.  Now the client confirms and sends the
@@ -878,12 +985,12 @@ updateModel = \case
         putModel (\m -> m{mDetailLoading = False, mDetail = Nothing, mDetailError = Just (ms (aeMessage err))})
         handleApiError err
     TitleInput title -> putModel (\m -> m{mEditTitle = title, mDirty = True})
-    NoteChanged text domRef -> do
-        putModel (\m -> m{mEditNote = text, mDirty = True})
+    NoteChanged noteText domRef -> do
+        putModel (\m -> m{mEditNote = noteText, mDirty = True})
         withSink $ \sink -> do
             selection <- fromMaybe 0 <$> (fromJSVal =<< getProperty domRef "selectionStart")
             let cursor = round (selection :: Double)
-                query = wikilinkQueryAt (fromMisoString text) cursor
+                query = wikilinkQueryAt (fromMisoString noteText) cursor
             sink (NoteMeta cursor query)
     NoteMeta cursor query -> do
         m <- get
@@ -1142,47 +1249,114 @@ updateModel = \case
                 putModel (\x -> x{mGraphLoading = True})
                 fetchGraph (mGraphSeed m) (mGraphDepth m) GraphLoaded GraphFailed
     -- dedup ----------------------------------------------------------------
-    DedupLoaded groups ->
+    DedupLoaded report -> do
         putModel
             ( \m ->
                 m
-                    { mDedup = groups
+                    { mDedupCounts = Just (drCounts report)
+                    , mDedupUrlGroups = drUrlGroups report
+                    , mDedupTitleGroups = drTitleGroups report
                     , mDedupLoading = False
+                    , mDedupMoreBusy = False
                     , mDedupError = Nothing
-                    , mDedupChoice = initialChoices groups
+                    , mDedupChoice = initialChoices (drUrlGroups report) (drTitleGroups report)
                     }
             )
     DedupFailed err -> do
-        putModel (\m -> m{mDedupLoading = False, mDedupError = Just (ms (aeMessage err))})
+        putModel
+            ( \m ->
+                m
+                    { mDedupLoading = False
+                    , mDedupMoreBusy = False
+                    , mDedupBusy = False
+                    , mDedupError = Just (ms (aeMessage err))
+                    }
+            )
         handleApiError err
-    DedupKeep groupIndex bookmarkId -> putModel (\m -> m{mDedupChoice = M.insert groupIndex bookmarkId (mDedupChoice m)})
-    DedupMerge groupIndex -> do
+    DedupMoreUrl -> do
         m <- get
-        case drop groupIndex (mDedup m) of
-            (group : _) | not (null (dgItems group)) -> putModel (\x -> x{mDedupConfirm = Just groupIndex})
+        when (dedupHasMoreUrl m && not (mDedupMoreBusy m) && not (mDedupLoading m)) $ do
+            putModel (\x -> x{mDedupMoreBusy = True})
+            fetchDedupReport
+                (length (mDedupUrlGroups m))
+                60
+                0
+                1
+                (DedupMoreLoaded True)
+                DedupFailed
+    DedupMoreTitle -> do
+        m <- get
+        when (dedupHasMoreTitle m && not (mDedupMoreBusy m) && not (mDedupLoading m)) $ do
+            putModel (\x -> x{mDedupMoreBusy = True})
+            fetchDedupReport
+                0
+                1
+                (length (mDedupTitleGroups m))
+                40
+                (DedupMoreLoaded False)
+                DedupFailed
+    DedupMoreLoaded moreUrls report ->
+        putModel
+            ( \m ->
+                m
+                    { mDedupCounts = Just (drCounts report)
+                    , mDedupUrlGroups =
+                        if moreUrls
+                            then mDedupUrlGroups m ++ drUrlGroups report
+                            else mDedupUrlGroups m
+                    , mDedupTitleGroups =
+                        if moreUrls
+                            then mDedupTitleGroups m
+                            else mDedupTitleGroups m ++ drTitleGroups report
+                    , mDedupMoreBusy = False
+                    , mDedupError = Nothing
+                    , mDedupChoice =
+                        addDedupChoices
+                            (drUrlGroups report ++ drTitleGroups report)
+                            (mDedupChoice m)
+                    }
+            )
+    DedupKeep key bookmarkId -> putModel (\m -> m{mDedupChoice = M.insert key bookmarkId (mDedupChoice m)})
+    DedupMerge key -> do
+        m <- get
+        case dedupGroup m key of
+            Just group
+                | length (dgItems group) > 1 ->
+                    putModel (\x -> x{mDedupConfirm = Just key})
             _ -> notify "Nothing to merge in this group" ToastInfo
     DedupMergeCancel -> putModel (\m -> m{mDedupConfirm = Nothing})
     DedupRefresh -> do
-        putModel (\m -> m{mDedupLoading = True, mDedupError = Nothing})
-        fetchDedup DedupLoaded DedupFailed
+        putModel (\m -> m{mDedupLoading = True, mDedupMoreBusy = False, mDedupError = Nothing})
+        dedupFirstPage DedupLoaded DedupFailed
     DedupMergeConfirm -> do
         m <- get
-        case mDedupConfirm m of
-            Nothing -> pure ()
-            Just groupIndex -> case drop groupIndex (mDedup m) of
-                (group : _) -> case dgItems group of
-                    [] -> putModel (\x -> x{mDedupConfirm = Nothing})
-                    (firstItem : rest) -> do
-                        let keep = fromMaybe (bsId firstItem) (M.lookup groupIndex (mDedupChoice m))
-                            mergeIds = [bsId item | item <- rest, bsId item /= keep]
-                        if null mergeIds
-                            then do
-                                putModel (\x -> x{mDedupConfirm = Nothing})
-                                notify "Nothing to merge in this group" ToastInfo
-                            else mergeDedup keep mergeIds (DedupMerged keep) DedupFailed
+        case mDedupConfirm m >>= dedupGroup m of
+            Nothing -> putModel (\x -> x{mDedupConfirm = Nothing})
+            Just group -> case dgItems group of
                 [] -> putModel (\x -> x{mDedupConfirm = Nothing})
-    DedupMerged merged keeper -> do
-        putModel (\m -> m{mDedupConfirm = Nothing, mDedupLast = Just (merged, keeper)})
+                (firstItem : rest) -> do
+                    let kept = fromMaybe (bsId firstItem) (M.lookup (dgKey group) (mDedupChoice m))
+                        mergeIds = [bsId item | item <- rest, bsId item /= kept]
+                    if null mergeIds
+                        then do
+                            putModel (\x -> x{mDedupConfirm = Nothing})
+                            notify "Nothing to merge in this group" ToastInfo
+                        else do
+                            putModel (\x -> x{mDedupBusy = True})
+                            mergeDedup
+                                kept
+                                mergeIds
+                                (\merged -> DedupMerged (dgKey group) merged kept)
+                                DedupFailed
+    DedupMerged key merged keeper -> do
+        putModel
+            ( \m ->
+                (dropDedupGroup key m)
+                    { mDedupConfirm = Nothing
+                    , mDedupBusy = False
+                    , mDedupLast = Just (merged, keeper)
+                    }
+            )
         notify
             ( ms
                 ( "Merged "
@@ -1192,8 +1366,45 @@ updateModel = \case
                 )
             )
             ToastOk
-        fetchDedup DedupLoaded DedupFailed
         refreshStats
+    DedupMergeAllOpen -> putModel (\m -> m{mDedupMergeAllOpen = True})
+    DedupMergeAllCancel -> putModel (\m -> m{mDedupMergeAllOpen = False})
+    DedupMergeAllConfirm -> do
+        putModel (\m -> m{mDedupBusy = True})
+        mergeDedupAll DedupMergeAllDone DedupMergeAllFailed
+    DedupMergeAllDone report -> do
+        putModel
+            ( \m ->
+                m
+                    { mDedupMergeAllOpen = False
+                    , mDedupBusy = False
+                    , mDedupMergeAllReport = Just report
+                    , mDedupUrlGroups = []
+                    , mDedupConfirm = Nothing
+                    , mDedupCounts =
+                        fmap
+                            (\counts -> counts{dcUrlGroups = 0, dcUrlRecords = 0})
+                            (mDedupCounts m)
+                    }
+            )
+        notify
+            ( ms
+                ( "Merged "
+                    <> show (dmGroups report)
+                    <> " URL duplicate group"
+                    <> (if dmGroups report == 1 then "" else "s")
+                    <> " ("
+                    <> show (dmRecords report)
+                    <> " records, snapshot #"
+                    <> show (dmSnapshotId report)
+                    <> ")"
+                )
+            )
+            ToastOk
+        refreshStats
+    DedupMergeAllFailed err -> do
+        putModel (\m -> m{mDedupBusy = False})
+        handleApiError err
     -- tags -----------------------------------------------------------------
     TagStatsLoaded stats -> putModel (\m -> m{mTags = stats})
     ConsolLoaded groups ->
@@ -1294,7 +1505,7 @@ updateModel = \case
         case tag of
             Nothing -> pure ()
             Just selected -> fetchSuggestions selected SuggestionsLoaded SuggestionsFailed
-    SuggestionsLoaded configured suggestions notice ->
+    SuggestionsLoaded _configured suggestions notice ->
         putModel
             ( \m ->
                 m
@@ -1386,10 +1597,17 @@ updateModel = \case
         putModel (\m -> m{mMaintBusy = True})
         runUndo UndoDone MaintFailed
     UndoDone restored -> do
-        putModel (\m -> m{mMaintBusy = False, mDedupLast = Nothing})
+        putModel
+            ( \m ->
+                m
+                    { mMaintBusy = False
+                    , mDedupLast = Nothing
+                    , mDedupMergeAllReport = Nothing
+                    }
+            )
         notify (ms ("Restored " <> show restored <> " bookmark(s)")) ToastOk
         fetchPruneCandidates PruneLoaded PruneFailed
-        fetchDedup DedupLoaded DedupFailed
+        dedupFirstPage DedupLoaded DedupFailed
         reloadList
         refreshStats
     MaintFailed err -> do
@@ -1541,6 +1759,14 @@ updateModel = \case
         putModel (\m -> m{mAccountLoading = False})
         handleApiError err
     AccountReload -> fetchAccount AccountLoaded AccountFailed
+    -- Signing out is a write, but an unsaved note would be lost silently, so
+    -- the dirty editor asks first; a clean screen signs out immediately.
+    LogoutRequest -> do
+        m <- get
+        if mDirty m
+            then putModel (\x -> x{mConfirmLogout = True})
+            else updateModel Logout
+    LogoutCancel -> putModel (\m -> m{mConfirmLogout = False})
     Logout -> logout LoggedOut (\err -> ApiErrorRaised err)
     LoggedOut -> liftSinkIO (redirectTo "/login")
     -- selection / bulk -----------------------------------------------------
@@ -1738,8 +1964,8 @@ updateModel = \case
         handleApiError err
     ReaderMouseUp -> withSink $ \sink -> do
         raw <- jsgf "ezaSelectionOffsets" ("reader-text" :: MisoString)
-        text <- fromJSVal raw
-        let selection = case (text :: Maybe MisoString) of
+        selectionJson <- fromJSVal raw
+        let selection = case (selectionJson :: Maybe MisoString) of
                 Nothing -> Nothing
                 Just json -> case MJ.eitherDecode json of
                     Right parsed -> Just (parsed :: ReaderSelection)
@@ -2074,7 +2300,25 @@ updateModel = \case
       where
         raw = show bookmarkId
 
+    -- Is a layer covering the ledger? A bare letter belongs to that layer, so
+    -- the palette must not open underneath a dialog.
+    hasModalLayer :: Model -> Bool
+    hasModalLayer m =
+        mPaletteOpen m
+            || mAddOpen m
+            || mGuardOpen m
+            || mConfirmLogout m
+            || mSnapshotOpen m
+            || mShareDialogOpen m
+            || isJust (mTagDialog m)
+            || isJust (mDedupConfirm m)
+            || isJust (mSavedShare m)
+            || isJust (mTagPrompt m)
+            || mConfirmBulkDelete m
+            || isJust (mConfirmDelete m)
+
     closeTopLayer m
+        | mConfirmLogout m = putModel (\x -> x{mConfirmLogout = False})
         | mHighlightNoteOpen m = putModel (\x -> x{mHighlightNoteOpen = False, mHighlightNote = ""})
         | isJust (mHighlightEdit m) = putModel (\x -> x{mHighlightEdit = Nothing, mHighlightEditNote = ""})
         | mShareDialogOpen m = putModel (\x -> x{mShareDialogOpen = False, mShareUrl = Nothing})
@@ -2122,7 +2366,37 @@ updateModel = \case
             Nothing -> pure ()
             Just b -> do
                 putModel (\x -> x{mLedgerCursor = Just idx, mDrawer = Just (bsId b)})
-                liftSinkIO (scrollRowIntoView (ms ("ledger-row-" <> show (bsId b))))
+                if mWidth m < 768
+                    then liftSinkIO (scrollRowIntoView (ms ("ledger-row-" <> show (bsId b))))
+                    else do
+                        let target = max 0 (ledgerScrollTarget m idx)
+                        when (target /= mScrollY m) $ liftSinkIO (ezaScrollLedger target)
+
+    -- \| The @scrollTop@ that brings a ledger row into view. The ledger only
+    --    renders the visible window, so the row may not exist in the DOM yet; the
+    --    offset comes from the same entry-height table the view uses.
+    --
+    ledgerScrollTarget :: Model -> Int -> Int
+    ledgerScrollTarget m idx =
+        let entries = ledgerEntries m
+            heights = map (entryHeight (mWidth m)) entries
+            offsets = scanl (+) 0 heights
+            tops =
+                [ (top, height)
+                | (entry, top, height) <- zip3 entries offsets heights
+                , case entry of
+                    LedgerRow rowIndex _ -> rowIndex == idx
+                    LedgerYear _ _ -> False
+                ]
+            scroll = mScrollY m
+            viewport = max 1 (mHeight m)
+            visibleTop = scroll
+            visibleBottom = scroll + viewport
+         in case tops of
+                ((top, height) : _)
+                    | top < visibleTop -> top
+                    | top + height > visibleBottom -> top + height - viewport + 24
+                _ -> scroll
 
     openCursorRecord :: Model -> Effect () () Model Action
     openCursorRecord m =
@@ -2135,6 +2409,12 @@ updateModel = \case
         Error message -> Left message
         Success report -> Right report
 
+    -- \| Scroll the ledger container to an absolute pixel offset. The helper
+    -- lives in pwa.js because the target row may not be in the virtual DOM.
+    ezaScrollLedger :: Int -> IO ()
+    ezaScrollLedger pixels = void $ jsgf "ezaScrollLedger" (pixels :: Int)
+
+    -- \| Narrow sheets render every row, so the browser can find the row by id.
     scrollRowIntoView :: MisoString -> IO ()
     scrollRowIntoView domId = do
         document <- jsg ("document" :: MisoString)
@@ -2149,9 +2429,63 @@ updateModel = \case
             (x : _) -> Just x
             [] -> Nothing
 
-    initialChoices groups =
-        M.fromList
-            [ (index, bsId firstItem)
-            | (index, group) <- zip [0 ..] groups
-            , (firstItem : _) <- [dgItems group]
-            ]
+    dedupGroup :: Model -> Text -> Maybe DedupGroup
+    dedupGroup m key =
+        case filter ((== key) . dgKey) (mDedupUrlGroups m ++ mDedupTitleGroups m) of
+            (group : _) -> Just group
+            [] -> Nothing
+
+    dedupHasMoreUrl :: Model -> Bool
+    dedupHasMoreUrl m = case mDedupCounts m of
+        Nothing -> False
+        Just counts -> length (mDedupUrlGroups m) < dcUrlGroups counts
+
+    dedupHasMoreTitle :: Model -> Bool
+    dedupHasMoreTitle m = case mDedupCounts m of
+        Nothing -> False
+        Just counts -> length (mDedupTitleGroups m) < dcTitleGroups counts
+
+    -- \| Seed the per-group keeper choices. An explicit choice already made for
+    -- a group survives a later page or refresh.
+    addDedupChoices :: [DedupGroup] -> M.Map Text Int -> M.Map Text Int
+    addDedupChoices groups choices =
+        foldl
+            ( \acc group -> case dgItems group of
+                (firstItem : _) -> M.insertWith (\_ old -> old) (dgKey group) (bsId firstItem) acc
+                [] -> acc
+            )
+            choices
+            groups
+
+    initialChoices :: [DedupGroup] -> [DedupGroup] -> M.Map Text Int
+    initialChoices urlGroups titleGroups = addDedupChoices (urlGroups ++ titleGroups) M.empty
+
+    -- \| Forget a group the server has merged and drop its records from the
+    -- exact counts. No refetch: DedupRefresh does that when asked.
+    dropDedupGroup :: Text -> Model -> Model
+    dropDedupGroup key m =
+        m
+            { mDedupUrlGroups = filter ((/= key) . dgKey) (mDedupUrlGroups m)
+            , mDedupTitleGroups = filter ((/= key) . dgKey) (mDedupTitleGroups m)
+            , mDedupCounts = adjustedCounts
+            }
+      where
+        inUrl = any ((== key) . dgKey) (mDedupUrlGroups m)
+        inTitle = any ((== key) . dgKey) (mDedupTitleGroups m)
+        size = maybe 0 (length . dgItems) (dedupGroup m key)
+        adjustedCounts = case mDedupCounts m of
+            Nothing -> Nothing
+            Just counts
+                | inUrl ->
+                    Just
+                        counts
+                            { dcUrlGroups = max 0 (dcUrlGroups counts - 1)
+                            , dcUrlRecords = max 0 (dcUrlRecords counts - size)
+                            }
+                | inTitle ->
+                    Just
+                        counts
+                            { dcTitleGroups = max 0 (dcTitleGroups counts - 1)
+                            , dcTitleRecords = max 0 (dcTitleRecords counts - size)
+                            }
+                | otherwise -> Just counts

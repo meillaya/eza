@@ -7,7 +7,6 @@ field-optional so the UI degrades gracefully while the server catches up.
 -}
 module Eza.Web.Types (
     ApiError (..),
-    DedupGroup (..),
     ConsolGroup (..),
     TagSuggestion (..),
     Credential (..),
@@ -56,19 +55,6 @@ mkApiError status msg =
             Just 429 -> "Rate limited: try again in a moment."
             Just n -> "Request failed (HTTP " <> T.pack (show n) <> ")."
             Nothing -> "Network error: the server did not answer."
-
--- | One duplicate-detection candidate group.
-data DedupGroup = DedupGroup
-    { dgKey :: Text
-    , dgItems :: [BookmarkSummary]
-    }
-    deriving (Eq, Show)
-
-instance FromJSON DedupGroup where
-    parseJSON = withObject "DedupGroup" $ \o ->
-        DedupGroup
-            <$> o .:? "key" .!= ""
-            <*> o .:? "items" .!= []
 
 -- | One tag-consolidation candidate group.
 data ConsolGroup = ConsolGroup

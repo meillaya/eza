@@ -1,7 +1,7 @@
 module Main (main) where
 
 import Control.Exception (IOException, SomeException, bracket, onException, try)
-import Control.Monad (forM)
+import Control.Monad (forM, unless)
 import Data.Aeson (encode, object, (.=))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as LBS8
@@ -22,13 +22,14 @@ import Eza.Bench (runBench)
 import Eza.Bookmarks
 import Eza.Config
 import Eza.DeadLinks (checkDead)
+import Eza.Dedup (DedupQuery (..), dedupCandidates, defaultDedupQuery, mergeUrlDuplicatesAll)
 import Eza.Enrich (enrichBookmark)
 import qualified Eza.Db as Db
 import Eza.Export (exportBookmarks)
 import Eza.Import
 import Eza.JsonExport (exportJson)
 import qualified Eza.Password as Password
-import Eza.Types (ImportReport (..), TagStat (..))
+import Eza.Types (DedupReport (..), ImportReport (..), TagStat (..))
 import Eza.Server (runServer)
 
 data Command
@@ -36,6 +37,7 @@ data Command
   | Init
   | Version
   | ImportCmd ImportOpts
+  | DedupeCmd DedupeOpts
   | Stats
   | Verify
   | RepairDomains
@@ -76,6 +78,14 @@ data ImportOpts = ImportOpts
   , optKeepNoise :: Bool
   , optMarkRead :: Bool
   , optDryRun :: Bool
+  }
+  deriving (Show, Eq)
+
+data DedupeOpts = DedupeOpts
+  { doAll :: Bool
+  , doUrlOnly :: Bool
+  , doDryRun :: Bool
+  , doYes :: Bool
   }
   deriving (Show, Eq)
 
@@ -163,6 +173,7 @@ main = do
           bracket (Db.openDb (cfgDbPath cfg)) close $ \conn -> do
             report <- importParsed conn (ImportOptions (optMode io) (not (optKeepNoise io)) (optMarkRead io)) parsed
             putStrLn (LBS8.unpack (encode report))
+    DedupeCmd dd -> runDedupe cfg dd
 
 dryReport :: ParsedImport -> ImportReport
 dryReport p =
@@ -220,6 +231,12 @@ commandParser =
               (progDesc "Import a Netscape bookmarks.html export")
           )
         <> command
+          "dedupe"
+          ( info
+              (DedupeCmd <$> dedupeOpts)
+              (progDesc "Merge same-URL duplicate bookmarks (title matches stay review-only)")
+          )
+        <> command
           "enrich"
           ( info
               (EnrichCmd <$> enrichOpts)
@@ -238,6 +255,28 @@ commandParser =
               (progDesc "Set the account password (prompts twice with echo off)")
           )
     )
+
+{- | Operator escape hatch for the duplicate cleanup. Bulk merging is limited
+to canonical-URL duplicates; the advisory same-title groups stay review-only
+because different pages can share a title. A merge needs both @--all@ and
+@--yes@; @--dry-run@ only prints the counts.
+-}
+runDedupe :: Config -> DedupeOpts -> IO ()
+runDedupe cfg dd
+  | not (doAll dd) =
+      hPutStrLn stderr "dedupe: pass --all to merge every same-URL duplicate group (use --dry-run to inspect counts first)" >> exitFailure
+  | doDryRun dd =
+      bracket (Db.openDb (cfgDbPath cfg)) close $ \conn -> do
+        report <- dedupCandidates conn defaultDedupQuery {dqUrlLimit = 1, dqTitleLimit = 1}
+        putStrLn (LBS8.unpack (encode (drCounts report)))
+  | not (doYes dd) =
+      hPutStrLn stderr "dedupe: refusing to merge without --yes (this writes one undo snapshot and can be undone from Maintenance)" >> exitFailure
+  | otherwise = do
+      unless (doUrlOnly dd) $
+        hPutStrLn stderr "dedupe: merging canonical-URL groups only; same-title matches stay review-only"
+      bracket (Db.openDb (cfgDbPath cfg)) close $ \conn -> do
+        report <- mergeUrlDuplicatesAll conn
+        putStrLn (LBS8.unpack (encode report))
 
 enrichOpts :: Parser EnrichOpts
 enrichOpts =
@@ -279,6 +318,14 @@ importOpts =
     <*> switch (long "keep-noise" <> help "Keep timestamp/New folder names as tags")
     <*> switch (long "mark-read" <> help "Mark imported bookmarks as read")
     <*> switch (long "dry-run" <> help "Parse and report without writing")
+
+dedupeOpts :: Parser DedupeOpts
+dedupeOpts =
+  DedupeOpts
+    <$> switch (long "all" <> help "Merge every same-URL duplicate group (required)")
+    <*> switch (long "url-only" <> help "Canonical-URL duplicates only; title matches are never bulk-merged (default)")
+    <*> switch (long "dry-run" <> help "Print duplicate counts without changing anything")
+    <*> switch (long "yes" <> help "Confirm the merge (required unless --dry-run)")
 
 checkDeadOpts :: Parser CheckDeadOpts
 checkDeadOpts =

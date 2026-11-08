@@ -66,7 +66,7 @@ fixed optical size so every browser draws the same letterforms.
 | `/bookmark/:id` | Record: reading column, catalogue record, note, see also, actions |
 | `/accessions` | The archive as an index: filing days per year, ranked sources, long tail |
 | `/graph` | Tag neighbourhood around a seed bookmark |
-| `/dedup` | Duplicate groups and keep-one merges |
+| `/dedup` | Duplicate groups: paged same-URL groups with a one-shot merge, and advisory same-title groups |
 | `/tags` | Tag table, case duplicates, near-duplicate pairs |
 | `/tags/ai` | Advisory tag suggestions, applied one bookmark at a time |
 | `/maintenance` | Dead-link sweep, prune candidates, undo |
@@ -87,8 +87,11 @@ CLI alternative. Sign-in attempts are rate-limited and locked out in the
 database.
 
 The masthead carries the wordmark, the provenance line, the search line and the
-section links. The ledger's facet rail lists sources with leader dots, tags in
-two columns, status, filing activity and the accessions link.
+section links. A sign-out control sits at the end of the section links and in
+the mobile bar, and every account tab repeats it in the page head. The
+command palette also offers "Sign out"; an unsaved note asks for confirmation
+first. The ledger's facet rail lists sources with leader dots, tags in two
+columns, status, filing activity and the accessions link.
 
 States are part of the design: fresh library, filtered to nothing, loading, API
 error, no extraction, enrichment queued and failed, dead link, no note, no
@@ -100,14 +103,15 @@ link. Every one has copy.
 | Key | Action |
 |---|---|
 | `/` | Focus the search line |
-| `Shift+K`, `Cmd+K`, `Ctrl+K` | Open the command palette |
-| `j`, `k` | Move the ledger cursor and open its field drawer |
+| `Shift+K`, `Cmd+K`, `Ctrl+K` | Open the command palette from any screen (`Ctrl/Cmd+K` works while the search line has focus) |
+| `j`, `k` | Move the ledger cursor and open its field drawer; bare `k` opens the palette away from the ledger and inbox |
 | `Enter` | Open the record under the cursor, or run the palette item |
-| `Esc` | Close the palette, drawer or dialog; clear the query when search has focus |
+| `Esc` | Close the top layer (palette, drawer or dialog) from any focus |
 | `Cmd+S`, `Ctrl+S` | Save the note on the record page |
 
-Bare `k` moves the ledger cursor, so the palette needs the shift or command
-modifier. This is recorded here because the two habits collide.
+The hint under the search line is a `⇧K` button and opens the palette. Bare `k`
+moves the ledger cursor on the ledger and inbox; on every other screen it opens
+the palette too.
 
 ## Accessibility
 

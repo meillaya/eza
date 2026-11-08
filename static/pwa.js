@@ -174,6 +174,54 @@
     }
   });
 
+  // ------------------------------------------------------------ keyboard ---
+  // Miso sees browser events through its own subscriptions, and keyCode is
+  // deprecated and layout dependent. Normalise the key press here instead:
+  // event.key is the character the user meant, and the bridge adds the
+  // modifier keys and whether focus is in a text field. The client maps keys
+  // from the resulting "eza-key" detail and never has to probe the DOM.
+  function isEditableTarget(node) {
+    if (!node || node.nodeType !== 1) return false;
+    var tag = node.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+    if (node.isContentEditable) return true;
+    if (typeof node.closest === "function") {
+      return !!node.closest(
+        '[contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]'
+      );
+    }
+    return false;
+  }
+
+  function bridgeKeyboard(event) {
+    if (event.defaultPrevented || event.isComposing) return;
+    var key = event.key;
+    if (key === "Tab" || key === "Unidentified" || key === "Dead") return;
+    var editable = isEditableTarget(event.target);
+    var withModifier = event.ctrlKey || event.metaKey;
+    var intercept = false;
+    if (withModifier && (key === "k" || key === "K")) intercept = true;
+    else if (withModifier && (key === "s" || key === "S")) intercept = true;
+    else if (key === "/" && !editable && !withModifier && !event.altKey) intercept = true;
+    // Only the shortcuts the browser itself would act on are cancelled: plain
+    // typing, j/k movement and Escape keep their native behaviour.
+    if (intercept) event.preventDefault();
+    window.dispatchEvent(
+      new CustomEvent("eza-key", {
+        detail: {
+          key: key,
+          shiftKey: !!event.shiftKey,
+          ctrlKey: !!event.ctrlKey,
+          metaKey: !!event.metaKey,
+          altKey: !!event.altKey,
+          editable: editable,
+        },
+      })
+    );
+  }
+
+  window.addEventListener("keydown", bridgeKeyboard, false);
+
   // ------------------------------------------------------ clipboard ------
   // Used by the Miso account page ("Copy bookmarklet"). Returns a boolean.
   window.ezaCopy = function (text) {
@@ -207,16 +255,34 @@
   // bookmark detail page to create highlights. Returns JSON or null.
   // The client's screens scroll inside their own containers. Forward the ledger
   // scroll to the window so the Miso subscription can fetch the next page.
+  // Coalesce to one event per animation frame: a scroll gesture fires dozens of
+  // events and every one of them would run the Miso update function.
+  var ledgerScrollFrame = 0;
+
+  function forwardLedgerScroll() {
+    ledgerScrollFrame = 0;
+    window.dispatchEvent(new Event("scroll"));
+  }
+
   document.addEventListener(
     "scroll",
     function (event) {
       var target = event.target;
-      if (target && target.classList && target.classList.contains("ledger")) {
-        window.dispatchEvent(new Event("scroll"));
-      }
+      if (!target || !target.classList || !target.classList.contains("ledger")) return;
+      if (ledgerScrollFrame) return;
+      ledgerScrollFrame = window.requestAnimationFrame(forwardLedgerScroll);
     },
     true
   );
+
+  // The keyboard cursor moves by row index, and the target row may not be in
+  // the DOM yet (the ledger is virtualized), so the client asks for an absolute
+  // container offset instead of scrollIntoView.
+  window.ezaScrollLedger = function (pixels) {
+    var ledger = document.querySelector(".ledger");
+    if (!ledger) return;
+    ledger.scrollTop = Math.max(0, Number(pixels) || 0);
+  };
 
   window.ezaSelectionOffsets = function (containerId) {
     try {

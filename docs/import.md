@@ -23,12 +23,36 @@ compare `bookmarks` and `bookmarks_fts`; it exits non-zero when the counts
 differ.
 
 A second run reports `inserted=0`, `existing=8905`, and
-`tag_links_added=0`. The importer matches rows by normalized URL: scheme and
-host are lowercased, default ports and fragments are removed, a trailing slash
-is dropped, a leading `www.` is removed, tracking parameters are stripped, and
-the remaining query is kept. The same normalized form is used by the JSON API
-and quick-save, so the same page cannot be filed twice through different
-capture paths.
+`tag_links_added=0`. The importer matches rows by a canonical key: the scheme
+(http/https), a leading `www.`, default ports, fragments, tracking parameters,
+and a trailing slash do not make a different source. The parser first collapses
+same-key anchors inside the file, then `importParsed` checks the key against
+every existing bookmark *before* it writes anything. A matched record gets the
+imported tags unioned on, empty title/description fields filled in, and its
+stored URL upgraded when the imported address is clearly better (https for
+http, or a normalised form replacing a legacy URL). The same key is used by the
+JSON API, quick-save and the browser clipper, so a page cannot be filed twice
+through different capture paths. Each run also appends one `import_runs` row
+with the report.
+
+## Cleaning an existing library
+
+Libraries imported before the canonical key existed (or from several
+overlapping exports) can hold thousands of same-page records. The importer
+never merges those automatically; the duplicates view and the CLI do it
+explicitly:
+
+```bash
+eza-bookmarks dedupe --all --dry-run   # print exact group/record counts
+eza-bookmarks dedupe --all --yes       # merge, one undo snapshot
+```
+
+The bulk merge covers same-URL duplicates only (http/https, `www.`, fragments,
+tracking parameters, trailing slashes). Same-title matches on one source stay
+review-only because different pages can share a title. One `merge_all` undo
+snapshot covers the whole operation, so a single undo from Maintenance restores
+every keeper and absorbed row with its tags, highlights and wikilinks. Stop the
+server while it runs, as with a large import.
 
 ## Reference result
 

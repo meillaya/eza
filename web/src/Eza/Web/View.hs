@@ -49,6 +49,7 @@ viewModel m =
             ++ [addDialog m | mAddOpen m]
             ++ [paletteView m | mPaletteOpen m]
             ++ [guardDialog m | mGuardOpen m]
+            ++ [logoutDialog | mConfirmLogout m]
             ++ [tagPromptDialog m | isJust (mTagPrompt m)]
             ++ [bulkDeleteDialog m | mConfirmBulkDelete m]
         )
@@ -137,9 +138,15 @@ queryLine m =
                     [text "×"]
                | not (T.null (T.strip (qText m)))
                ]
-            ++ [ H.span_
-                    [HP.class_ "query-hint"]
-                    [H.kbd_ [] [text "K"], H.span_ [HP.class_ "meta"] [text "commands"]]
+            ++ [ H.button_
+                    [ HP.class_ "query-hint query-hint--act"
+                    , HP.type_ "button"
+                    , HP.data_ "testid" "palette-open"
+                    , HP.aria_ "label" "Open the command palette"
+                    , HP.title_ "Command palette: Shift+K, Cmd+K or Ctrl+K"
+                    , HE.onClick PaletteOpen
+                    ]
+                    [H.kbd_ [] [text "⇧K"], H.span_ [HP.class_ "meta"] [text "commands"]]
                ]
         )
   where
@@ -295,8 +302,17 @@ sectionsNav m =
         , HP.aria_ "label" "Sections"
         , HP.data_ "testid" "sections"
         ]
-        (map sectionLink sections)
+        (map sectionLink sections ++ [signOutLink])
   where
+    signOutLink =
+        H.button_
+            [ HP.class_ "sections-signout"
+            , HP.type_ "button"
+            , HP.data_ "testid" "section-sign-out"
+            , HP.title_ "Sign out of this browser"
+            , HE.onClick LogoutRequest
+            ]
+            [text "sign out"]
     sections =
         [ ("ledger", "section-ledger", Index)
         , ("inbox", "section-inbox", Inbox)
@@ -772,11 +788,52 @@ staleError m = case mError m of
             ]
         ]
 
+{- | Render only the rows around the visible window. The ledger can hold
+thousands of rows; the DOM keeps the visible entries plus a screen of overscan,
+and the two spacers preserve the scroll height, so the scrollbar and the cursor
+jumps keep meaning the same thing.
+
+Rows and year dividers are given exact heights by eza.css and 'entryHeight', so
+the arithmetic below is the same measure the browser lays out. Narrow screens
+keep the full sheet: the phone row is a four-line block whose height depends on
+the title, and sixty rows are cheap to keep in the DOM.
+-}
 entriesView :: Model -> [View () () Model Action]
-entriesView m = map entryView (ledgerEntries m)
+entriesView m
+    | null picked = map entryView entries
+    | otherwise = topSpacer : map pickedEntryView picked ++ [bottomSpacer]
   where
+    entries = ledgerEntries m
+    heights = map (entryHeight (mWidth m)) entries
+    offsets = scanl (+) 0 heights
+    totalHeight = last (0 : offsets)
+    virtualized = mWidth m >= 768
+    overscan = if virtualized then 480 else totalHeight + 5000
+    viewTop = max 0 (mScrollY m - overscan)
+    viewBottom = mScrollY m + max 1 (mHeight m) + overscan
+    -- Filter, not takeWhile: at a deep scroll position the entries above the
+    -- window come first, and takeWhile would stop immediately and fall back to
+    -- rendering the whole loaded list.
+    picked = filter withinWindow (zip3 entries offsets heights)
+    withinWindow (_, top, height) = top < viewBottom && top + height > viewTop
+    pickedEntryView (entry, _, _) = entryView entry
     entryView (LedgerYear year matched) = yearDivider m year matched
     entryView (LedgerRow _idx bookmark) = rowView m bookmark
+    firstTop = case picked of
+        ((_, top, _) : _) -> top
+        [] -> 0
+    lastEnd = case reverse picked of
+        ((_, top, height) : _) -> top + height
+        [] -> 0
+    spacer height =
+        H.div_
+            [ HP.class_ "ledger-vspace"
+            , HP.aria_ "hidden" "true"
+            , C.styleInline_ ("height:" <> C.px height <> ";margin:0;padding:0;border:0")
+            ]
+            []
+    topSpacer = spacer firstTop
+    bottomSpacer = spacer (max 0 (totalHeight - lastEnd))
 
 columnHead :: Model -> View () () Model Action
 columnHead _ =
@@ -1307,6 +1364,14 @@ mobileNav m =
         , mobileLink "search" searchOn (Navigate Index)
         , mobileLink "inbox" (mRoute m == Inbox) (Navigate Inbox)
         , mobileLink "account" (mRoute m == Account) (Navigate Account)
+        , H.button_
+            [ HP.class_ "m-nav-a m-nav-a--signout"
+            , HP.type_ "button"
+            , HP.data_ "testid" "m-nav-sign-out"
+            , HP.aria_ "label" "Sign out"
+            , HE.onClick LogoutRequest
+            ]
+            [text "out"]
         , H.button_
             [ HP.class_ "m-nav-a m-nav-a--plus"
             , HP.type_ "button"
@@ -1881,6 +1946,38 @@ guardDialog _ =
                 [ H.span_ [HP.class_ "spacer"] []
                 , dialogButton "dialog-cancel" "btn" "keep editing" DirtyGuardClose
                 , dialogButton "dialog-confirm" "btn btn--strong" "discard and leave" DirtyGuardDiscard
+                ]
+            ]
+        ]
+
+{- | The dirty-editor guard for signing out: the note on this record would not
+be written, so the action asks first. It reuses the shared dialog shell and the
+same test hooks as the delete guard.
+-}
+logoutDialog :: View () () Model Action
+logoutDialog =
+    H.div_
+        [HP.class_ "overlay is-open", HP.data_ "testid" "dialog", HE.onClick LogoutCancel]
+        [ H.div_
+            [ HP.class_ "dialog"
+            , HP.data_ "testid" "dialog-logout"
+            , HP.role_ "dialog"
+            , HP.aria_ "modal" "true"
+            , HP.aria_ "label" "Sign out"
+            , HE.onClickWithOptions stopPropagation Noop
+            ]
+            [ dialogHead "Sign out"
+            , H.div_
+                [HP.class_ "dialog__body", HP.data_ "testid" "dialog-body"]
+                [ H.p_
+                    []
+                    [text "The note or title edits on this record have not been saved yet. Signing out leaves them behind."]
+                ]
+            , H.div_
+                [HP.class_ "dialog__foot"]
+                [ H.span_ [HP.class_ "spacer"] []
+                , dialogButton "dialog-cancel" "btn" "keep editing" LogoutCancel
+                , dialogButton "dialog-confirm" "btn btn--strong" "sign out" Logout
                 ]
             ]
         ]

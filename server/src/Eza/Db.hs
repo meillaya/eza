@@ -20,6 +20,7 @@ module Eza.Db
   , schemaV6
   , schemaV7
   , schemaV8
+  , schemaV9
   , DbError (..)
   ) where
 
@@ -43,7 +44,7 @@ newtype DbError = DbError Text
 instance Exception DbError
 
 targetSchemaVersion :: Int
-targetSchemaVersion = 8
+targetSchemaVersion = 9
 
 -- | Open the database and bring the schema up to date.
 openDb :: FilePath -> IO Sqlite.Connection
@@ -148,7 +149,7 @@ pragmas =
   ]
 
 migrations :: [(Int, [Query])]
-migrations = [(1, schemaV1), (2, schemaV2), (3, schemaV3), (4, schemaV4), (5, schemaV5), (6, schemaV6), (7, schemaV7), (8, schemaV8)]
+migrations = [(1, schemaV1), (2, schemaV2), (3, schemaV3), (4, schemaV4), (5, schemaV5), (6, schemaV6), (7, schemaV7), (8, schemaV8), (9, schemaV9)]
 
 schemaV1 :: [Query]
 schemaV1 =
@@ -262,3 +263,26 @@ schema stay together; migrations remain append-only.
 -}
 schemaV8 :: [Query]
 schemaV8 = map Query clipSchema
+
+{- | v9 adds the indexes the list and statistics queries need, measured on the
+reference database with EXPLAIN QUERY PLAN:
+
+* @idx_bookmarks_opened@ turns the @sort=opened@ ledger page from a full scan
+  with a temporary B-tree into an ordered index scan.
+* @idx_bookmarks_unread@ and @idx_bookmarks_dead@ are partial, so the flag
+  filters only pay for the matching rows.
+* @idx_bookmarks_year@ covers the per-year ledger counts that every first page
+  carries. Without it SQLite scans the created_at index and builds a temporary
+  B-tree for @GROUP BY strftime('%Y', ...)@; with it the same query is a plain
+  index scan (measured 3.7 ms to 0.75 ms on 14,582 rows).
+
+A @date(created_at, 'unixepoch')@ expression index was also tried for the
+statistics day grouping and made that query slower, so it is not shipped here.
+-}
+schemaV9 :: [Query]
+schemaV9 =
+  [ "CREATE INDEX IF NOT EXISTS idx_bookmarks_opened ON bookmarks(last_opened_at DESC, id DESC)"
+  , "CREATE INDEX IF NOT EXISTS idx_bookmarks_unread ON bookmarks(created_at DESC, id DESC) WHERE is_read = 0"
+  , "CREATE INDEX IF NOT EXISTS idx_bookmarks_dead ON bookmarks(created_at DESC, id DESC) WHERE is_dead = 1"
+  , "CREATE INDEX IF NOT EXISTS idx_bookmarks_year ON bookmarks(CAST(strftime('%Y', created_at, 'unixepoch') AS INTEGER))"
+  ]

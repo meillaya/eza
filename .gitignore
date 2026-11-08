@@ -41,6 +41,11 @@ dist/
 *.log
 static/app/*
 !static/app/index.js
+# Precompressed sidecars written next to the assets during a web build (the
+# release bundle is assembled after scripts/build-web.sh, so these are build
+# outputs rather than sources)
+static/*.gz
+static/vendor/**/*.gz
 
 # Environments / secrets
 .env

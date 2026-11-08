@@ -26,6 +26,32 @@ fi
 
 gzip -9 -c static/app/app.wasm > static/app/app.wasm.gz || true
 
+# Precompressed sidecars for the text assets. The server serves <file>.gz with
+# Content-Encoding: gzip when the client accepts it, so a cold load does not pay
+# for the uncompressed bytes.
+GZIP_FILES=(
+  static/index.html
+  static/eza.css
+  static/pwa.js
+  static/theme.js
+  static/auth.js
+  static/app/index.js
+  static/app/ghc_wasm_jsffi.js
+  static/vendor/browser_wasi_shim/index.js
+  static/vendor/browser_wasi_shim/wasi.js
+  static/vendor/browser_wasi_shim/wasi_defs.js
+  static/vendor/browser_wasi_shim/fd.js
+  static/vendor/browser_wasi_shim/fs_mem.js
+  static/vendor/browser_wasi_shim/fs_opfs.js
+  static/vendor/browser_wasi_shim/strace.js
+  static/vendor/browser_wasi_shim/debug.js
+)
+for file in "${GZIP_FILES[@]}"; do
+  if [[ -f "$file" ]]; then
+    gzip -9 -c "$file" > "$file.gz" || true
+  fi
+done
+
 # The server serves /sw.js with this id in its version, so a rebuild invalidates
 # the service worker and open tabs refresh themselves on the next load.
 BUILD_ID="$(

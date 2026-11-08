@@ -1,6 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections #-}
 
 -- | Netscape bookmarks.html parser and importer.
 --
@@ -19,10 +18,12 @@ module Eza.Import
   , decodeHtml
   ) where
 
-import Control.Monad (foldM, forM)
+import Control.Monad (forM)
+import Data.Aeson (encode)
 import Data.Char (isAlphaNum, isDigit, isSpace)
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes, fromMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -37,7 +38,7 @@ import Text.HTML.TagSoup
 import Text.Read (readMaybe)
 
 import Eza.Types (ImportReport (..))
-import Eza.Url (hostOf, isHttpUrl, normalizeUrl)
+import Eza.Url (dedupeKey, hostOf, isHttpUrl, normalizeUrl)
 
 data TagMode = TagLeaf | TagDeepest | TagPath | TagNone
   deriving (Show, Eq)
@@ -424,26 +425,35 @@ containsIsoDate t =
 -- Dedupe
 -- ---------------------------------------------------------------------------
 
+-- | Collapse anchors that address the same page under the shared canonical
+-- key (see 'Eza.Url.dedupeKey'). The earliest usable title and description
+-- win, tag sets are unioned, the earliest date is kept, and an https address
+-- replaces an http one so the stored record points at the better scheme.
 dedupe :: [ImportItem] -> ([ImportItem], Int)
 dedupe items =
   let m = foldl' insertItem Map.empty items
    in (Map.elems m, length items - Map.size m)
   where
     insertItem acc item =
-      Map.alter
-        ( \case
-            Nothing -> Just item
-            Just old ->
-              Just
-                old
-                  { iiTitle = if T.null (iiTitle old) then iiTitle item else iiTitle old
-                  , iiDescription = if T.null (iiDescription old) then iiDescription item else iiDescription old
-                  , iiTags = dedupeText (iiTags old <> iiTags item)
-                  , iiCreatedAt = minNonZero (iiCreatedAt old) (iiCreatedAt item)
-                  }
-        )
-        (iiUrl item)
-        acc
+      Map.alter (mergeItem item) (dedupeKey (iiUrl item)) acc
+
+    mergeItem item Nothing = Just item
+    mergeItem item (Just old) =
+      Just
+        old
+          { iiUrl = preferredUrl old item
+          , iiTitle = if T.null (iiTitle old) then iiTitle item else iiTitle old
+          , iiDescription = if T.null (iiDescription old) then iiDescription item else iiDescription old
+          , iiTags = dedupeText (iiTags old <> iiTags item)
+          , iiCreatedAt = minNonZero (iiCreatedAt old) (iiCreatedAt item)
+          }
+
+-- | The imported address kept for a collapsed anchor: https replaces http,
+-- otherwise the first address wins.
+preferredUrl :: ImportItem -> ImportItem -> Text
+preferredUrl old new
+  | "http://" `T.isPrefixOf` iiUrl old && "https://" `T.isPrefixOf` iiUrl new = iiUrl new
+  | otherwise = iiUrl old
 
 minNonZero :: Int -> Int -> Int
 minNonZero 0 b = b
@@ -461,65 +471,197 @@ dedupeText = reverse . fst . foldl' step ([], Set.empty)
 -- Database import
 -- ---------------------------------------------------------------------------
 
+{- | Import one parsed file.
+
+De-duplication happens before a row is written. The parser has already
+collapsed anchors that share a canonical key; here the key is also checked
+against every existing bookmark, so a re-import, an overlapping export, or an
+http/https copy of an already-filed page never creates a second row. Matched
+records get the imported tags unioned on, empty metadata filled in, and a
+stored URL upgraded when the imported address is clearly better (https for
+http, or a normalised form for a legacy URL).
+
+New rows are inserted in chunks with one prepared statement per chunk and the
+tag links are flushed with a single @executeMany@, which keeps a 9k-anchor
+import in the sub-second range. One @import_runs@ row records the run.
+-}
 importParsed :: Connection -> ImportOptions -> ParsedImport -> IO ImportReport
 importParsed conn opts parsed = do
   start <- getPOSIXTime
   now <- floor <$> getPOSIXTime
   (inserted, existing, tagsCreated, tagLinks) <-
     withImmediateTransaction conn $ do
+      existingRows <- query_ conn "SELECT id, url FROM bookmarks" :: IO [(Int, Text)]
+      let byKey = foldl' addExisting Map.empty existingRows
+          initial = ClassifyState byKey (Set.fromList (map snd existingRows)) [] [] []
+          classified = foldl' classifyItem initial (piItems parsed)
+      mapM_
+        (\(bid, url) -> execute conn "UPDATE bookmarks SET url = ?, updated_at = ? WHERE id = ?" (url, now, bid))
+        (csHeal classified)
       let allTagNames = Set.toList (Set.fromList (concatMap iiTags (piItems parsed)))
       tagsCreated <- sum <$> mapM (insertTag conn now) allTagNames
       tagIds <- tagIdMap conn
-      let step (nIns, nExisting, nLinks) item = do
-            let isRead = if ioMarkRead opts then (1 :: Int) else 0
-            execute
-              conn
-              "INSERT INTO bookmarks (url,title,description,domain,source,created_at,added_at,updated_at,is_read) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(url) DO NOTHING"
-              (iiUrl item, iiTitle item, iiDescription item, iiDomain item, "netscape" :: Text, iiCreatedAt item, now, now, isRead)
-            changed <- changes conn
-            bid <-
-              if changed > 0
-                then fromIntegral <$> lastInsertRowId conn
-                else do
-                  rows <- query conn "SELECT id FROM bookmarks WHERE url = ?" (Only (iiUrl item)) :: IO [Only Int]
-                  pure (case rows of [Only i] -> i; _ -> 0)
-            links <- if bid == 0 then pure 0 else addLinks conn bid (iiTags item) tagIds
-            pure
-              ( nIns + if changed > 0 then 1 else 0
-              , nExisting + if changed > 0 then 0 else 1
-              , nLinks + links
-              )
-      (nIns, nExisting, nLinks) <- foldM step (0, 0, 0) (piItems parsed)
-      pure (nIns, nExisting, tagsCreated, nLinks)
+      [Only linksBefore] <- query_ conn "SELECT COUNT(*) FROM bookmark_tags" :: IO [Only Int]
+      (nInserted, nRaced, insertedTargets) <- insertNewItems conn opts now (reverse (csNew classified))
+      let matchedTargets = [(bid, iiTags item) | (bid, item) <- csMatched classified]
+          targets = matchedTargets <> insertedTargets
+          pairs =
+            [ (bid, tagId)
+            | (bid, names) <- targets
+            , name <- names
+            , Just tagId <- [Map.lookup name tagIds]
+            ]
+      executeMany conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" pairs
+      [Only linksAfter] <- query_ conn "SELECT COUNT(*) FROM bookmark_tags" :: IO [Only Int]
+      pure (nInserted, length (csMatched classified) + nRaced, tagsCreated, linksAfter - linksBefore)
   execute_ conn "ANALYZE"
   execute_ conn "PRAGMA optimize"
   end <- getPOSIXTime
-  pure
-    ImportReport
-      { irFound = piFound parsed
-      , irHttpAnchors = piHttp parsed
-      , irUniqueUrls = length (piItems parsed)
-      , irInserted = inserted
-      , irExisting = existing
-      , irDuplicateAnchors = piDuplicates parsed
-      , irSkippedNonHttp = piNonHttp parsed
-      , irTagsCreated = tagsCreated
-      , irTagLinksAdded = tagLinks
-      , irFoldersSkipped = piFoldersSkipped parsed
-      , irUntagged = piUntagged parsed
-      , irElapsedMs = floor ((end - start) * 1000)
-      }
+  let report =
+        ImportReport
+          { irFound = piFound parsed
+          , irHttpAnchors = piHttp parsed
+          , irUniqueUrls = length (piItems parsed)
+          , irInserted = inserted
+          , irExisting = existing
+          , irDuplicateAnchors = piDuplicates parsed
+          , irSkippedNonHttp = piNonHttp parsed
+          , irTagsCreated = tagsCreated
+          , irTagLinksAdded = tagLinks
+          , irFoldersSkipped = piFoldersSkipped parsed
+          , irUntagged = piUntagged parsed
+          , irElapsedMs = floor ((end - start) * 1000)
+          }
+  recordImportRun conn now (floor end) report
+  pure report
+
+-- | State carried while deciding, per item, whether it joins an existing
+-- record or becomes a new one.
+data ClassifyState = ClassifyState
+  { csByKey :: Map.Map Text (Int, Text)
+  , csUsedUrls :: Set Text
+  , csHeal :: [(Int, Text)]
+  , csMatched :: [(Int, ImportItem)]
+  , csNew :: [ImportItem]
+  }
+
+-- | Fold one stored row into the canonical-key map. When legacy rows share a
+-- key (old imports could keep fragments), prefer the cleanest https address
+-- and then the lowest id as the keeper.
+addExisting :: Map.Map Text (Int, Text) -> (Int, Text) -> Map.Map Text (Int, Text)
+addExisting m (bid, url) = Map.insertWith better (dedupeKey url) (bid, url) m
+  where
+    better new@(newId, newUrl) old@(oldId, oldUrl)
+      | urlRank newUrl > urlRank oldUrl = new
+      | urlRank newUrl < urlRank oldUrl = old
+      | newId < oldId = new
+      | otherwise = old
+    urlRank :: Text -> (Int, Int)
+    urlRank candidate =
+      ( if "https://" `T.isPrefixOf` candidate then 1 else 0
+      , if candidate == normalizeUrl candidate then 1 else 0
+      )
+
+classifyItem :: ClassifyState -> ImportItem -> ClassifyState
+classifyItem st item =
+  case Map.lookup key (csByKey st) of
+    Nothing -> st {csNew = item : csNew st}
+    Just (bid, stored)
+      | shouldHeal stored desired && not (Set.member desired (csUsedUrls st)) ->
+          st
+            { csByKey = Map.insert key (bid, desired) (csByKey st)
+            , csUsedUrls = Set.insert desired (csUsedUrls st)
+            , csHeal = (bid, desired) : csHeal st
+            , csMatched = (bid, item) : csMatched st
+            }
+      | otherwise -> st {csMatched = (bid, item) : csMatched st}
+  where
+    key = dedupeKey (iiUrl item)
+    desired = iiUrl item
+
+-- | A matched record's stored URL is replaced only for a clear improvement:
+-- https over http, or a normalised form replacing a legacy URL (a fragment or
+-- tracking parameter the current importer would strip). Anything else is left
+-- alone so a re-import cannot churn stable addresses.
+shouldHeal :: Text -> Text -> Bool
+shouldHeal stored desired =
+  stored /= desired
+    && isHttpUrl desired
+    && ( ("https://" `T.isPrefixOf` desired && "http://" `T.isPrefixOf` stored)
+           || normalizeUrl stored /= stored
+       )
+
+-- | Insert new items one prepared statement per chunk and return the row ids
+-- (with their tags) for tag linking. A conflict that appeared after the
+-- preload is counted as an existing record rather than an insert.
+insertNewItems :: Connection -> ImportOptions -> Int -> [ImportItem] -> IO (Int, Int, [(Int, [Text])])
+insertNewItems conn opts now items = go 0 0 [] (chunksOf 200 items)
+  where
+    go nInserted nRaced targets [] = pure (nInserted, nRaced, reverse targets)
+    go nInserted nRaced targets (chunk : rest) = do
+      executeMany conn insertSql (map (rowFor opts now) chunk)
+      rows <-
+        query
+          conn
+          (Query ("SELECT id, url FROM bookmarks WHERE url IN (" <> marksFor chunk <> ")"))
+          (map iiUrl chunk) ::
+          IO [(Int, Text)]
+      let idsByUrl = Map.fromList [(url, bid) | (bid, url) <- rows]
+          found = [(bid, iiTags item) | item <- chunk, Just bid <- [Map.lookup (iiUrl item) idsByUrl]]
+      missing <-
+        forM
+          [ item
+          | item <- chunk
+          , Map.notMember (iiUrl item) idsByUrl
+          ]
+          $ \item -> do
+            racedRows <- query conn "SELECT id FROM bookmarks WHERE url = ?" (Only (iiUrl item)) :: IO [Only Int]
+            pure $ case racedRows of
+              (Only bid : _) -> Just (bid, iiTags item)
+              [] -> Nothing
+      let raced = catMaybes missing
+      go
+        (nInserted + length found)
+        (nRaced + (length chunk - length found))
+        (reverse found <> raced <> targets)
+        rest
+
+insertSql :: Query
+insertSql =
+  "INSERT INTO bookmarks (url,title,description,domain,source,created_at,added_at,updated_at,is_read) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(url) DO NOTHING"
+
+rowFor :: ImportOptions -> Int -> ImportItem -> (Text, Text, Text, Text, Text, Int, Int, Int, Int)
+rowFor opts now item =
+  ( iiUrl item
+  , iiTitle item
+  , iiDescription item
+  , iiDomain item
+  , "netscape"
+  , iiCreatedAt item
+  , now
+  , now
+  , if ioMarkRead opts then 1 else 0
+  )
+
+marksFor :: [ImportItem] -> Text
+marksFor chunk = T.intercalate "," (replicate (length chunk) "?")
+
+chunksOf :: Int -> [a] -> [[a]]
+chunksOf _ [] = []
+chunksOf n xs = take n xs : chunksOf n (drop n xs)
+
+recordImportRun :: Connection -> Int -> Int -> ImportReport -> IO ()
+recordImportRun conn started finished report = do
+  let payload = TE.decodeUtf8 (LBS.toStrict (encode report))
+  execute
+    conn
+    "INSERT INTO import_runs (source, started_at, finished_at, report_json) VALUES (?,?,?,?)"
+    ("netscape" :: Text, started, finished, payload)
 
 insertTag :: Connection -> Int -> Text -> IO Int
 insertTag conn now name = do
   execute conn "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, ?)" (name, now)
   changes conn
-
-addLinks :: Connection -> Int -> [Text] -> Map.Map Text Int -> IO Int
-addLinks conn bid tags tagIds =
-  sum <$> forM (mapMaybe (\t -> (bid,) <$> Map.lookup t tagIds) tags) (\(b, tid) -> do
-    execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (b, tid)
-    changes conn)
 
 tagIdMap :: Connection -> IO (Map.Map Text Int)
 tagIdMap conn = do

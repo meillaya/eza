@@ -61,7 +61,11 @@ function isNetworkOnly(url) {
 // missing route only skips that asset instead of failing the installation.
 async function precache(cache, url) {
   try {
-    const response = await fetch(url, { redirect: "error", cache: "reload" });
+    // Default cache mode: the server marks assets no-cache, so a copy the page
+    // already fetched is revalidated with a cheap 304 instead of downloaded
+    // twice when the worker installs. A rebuilt asset has a new ETag and
+    // arrives in full.
+    const response = await fetch(url, { redirect: "error", cache: "default" });
     if (response && response.ok) await cache.put(url, response);
   } catch (error) {
     /* tolerate missing routes / offline install */

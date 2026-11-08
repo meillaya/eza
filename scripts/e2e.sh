@@ -24,6 +24,9 @@ SCRIPTS=(
   auth-smoke.mjs
   api-smoke.mjs
   ui-smoke.mjs
+  keyboard-smoke.mjs
+  logout-smoke.mjs
+  dedup-smoke.mjs
   bulk-ui-smoke.mjs
   flows-smoke.mjs
   token-smoke.mjs

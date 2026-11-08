@@ -1,107 +1,193 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Duplicate detection and the explicit merge action.
+-- | Duplicate detection and the explicit merge actions.
 
--- 'dedupCandidates' only reports groups; nothing is ever merged automatically.
--- 'mergeBookmarks' is called from the confirmed merge endpoint and preserves
--- data from every absorbed row: tags are unioned, notes appended with a source
--- heading, highlights and wikilinks moved to the keeper, counters combined and
--- empty keeper metadata filled from the first absorbed row that has it. A side
--- undo snapshot of all affected rows (plus their highlights and wikilinks) is
--- written before anything changes.
+{- 'dedupeGroups' is pure: it groups rows by the shared canonical URL key (the
+safe duplicates) and, separately, by normalised title on the same source
+(advisory only, because different pages can share a title). 'dedupCandidates'
+pages those groups and fetches the summaries in bulk, so the cost is one light
+scan plus a handful of indexed queries rather than one query per group.
+
+Nothing is ever merged automatically. 'mergeBookmarks' handles one confirmed
+group; 'mergeUrlDuplicatesAll' merges every same-URL group in one transaction
+behind a single undo snapshot, leaving the advisory title groups for individual
+review. Both preserve data from every absorbed row: tags are unioned, notes
+appended with a source heading, highlights and wikilinks moved to the keeper,
+counters combined and empty keeper metadata filled from the first absorbed row
+that has it.
+-}
 module Eza.Dedup
-  ( DedupGroup (..)
-  , DedupReport (..)
+  ( DedupQuery (..)
+  , defaultDedupQuery
+  , GroupIds (..)
+  , dedupeGroups
   , dedupCandidates
   , mergeBookmarks
+  , mergeUrlDuplicatesAll
   ) where
 
-import Control.Monad (forM, forM_)
-import Data.Aeson (ToJSON (..), genericToJSON)
+import Control.Monad (forM, forM_, when)
 import Data.Char (isAlphaNum)
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
-import GHC.Generics (Generic)
-import Network.URI (URI (..), URIAuth (..), parseURI)
 
-import Eza.Bookmarks (bookmarksByIds)
-import Eza.Json (jsonOptions)
-import Eza.Types (BookmarkSummary (..))
+import Eza.Types (BookmarkSummary (..), DedupCounts (..), DedupGroup (..), DedupMergeAllReport (..), DedupReport (..))
 import Eza.Undo (recordUndoIds)
-import Eza.Url (hostOf)
+import Eza.Url (dedupeKey, domainOf, hostOf)
 
-data DedupGroup = DedupGroup
-  { dgKey :: Text
-  , dgItems :: [BookmarkSummary]
+-- ---------------------------------------------------------------------------
+-- Detection
+-- ---------------------------------------------------------------------------
+
+-- | Pagination for the duplicates view. Limits are clamped to 1..200 when the
+-- report is built; the defaults match the interface's first page.
+data DedupQuery = DedupQuery
+  { dqUrlOffset :: Int
+  , dqUrlLimit :: Int
+  , dqTitleOffset :: Int
+  , dqTitleLimit :: Int
   }
-  deriving (Show, Eq, Generic)
+  deriving (Show, Eq)
 
-instance ToJSON DedupGroup where
-  toJSON = genericToJSON (jsonOptions "dg")
+defaultDedupQuery :: DedupQuery
+defaultDedupQuery = DedupQuery 0 60 0 40
 
-data DedupReport = DedupReport
-  { drGroups :: [DedupGroup]
+-- | One candidate group before its summaries are loaded.
+data GroupIds = GroupIds
+  { giKey :: Text
+  , giKind :: Text
+  , giIds :: [Int]
   }
-  deriving (Show, Eq, Generic)
+  deriving (Show, Eq)
 
-instance ToJSON DedupReport where
-  toJSON = genericToJSON (jsonOptions "dr")
-
-dedupCandidates :: Connection -> IO DedupReport
-dedupCandidates conn = do
-  rows <- query_ conn "SELECT id,url,title,domain FROM bookmarks" :: IO [(Int, Text, Text, Text)]
-  let entries = [(i, normalizeUrl u, normalizeTitle t, hostOf u) | (i, u, t, _) <- rows]
-      byUrl = Map.fromListWith (<>) [((normalizeDomain d, nu), [i]) | (i, nu, _, d) <- entries]
-      urlGroups = [(key, ids) | (key, ids) <- Map.toList byUrl, length ids > 1]
-      urlIds = Set.fromList (concatMap snd urlGroups)
+{- | Group lightweight rows @(id, url, title, domain)@ into duplicate
+candidates. URL groups come first (sorted by key), then advisory
+title-on-source groups. Members are sorted by id, so the first member is the
+deterministic default keeper.
+-}
+dedupeGroups :: [(Int, Text, Text, Text)] -> [GroupIds]
+dedupeGroups rows =
+  let byUrl =
+        Map.fromListWith (<>)
+          [ (dedupeKey url, [(bid, url)])
+          | (bid, url, _, _) <- rows
+          ]
+      urlGroups =
+        [ GroupIds key "url" (map fst (sortOn fst items))
+        | (key, items) <- Map.toList byUrl
+        , length items > 1
+        ]
+      urlIds = Set.fromList (concatMap giIds urlGroups)
       byTitle =
         Map.fromListWith (<>)
-          [ ((normalizeDomain d, nt), [i])
-          | (i, _, nt, d) <- entries
-          , not (Set.member i urlIds)
-          , not (T.null nt)
+          [ ((domainOf (hostOf url), normalizeTitle title), [(bid, url)])
+          | (bid, url, title, _) <- rows
+          , not (Set.member bid urlIds)
+          , let normalized = normalizeTitle title
+          , not (T.null normalized)
           ]
-      titleGroups = [(key, ids) | (key, ids) <- Map.toList byTitle, length ids > 1]
-      groups = urlGroups <> titleGroups
-  items <- forM groups $ \((dom, key), ids) -> do
-    summaries <- bookmarksByIds conn ids
-    pure (DedupGroup (dom <> ":" <> key) summaries)
-  pure (DedupReport (sortOn dgKey items))
+      titleGroups =
+        [ GroupIds (dom <> ": " <> title) "title" (map fst (sortOn fst items))
+        | ((dom, title), items) <- Map.toList byTitle
+        , length items > 1
+        ]
+   in sortOn giKey urlGroups <> sortOn giKey titleGroups
 
-normalizeUrl :: Text -> Text
-normalizeUrl raw =
-  case parseURI (T.unpack (T.strip raw)) of
-    Nothing -> T.toLower (T.strip raw)
-    Just uri ->
-      let auth = uriAuthority uri
-          host = case auth of
-            Nothing -> ""
-            Just a -> T.toLower (T.pack (uriRegName a))
-          host' = fromMaybe host (T.stripPrefix "www." host)
-          path = T.pack (uriPath uri)
-          path' = if T.length path > 1 && T.last path == '/' then T.init path else path
-          params = parseQuery (T.pack (uriQuery uri))
-          meaningful = [(k, v) | (k, v) <- params, not (isTracking k)]
-          q = if null meaningful then "" else "?" <> T.intercalate "&" [k <> "=" <> v | (k, v) <- meaningful]
-       in host' <> path' <> q
+-- | Build the paged duplicate report. Counts always cover the whole library;
+-- only the requested group pages are loaded with summaries.
+dedupCandidates :: Connection -> DedupQuery -> IO DedupReport
+dedupCandidates conn q = do
+  rows <- query_ conn "SELECT id, url, title, domain FROM bookmarks" :: IO [(Int, Text, Text, Text)]
+  let groups = dedupeGroups rows
+      urlGroups = filter ((== "url") . giKind) groups
+      titleGroups = filter ((/= "url") . giKind) groups
+      urlPage = pageOf (dqUrlOffset q) (dqUrlLimit q) urlGroups
+      titlePage = pageOf (dqTitleOffset q) (dqTitleLimit q) titleGroups
+      counts =
+        DedupCounts
+          { dcUrlGroups = length urlGroups
+          , dcUrlRecords = sum (map (length . giIds) urlGroups)
+          , dcTitleGroups = length titleGroups
+          , dcTitleRecords = sum (map (length . giIds) titleGroups)
+          }
+  summaries <- fetchSummaries conn (concatMap giIds (urlPage <> titlePage))
+  let byId = Map.fromList [(bsId summary, summary) | summary <- summaries]
+      toGroup (GroupIds key kind ids) =
+        DedupGroup
+          { dgKey = key
+          , dgKind = kind
+          , dgItems = [summary | bid <- ids, Just summary <- [Map.lookup bid byId]]
+          }
+  pure
+    DedupReport
+      { drCounts = counts
+      , drUrlGroups = map toGroup urlPage
+      , drTitleGroups = map toGroup titlePage
+      }
 
-parseQuery :: Text -> [(Text, Text)]
-parseQuery q =
-  [ (k, v)
-  | part <- T.splitOn "&" (T.dropWhile (== '?') q)
-  , not (T.null part)
-  , let (k, rest) = T.breakOn "=" part
-  , let v = fromMaybe "" (T.stripPrefix "=" rest)
-  ]
+pageOf :: Int -> Int -> [a] -> [a]
+pageOf offset limit = take (max 1 (min 200 limit)) . drop (max 0 offset)
 
-isTracking :: Text -> Bool
-isTracking k =
-  "utm_" `T.isPrefixOf` k || k `elem` ["fbclid", "gclid", "ref", "ref_src"]
+-- | Load the light summary columns the duplicates view needs (no notes or
+-- extracted text) for the requested ids, chunked to stay well inside SQLite's
+-- variable limit.
+fetchSummaries :: Connection -> [Int] -> IO [BookmarkSummary]
+fetchSummaries conn ids = do
+  chunks <- forM (chunksOf 500 ids) $ \chunk -> do
+    rows <-
+      query
+        conn
+        ( Query
+            ( "SELECT id, url, title, domain, favicon_url, created_at, added_at, is_read, is_dead"
+                <> " FROM bookmarks WHERE id IN ("
+                <> marksFor chunk
+                <> ") ORDER BY id"
+            )
+        )
+        chunk ::
+        IO [(Int, Text, Text, Text, Text, Int, Int, Int, Int)]
+    tagsById <- tagsForIds conn chunk
+    pure
+      [ BookmarkSummary
+          { bsId = bid
+          , bsUrl = url
+          , bsTitle = if T.null title then url else title
+          , bsDomain = domain
+          , bsFaviconUrl = favicon
+          , bsCreatedAt = created
+          , bsAddedAt = added
+          , bsTags = fromMaybe [] (Map.lookup bid tagsById)
+          , bsIsRead = isRead /= 0
+          , bsIsDead = isDead /= 0
+          , bsSnippet = Nothing
+          }
+      | (bid, url, title, domain, favicon, created, added, isRead, isDead) <- rows
+      ]
+  pure (concat chunks)
+
+tagsForIds :: Connection -> [Int] -> IO (Map.Map Int [Text])
+tagsForIds conn ids = do
+  rows <-
+    forM (chunksOf 500 ids) $ \chunk ->
+      query
+        conn
+        ( Query
+            ( "SELECT bt.bookmark_id, t.name FROM bookmark_tags bt"
+                <> " JOIN tags t ON t.id = bt.tag_id WHERE bt.bookmark_id IN ("
+                <> marksFor chunk
+                <> ") ORDER BY bt.bookmark_id, t.name"
+            )
+        )
+        chunk ::
+        IO [(Int, Text)]
+  pure (foldl' addTag Map.empty (concat rows))
+  where
+    addTag acc (bid, tag) = Map.insertWith (flip (<>)) bid [tag] acc
 
 normalizeTitle :: Text -> Text
 normalizeTitle = T.unwords . T.words . T.toLower . T.map replace
@@ -110,10 +196,9 @@ normalizeTitle = T.unwords . T.words . T.toLower . T.map replace
       | isAlphaNum c || c == ' ' = c
       | otherwise = ' '
 
-normalizeDomain :: Text -> Text
-normalizeDomain domain =
-  let host = T.toLower (T.takeWhile (\c -> c /= '/' && c /= ':') domain)
-   in fromMaybe host (T.stripPrefix "www." host)
+-- ---------------------------------------------------------------------------
+-- Single confirmed merge
+-- ---------------------------------------------------------------------------
 
 -- | The bookmark columns a merge reads and combines. @id@ is first so the same
 -- row parser works for the keeper and for each absorbed row.
@@ -158,7 +243,7 @@ No automatic merge: this only runs for an explicit confirmed request.
 -}
 mergeBookmarks :: Connection -> Int -> [Int] -> IO Int
 mergeBookmarks conn keep mergeIds = do
-  let merges = dedupeIds (filter (/= keep) mergeIds)
+  let merges = filter (/= keep) mergeIds
   if null merges
     then pure 0
     else
@@ -167,101 +252,222 @@ mergeBookmarks conn keep mergeIds = do
         case exists of
           [] -> pure 0
           _ -> do
-            let marks = T.intercalate "," (replicate (length merges) "?")
-            noteRows <-
-              query
-                conn
-                (Query ("SELECT id,title,url,note_body FROM bookmarks WHERE id IN (" <> marks <> ") ORDER BY id"))
-                merges :: IO [NoteRow]
-            let found = map nrId noteRows
+            found <- existingBookmarkIds conn merges
             if null found
               then pure 0
               else do
-                now <- (floor <$> getPOSIXTime) :: IO Int
                 -- Snapshot first: bookmark rows, tags, highlights and links.
                 _ <- recordUndoIds conn "merge" (keep : found)
-                -- 1. Tags are unioned onto the keeper.
-                forM_ found $ \mid ->
-                  execute
-                    conn
-                    "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) SELECT ?, tag_id FROM bookmark_tags WHERE bookmark_id = ?"
-                    (keep, mid)
-                -- 2. Highlights move to the keeper with quote/offsets intact.
-                forM_ found $ \mid ->
-                  execute
-                    conn
-                    "UPDATE highlights SET bookmark_id = ?, updated_at = ? WHERE bookmark_id = ?"
-                    (keep, now, mid)
-                -- 3. Wikilinks are repointed at the keeper; rows that cannot be
-                --    repointed because of the UNIQUE key are deleted afterwards.
-                forM_ found $ \mid -> execute conn "UPDATE OR IGNORE links SET source_id = ? WHERE source_id = ?" (keep, mid)
-                forM_ found $ \mid -> execute conn "UPDATE OR IGNORE links SET target_id = ? WHERE target_id = ?" (keep, mid)
-                execute
-                  conn
-                  (Query ("DELETE FROM links WHERE source_id IN (" <> marks <> ") OR target_id IN (" <> marks <> ")"))
-                  (merges <> merges)
-                -- 4. Notes: keep the keeper note and append every absorbed note
-                --    under a heading naming its source, so nothing is dropped.
-                keeperNoteRows <-
-                  query
-                    conn
-                    "SELECT note_body FROM bookmarks WHERE id = ?"
-                    (Only keep) :: IO [Only Text]
-                keeperRows <-
-                  query
-                    conn
-                    (Query ("SELECT " <> mergeRowColumns <> " FROM bookmarks WHERE id = ?"))
-                    (Only keep) :: IO [MergeRow]
-                case keeperRows of
-                  [] -> pure 0
-                  keeper : _ -> do
-                    mergedRows <-
-                      query
-                        conn
-                        (Query ("SELECT " <> mergeRowColumns <> " FROM bookmarks WHERE id IN (" <> marks <> ") ORDER BY id"))
-                        merges :: IO [MergeRow]
-                    let allRows = keeper : mergedRows
-                        baseNote = case keeperNoteRows of
-                          (Only n : _) -> n
-                          _ -> ""
-                        mergedNote =
-                          appendNotes
-                            baseNote
-                            [ noteBlock (nrTitle r) (nrUrl r) (nrNote r)
-                            | r <- noteRows
-                            , not (T.null (T.strip (nrNote r)))
-                            ]
-                        openCount = sum (map mrOpenCount allRows)
-                        lastOpened = maxJust (map mrLastOpenedAt allRows)
-                        lastChecked = maxJust (map mrLastCheckedAt allRows)
-                        -- A merged copy that was read makes the keeper read; a
-                        -- dead keeper stays dead only when every copy was dead.
-                        isRead = if any ((/= 0) . mrIsRead) allRows then (1 :: Int) else 0
-                        isDead = if all ((/= 0) . mrIsDead) allRows then (1 :: Int) else 0
-                        createdAt = minimum (map mrCreatedAt allRows)
-                        addedAt = minimum (map mrAddedAt allRows)
-                        capturedAt = firstJust (map mrSnapshotCapturedAt allRows)
-                    executeNamed
-                      conn
-                      "UPDATE bookmarks SET note_body = :note, open_count = :open_count, last_opened_at = :last_opened, last_checked_at = :last_checked, is_read = :is_read, is_dead = :is_dead, created_at = :created, added_at = :added, favicon_url = :favicon, snapshot_path = :snapshot_path, snapshot_kind = :snapshot_kind, snapshot_captured_at = :snapshot_captured, ai_summary = :ai_summary, updated_at = :updated WHERE id = :keep"
-                      [ ":note" := mergedNote
-                      , ":open_count" := openCount
-                      , ":last_opened" := lastOpened
-                      , ":last_checked" := lastChecked
-                      , ":is_read" := isRead
-                      , ":is_dead" := isDead
-                      , ":created" := createdAt
-                      , ":added" := addedAt
-                      , ":favicon" := firstText (map mrFaviconUrl allRows)
-                      , ":snapshot_path" := firstText (map mrSnapshotPath allRows)
-                      , ":snapshot_kind" := firstText (map mrSnapshotKind allRows)
-                      , ":snapshot_captured" := capturedAt
-                      , ":ai_summary" := firstText (map mrAiSummary allRows)
-                      , ":updated" := now
-                      , ":keep" := keep
-                      ]
-                    execute conn (Query ("DELETE FROM bookmarks WHERE id IN (" <> marks <> ")")) merges
-                    pure (length found)
+                mergeGroupTx conn keep found False
+
+-- | Fold @merges@ into @keep@ inside the caller's write transaction. The
+-- caller has already recorded the undo snapshot. When @preferHttps@ is set (the
+-- bulk same-URL cleanup) the keeper address is upgraded to the https variant of
+-- the page after the absorbed rows are deleted, so no UNIQUE collision can
+-- occur. Returns the number of absorbed rows.
+mergeGroupTx :: Connection -> Int -> [Int] -> Bool -> IO Int
+mergeGroupTx conn keep merges preferHttps = do
+  let marks = marksFor merges
+  noteRows <-
+    query
+      conn
+      (Query ("SELECT id,title,url,note_body FROM bookmarks WHERE id IN (" <> marks <> ") ORDER BY id"))
+      merges ::
+      IO [NoteRow]
+  let found = map nrId noteRows
+  if null found
+    then pure 0
+    else do
+      now <- (floor <$> getPOSIXTime) :: IO Int
+      -- 1. Tags are unioned onto the keeper.
+      forM_ found $ \mid ->
+        execute
+          conn
+          "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) SELECT ?, tag_id FROM bookmark_tags WHERE bookmark_id = ?"
+          (keep, mid)
+      -- 2. Highlights move to the keeper with quote/offsets intact.
+      forM_ found $ \mid ->
+        execute
+          conn
+          "UPDATE highlights SET bookmark_id = ?, updated_at = ? WHERE bookmark_id = ?"
+          (keep, now, mid)
+      -- 3. Wikilinks are repointed at the keeper; rows that cannot be
+      --    repointed because of the UNIQUE key are deleted afterwards.
+      forM_ found $ \mid -> execute conn "UPDATE OR IGNORE links SET source_id = ? WHERE source_id = ?" (keep, mid)
+      forM_ found $ \mid -> execute conn "UPDATE OR IGNORE links SET target_id = ? WHERE target_id = ?" (keep, mid)
+      execute
+        conn
+        (Query ("DELETE FROM links WHERE source_id IN (" <> marks <> ") OR target_id IN (" <> marks <> ")"))
+        (merges <> merges)
+      -- 4. Notes: keep the keeper note and append every absorbed note under a
+      --    heading naming its source, so nothing is dropped.
+      keeperNoteRows <-
+        query
+          conn
+          "SELECT note_body FROM bookmarks WHERE id = ?"
+          (Only keep) ::
+          IO [Only Text]
+      keeperUrlRows <-
+        query
+          conn
+          "SELECT url FROM bookmarks WHERE id = ?"
+          (Only keep) ::
+          IO [Only Text]
+      keeperRows <-
+        query
+          conn
+          (Query ("SELECT " <> mergeRowColumns <> " FROM bookmarks WHERE id = ?"))
+          (Only keep) ::
+          IO [MergeRow]
+      case keeperRows of
+        [] -> pure 0
+        keeper : _ -> do
+          mergedRows <-
+            query
+              conn
+              (Query ("SELECT " <> mergeRowColumns <> " FROM bookmarks WHERE id IN (" <> marks <> ") ORDER BY id"))
+              merges ::
+              IO [MergeRow]
+          let allRows = keeper : mergedRows
+              baseNote = case keeperNoteRows of
+                (Only n : _) -> n
+                _ -> ""
+              mergedNote =
+                appendNotes
+                  baseNote
+                  [ noteBlock (nrTitle r) (nrUrl r) (nrNote r)
+                  | r <- noteRows
+                  , not (T.null (T.strip (nrNote r)))
+                  ]
+              openCount = sum (map mrOpenCount allRows)
+              lastOpened = maxJust (map mrLastOpenedAt allRows)
+              lastChecked = maxJust (map mrLastCheckedAt allRows)
+              -- A merged copy that was read makes the keeper read; a dead
+              -- keeper stays dead only when every copy was dead.
+              isRead = if any ((/= 0) . mrIsRead) allRows then (1 :: Int) else 0
+              isDead = if all ((/= 0) . mrIsDead) allRows then (1 :: Int) else 0
+              createdAt = minimum (map mrCreatedAt allRows)
+              addedAt = minimum (map mrAddedAt allRows)
+              capturedAt = firstJust (map mrSnapshotCapturedAt allRows)
+          executeNamed
+            conn
+            "UPDATE bookmarks SET note_body = :note, open_count = :open_count, last_opened_at = :last_opened, last_checked_at = :last_checked, is_read = :is_read, is_dead = :is_dead, created_at = :created, added_at = :added, favicon_url = :favicon, snapshot_path = :snapshot_path, snapshot_kind = :snapshot_kind, snapshot_captured_at = :snapshot_captured, ai_summary = :ai_summary, updated_at = :updated WHERE id = :keep"
+            [ ":note" := mergedNote
+            , ":open_count" := openCount
+            , ":last_opened" := lastOpened
+            , ":last_checked" := lastChecked
+            , ":is_read" := isRead
+            , ":is_dead" := isDead
+            , ":created" := createdAt
+            , ":added" := addedAt
+            , ":favicon" := firstText (map mrFaviconUrl allRows)
+            , ":snapshot_path" := firstText (map mrSnapshotPath allRows)
+            , ":snapshot_kind" := firstText (map mrSnapshotKind allRows)
+            , ":snapshot_captured" := capturedAt
+            , ":ai_summary" := firstText (map mrAiSummary allRows)
+            , ":updated" := now
+            , ":keep" := keep
+            ]
+          execute conn (Query ("DELETE FROM bookmarks WHERE id IN (" <> marks <> ")")) merges
+          when preferHttps $
+            upgradeKeeperUrl conn keep now (keeperUrlRows, noteRows)
+          pure (length found)
+
+-- | Upgrade an http keeper to the https address of the same page once the
+-- absorbed rows are gone. @keeperUrlRows@ is the keeper's stored address and
+-- @noteRows@ carries the absorbed addresses.
+upgradeKeeperUrl :: Connection -> Int -> Int -> ([Only Text], [NoteRow]) -> IO ()
+upgradeKeeperUrl conn keep now (keeperUrlRows, noteRows) = do
+  let keeperUrl = case keeperUrlRows of
+        (Only u : _) -> T.strip u
+        _ -> ""
+      httpsCandidate =
+        case [T.strip (nrUrl r) | r <- noteRows, "https://" `T.isPrefixOf` T.strip (nrUrl r)] of
+          (url : _) -> Just url
+          [] -> Nothing
+  case httpsCandidate of
+    Just newUrl
+      | "http://" `T.isPrefixOf` keeperUrl ->
+          execute conn "UPDATE bookmarks SET url = ?, updated_at = ? WHERE id = ?" (newUrl, now, keep)
+    _ -> pure ()
+
+-- ---------------------------------------------------------------------------
+-- Confirmed merge of every same-URL duplicate group
+-- ---------------------------------------------------------------------------
+
+{- | Merge every canonical-URL duplicate group at once. The advisory
+title-on-source groups are intentionally not touched: different pages can
+share a title. One undo snapshot covers every keeper and absorbed row, so a
+single undo restores the whole operation.
+-}
+mergeUrlDuplicatesAll :: Connection -> IO DedupMergeAllReport
+mergeUrlDuplicatesAll conn = do
+  start <- getPOSIXTime
+  withImmediateTransaction conn $ do
+    rows <- query_ conn "SELECT id, url, title, domain FROM bookmarks" :: IO [(Int, Text, Text, Text)]
+    let groups = [group | group <- dedupeGroups rows, giKind group == "url"]
+        plans = mapMaybe planGroup groups
+        records = sum (map (length . giIds) groups)
+        affected = dedupeIds (concat [keeper : absorbs | (keeper, absorbs) <- plans])
+    if null plans
+      then
+        pure
+          DedupMergeAllReport
+            { dmGroups = 0
+            , dmRecords = 0
+            , dmAffected = 0
+            , dmSnapshotId = 0
+            , dmElapsedMs = 0
+            }
+      else do
+        snapshotId <- recordUndoIds conn "merge_all" affected
+        forM_ plans $ \(keeper, absorbs) -> mergeGroupTx conn keeper absorbs True
+        end <- getPOSIXTime
+        pure
+          DedupMergeAllReport
+            { dmGroups = length plans
+            , dmRecords = records
+            , dmAffected = length affected
+            , dmSnapshotId = snapshotId
+            , dmElapsedMs = floor ((end - start) * 1000)
+            }
+  where
+    planGroup group = case sortOn id (giIds group) of
+      [] -> Nothing
+      (keeper : absorbs) -> Just (keeper, absorbs)
+
+-- ---------------------------------------------------------------------------
+-- Helpers
+-- ---------------------------------------------------------------------------
+
+existingBookmarkIds :: Connection -> [Int] -> IO [Int]
+existingBookmarkIds _ [] = pure []
+existingBookmarkIds conn ids = do
+  rows <-
+    query
+      conn
+      (Query ("SELECT id FROM bookmarks WHERE id IN (" <> marksFor uniqueIds <> ") ORDER BY id"))
+      uniqueIds ::
+      IO [Only Int]
+  pure [bid | Only bid <- rows]
+  where
+    uniqueIds = dedupeIds ids
+
+dedupeIds :: [Int] -> [Int]
+dedupeIds = go Set.empty
+  where
+    go _ [] = []
+    go seen (x : rest)
+      | x <= 0 = go seen rest
+      | Set.member x seen = go seen rest
+      | otherwise = x : go (Set.insert x seen) rest
+
+marksFor :: [Int] -> Text
+marksFor values = T.intercalate "," (replicate (length values) "?")
+
+chunksOf :: Int -> [a] -> [[a]]
+chunksOf _ [] = []
+chunksOf n xs = take n xs : chunksOf n (drop n xs)
 
 -- | Append notes with a blank line between blocks. Empty notes are skipped and
 -- a note identical to the keeper body is not duplicated.
@@ -295,6 +501,3 @@ maxJust :: [Maybe Int] -> Maybe Int
 maxJust values = case [v | Just v <- values] of
   [] -> Nothing
   present -> Just (maximum present)
-
-dedupeIds :: [Int] -> [Int]
-dedupeIds ids = [i | (n, i) <- zip [0 :: Int ..] ids, i > 0, not (elem i (take n ids))]

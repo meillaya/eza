@@ -6,11 +6,9 @@ module Eza.Graph
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
-import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Database.SQLite.Simple
-import Database.SQLite.Simple (Query (..))
 
 import Eza.Types
 
@@ -78,16 +76,59 @@ tagsFor conn ids = do
       ids :: IO [(Int, Text)]
   pure (Map.fromListWith (flip (<>)) [(i, [t]) | (i, t) <- rows])
 
+{- | Tag co-occurrence edges between the selected records.
+
+The previous implementation compared every selected record with every other
+one and intersected their tag lists. This groups the records by tag first: one
+map walks the tag membership, counts how many tags each pair shares, and then
+emits the edge list in the same order the old nested loop produced it (by the
+position of the numerically smaller id in the id list, then the position of the
+larger id), so the weight sort the caller applies sees an identical edge list.
+-}
 graphEdges :: [Int] -> Map.Map Int [Text] -> [GraphEdge]
 graphEdges ids tagsBy =
-  [ GraphEdge a b (length (filter (`elem` tagsA) tagsB))
-  | (a, tagsA) <- pairs
-  , (b, tagsB) <- pairs
+  [ GraphEdge a b weight
+  | ((a, b), weight) <- orderedCounts
   , a < b
-  , not (null (filter (`elem` tagsA) tagsB))
   ]
   where
-    pairs = [(i, Map.findWithDefault [] i tagsBy) | i <- ids]
+    posById :: Map.Map Int Int
+    posById = Map.fromList (zip ids [0 :: Int ..])
+
+    -- Each tag maps to the ids carrying it, in id-list order.
+    tagMembers :: Map.Map Text [Int]
+    tagMembers =
+      Map.fromListWith (flip (<>))
+        [ (tag, [bid])
+        | bid <- ids
+        , tag <- Map.findWithDefault [] bid tagsBy
+        ]
+
+    pairCounts :: Map.Map (Int, Int) Int
+    pairCounts =
+      Map.fromListWith (+)
+        [ (orderedPair x y, 1)
+        | members <- Map.elems tagMembers
+        , (x, y) <- unorderedPairs members
+        ]
+
+    orderedCounts :: [((Int, Int), Int)]
+    orderedCounts =
+      sortOn
+        (\((a, b), _) -> (position a, position b))
+        (Map.toList pairCounts)
+
+    position :: Int -> Int
+    position bid = Map.findWithDefault 0 bid posById
+
+    orderedPair :: Int -> Int -> (Int, Int)
+    orderedPair x y
+      | x <= y = (x, y)
+      | otherwise = (y, x)
+
+    unorderedPairs :: [a] -> [(a, a)]
+    unorderedPairs [] = []
+    unorderedPairs (x : xs) = [(x, y) | y <- xs] <> unorderedPairs xs
 
 nodeDetails :: Connection -> [Int] -> Map.Map Int Int -> IO (Map.Map Int GraphNode)
 nodeDetails _ [] _ = pure Map.empty

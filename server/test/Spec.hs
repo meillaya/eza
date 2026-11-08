@@ -3,6 +3,8 @@ module Main (main) where
 import Control.Exception (bracket)
 import Data.Aeson (object)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
+import Data.Text (Text)
 import qualified Data.Text as T
 import Database.SQLite.Simple (close)
 import qualified Database.SQLite.Simple as Sqlite
@@ -14,6 +16,8 @@ import Test.Hspec
 
 import qualified ClipSpec
 import qualified DataIntegritySpec
+import qualified DedupSpec
+import qualified PerfSpec
 import qualified Eza.Auth as Auth
 import Eza.Bookmarks
 import Eza.Db (openDb, queryScalar, schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaVersion, targetSchemaVersion)
@@ -26,7 +30,7 @@ import Eza.Rules (Rule (..), createRule, listRules, matchingBookmarks)
 import Eza.SearchQuery
 import Eza.Shares (ShareRecord (..), ShareState (..), ShareUnavailable (..), createShare, resolveShare, resolveShareState, revokeShare, shareUnavailablePage)
 import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), Highlight (..), ImportReport (..), LibraryStats (..), SearchPage (..))
-import Eza.Url (normalizeUrl)
+import Eza.Url (dedupeKey, dedupeLookupUrls, normalizeUrl)
 
 main :: IO ()
 main = hspec $ do
@@ -35,6 +39,15 @@ main = hspec $ do
             normalizeUrl "HTTPS://Example.COM:443/a/#frag" `shouldBe` "https://example.com/a"
             normalizeUrl "https://example.com/" `shouldBe` "https://example.com"
             normalizeUrl "http://example.com:80/path/" `shouldBe` "http://example.com/path"
+
+    describe "canonical dedupe key" $ do
+        it "ignores the http(s) scheme, www and trailing slash but keeps non-default ports" $ do
+            dedupeKey "http://Example.COM:80/a/" `shouldBe` dedupeKey "https://example.com/a"
+            dedupeKey "https://www.example.com" `shouldBe` T.pack "example.com"
+            dedupeKey "http://example.com:8080/a" `shouldNotBe` dedupeKey "http://example.com/a"
+        it "lists the exact stored-URL candidates for a canonical lookup" $ do
+            dedupeLookupUrls "HTTPS://Example.com:443/a/" `shouldMatchList` map T.pack ["https://example.com/a", "http://example.com/a"]
+            dedupeLookupUrls "mailto:owner@example.com" `shouldBe` [T.pack "mailto:owner@example.com"]
 
     describe "favicon parsing" $ do
         it "resolves relative icon links against a directory URL" $ do
@@ -226,6 +239,57 @@ main = hspec $ do
                                 Nothing -> expectationFailure "expected bookmark detail"
                                 Just d -> bdTags d `shouldContain` ["toolbar"]
                         [] -> expectationFailure "expected a tagged bookmark"
+
+    describe "import pre-deduplication" $ do
+        it "collapses http/https variants in the file before writing a row" $ do
+            let raw =
+                    BSC.pack
+                        ( "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n"
+                            <> "<DT><A HREF=\"http://example.com/page\" ADD_DATE=\"1700000000\" TAGS=\"alpha\">A http</A>\n"
+                            <> "<DT><A HREF=\"https://example.com/page#section\" ADD_DATE=\"1700000001\" TAGS=\"beta\">A https</A>\n"
+                            <> "</DL><p>\n"
+                        )
+                parsed = parseNetscape defaultImportOptions raw
+            piDuplicates parsed `shouldBe` 1
+            length (piItems parsed) `shouldBe` 1
+            map iiUrl (piItems parsed) `shouldBe` [T.pack "https://example.com/page"]
+            map iiTags (piItems parsed) `shouldBe` [[T.pack "alpha", T.pack "beta"]]
+
+        it "merges a re-import into the existing canonical row and records the run" $
+            withSystemTempDirectory "eza-dedupe-import" $ \dir ->
+                bracket (openDb (dir </> "test.db")) close $ \conn -> do
+                    existing <- insertRawBookmark conn (T.pack "https://example.com/page") (T.pack "Existing")
+                    let raw =
+                            BSC.pack
+                                ( "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n"
+                                    <> "<DT><A HREF=\"http://example.com/page\" TAGS=\"alpha\">A http</A>\n"
+                                    <> "</DL><p>\n"
+                                )
+                        parsed = parseNetscape defaultImportOptions raw
+                    report <- importParsed conn defaultImportOptions parsed
+                    irInserted report `shouldBe` 0
+                    irExisting report `shouldBe` 1
+                    bookmarkCount conn `shouldReturn` 1
+                    bookmarkUrlAt conn existing `shouldReturn` T.pack "https://example.com/page"
+                    bookmarkTagNames conn existing `shouldReturn` [T.pack "alpha"]
+                    runs <- Sqlite.query_ conn "SELECT COUNT(*) FROM import_runs" :: IO [Sqlite.Only Int]
+                    runs `shouldBe` [Sqlite.Only 1]
+
+        it "heals a legacy fragment URL when the importer matches it" $
+            withSystemTempDirectory "eza-dedupe-heal" $ \dir ->
+                bracket (openDb (dir </> "test.db")) close $ \conn -> do
+                    existing <- insertRawBookmark conn (T.pack "https://example.com/legacy#/section") (T.pack "Legacy")
+                    let raw =
+                            BSC.pack
+                                ( "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n"
+                                    <> "<DT><A HREF=\"https://example.com/legacy\">Legacy clean</A>\n"
+                                    <> "</DL><p>\n"
+                                )
+                        parsed = parseNetscape defaultImportOptions raw
+                    report <- importParsed conn defaultImportOptions parsed
+                    irInserted report `shouldBe` 0
+                    irExisting report `shouldBe` 1
+                    bookmarkUrlAt conn existing `shouldReturn` T.pack "https://example.com/legacy"
 
     describe "library stats" $ do
         it "counts rows, sources, top sources, years, and filing days" $
@@ -572,6 +636,8 @@ main = hspec $ do
                 close conn
 
     DataIntegritySpec.spec
+    DedupSpec.spec
+    PerfSpec.spec
     ClipSpec.spec
 
 -- ---------------------------------------------------------------------------
@@ -619,3 +685,32 @@ insertTestCredential conn credentialId = do
         conn
         "INSERT INTO passkey_credentials (credential_id,user_handle,public_key,created_at) VALUES (?,?,?,1)"
         (credentialId, BS.pack [0x02], BS.pack [0x03])
+
+-- | Raw row insert for import/dedupe tests that do not need a normal save.
+insertRawBookmark :: Sqlite.Connection -> Text -> Text -> IO Int
+insertRawBookmark conn url title = do
+    Sqlite.execute
+        conn
+        "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES (?,?,?,?,?,?)"
+        (url, title, T.pack "example.com", (1 :: Int), (1 :: Int), (1 :: Int))
+    fromIntegral <$> Sqlite.lastInsertRowId conn
+
+bookmarkCount :: Sqlite.Connection -> IO Int
+bookmarkCount conn = do
+    rows <- Sqlite.query_ conn "SELECT COUNT(*) FROM bookmarks" :: IO [Sqlite.Only Int]
+    pure (case rows of (Sqlite.Only n : _) -> n; [] -> 0)
+
+bookmarkUrlAt :: Sqlite.Connection -> Int -> IO Text
+bookmarkUrlAt conn bid = do
+    rows <- Sqlite.query conn "SELECT url FROM bookmarks WHERE id = ?" (Sqlite.Only bid) :: IO [Sqlite.Only Text]
+    pure (case rows of (Sqlite.Only url : _) -> url; [] -> T.pack "")
+
+bookmarkTagNames :: Sqlite.Connection -> Int -> IO [Text]
+bookmarkTagNames conn bid = do
+    rows <-
+        Sqlite.query
+            conn
+            "SELECT t.name FROM bookmark_tags bt JOIN tags t ON t.id = bt.tag_id WHERE bt.bookmark_id = ? ORDER BY t.name"
+            (Sqlite.Only bid) ::
+            IO [Sqlite.Only Text]
+    pure [name | Sqlite.Only name <- rows]

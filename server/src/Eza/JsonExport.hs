@@ -18,7 +18,7 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
 import GHC.Generics (Generic)
 
-import Eza.Url (hostOf, normalizeUrl)
+import Eza.Url (dedupeLookupUrls, hostOf, normalizeUrl)
 
 data JsonImportReport = JsonImportReport
   { jrBookmarks :: Int
@@ -44,17 +44,17 @@ exportJson conn = do
   searches <- query_ conn "SELECT id,name,q,tags_json,created_at FROM saved_searches ORDER BY id" :: IO [(Int, Text, Text, Text, Int)]
   rules <- query_ conn "SELECT id,name,enabled,field,pattern,add_tags,mark_read,created_at FROM rules ORDER BY id" :: IO [(Int, Text, Int, Text, Text, Text, Int, Int)]
   let tagsFor bid = [name | (bookmarkId, name) <- tagRows, bookmarkId == bid]
-      bookmarkValue (bid, url, title, description, domain, note, extracted, read, created, added) =
+      bookmarkValue (bid, url, title, description, domain, note, extracted, isRead, created, added) =
         object
           [ "id" .= bid, "url" .= url, "title" .= title, "description" .= description
           , "domain" .= domain, "note_body" .= note, "extracted_text" .= extracted
-          , "is_read" .= (read /= 0), "created_at" .= created, "added_at" .= added
+          , "is_read" .= (isRead /= 0), "created_at" .= created, "added_at" .= added
           , "tags" .= tagsFor bid
           ]
       highlightValue (hid, bid, quote, start, end, note, color, created) =
         object ["id" .= hid, "bookmark_id" .= bid, "quote" .= quote, "start_offset" .= start, "end_offset" .= end, "note" .= note, "color" .= color, "created_at" .= created]
       searchValue (sid, name, q, tags, created) = object ["id" .= sid, "name" .= name, "q" .= q, "tags" .= tags, "created_at" .= created]
-      ruleValue (rid, name, enabled, field, rulePattern, tags, markRead, created) = object ["id" .= rid, "name" .= name, "enabled" .= (enabled /= 0), "field" .= field, "pattern" .= rulePattern, "add_tags" .= tags, "mark_read" .= (markRead /= 0), "created_at" .= created]
+      ruleValue (rid, name, enabled, ruleFieldName, rulePattern, tags, markRead, created) = object ["id" .= rid, "name" .= name, "enabled" .= (enabled /= 0), "field" .= ruleFieldName, "pattern" .= rulePattern, "add_tags" .= tags, "mark_read" .= (markRead /= 0), "created_at" .= created]
   pure
     ( object
         [ "format" .= ("eza-json" :: Text)
@@ -107,8 +107,8 @@ importJson conn value =
       | otherwise -> do
           now <- (floor <$> getPOSIXTime) :: IO Int
           imported <- forM bookmarks (importBookmark now)
-          let pairs = [(old, new) | Right (Just old, new) <- imported]
-              bookmarkMap = Map.fromList pairs
+          let idPairs = [(old, new) | Right (Just old, new) <- imported]
+              bookmarkMap = Map.fromList idPairs
               bad = length [() | Left _ <- imported]
           importedHighlights <- forM highlights (importHighlight now bookmarkMap)
           importedSearches <- forM searches (importSavedSearch now)
@@ -136,7 +136,9 @@ importJson conn value =
           let url = normalizeUrl (ibUrl bookmark)
               created = if ibCreated bookmark > 0 then ibCreated bookmark else ibAdded bookmark
               added = if ibAdded bookmark > 0 then ibAdded bookmark else now
-          existing <- query conn "SELECT id FROM bookmarks WHERE url = ? OR url = ? ORDER BY id LIMIT 1" (url, ibUrl bookmark) :: IO [Only Int]
+          let candidates = dedupeLookupUrls (ibUrl bookmark)
+              marks = T.intercalate "," (replicate (length candidates) "?")
+          existing <- query conn (Query ("SELECT id FROM bookmarks WHERE url IN (" <> marks <> ") ORDER BY id LIMIT 1")) candidates :: IO [Only Int]
           case existing of
             (Only bid : _) -> do
               fillMissing conn bid bookmark
@@ -253,10 +255,10 @@ importJson conn value =
     importRule now raw =
       case parseMaybe parseRule raw of
         Nothing -> pure (Left "invalid rule")
-        Just (name, enabled, field, rulePattern, tags, markRead) -> do
+        Just (name, enabled, ruleFieldName, rulePattern, tags, markRead) -> do
           let cleanName = T.strip name
               cleanPattern = T.strip rulePattern
-              safeField = if T.toLower (T.strip field) `elem` ["url", "domain", "title"] then T.toLower (T.strip field) else "url"
+              safeField = if T.toLower (T.strip ruleFieldName) `elem` ["url", "domain", "title"] then T.toLower (T.strip ruleFieldName) else "url"
           if T.null cleanName || T.null cleanPattern
             then pure (Left "rule name and pattern are required")
             else do
@@ -277,7 +279,7 @@ importJson conn value =
       description <- o .:? "description" .!= ""
       note <- o .:? "note_body" .!= ""
       extracted <- o .:? "extracted_text" .!= ""
-      read <- o .:? "is_read" .!= False
+      isRead <- o .:? "is_read" .!= False
       dead <- o .:? "is_dead" .!= False
       created <- o .:? "created_at" .!= 0
       added <- o .:? "added_at" .!= 0
@@ -301,7 +303,7 @@ importJson conn value =
           , ibDescription = description
           , ibNote = note
           , ibExtracted = extracted
-          , ibRead = read
+          , ibRead = isRead
           , ibDead = dead
           , ibCreated = created
           , ibAdded = added
@@ -335,11 +337,11 @@ importJson conn value =
     parseRule = withObject "rule" $ \o -> do
       name <- o .: "name"
       enabled <- o .:? "enabled" .!= True
-      field <- o .:? "field" .!= "url"
+      ruleFieldName <- o .:? "field" .!= "url"
       rulePattern <- o .: "pattern"
       tags <- o .:? "add_tags" .!= []
       markRead <- o .:? "mark_read" .!= False
-      pure (name, enabled, field, rulePattern, tags :: [Text], markRead)
+      pure (name, enabled, ruleFieldName, rulePattern, tags :: [Text], markRead)
 
 dedupeTags :: [Text] -> [Text]
 dedupeTags = go []

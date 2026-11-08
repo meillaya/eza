@@ -225,6 +225,14 @@ tree with entries at the archive root**:
     app/app.wasm
     app/ghc_wasm_jsffi.js
     vendor/...
+    # plus the <file>.gz sidecars scripts/build-web.sh writes next to the
+    # compressible assets (wasm, css, html shell, loader JavaScript)
+
+The `.gz` sidecars are not optional for a fast cold load: the server serves
+them with `Content-Encoding: gzip` and `Vary: Accept-Encoding`, so the WASM
+bundle crosses the wire at about 1.5 MB instead of 6.7 MB. Including them in the
+tarball is what keeps the compression on; without them the assets are served
+uncompressed.
 
 After the asset exists:
 

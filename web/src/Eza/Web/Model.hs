@@ -5,6 +5,7 @@ module Eza.Web.Model (
     NoteMode (..),
     ToastKind (..),
     Toast (..),
+    KeyEvent (..),
     Model (..),
     Action (..),
     initialModel,
@@ -18,6 +19,7 @@ module Eza.Web.Model (
     LedgerEntry (..),
     ledgerEntries,
     ledgerContentHeight,
+    entryHeight,
     yearOf,
     isoDay,
     formatStamp,
@@ -46,6 +48,10 @@ import Eza.Types (
     BookmarkDetail,
     BookmarkSummary (..),
     BootPayload,
+    DedupCounts,
+    DedupGroup (..),
+    DedupMergeAllReport,
+    DedupReport,
     GraphData,
     Highlight (..),
     ImportReport,
@@ -58,7 +64,7 @@ import Miso
 import Miso.Router (Router (..), RoutingError (..), Token (..), parseURI, routes, toCapture, toPath, toQueryParam)
 import Miso.Subscription.History (getURI)
 
-import Eza.Web.Types (AccountInfo, AiStatus, ApiError, ConsolGroup, DedupGroup, ReaderSelection, Rule (..), SessionInfo, ShareView, TagSuggestion, TokenView)
+import Eza.Web.Types (AccountInfo, AiStatus, ApiError, ConsolGroup, ReaderSelection, Rule (..), SessionInfo, ShareView, TagSuggestion, TokenView)
 
 -- | Application routes.  @Bookmark@ carries the numeric bookmark id.
 data Route
@@ -291,6 +297,22 @@ data Toast = Toast
     }
     deriving (Eq, Show)
 
+{- | One keyboard event as the JavaScript bridge reports it. @keKey@ is
+@event.key@, which is layout independent: it is the character the user meant,
+not the physical key code. @keEditable@ says whether focus was in a text field
+when the key was pressed, so the update function can tell typing from a
+shortcut without probing the DOM.
+-}
+data KeyEvent = KeyEvent
+    { keKey :: Text
+    , keShift :: Bool
+    , keCtrl :: Bool
+    , keMeta :: Bool
+    , keAlt :: Bool
+    , keEditable :: Bool
+    }
+    deriving (Eq, Show)
+
 -- | Every user-visible action the client understands.
 data Action
     = -- lifecycle / routing
@@ -301,8 +323,7 @@ data Action
     | LayoutChanged Int Int
     | Scrolled
     | Resized
-    | GlobalKey KeyInfo
-    | KeyHandled KeyInfo Bool
+    | KeyPressed KeyEvent
     | DeleteBookmarkRequest Int
     | DeleteBookmarkCancel
     | DeleteBookmarkConfirm
@@ -338,8 +359,8 @@ data Action
     | ClearFilters
     | SortSelected Text
     | UnreadToggled
-    | ListLoaded Bool SearchPage
-    | ListFailed Bool ApiError
+    | ListLoaded Bool Int SearchPage
+    | ListFailed Bool Int ApiError
     | LoadMore
     | MarkAllAbove
     | MarkAllDone Int
@@ -422,15 +443,23 @@ data Action
     | GraphPickSeed Int
     | OpenGraphAt Int
     | GraphRefresh
-    | -- dedup
-      DedupLoaded [DedupGroup]
+    | -- dedup (two independently paged sections)
+      DedupLoaded DedupReport
     | DedupFailed ApiError
-    | DedupKeep Int Int
-    | DedupMerge Int
+    | DedupMoreUrl
+    | DedupMoreTitle
+    | DedupMoreLoaded Bool DedupReport
+    | DedupKeep Text Int
+    | DedupMerge Text
     | DedupMergeConfirm
     | DedupMergeCancel
     | DedupRefresh
-    | DedupMerged Int Int
+    | DedupMerged Text Int Int
+    | DedupMergeAllOpen
+    | DedupMergeAllCancel
+    | DedupMergeAllConfirm
+    | DedupMergeAllDone DedupMergeAllReport
+    | DedupMergeAllFailed ApiError
     | -- tags
       TagStatsLoaded [TagStat]
     | ConsolLoaded [ConsolGroup]
@@ -495,6 +524,8 @@ data Action
     | SessionsRevokeOthers
     | SessionsRevoked Int
     | SessionsRevokeFailed ApiError
+    | LogoutRequest
+    | LogoutCancel
     | Logout
     | LoggedOut
     | -- selection / bulk actions
@@ -598,6 +629,15 @@ data Model = Model
       mRoute :: Route
     , mTheme :: Theme
     , mBooted :: Bool
+    , -- boot payload reuse: the boot page seeds the default ledger, so a list
+      -- route that arrives before /boot answers waits for it instead of
+      -- fetching the same page a second time.
+      mBootReady :: Bool
+    , mBootSeeded :: Bool
+    , mRouted :: Bool
+    , mListDeferred :: Bool
+    , -- list fetch epoch: a response for an older query is dropped
+      mListEpoch :: Int
     , mVersion :: MisoString
     , mOrigin :: MisoString
     , mWindowOrigin :: MisoString
@@ -710,6 +750,7 @@ data Model = Model
     , mDirty :: Bool
     , mGuardOpen :: Bool
     , mPendingRoute :: Maybe Route
+    , mConfirmLogout :: Bool
     , -- graph
       mGraph :: Maybe GraphData
     , mGraphLoading :: Bool
@@ -718,13 +759,19 @@ data Model = Model
     , mGraphSeed :: Maybe Int
     , mGraphQuery :: MisoString
     , mGraphResults :: [BookmarkSummary]
-    , -- dedup
-      mDedup :: [DedupGroup]
+    , -- dedup: exact counts plus two independently paged sections
+      mDedupCounts :: Maybe DedupCounts
+    , mDedupUrlGroups :: [DedupGroup]
+    , mDedupTitleGroups :: [DedupGroup]
     , mDedupLoading :: Bool
     , mDedupError :: Maybe MisoString
-    , mDedupChoice :: M.Map Int Int
-    , mDedupConfirm :: Maybe Int
+    , mDedupChoice :: M.Map Text Int
+    , mDedupConfirm :: Maybe Text
     , mDedupLast :: Maybe (Int, Int)
+    , mDedupMoreBusy :: Bool
+    , mDedupBusy :: Bool
+    , mDedupMergeAllOpen :: Bool
+    , mDedupMergeAllReport :: Maybe DedupMergeAllReport
     , -- tags / ai tags
       mConsol :: [ConsolGroup]
     , mConsolLoading :: Bool
@@ -774,6 +821,11 @@ initialModel =
         { mRoute = Index
         , mTheme = ThemeLight
         , mBooted = False
+        , mBootReady = False
+        , mBootSeeded = False
+        , mRouted = False
+        , mListDeferred = False
+        , mListEpoch = 0
         , mVersion = "0.1.0"
         , mOrigin = ""
         , mWindowOrigin = ""
@@ -791,7 +843,9 @@ initialModel =
         , mTotal = 0
         , mHasMore = False
         , mOffset = 0
-        , mLoading = False
+        , -- the first paint is a skeleton: the boot payload or the deferred
+          -- list fetch fills the ledger
+          mLoading = True
         , mLoadingMore = False
         , mError = Nothing
         , mNotice = Nothing
@@ -880,6 +934,7 @@ initialModel =
         , mDirty = False
         , mGuardOpen = False
         , mPendingRoute = Nothing
+        , mConfirmLogout = False
         , mGraph = Nothing
         , mGraphLoading = False
         , mGraphDepth = 1
@@ -887,12 +942,18 @@ initialModel =
         , mGraphSeed = Nothing
         , mGraphQuery = ""
         , mGraphResults = []
-        , mDedup = []
+        , mDedupCounts = Nothing
+        , mDedupUrlGroups = []
+        , mDedupTitleGroups = []
         , mDedupLoading = False
         , mDedupError = Nothing
         , mDedupChoice = M.empty
         , mDedupConfirm = Nothing
         , mDedupLast = Nothing
+        , mDedupMoreBusy = False
+        , mDedupBusy = False
+        , mDedupMergeAllOpen = False
+        , mDedupMergeAllReport = Nothing
         , mConsol = []
         , mConsolLoading = False
         , mConsolError = Nothing
@@ -980,10 +1041,15 @@ ledgerEntries m =
 ledgerContentHeight :: Model -> Int
 ledgerContentHeight m = sum (map (entryHeight (mWidth m)) (ledgerEntries m))
 
+{- | Pixel height of one ledger entry. These numbers are a contract with
+eza.css: on the table layout (at least 768px) every row and year divider has
+exactly this height, which the virtualized ledger needs to place its spacers.
+The phone sheet keeps its own heights because its rows wrap.
+-}
 entryHeight :: Int -> LedgerEntry -> Int
 entryHeight w = \case
-    LedgerYear _ _ -> if w < 768 then 48 else 56
-    LedgerRow _ _ -> if w < 768 then 72 else 52
+    LedgerYear _ _ -> if w < 768 then 48 else 74
+    LedgerRow _ _ -> if w < 768 then 72 else 48
 
 -- | Is a bookmark currently selected for bulk actions?
 isSelected :: Model -> Int -> Bool
@@ -1007,6 +1073,7 @@ paletteEntries m = filter matches (commands ++ savedSearches ++ bookmarks)
 
     commands =
         [ ("Add bookmark", "POST", AddOpen)
+        , ("Sign out", "session", LogoutRequest)
         , ("Toggle theme", "appearance", ThemeToggled)
         , ("Library", "all bookmarks", Navigate Index)
         , ("Inbox", "unread", Navigate Inbox)

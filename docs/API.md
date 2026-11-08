@@ -199,8 +199,9 @@ GET    /api/v1/maintenance/prune-candidates
 POST   /api/v1/maintenance/prune
 POST   /api/v1/maintenance/check-dead
 POST   /api/v1/undo
-GET    /api/v1/dedup/candidates
+GET    /api/v1/dedup/candidates?url_offset=0&url_limit=60&title_offset=0&title_limit=40
 POST   /api/v1/dedup/merge
+POST   /api/v1/dedup/merge-all
 POST   /api/v1/bookmarks/{id}/open
 POST   /api/v1/bookmarks/{id}/enrich
 POST   /api/v1/bookmarks/{id}/extract
@@ -215,9 +216,37 @@ GET    /api/v1/export
 snapshot before deleting. `POST /api/v1/undo` restores the most recent
 snapshot and returns `{"restored":N}`.
 
+`GET /api/v1/dedup/candidates` pages the duplicate report. `url_limit`
+(default 60) and `title_limit` (default 40) are clamped to 1-200 and both
+offsets default to 0. The response is
+`{"counts":{url_groups,url_records,title_groups,title_records},"url_groups":[{"key","kind":"url","items":[BookmarkSummary]}],"title_groups":[{"key","kind":"title","items":[...]}]}`.
+`counts` always covers the whole library, so the interface never sums loaded
+groups. Items are ordered by record id, so the first item is the deterministic
+keeper. URL groups are safe duplicates: the shared canonical key ignores the
+http/https scheme, a leading `www.`, default ports, fragments, tracking
+parameters, and a trailing slash, while a non-default port stays significant.
+Title groups are advisory (same normalised title on one source, different
+pages); bulk merging never touches them.
+
+`POST /api/v1/dedup/merge` merges one group: `{"keep_id":N,"merge_ids":[N]}`.
+Every absorbed row's tags, notes, highlights and wikilinks are folded onto the
+keeper, and a `merge` undo snapshot is written first.
+
+`POST /api/v1/dedup/merge-all` requires `{"confirm":true}`. It recomputes every
+canonical-URL duplicate group, merges them all in one transaction behind one
+`merge_all` undo snapshot, and returns
+`{"groups":N,"records":N,"affected":N,"snapshot_id":N,"elapsed_ms":N}`. A
+keeper prefers the https address of its page. Title matches are excluded by
+design. The command-line equivalent is
+`eza-bookmarks dedupe --all --dry-run` and `eza-bookmarks dedupe --all --yes`.
+
 `POST /api/v1/import` accepts a multipart body with one `file` field in the
-Netscape format. It returns an `ImportReport`. `POST /api/v1/import/json`
-takes a versioned eza JSON document.
+Netscape format. It returns an `ImportReport`. Rows are de-duplicated against
+the library by the canonical URL key before anything is inserted, so a re-run,
+an overlapping export, or an http/https copy of a filed page merges tags onto
+the existing record instead of creating a second row. `POST
+/api/v1/import/json` takes a versioned eza JSON document and uses the same
+canonical key.
 
 `GET /api/v1/export` returns Netscape HTML. Add `?format=json` for a JSON
 document with bookmarks, tags, highlights, saved searches, and rules.

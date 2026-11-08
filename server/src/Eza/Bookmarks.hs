@@ -23,24 +23,28 @@ module Eza.Bookmarks (
     pruneCandidates,
     pruneApply,
     bookmarksByIds,
+    bookmarksByIdsLight,
     backfillDomains,
     bookmarkStats,
     libraryStats,
 ) where
 
 import Control.Monad (forM, forM_)
+import Data.List (sortOn)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
+import Text.Read (readMaybe)
 
 import Eza.Links (syncLinks)
 import Eza.Rules (applyRules)
 import Eza.SearchQuery
 import Eza.Types
 import Eza.Undo (recordUndoIds)
-import Eza.Url (hostOf, normalizeUrl)
+import Eza.Url (dedupeLookupUrls, hostOf, normalizeUrl)
 
 data ListQuery = ListQuery
     { lqQ :: Text
@@ -56,24 +60,27 @@ data ListQuery = ListQuery
 defaultListQuery :: ListQuery
 defaultListQuery = ListQuery "" [] Nothing Nothing "created" 0 60
 
-data SummaryRow = SummaryRow
-    { srId :: Int
-    , srUrl :: Text
-    , srTitle :: Text
-    , srDescription :: Text
-    , srDomain :: Text
-    , srFaviconUrl :: Text
-    , srCreatedAt :: Int
-    , srAddedAt :: Int
-    , srIsRead :: Int
-    , srIsDead :: Int
-    , srNoteBody :: Text
-    , srExtractedText :: Text
+{- | The summary columns every ledger row needs. The two long text columns
+(note body and extracted text) are fetched only when an FTS query needs a
+snippet; the plain listing does not select them, so SQLite never loads the
+large overflow pages for a page of rows.
+-}
+data SummaryCore = SummaryCore
+    { scId :: Int
+    , scUrl :: Text
+    , scTitle :: Text
+    , scDescription :: Text
+    , scDomain :: Text
+    , scFaviconUrl :: Text
+    , scCreatedAt :: Int
+    , scAddedAt :: Int
+    , scIsRead :: Int
+    , scIsDead :: Int
     }
 
-instance FromRow SummaryRow where
+instance FromRow SummaryCore where
     fromRow =
-        SummaryRow
+        SummaryCore
             <$> field
             <*> field
             <*> field
@@ -84,66 +91,104 @@ instance FromRow SummaryRow where
             <*> field
             <*> field
             <*> field
-            <*> field
-            <*> field
 
-summaryColumns :: Text
-summaryColumns =
-    "b.id, b.url, b.title, b.description, b.domain, b.favicon_url, b.created_at, b.added_at, b.is_read, b.is_dead, b.note_body, b.extracted_text"
+coreColumns :: Text
+coreColumns =
+    "b.id, b.url, b.title, b.description, b.domain, b.favicon_url, b.created_at, b.added_at, b.is_read, b.is_dead"
+
+-- | A summary row plus the columns that snippet extraction scans.
+data SummaryRow = SummaryRow
+    { srCore :: SummaryCore
+    , srNoteBody :: Text
+    , srExtractedText :: Text
+    }
+
+instance FromRow SummaryRow where
+    fromRow = SummaryRow <$> fromRow <*> field <*> field
+
+-- | One row as the ledger renders it; snippets are added by the FTS path.
+summaryOf :: SummaryCore -> [Text] -> BookmarkSummary
+summaryOf r tags =
+    BookmarkSummary
+        { bsId = scId r
+        , bsUrl = scUrl r
+        , bsTitle = if T.null (scTitle r) then scUrl r else scTitle r
+        , bsDomain = scDomain r
+        , bsCreatedAt = scCreatedAt r
+        , bsAddedAt = scAddedAt r
+        , bsFaviconUrl = scFaviconUrl r
+        , bsTags = tags
+        , bsIsRead = scIsRead r /= 0
+        , bsIsDead = scIsDead r /= 0
+        , bsSnippet = Nothing
+        }
+
+summaryWithSnippet :: [Text] -> SummaryRow -> [Text] -> BookmarkSummary
+summaryWithSnippet terms row tags =
+    (summaryOf core tags)
+        { bsSnippet =
+            let snippet = snippetFor terms [scTitle core, scDescription core, scUrl core, srNoteBody row, srExtractedText row]
+             in if T.null snippet then Nothing else Just snippet
+        }
+  where
+    core = srCore row
 
 listBookmarks :: Connection -> ListQuery -> IO SearchPage
 listBookmarks conn q = do
     let parsed = parseSearchQuery (lqQ q)
         tags = dedupeText (sqTags parsed <> map (T.toLower . T.strip) (lqTags q))
         (joinSql, whereSql, params, orderSql) = buildFilter q parsed tags
-        pageSql =
+        terms = sqTerms parsed
+        pageParams = params <> [(":limit" := lqLimit q), (":offset" := lqOffset q)]
+        pageSql columns =
             Query
                 ( "SELECT "
-                    <> summaryColumns
+                    <> columns
                     <> " FROM bookmarks b "
                     <> joinSql
                     <> whereSql
                     <> orderSql
                     <> " LIMIT :limit OFFSET :offset"
                 )
-        pageParams = params <> [(":limit" := lqLimit q), (":offset" := lqOffset q)]
-    yearRows <-
-        queryNamed
-            conn
-            ( Query
+        yearSql =
+            Query
                 ( "SELECT CAST(strftime('%Y', b.created_at, 'unixepoch') AS INTEGER), COUNT(*) "
                     <> "FROM bookmarks b "
                     <> joinSql
                     <> whereSql
                     <> " GROUP BY 1 ORDER BY 1 DESC"
                 )
-            )
-            params ::
-            IO [(Int, Int)]
-    let total = sum (map snd yearRows)
-    rows <- queryNamed conn pageSql pageParams :: IO [SummaryRow]
-    tagsById <- tagsForIds conn (map srId rows)
-    let terms = sqTerms parsed
-        toSummary r =
-            BookmarkSummary
-                { bsId = srId r
-                , bsUrl = srUrl r
-                , bsTitle = if T.null (srTitle r) then srUrl r else srTitle r
-                , bsDomain = srDomain r
-                , bsCreatedAt = srCreatedAt r
-                , bsAddedAt = srAddedAt r
-                , bsFaviconUrl = srFaviconUrl r
-                , bsTags = fromMaybe [] (lookup (srId r) tagsById)
-                , bsIsRead = srIsRead r /= 0
-                , bsIsDead = srIsDead r /= 0
-                , bsSnippet =
-                    if null terms
-                        then Nothing
-                        else
-                            let s = snippetFor terms [srTitle r, srDescription r, srUrl r, srNoteBody r, srExtractedText r]
-                             in if T.null s then Nothing else Just s
-                }
-        items = map toSummary rows
+        countSql =
+            Query
+                ( "SELECT COUNT(*) FROM bookmarks b "
+                    <> joinSql
+                    <> whereSql
+                )
+    -- The per-year counts are only needed for the first page; a later page
+    -- needs the total for hasMore, which is a cheaper single count.
+    (total, yearRows) <-
+        if lqOffset q == 0
+            then do
+                rows <- queryNamed conn yearSql params :: IO [(Int, Int)]
+                pure (sum (map snd rows), rows)
+            else do
+                rows <- queryNamed conn countSql params :: IO [Only Int]
+                pure (case rows of [Only n] -> (n, []); _ -> (0, []))
+    items <-
+        if null terms
+            then do
+                rows <- queryNamed conn (pageSql coreColumns) pageParams :: IO [SummaryCore]
+                tagsById <- tagsForIds conn (map scId rows)
+                pure [summaryOf r (fromMaybe [] (lookup (scId r) tagsById)) | r <- rows]
+            else do
+                rows <-
+                    queryNamed
+                        conn
+                        (pageSql (coreColumns <> ", b.note_body, b.extracted_text"))
+                        pageParams ::
+                        IO [SummaryRow]
+                tagsById <- tagsForIds conn (map (scId . srCore) rows)
+                pure [summaryWithSnippet terms r (fromMaybe [] (lookup (scId (srCore r)) tagsById)) | r <- rows]
     pure
         SearchPage
             { spItems = items
@@ -166,7 +211,7 @@ buildFilter q parsed tags =
         Nothing -> " ORDER BY " <> sortClause
     sortClause = case T.toLower (T.strip (lqSort q)) of
         "added" -> "b.added_at DESC, b.id DESC"
-        "opened" -> "COALESCE(b.last_opened_at, 0) DESC, b.id DESC"
+        "opened" -> "b.last_opened_at DESC, b.id DESC"
         _ -> "b.created_at DESC, b.id DESC"
 
     ftsParams = case sqFts parsed of
@@ -385,14 +430,22 @@ allTags conn = do
             IO [(Text, Int)]
     pure [TagStat name count | (name, count) <- rows]
 
+{- | Find a stored row whose URL is the same page as the given one. The save
+path uses the shared canonical key: the lookup is a single indexed @IN@ over
+the exact stored forms (normalized URL and its http/https variants), so
+http and https saves of one page resolve to the same row without a table scan.
+-}
 findBookmarkIdByUrl :: Connection -> Text -> IO (Maybe Int)
 findBookmarkIdByUrl conn url = do
-    let normalized = normalizeUrl url
+    let candidates = dedupeLookupUrls url
+        names = [":url" <> T.pack (show i) | i <- [0 .. length candidates - 1]]
+        placeholders = T.intercalate ", " names
+        params = zipWith (:=) names candidates
     rows <-
-        query
+        queryNamed
             conn
-            "SELECT id FROM bookmarks WHERE url = ? OR url = ? ORDER BY id LIMIT 1"
-            (url, normalized) ::
+            (Query ("SELECT id FROM bookmarks WHERE url IN (" <> placeholders <> ") ORDER BY id LIMIT 1"))
+            params ::
             IO [Only Int]
     pure (case rows of [Only i] -> Just i; _ -> Nothing)
 
@@ -406,41 +459,42 @@ quickSave conn rawUrl title tags = do
     case existing of
         Just bid -> pure (Right (bid, True))
         Nothing -> do
-            result <- insertBookmark conn url title tags
-            case result of
-                Right bid -> pure (Right (bid, False))
-                Left message -> do
-                    raced <- findBookmarkIdByUrl conn url
-                    pure (maybe (Left message) (\bid -> Right (bid, True)) raced)
+            bid <- insertBookmarkRow conn url title tags
+            pure (Right (bid, False))
 
 insertBookmark :: Connection -> Text -> Text -> [Text] -> IO (Either Text Int)
 insertBookmark conn rawUrl title tags = do
-    now <- (floor <$> getPOSIXTime) :: IO Int
     let url = normalizeUrl rawUrl
-    existing <- findBookmarkIdByUrl conn rawUrl
+    existing <- findBookmarkIdByUrl conn url
     case existing of
         Just i -> pure (Left ("already saved as bookmark " <> T.pack (show i)))
-        Nothing -> do
-            bid <-
-                withImmediateTransaction conn $ do
-                    execute
-                        conn
-                        "INSERT INTO bookmarks (url,title,domain,source,created_at,added_at,updated_at) VALUES (?,?,?,?,?,?,?)"
-                        (url, title, hostOfSimple url, "api" :: Text, now, now, now)
-                    newId <- fromIntegral <$> lastInsertRowId conn
-                    forM_ (dedupeText tags) $ \tag -> do
-                        execute conn "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, ?)" (tag, now)
-                        idRows <- query conn "SELECT id FROM tags WHERE name = ?" (Only tag) :: IO [Only Int]
-                        case idRows of
-                            (Only tid : _) -> execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (newId, tid)
-                            _ -> pure ()
-                    _ <- applyRules conn newId url title
-                    pure newId
-            pure (Right bid)
+        Nothing -> Right <$> insertBookmarkRow conn url title tags
+
+{- | Insert one bookmark row. The caller owns the URL lookup, so the save paths
+run exactly one indexed lookup instead of checking twice.
+-}
+insertBookmarkRow :: Connection -> Text -> Text -> [Text] -> IO Int
+insertBookmarkRow conn url title tags = do
+    now <- (floor <$> getPOSIXTime) :: IO Int
+    withImmediateTransaction conn $ do
+        execute
+            conn
+            "INSERT INTO bookmarks (url,title,domain,source,created_at,added_at,updated_at) VALUES (?,?,?,?,?,?,?)"
+            (url, title, hostOfSimple url, "api" :: Text, now, now, now)
+        newId <- fromIntegral <$> lastInsertRowId conn
+        forM_ (dedupeText tags) $ \tag -> do
+            execute conn "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, ?)" (tag, now)
+            idRows <- query conn "SELECT id FROM tags WHERE name = ?" (Only tag) :: IO [Only Int]
+            case idRows of
+                (Only tid : _) -> execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (newId, tid)
+                _ -> pure ()
+        _ <- applyRules conn newId url title
+        pure newId
 
 {- | Delete one bookmark. The side snapshot recorded first also captures the
 highlights and wikilinks that the delete cascades away, so undo restores the
-whole record rather than an empty shell. -}
+whole record rather than an empty shell.
+-}
 deleteBookmark :: Connection -> Int -> IO Bool
 deleteBookmark conn bid = do
     n <- withImmediateTransaction conn $ do
@@ -475,11 +529,10 @@ bulkUpdate conn action ids
                 BulkDelete -> "bulk_delete"
          in if null uniqueIds
                 then pure (Left "no valid bookmark ids supplied")
-                else
-                    withImmediateTransaction conn $ do
-                        snapshotId <- recordUndoIds conn op uniqueIds
-                        updated <- applyBulk uniqueIds
-                        pure (Right (updated, snapshotId))
+                else withImmediateTransaction conn $ do
+                    snapshotId <- recordUndoIds conn op uniqueIds
+                    updated <- applyBulk uniqueIds
+                    pure (Right (updated, snapshotId))
   where
     applyBulk uniqueIds = case action of
         BulkAddTags tags -> do
@@ -524,7 +577,8 @@ dedupeTextIds = go []
 
 {- | Mark the unread rows at or above one boundary in the ledger. The caller
 must name a real row: an empty list previously meant "mark the whole library
-read", which is not a safe interpretation of an empty inbox. -}
+read", which is not a safe interpretation of an empty inbox.
+-}
 markAllAbove :: Connection -> Maybe Int -> IO Int
 markAllAbove _conn Nothing = pure 0
 markAllAbove conn (Just bid) =
@@ -540,7 +594,8 @@ markAllAbove conn (Just bid) =
             _ -> pure 0
 
 {- | Keep stored wikilinks pointing at a renamed bookmark, and resolve any
-unresolved links that now match its new title. -}
+unresolved links that now match its new title.
+-}
 resolveIncomingLinks :: Connection -> Int -> Text -> IO ()
 resolveIncomingLinks conn targetId newTitle =
     execute
@@ -618,15 +673,15 @@ autocomplete conn q limit = do
                     conn
                     ( Query
                         ( "SELECT "
-                            <> summaryColumns
+                            <> coreColumns
                             <> " FROM bookmarks b "
                             <> "WHERE b.title LIKE ? COLLATE NOCASE OR b.url LIKE ? COLLATE NOCASE "
                             <> "ORDER BY CASE WHEN b.title LIKE ? COLLATE NOCASE THEN 0 ELSE 1 END, b.title COLLATE NOCASE LIMIT ?"
                         )
                     )
                     (likePattern, likePattern, prefix, limit) ::
-                    IO [SummaryRow]
-            summariesFromRows conn rows
+                    IO [SummaryCore]
+            withTags conn rows
 
 getBacklinks :: Connection -> Int -> IO Backlinks
 getBacklinks conn bid = do
@@ -681,63 +736,81 @@ pruneCandidates conn days = do
             conn
             ( Query
                 ( "SELECT "
-                    <> summaryColumns
+                    <> coreColumns
                     <> " FROM bookmarks b "
                     <> "WHERE b.open_count = 0 AND b.last_opened_at IS NULL AND b.added_at < ? "
                     <> "ORDER BY b.added_at ASC"
                 )
             )
             (Only cutoff) ::
-            IO [SummaryRow]
-    summariesFromRows conn rows
+            IO [SummaryCore]
+    withTags conn rows
 
 {- | Delete the pruned rows. Prune is destructive, so it writes the same side
 snapshot as a delete (bookmark rows, tags, highlights, wikilinks) before it
 touches anything; undo restores all of it. The legacy JSON snapshot path is
-deliberately not used here. -}
+deliberately not used here.
+-}
 pruneApply :: Connection -> [Int] -> IO Int
 pruneApply conn ids =
     let uniqueIds = dedupeTextIds ids
      in if null uniqueIds
             then pure 0
-            else
-                withImmediateTransaction conn $ do
-                    let marks = T.intercalate "," (replicate (length uniqueIds) "?")
-                    rows <- query conn (Query ("SELECT id FROM bookmarks WHERE id IN (" <> marks <> ")")) uniqueIds :: IO [Only Int]
-                    let found = [i | Only i <- rows]
-                    if null found
-                        then pure 0
-                        else do
-                            _ <- recordUndoIds conn "prune" found
-                            execute conn (Query ("DELETE FROM bookmarks WHERE id IN (" <> marks <> ")")) uniqueIds
-                            pure (length found)
+            else withImmediateTransaction conn $ do
+                let marks = T.intercalate "," (replicate (length uniqueIds) "?")
+                rows <- query conn (Query ("SELECT id FROM bookmarks WHERE id IN (" <> marks <> ")")) uniqueIds :: IO [Only Int]
+                let found = [i | Only i <- rows]
+                if null found
+                    then pure 0
+                    else do
+                        _ <- recordUndoIds conn "prune" found
+                        execute conn (Query ("DELETE FROM bookmarks WHERE id IN (" <> marks <> ")")) uniqueIds
+                        pure (length found)
 
+-- | Summaries for a known id set, ordered by id. See 'bookmarksByIdsLight'.
 bookmarksByIds :: Connection -> [Int] -> IO [BookmarkSummary]
-bookmarksByIds _ [] = pure []
-bookmarksByIds conn ids = do
-    let marks = T.intercalate "," (replicate (length ids) "?")
-    rows <- query conn (Query ("SELECT " <> summaryColumns <> " FROM bookmarks b WHERE b.id IN (" <> marks <> ")")) ids :: IO [SummaryRow]
-    summariesFromRows conn rows
+bookmarksByIds = bookmarksByIdsLight
 
-summariesFromRows :: Connection -> [SummaryRow] -> IO [BookmarkSummary]
-summariesFromRows conn rows = do
-    tagsById <- tagsForIds conn (map srId rows)
-    pure
-        [ BookmarkSummary
-            { bsId = srId r
-            , bsUrl = srUrl r
-            , bsTitle = if T.null (srTitle r) then srUrl r else srTitle r
-            , bsDomain = srDomain r
-            , bsCreatedAt = srCreatedAt r
-            , bsAddedAt = srAddedAt r
-            , bsFaviconUrl = srFaviconUrl r
-            , bsTags = fromMaybe [] (lookup (srId r) tagsById)
-            , bsIsRead = srIsRead r /= 0
-            , bsIsDead = srIsDead r /= 0
-            , bsSnippet = Nothing
-            }
-        | r <- rows
-        ]
+{- | Summaries for a known id set, ordered by id. Only the light columns are
+read: a caller that has the ids does not need note bodies or extracted text.
+The id list is chunked so a large merge or AI-tag request stays under SQLite's
+bound-parameter cap, and tags are fetched once per chunk.
+-}
+bookmarksByIdsLight :: Connection -> [Int] -> IO [BookmarkSummary]
+bookmarksByIdsLight _ [] = pure []
+bookmarksByIdsLight conn ids = do
+    rows <- concat <$> mapM fetchChunk (chunksOf idChunkSize ids)
+    withTags conn (sortOn scId rows)
+  where
+    fetchChunk chunk = do
+        let names = [":id" <> T.pack (show i) | i <- [0 .. length chunk - 1]]
+            placeholders = T.intercalate ", " names
+            params = zipWith (:=) names chunk
+        queryNamed
+            conn
+            (Query ("SELECT " <> coreColumns <> " FROM bookmarks b WHERE b.id IN (" <> placeholders <> ") ORDER BY b.id"))
+            params ::
+            IO [SummaryCore]
+
+-- | Attach each row's tag names, in one query per chunk of ids.
+withTags :: Connection -> [SummaryCore] -> IO [BookmarkSummary]
+withTags _ [] = pure []
+withTags conn rows = do
+    tagRows <- concat <$> mapM (tagsForIds conn) (chunksOf idChunkSize (map scId rows))
+    pure [summaryOf r (fromMaybe [] (lookup (scId r) tagRows)) | r <- rows]
+
+{- | SQLite builds cap bound parameters (999 in the oldest supported builds),
+so long @IN@ lists are split.
+-}
+idChunkSize :: Int
+idChunkSize = 500
+
+chunksOf :: Int -> [a] -> [[a]]
+chunksOf size xs
+    | size <= 0 = [xs]
+    | otherwise = case splitAt size xs of
+        ([], _) -> []
+        (chunk, rest) -> chunk : chunksOf size rest
 
 backfillDomains :: Connection -> IO Int
 backfillDomains conn = do
@@ -759,76 +832,95 @@ bookmarkStats conn = do
         [Only n] <- query_ conn sql :: IO [Only Int]
         pure n
 
+-- | The scalar counters @libraryStats@ reports, fetched in one round trip.
+data StatsCounts = StatsCounts
+    { stTotal :: Int
+    , stTags :: Int
+    , stTagLinks :: Int
+    , stUnread :: Int
+    , stDead :: Int
+    , stQueued :: Int
+    , stFaviconBytes :: Int
+    , stHighlights :: Int
+    , stShares :: Int
+    }
+
+instance FromRow StatsCounts where
+    fromRow =
+        StatsCounts
+            <$> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+
+statsCountsQuery :: Query
+statsCountsQuery =
+    "SELECT (SELECT COUNT(*) FROM bookmarks), \
+    \(SELECT COUNT(*) FROM tags), \
+    \(SELECT COUNT(*) FROM bookmark_tags), \
+    \(SELECT COUNT(*) FROM bookmarks WHERE is_read = 0), \
+    \(SELECT COUNT(*) FROM bookmarks WHERE is_dead = 1), \
+    \(SELECT COUNT(*) FROM jobs WHERE state IN ('queued','running')), \
+    \(SELECT COALESCE(SUM(LENGTH(bytes)),0) FROM favicons), \
+    \(SELECT COUNT(*) FROM highlights), \
+    \(SELECT COUNT(*) FROM share_links WHERE revoked_at IS NULL)"
+
 {- | Whole-library figures for the boot payload, the accessions page and the
 account panels. Counts are live; nothing here is cached or estimated.
+
+Three statements cover the whole payload: the scalar counters, one grouped
+source-document fetch and one grouped filing-day fetch. The top sources and
+the filing history are derived in Haskell from the grouped rows, so the
+database is scanned once for each grouping instead of once per aggregate.
 -}
 libraryStats :: Connection -> IO LibraryStats
 libraryStats conn = do
-    [Only total] <- query_ conn "SELECT COUNT(*) FROM bookmarks" :: IO [Only Int]
-    [Only tags] <- query_ conn "SELECT COUNT(*) FROM tags" :: IO [Only Int]
-    [Only tagLinks] <- query_ conn "SELECT COUNT(*) FROM bookmark_tags" :: IO [Only Int]
-    [Only sources] <-
-        query_ conn "SELECT COUNT(DISTINCT domain) FROM bookmarks WHERE domain <> ''" :: IO [Only Int]
-    topSources <-
+    countRows <- query_ conn statsCountsQuery :: IO [StatsCounts]
+    domainRows <-
         query_
             conn
-            "SELECT domain, COUNT(*) AS c FROM bookmarks WHERE domain <> '' GROUP BY domain ORDER BY c DESC, domain ASC LIMIT 24" ::
+            "SELECT domain, COUNT(*) FROM bookmarks WHERE domain <> '' GROUP BY domain" ::
             IO [(Text, Int)]
-    [Only sourcesOnce] <-
+    dateRows <-
         query_
             conn
-            "SELECT COUNT(*) FROM (SELECT domain FROM bookmarks WHERE domain <> '' GROUP BY domain HAVING COUNT(*) = 1)" ::
-            IO [Only Int]
-    dayRows <-
-        query_
-            conn
-            "SELECT COALESCE(MIN(date(created_at, 'unixepoch')), ''), COALESCE(MAX(date(created_at, 'unixepoch')), '') FROM bookmarks WHERE created_at > 0" ::
-            IO [(Text, Text)]
-    let (firstDay, lastDay) = case dayRows of
-            ((first, lastRow) : _) -> (first, lastRow)
-            [] -> ("", "")
-    [Only days] <-
-        query_
-            conn
-            "SELECT COUNT(DISTINCT date(created_at, 'unixepoch')) FROM bookmarks WHERE created_at > 0" ::
-            IO [Only Int]
-    years <-
-        query_
-            conn
-            "SELECT CAST(strftime('%Y', created_at, 'unixepoch') AS INTEGER), COUNT(*) FROM bookmarks WHERE created_at > 0 GROUP BY 1 ORDER BY 1 DESC" ::
-            IO [(Int, Int)]
-    filingDays <-
-        query_
-            conn
-            "SELECT date(created_at, 'unixepoch'), COUNT(*) FROM bookmarks WHERE created_at > 0 GROUP BY 1 ORDER BY 1 ASC" ::
+            "SELECT date(created_at, 'unixepoch'), COUNT(*) FROM bookmarks WHERE created_at > 0 GROUP BY 1" ::
             IO [(Text, Int)]
-    [Only unread] <- query_ conn "SELECT COUNT(*) FROM bookmarks WHERE is_read = 0" :: IO [Only Int]
-    [Only dead] <- query_ conn "SELECT COUNT(*) FROM bookmarks WHERE is_dead = 1" :: IO [Only Int]
-    [Only queued] <- query_ conn "SELECT COUNT(*) FROM jobs WHERE state IN ('queued','running')" :: IO [Only Int]
-    [Only faviconBytes] <- query_ conn "SELECT COALESCE(SUM(LENGTH(bytes)),0) FROM favicons" :: IO [Only Int]
-    [Only highlights] <- query_ conn "SELECT COUNT(*) FROM highlights" :: IO [Only Int]
-    [Only shares] <-
-        query_ conn "SELECT COUNT(*) FROM share_links WHERE revoked_at IS NULL" :: IO [Only Int]
+    let counts = case countRows of (row : _) -> row; [] -> StatsCounts 0 0 0 0 0 0 0 0 0
+        topSources = take 24 (sortOn (\(domain, count) -> (negate count, domain)) domainRows)
+        sourcesOnce = length (filter ((== 1) . snd) domainRows)
+        filingDays = sortOn fst dateRows
+        firstDay = case filingDays of ((day, _) : _) -> day; [] -> ""
+        lastDay = case reverse filingDays of ((day, _) : _) -> day; [] -> ""
+        years = Map.toDescList (Map.fromListWith (+) [(year, count) | (day, count) <- filingDays, Just year <- [yearOfDay day]])
     pure
         LibraryStats
-            { lsTotal = total
-            , lsTags = tags
-            , lsTagLinks = tagLinks
-            , lsSources = sources
+            { lsTotal = stTotal counts
+            , lsTags = stTags counts
+            , lsTagLinks = stTagLinks counts
+            , lsSources = length domainRows
             , lsTopSources = topSources
             , lsSourcesOnce = sourcesOnce
             , lsFirstDay = firstDay
             , lsLastDay = lastDay
-            , lsDays = days
+            , lsDays = length filingDays
             , lsYears = years
             , lsFilingDays = filingDays
-            , lsUnread = unread
-            , lsDead = dead
-            , lsQueued = queued
-            , lsFaviconBytes = faviconBytes
-            , lsHighlights = highlights
-            , lsShares = shares
+            , lsUnread = stUnread counts
+            , lsDead = stDead counts
+            , lsQueued = stQueued counts
+            , lsFaviconBytes = stFaviconBytes counts
+            , lsHighlights = stHighlights counts
+            , lsShares = stShares counts
             }
+  where
+    -- The days come straight from date(); the year is its first four digits.
+    yearOfDay day = readMaybe (T.unpack (T.takeWhile (/= '-') day))
 
 hostOfSimple :: Text -> Text
 hostOfSimple u =

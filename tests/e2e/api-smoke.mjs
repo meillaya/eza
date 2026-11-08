@@ -61,8 +61,12 @@ const savedCreate = await api("/api/v1/saved-searches", { method: "POST", header
 console.log("saved create", savedCreate.status, savedCreate.body);
 const savedList = await api("/api/v1/saved-searches");
 console.log("saved list", savedList.status, savedList.body?.saved_searches?.length);
-const dedup = await api("/api/v1/dedup/candidates");
-console.log("dedup", dedup.status, dedup.body?.groups?.length);
+const dedup = await api("/api/v1/dedup/candidates?url_limit=5&title_limit=5");
+console.log("dedup", dedup.status, dedup.body?.counts);
+const mergeAllRefused = await api("/api/v1/dedup/merge-all", { method: "POST", body: JSON.stringify({}) });
+console.log("dedup merge-all refused", mergeAllRefused.status, mergeAllRefused.body?.error?.code);
+const mergeAll = await api("/api/v1/dedup/merge-all", { method: "POST", body: JSON.stringify({ confirm: true }) });
+console.log("dedup merge-all", mergeAll.status, mergeAll.body);
 const tags = await api("/api/v1/tags/consolidation-candidates");
 console.log("tags cleanup", tags.status, tags.body?.groups?.length);
 const prune = await api("/api/v1/maintenance/prune-candidates");

@@ -239,7 +239,7 @@ import GHC.Generics (Generic)
 
 import Eza.ClipTemplates
 import Eza.Rules (applyRules)
-import Eza.Url (domainOf, hostOf, isHttpUrl, normalizeUrl)
+import Eza.Url (dedupeLookupUrls, domainOf, hostOf, isHttpUrl, normalizeUrl)
 
 -- ---------------------------------------------------------------------------
 -- Payload
@@ -879,7 +879,7 @@ upsertBookmark conn request now title rendered tags = do
                 <> ":note_body, :extracted_text, :author, :sitename, :published_at, :language, :image_url, :final_url, :enrich_state, :reading_time_minutes, :enriched_at)"
             )
         )
-        [ ":url" := clUrl request
+        [ ":url" := normalizeUrl (clUrl request)
         , ":title" := title
         , ":description" := cmDescription metadata
         , ":favicon_url" := cmFavicon metadata
@@ -1007,11 +1007,13 @@ insertCapture conn request now title rendered tags template bookmarkId = do
 
 findBookmark :: Connection -> Text -> IO (Maybe Int)
 findBookmark conn url = do
+  let candidates = dedupeLookupUrls url
+      marks = T.intercalate "," (replicate (length candidates) "?")
   rows <-
     query
       conn
-      "SELECT id FROM bookmarks WHERE url = ? OR url = ? ORDER BY id LIMIT 1"
-      (url, normalizeUrl url) ::
+      (Query ("SELECT id FROM bookmarks WHERE url IN (" <> marks <> ") ORDER BY id LIMIT 1"))
+      candidates ::
       IO [Only Int]
   pure (case rows of [Only bookmarkId] -> Just bookmarkId; _ -> Nothing)
 

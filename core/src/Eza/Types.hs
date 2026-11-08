@@ -18,6 +18,10 @@ module Eza.Types (
     ImportReport (..),
     CredentialInfo (..),
     Highlight (..),
+    DedupGroup (..),
+    DedupCounts (..),
+    DedupReport (..),
+    DedupMergeAllReport (..),
 ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON, genericToJSON)
@@ -280,3 +284,63 @@ instance ToJSON CredentialInfo where
     toJSON = genericToJSON (jsonOptions "ci")
 instance FromJSON CredentialInfo where
     parseJSON = genericParseJSON (jsonOptions "ci")
+
+{- | One duplicate-candidate group. @dgKind@ is @\"url\"@ when every member
+shares the canonical URL key, or @\"title\"@ for the advisory same-title
+groups. Items are sorted by record id, so the first item is the default keeper.
+-}
+data DedupGroup = DedupGroup
+    { dgKey :: Text
+    , dgKind :: Text
+    , dgItems :: [BookmarkSummary]
+    }
+    deriving stock (Show, Eq, Generic)
+
+instance ToJSON DedupGroup where
+    toJSON = genericToJSON (jsonOptions "dg")
+instance FromJSON DedupGroup where
+    parseJSON = genericParseJSON (jsonOptions "dg")
+
+-- | Whole-library duplicate totals: exact counts for the duplicates view and
+-- its "merge all" confirmation.
+data DedupCounts = DedupCounts
+    { dcUrlGroups :: Int
+    , dcUrlRecords :: Int
+    , dcTitleGroups :: Int
+    , dcTitleRecords :: Int
+    }
+    deriving stock (Show, Eq, Generic)
+
+instance ToJSON DedupCounts where
+    toJSON = genericToJSON (jsonOptions "dc")
+instance FromJSON DedupCounts where
+    parseJSON = genericParseJSON (jsonOptions "dc")
+
+-- | One page of duplicate candidates, split into safe same-URL groups and
+-- advisory same-title groups, plus exact totals for the whole library.
+data DedupReport = DedupReport
+    { drCounts :: DedupCounts
+    , drUrlGroups :: [DedupGroup]
+    , drTitleGroups :: [DedupGroup]
+    }
+    deriving stock (Show, Eq, Generic)
+
+instance ToJSON DedupReport where
+    toJSON = genericToJSON (jsonOptions "dr")
+instance FromJSON DedupReport where
+    parseJSON = genericParseJSON (jsonOptions "dr")
+
+-- | Result of the confirmed one-shot URL-duplicate merge.
+data DedupMergeAllReport = DedupMergeAllReport
+    { dmGroups :: Int
+    , dmRecords :: Int
+    , dmAffected :: Int
+    , dmSnapshotId :: Int
+    , dmElapsedMs :: Int
+    }
+    deriving stock (Show, Eq, Generic)
+
+instance ToJSON DedupMergeAllReport where
+    toJSON = genericToJSON (jsonOptions "dm")
+instance FromJSON DedupMergeAllReport where
+    parseJSON = genericParseJSON (jsonOptions "dm")

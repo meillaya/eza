@@ -19,7 +19,7 @@ common exe-common
     RecordWildCards
     ScopedTypeVariables
     TypeApplications
-  ghc-options:      -Wall -Wcompat -Wincomplete-uni-patterns -threaded -rtsopts
+  ghc-options:      -Wall -Wcompat -Wincomplete-uni-patterns -threaded
 
 library
   import:           exe-common
@@ -116,6 +116,8 @@ test-suite eza-test
   main-is:          Spec.hs
   other-modules:    ClipSpec
                     DataIntegritySpec
+                    DedupSpec
+                    PerfSpec
   build-depends:    base
                   , aeson
                   , bytestring

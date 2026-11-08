@@ -178,11 +178,15 @@ Deployment guides sit beside them: [NixOS](docs/deployment-nixos.md),
 | Key | Action |
 |---|---|
 | `/` | Focus the search line |
-| `Shift+K`, `Cmd+K`, `Ctrl+K` | Open the command palette |
-| `j`, `k` | Move the ledger cursor and open its field drawer |
+| `Shift+K`, `Cmd+K`, `Ctrl+K` | Open the command palette from any screen (`Ctrl/Cmd+K` works while the search line has focus) |
+| `j`, `k` | Move the ledger cursor; bare `k` opens the palette away from the ledger and inbox |
 | `Enter` | Open the record under the cursor |
 | `Esc` | Close the palette, drawer, or dialog |
 | `Cmd+S`, `Ctrl+S` | Save the note on the record page |
+
+The hint under the search line is a `⇧K` button. `Sign out` lives at the end of
+the section links, in the mobile bar, on every account tab, and in the palette;
+an unsaved note asks for confirmation first.
 
 ---
 

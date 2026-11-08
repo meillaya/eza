@@ -6,8 +6,11 @@ module Eza.Url
   , hostOf
   , domainOf
   , normalizeUrl
+  , dedupeKey
+  , dedupeLookupUrls
   ) where
 
+import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as T
 
@@ -36,6 +39,32 @@ domainOf :: Text -> Text
 domainOf h =
   let l = T.toLower (T.strip h)
    in maybe l id (T.stripPrefix "www." l)
+
+-- | The canonical de-duplication key shared by the importer, the save paths
+-- and the duplicates view: 'normalizeUrl' with the http(s) scheme removed, so
+-- the same page saved over http and https is one record. Non-HTTP values are
+-- compared by their normalized text. A non-default port stays part of the
+-- key, because it can address a different service on the same host.
+dedupeKey :: Text -> Text
+dedupeKey raw =
+  let normalized = normalizeUrl raw
+   in case T.stripPrefix "http://" normalized of
+        Just rest -> rest
+        Nothing -> case T.stripPrefix "https://" normalized of
+          Just rest -> rest
+          Nothing -> normalized
+
+-- | The exact stored-URL candidates that can carry @dedupeKey raw@. Stored
+-- URLs keep a scheme, so the canonical lookup is an indexed @IN@ query on
+-- these values (plus the normalised form for non-HTTP values).
+dedupeLookupUrls :: Text -> [Text]
+dedupeLookupUrls raw =
+  let normalized = normalizeUrl raw
+   in if isHttpUrl normalized
+        then
+          let key = dedupeKey normalized
+           in nub [normalized, "http://" <> key, "https://" <> key]
+        else [normalized]
 
 -- | Normalize a URL for deduplication: lowercase the scheme and host, strip
 -- a leading @www.@, remove the default port, drop the fragment, remove
