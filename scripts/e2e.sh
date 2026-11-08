@@ -25,6 +25,7 @@ SCRIPTS=(
   api-smoke.mjs
   ui-smoke.mjs
   keyboard-smoke.mjs
+  navigation-smoke.mjs
   logout-smoke.mjs
   dedup-smoke.mjs
   bulk-ui-smoke.mjs

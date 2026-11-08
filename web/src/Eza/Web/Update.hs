@@ -289,6 +289,7 @@ loadRoute route = do
                 Bookmark currentId -> currentId /= bookmarkId
                 _ -> True
             _ -> True
+        enteringList = isListRoute route && not (isListRoute (mRoute m))
         keepDetail = isDetailRoute route && not enteringNewDetail
         epoch = mDetailEpoch m + 1
     put
@@ -299,6 +300,7 @@ loadRoute route = do
             , mDetailEpoch = epoch
             , mLoading = isListRoute route
             , mLoadingMore = False
+            , mScrollY = if enteringList then 0 else mScrollY m
             , mError = Nothing
             , mNotice = Nothing
             , mStatsError = Nothing
