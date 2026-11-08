@@ -21,16 +21,22 @@ The database came from `bookmarks_14_08_2026.html`.
 ```
 $ eza-bookmarks bench --iterations 20
 iterations: 20
-all: total=0.671238 avg_ms=0.38 p95_ms=0.67
-fts-rust: total=0.855758 avg_ms=0.58 p95_ms=0.86
-fts-github: total=1.189957 avg_ms=1.1 p95_ms=1.19
-tag-imported: total=11.18985 avg_ms=10.36 p95_ms=12.15
-tag-imported-books: total=9.375713 avg_ms=9.29 p95_ms=9.52
+all: total=3.985609 avg_ms=2.96 p95_ms=3.99
+fts-rust: total=0.849919 avg_ms=0.65 p95_ms=0.85
+fts-github: total=1.532899 avg_ms=1.43 p95_ms=1.53
+tag-imported: total=13.855065 avg_ms=13.34 p95_ms=13.86
+tag-imported-books: total=9.596496 avg_ms=9.91 p95_ms=12.04
 ```
 
-FTS queries stay below 1.2 ms at p95. Tag queries stay below 12.2 ms at p95.
+FTS queries stay below 1.6 ms at p95. Tag queries stay below 14 ms at p95.
 The tag query materializes the filtered id set before ranking, which is the
 larger cost.
+
+Every list response now carries per year counts for the ledger. The query
+groups the filtered rows by year and derives the total from the same scan, so a
+page costs two scans instead of three. That work is what raises the `all` row
+from the sub-millisecond range it held before the counts existed; the absolute
+cost is under 4 ms at p95.
 
 The import of the full export runs in about 2.5 to 3.0 seconds on the same
 host. It writes 8,988 rows, 75 tags, and 21,316 links in one transaction.

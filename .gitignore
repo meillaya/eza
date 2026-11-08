@@ -64,3 +64,13 @@ venv/
 .codegraph
 
 data-demo/
+
+# Local port scratch data
+.eza-scratch/
+.eza-scratch*/
+
+# Direction design packages and reference research (local working material,
+# not part of the server or client)
+design/
+design-demos/
+.huashu-design/

@@ -1,15 +1,15 @@
 {
   "id": "/",
-  "name": "eza — bookmarks",
+  "name": "eza, the catalogue",
   "short_name": "eza",
-  "description": "Search-first, tag-based bookmark library.",
+  "description": "A private catalogue of saved links: search, tags, and a reading copy, kept in one SQLite file.",
   "lang": "en",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "any",
-  "theme_color": "#f7f7f5",
-  "background_color": "#f7f7f5",
+  "theme_color": "#F2EDE3",
+  "background_color": "#F2EDE3",
   "categories": [
     "productivity",
     "utilities"

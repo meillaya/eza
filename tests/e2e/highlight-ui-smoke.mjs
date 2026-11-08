@@ -1,51 +1,14 @@
-// Highlight UI smoke test: reader selection, create quick highlight, note
-// highlight, edit note/colour, delete, drift resilience, keyboard dismiss.
+// Highlight UI smoke test: reader selection, quick highlight, note highlight,
+// edit note and mark style, delete, drift resilience, keyboard dismiss.
 //
-// Run from the repo root in the dev shell:
-//   EZA_BASE=http://localhost:8095 node tests/e2e/highlight-ui-smoke.mjs
-import { chromium } from "@playwright/test";
+// Run from the repo root in the dev shell, against a scratch server:
+//   EZA_BASE=http://localhost:8100 node tests/e2e/highlight-ui-smoke.mjs
+import { BASE, SEL, launchBrowser, launchPage, enterLibrary, makeApi, newChecker } from "./lib/dom.mjs";
 
-const BASE = process.env.EZA_BASE || "http://localhost:8095";
-const passed = [];
-const failed = [];
-function check(name, condition, detail) {
-  if (condition) {
-    passed.push(name);
-    console.log("PASS " + name + (detail ? " — " + detail : ""));
-  } else {
-    failed.push(name + (detail ? " — " + detail : ""));
-    console.log("FAIL " + name + (detail ? " — " + detail : ""));
-  }
-}
-
-const browser = await chromium.launch({ headless: true });
-const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-const page = await context.newPage();
-const consoleErrors = [];
-page.on("console", (message) => {
-  if (message.type() === "error") consoleErrors.push(message.text());
-});
-page.on("pageerror", (error) => consoleErrors.push(String(error)));
-
-const cdp = await context.newCDPSession(page);
-await cdp.send("WebAuthn.enable", { enableUI: false });
-await cdp.send("WebAuthn.addVirtualAuthenticator", {
-  options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
-});
-
-const api = (path, options = {}) =>
-  page.evaluate(
-    async ({ path, options }) => {
-      const csrf = document.cookie.split("; ").find((c) => c.startsWith("eza_csrf="))?.split("=")[1] || "";
-      const headers = Object.assign({ "Content-Type": "application/json" }, options.headers || {});
-      if ((options.method || "GET") !== "GET") headers["X-CSRF-Token"] = csrf;
-      const response = await fetch(path, { ...options, headers });
-      let body = null;
-      try { body = await response.json(); } catch (_) {}
-      return { status: response.status, body };
-    },
-    { path, options }
-  );
+const browser = await launchBrowser();
+const { page, errors } = await launchPage(browser, { viewport: { width: 1440, height: 1000 } });
+const { check, report } = newChecker();
+const api = makeApi(page);
 
 const highlights = async (id) => (await api("/api/v1/bookmarks/" + id + "/highlights")).body?.highlights || [];
 
@@ -89,13 +52,15 @@ const selectReaderRange = (start, end) =>
     { start, end }
   );
 
+async function openReader(id) {
+  await page.goto(BASE + "/bookmark/" + id, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector(SEL.appShell, { timeout: 30000 });
+  await page.waitForSelector(SEL.readerText, { timeout: 20000 });
+  await page.waitForTimeout(500);
+}
+
 try {
-  await page.goto(BASE + "/setup", { waitUntil: "domcontentloaded" });
-  await page.click("#passkey-setup");
-  await page.waitForSelector("#recovery:not([hidden])", { timeout: 30000 });
-  await page.click("#continue");
-  await page.waitForSelector(".topbar", { timeout: 30000 });
-  await page.waitForTimeout(1200);
+  await enterLibrary(page);
 
   // Find a bookmark with extracted reader text (fall back to enrichment).
   const listing = await api("/api/v1/bookmarks?limit=40&offset=0");
@@ -124,23 +89,23 @@ try {
   check("found bookmark with extracted text", Boolean(target), target ? "bookmark #" + target.id : "none");
   if (!target) throw new Error("no bookmark with extracted text; seed extracted_text or enable enrichment");
 
-  await page.goto(BASE + "/bookmark/" + target.id, { waitUntil: "domcontentloaded" });
-  await page.waitForSelector("#reader-text", { timeout: 20000 });
-  await page.waitForTimeout(600);
-  check("reader renders extracted text", (await page.locator("#reader-text").innerText()).length > 120);
+  await openReader(target.id);
+  check("reader renders extracted text", (await page.locator(SEL.readerText).innerText()).length > 120);
 
-  // Select a range -> toolbar.
+  // Selection opens the highlight toolbar.
   check("selection dispatched", await selectReaderRange(5, 45));
-  await page.waitForSelector(".highlight-toolbar", { timeout: 10000 });
-  check("selection opens highlight toolbar", (await page.locator(".highlight-toolbar").count()) === 1);
+  await page.waitForSelector(SEL.highlightToolbar, { timeout: 10000 });
+  check("selection opens highlight toolbar", (await page.locator(SEL.highlightToolbar).count()) === 1);
 
   // Quick highlight.
-  await page.getByRole("button", { name: "Highlight", exact: true }).click();
-  await page.waitForFunction(
-    () => [...document.querySelectorAll(".toast")].some((toast) => /Highlight saved/.test(toast.textContent)),
-    null,
-    { timeout: 20000 }
-  ).catch(() => {});
+  await page.getByRole("button", { name: /highlight/i }).first().click();
+  await page
+    .waitForFunction(
+      () => [...document.querySelectorAll('[data-testid="toast"]')].some((toast) => /highlight/i.test(toast.textContent)),
+      null,
+      { timeout: 20000 }
+    )
+    .catch(() => {});
   let saved = await highlights(target.id);
   check("quick highlight saved via api", saved.length === 1, JSON.stringify(saved).slice(0, 160));
   check(
@@ -149,37 +114,35 @@ try {
     saved[0]?.quote?.slice(0, 40)
   );
   await page.waitForTimeout(500);
-  check("highlight span rendered in reader", (await page.locator("#reader-text span.hl").count()) >= 1);
-  check("highlight listed below reader", (await page.locator(".highlight-row").count()) === 1);
+  check("highlight mark rendered in reader", (await page.locator(SEL.readerMark).count()) >= 1);
+  check("highlight listed below reader", (await page.locator(SEL.highlightRow).count()) === 1);
 
   // Persisted after reload.
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await page.waitForSelector("#reader-text", { timeout: 20000 });
-  await page.waitForTimeout(900);
-  check("highlight persists and renders after reload", (await page.locator("#reader-text span.hl").count()) >= 1);
+  await openReader(target.id);
+  check("highlight persists and renders after reload", (await page.locator(SEL.readerMark).count()) >= 1);
 
   // Note highlight through the toolbar.
   await selectReaderRange(60, 100);
-  await page.waitForSelector(".highlight-toolbar", { timeout: 10000 });
-  await page.getByRole("button", { name: "Note", exact: true }).click();
-  await page.waitForSelector("#highlight-note", { timeout: 10000 });
-  await page.fill("#highlight-note", "e2e note");
-  await page.getByRole("button", { name: "Save highlight", exact: true }).click();
+  await page.waitForSelector(SEL.highlightToolbar, { timeout: 10000 });
+  await page.getByRole("button", { name: /^note$/i }).first().click();
+  await page.waitForSelector(SEL.highlightNote, { timeout: 10000 });
+  await page.fill(SEL.highlightNote, "e2e note");
+  await page.locator(SEL.dialogConfirm).click();
   await page.waitForTimeout(1600);
   saved = await highlights(target.id);
-  check("note highlight saved", saved.length === 2 && saved.some((h) => h.note === "e2e note"), JSON.stringify(saved.map((h) => h.note)));
+  check("note highlight saved", saved.length === 2 && saved.some((entry) => entry.note === "e2e note"), JSON.stringify(saved.map((entry) => entry.note)));
 
-  // Edit note + colour on the first row.
-  await page.locator('.highlight-row button[title="Edit highlight"]').first().click();
-  await page.waitForSelector("#highlight-edit-note", { timeout: 10000 });
-  await page.fill("#highlight-edit-note", "edited note");
-  await page.locator('.color-swatch[title="Set purple colour"]').click();
-  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  // Edit note and mark style on the first row. The double mark stores blue.
+  await page.locator(SEL.highlightRow).first().locator(SEL.highlightEdit).click();
+  await page.waitForSelector(SEL.highlightEditNote, { timeout: 10000 });
+  await page.fill(SEL.highlightEditNote, "edited note");
+  await page.locator(SEL.highlightStyle("double")).click();
+  await page.locator(SEL.dialogConfirm).click();
   await page.waitForTimeout(1600);
   saved = await highlights(target.id);
-  const edited = saved.find((h) => h.note === "edited note");
-  check("highlight note edited", Boolean(edited), JSON.stringify(saved.map((h) => h.note)));
-  check("highlight colour updated", edited?.color === "purple", String(edited?.color));
+  const edited = saved.find((entry) => entry.note === "edited note");
+  check("highlight note edited", Boolean(edited), JSON.stringify(saved.map((entry) => entry.note)));
+  check("highlight mark style updated", edited?.color === "blue", String(edited?.color));
 
   // Drift resilience: an out-of-range highlight must not corrupt the reader.
   const beforeDrift = await highlights(target.id);
@@ -187,42 +150,30 @@ try {
     method: "POST",
     body: JSON.stringify({ quote: "zzz-not-in-text", prefix: "", suffix: "", start_offset: 100000, end_offset: 100010, note: "", color: "yellow" }),
   });
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await page.waitForSelector("#reader-text", { timeout: 20000 });
-  await page.waitForTimeout(900);
-  check("drifted highlight skipped without breaking reader", (await page.locator("#reader-text").count()) === 1);
+  await openReader(target.id);
+  check("drifted highlight skipped without breaking reader", (await page.locator(SEL.readerText).count()) === 1);
   check(
-    "invalid range not rendered as span",
-    (await page.locator("#reader-text span.hl").count()) === beforeDrift.length,
-    "spans=" + (await page.locator("#reader-text span.hl").count()) + " valid=" + beforeDrift.length
+    "invalid range not rendered as a mark",
+    (await page.locator(SEL.readerMark).count()) === beforeDrift.length,
+    "marks=" + (await page.locator(SEL.readerMark).count()) + " valid=" + beforeDrift.length
   );
 
   // Delete the first highlight.
   const beforeDelete = (await highlights(target.id)).length;
-  await page.locator('.highlight-row button[title="Delete highlight"]').first().click();
+  await page.locator(SEL.highlightRow).first().locator(SEL.highlightDelete).click();
   await page.waitForTimeout(1600);
   check("highlight deleted", (await highlights(target.id)).length === beforeDelete - 1);
 
-  // Keyboard: Escape clears the selection toolbar.
+  // Escape clears the selection toolbar.
   await selectReaderRange(10, 30);
-  await page.waitForSelector(".highlight-toolbar", { timeout: 10000 });
+  await page.waitForSelector(SEL.highlightToolbar, { timeout: 10000 });
   await page.keyboard.press("Escape");
   await page.waitForTimeout(500);
-  check("escape dismisses highlight toolbar", (await page.locator(".highlight-toolbar").count()) === 0);
+  check("escape dismisses highlight toolbar", (await page.locator(SEL.highlightToolbar).count()) === 0);
 } catch (error) {
-  failed.push("unexpected error — " + (error && error.stack ? error.stack : String(error)));
+  check("unexpected error", false, String(error && error.stack ? error.stack : error));
 } finally {
   await browser.close();
 }
 
-console.log("");
-console.log("passed: " + passed.length + ", failed: " + failed.length);
-if (consoleErrors.length) {
-  console.log("console errors (" + consoleErrors.length + "):");
-  for (const error of consoleErrors.slice(0, 10)) console.log("  " + error);
-}
-if (failed.length) {
-  console.log("failures:");
-  for (const failure of failed) console.log("  - " + failure);
-  process.exit(1);
-}
+report(errors);

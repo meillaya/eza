@@ -29,6 +29,7 @@ login, and recovery are separate routes. All JSON is UTF-8.
 | 403 | CSRF failure or a route outside the recovery scope |
 | 404 | Row or route missing |
 | 409 | URL or tag conflict |
+| 410 | Share link revoked or expired |
 | 413 | Request body too large |
 | 429 | Rate limit |
 | 500 | Internal error |
@@ -163,8 +164,16 @@ takes a versioned eza JSON document.
 
 `GET /api/v1/export` returns Netscape HTML. Add `?format=json` for a JSON
 document with bookmarks, tags, highlights, saved searches, and rules.
-`GET /api/v1/stats` returns bookmark, tag, unread, dead, highlight, share,
-queue, and favicon byte counts.
+
+`GET /api/v1/stats` returns library counts: `bookmarks`, `tags`,
+`bookmark_tags`, `links`, `sources`, `top_sources`, `sources_once`, `first_day`,
+`last_day`, `days`, `years`, `filing_days`, `unread`, `dead`, `highlights`,
+`shares`, `jobs_pending`, and `favicon_bytes`. `years` is a list of
+`[year, count]` pairs, newest first. `filing_days` is a list of
+`[date, count]` pairs, oldest first. `top_sources` ranks the 24 busiest
+domains as `[domain, count]` pairs. `sources_once` counts domains that hold
+exactly one bookmark. `GET /api/v1/boot` returns the same figures under
+`stats`.
 
 ## Highlights and shares
 
@@ -191,7 +200,11 @@ A highlight body contains `quote`, `prefix`, `suffix`, `start_offset`,
 (`bookmark` or `saved_search`), `target_id`, `include_note`, and
 `expires_in_days`. The create response returns the public URL once.
 
-`GET /s/{token}` is a public, noindex page. A saved-search share also exposes
+`GET /s/{token}` is a public, read-only page and sends `X-Robots-Tag: noindex`
+and `Cache-Control: private, no-store`. A readable link returns 200 with the
+shared record, the keeper's note when the link includes it, and the expiry
+date. A token that matches no row returns 404. A revoked or expired link
+returns 410 with a page that says so. A saved-search share also exposes
 `/s/{token}.xml` as an Atom feed. The snapshot route returns the local
 monolith file inside a sandboxed CSP.
 
@@ -215,7 +228,9 @@ POST   /api/v1/account/recovery/regenerate
 ```
 
 `GET /api/v1/account` returns
-`{"credentials":[CredentialInfo],"recovery_codes_remaining":N}`.
+`{"credentials":[CredentialInfo],"recovery_codes_remaining":N,"sessions":[SessionInfo]}`.
+`SessionInfo` carries timestamps and a `current` flag for the requesting
+session. Session ids and hashes are never exposed.
 `POST /api/v1/account/recovery/regenerate` invalidates the unused codes and
 returns ten new codes. `POST /api/v1/tokens` takes
 `{"name","scopes":["read","write","capture"]}` and returns the raw token once
@@ -227,7 +242,16 @@ plus its metadata. Tokens are stored by hash and revoke immediately.
 TagStat         {name: Text, count: Int}
 BookmarkSummary {id, url, title, domain, created_at, added_at, favicon_url,
                  tags: [Text], is_read: Bool, is_dead: Bool, snippet: Maybe Text}
-SearchPage      {items: [BookmarkSummary], total, offset, limit, has_more}
+SearchPage      {items: [BookmarkSummary], total, offset, limit, has_more,
+                 year_counts: [[Int, Int]]}
+BootPayload     {version, origin, tags: [TagStat], saved_searches,
+                 initial: SearchPage, stats: LibraryStats}
+LibraryStats    {total, tags, tag_links, sources,
+                 top_sources: [[Text, Int]], sources_once, first_day, last_day,
+                 days, years: [[Int, Int]], filing_days: [[Text, Int]],
+                 unread, dead, queued, favicon_bytes, highlights, shares}
+SessionInfo     {created_at: Int, last_seen_at: Maybe Int, expires_at: Int,
+                 current: Bool}
 BookmarkDetail  {summary fields except snippet, note_body, extracted_text,
                  author, sitename, published_at, language, image_url,
                  final_url, snapshot_path, snapshot_kind, last_opened_at,

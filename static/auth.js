@@ -83,9 +83,29 @@ function showError(message) {
   if (el) el.textContent = message;
 }
 
+// Passkeys need a secure origin. Browsers treat localhost and 127.0.0.1 as
+// secure, but a LAN address or a plain http hostname is not. Say that plainly
+// instead of surfacing the browser's SecurityError.
+function passkeysUnavailable() {
+  if (!window.isSecureContext) {
+    return "Passkeys need a secure origin. Open eza over https, or on http://localhost, then try again. A recovery code works on any origin.";
+  }
+  if (!window.PublicKeyCredential || !navigator.credentials) {
+    return "This browser does not offer passkeys. Use a recovery code instead.";
+  }
+  return "";
+}
+
+function blockIfPasskeysUnavailable() {
+  const reason = passkeysUnavailable();
+  if (reason) showError(reason);
+  return reason !== "";
+}
+
 async function doLogin() {
   try {
     showError("");
+    if (blockIfPasskeysUnavailable()) return;
     const options = await postJSON("/api/auth/options");
     const credential = await navigator.credentials.get({ publicKey: parseRequestOptions(options) });
     const result = await postJSON("/api/auth/verify", credentialJSON(credential));
@@ -98,6 +118,7 @@ async function doLogin() {
 async function doSetup() {
   try {
     showError("");
+    if (blockIfPasskeysUnavailable()) return;
     const options = await postJSON("/api/setup/options");
     const credential = await navigator.credentials.create({ publicKey: parseCreationOptions(options) });
     const result = await postJSON("/api/setup/verify", credentialJSON(credential));
@@ -109,7 +130,7 @@ async function doSetup() {
     $("#passkey-setup").hidden = true;
     $("#copy-codes").addEventListener("click", async () => {
       try { await navigator.clipboard.writeText(codes.join("\n")); $("#copy-codes").textContent = "Copied"; }
-      catch (_) { showError("Copy failed — select the codes manually."); }
+      catch (_) { showError("Copy failed. Select the codes manually."); }
     });
     $("#continue").addEventListener("click", () => { window.location.href = result.redirect || "/"; });
   } catch (e) {
@@ -132,6 +153,7 @@ async function doRecover() {
 async function doAddPasskey() {
   try {
     showError("");
+    if (blockIfPasskeysUnavailable()) return;
     const options = await postJSON("/api/v1/account/passkeys/options");
     const credential = await navigator.credentials.create({ publicKey: parseCreationOptions(options) });
     await postJSON("/api/v1/account/passkeys/verify", credentialJSON(credential));
@@ -142,6 +164,9 @@ async function doAddPasskey() {
 }
 
 const page = document.querySelector("[data-page]")?.dataset.page;
+if (page && !window.isSecureContext) {
+  showError("Passkeys need a secure origin. Open eza over https, or on http://localhost. A recovery code works on any origin.");
+}
 if (page === "login") $("#passkey-login")?.addEventListener("click", doLogin);
 if (page === "setup") $("#passkey-setup")?.addEventListener("click", doSetup);
 if (page === "recover") $("#redeem")?.addEventListener("click", doRecover);

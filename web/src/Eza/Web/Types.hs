@@ -12,6 +12,7 @@ module Eza.Web.Types (
     TagSuggestion (..),
     Credential (..),
     AccountInfo (..),
+    SessionInfo (..),
     TokenView (..),
     ShareView (..),
     AiStatus (..),
@@ -229,10 +230,29 @@ instance FromJSON TokenView where
             <*> o .:? "last_used_at"
             <*> o .:? "revoked_at"
 
--- | Account screen payload.
+{- | Account screen payload.
+| One browser session, as the account payload reports it. No ids or hashes.
+-}
+data SessionInfo = SessionInfo
+    { siCreatedAt :: Int
+    , siLastSeenAt :: Maybe Int
+    , siExpiresAt :: Int
+    , siCurrent :: Bool
+    }
+    deriving (Eq, Show)
+
+instance FromJSON SessionInfo where
+    parseJSON = withObject "SessionInfo" $ \o ->
+        SessionInfo
+            <$> o .:? "created_at" .!= 0
+            <*> o .:? "last_seen_at"
+            <*> o .:? "expires_at" .!= 0
+            <*> o .:? "current" .!= False
+
 data AccountInfo = AccountInfo
     { aiCredentials :: [Credential]
     , aiRecoveryRemaining :: Int
+    , aiSessions :: [SessionInfo]
     }
     deriving (Eq, Show)
 
@@ -241,6 +261,7 @@ instance FromJSON AccountInfo where
         AccountInfo
             <$> o .:? "credentials" .!= []
             <*> o .:? "recovery_codes_remaining" .!= 0
+            <*> o .:? "sessions" .!= []
 
 -- | Read an integer field from a loose JSON object (0 when absent/mistyped).
 fieldInt :: Text -> Value -> Int

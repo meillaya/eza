@@ -25,4 +25,23 @@ if command -v wasm-opt >/dev/null 2>&1; then
 fi
 
 gzip -9 -c static/app/app.wasm > static/app/app.wasm.gz || true
-echo "web assets written to static/app"
+
+# The server serves /sw.js with this id in its version, so a rebuild invalidates
+# the service worker and open tabs refresh themselves on the next load.
+BUILD_ID="$(
+  {
+    sha256sum \
+      static/app/app.wasm \
+      static/app/ghc_wasm_jsffi.js \
+      static/app/index.js \
+      static/eza.css \
+      static/index.html \
+      static/pwa.js \
+      static/sw.js \
+      static/theme.js \
+      static/auth.js \
+      static/manifest.webmanifest 2>/dev/null || true
+  } | sha256sum | cut -c1-16
+)"
+printf '%s\n' "$BUILD_ID" > static/app/build-id
+echo "web assets written to static/app (build $BUILD_ID)"

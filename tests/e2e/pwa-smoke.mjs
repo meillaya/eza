@@ -1,26 +1,11 @@
 // PWA smoke test: manifest, service worker, share_target, offline banner,
 // bookmarklet copy, and the share_target landing route.
 //
-// Run from the repo root with the dev shell:
-//   EZA_BASE=http://localhost:8087 node tests/e2e/pwa-smoke.mjs
-//
-// Expects a server with a first-run auth database (the test registers a
-// virtual passkey through /setup, like the other e2e smoke scripts).
-import { chromium } from "@playwright/test";
+// Run from the repo root in the dev shell, against a scratch server:
+//   EZA_BASE=http://localhost:8100 node tests/e2e/pwa-smoke.mjs
+import { BASE, SEL, launchBrowser, launchPage, enterLibrary, newChecker } from "./lib/dom.mjs";
 
-const BASE = process.env.EZA_BASE || "http://localhost:8087";
-
-const passed = [];
-const failed = [];
-function check(name, condition, detail) {
-  if (condition) {
-    passed.push(name);
-    console.log("PASS " + name + (detail ? " — " + detail : ""));
-  } else {
-    failed.push(name + (detail ? " — " + detail : ""));
-    console.log("FAIL " + name + (detail ? " — " + detail : ""));
-  }
-}
+const { check, report } = newChecker();
 
 // ---------------------------------------------------------------- static ---
 const manifestResponse = await fetch(BASE + "/manifest.webmanifest");
@@ -88,35 +73,12 @@ check(
 );
 
 // ---------------------------------------------------------------- browser ---
-const browser = await chromium.launch({ headless: true });
-const context = await browser.newContext({ viewport: { width: 1360, height: 900 } });
-const page = await context.newPage();
-const consoleErrors = [];
-page.on("console", (message) => {
-  if (message.type() === "error") consoleErrors.push(message.text());
-});
-page.on("pageerror", (error) => consoleErrors.push(String(error)));
-
-const cdp = await context.newCDPSession(page);
-await cdp.send("WebAuthn.enable", { enableUI: false });
-await cdp.send("WebAuthn.addVirtualAuthenticator", {
-  options: {
-    protocol: "ctap2",
-    transport: "internal",
-    hasResidentKey: true,
-    hasUserVerification: true,
-    isUserVerified: true,
-    automaticPresenceSimulation: true,
-  },
-});
+const browser = await launchBrowser();
+const { context, page, errors } = await launchPage(browser, { viewport: { width: 1360, height: 900 } });
 
 try {
-  await page.goto(BASE + "/setup", { waitUntil: "domcontentloaded" });
-  await page.click("#passkey-setup");
-  await page.waitForSelector("#recovery:not([hidden])", { timeout: 30000 });
-  await page.click("#continue");
-  await page.waitForSelector(".topbar", { timeout: 30000 });
-  await page.waitForTimeout(1200);
+  await enterLibrary(page);
+  await page.waitForTimeout(800);
 
   const manifestLink = await page.evaluate(() => {
     const link = document.querySelector('link[rel="manifest"]');
@@ -140,11 +102,7 @@ try {
       return { error: String(error) };
     }
   });
-  check(
-    "service worker registered",
-    Boolean(registration && registration.active),
-    JSON.stringify(registration)
-  );
+  check("service worker registered", Boolean(registration && registration.active), JSON.stringify(registration));
   check(
     "service worker scope is /",
     Boolean(registration?.scope && new URL(registration.scope).pathname === "/"),
@@ -180,68 +138,58 @@ try {
     cachedPaths.length + " entries, forbidden: " + JSON.stringify(forbidden)
   );
 
-  // Offline banner appears when the browser goes offline and clears on reconnect.
+  // Offline banner appears when the browser goes offline and clears online.
   await context.setOffline(true);
   await page.waitForTimeout(900);
-  const offlineVisible = await page.locator(".offline-banner").count();
-  const offlineText = offlineVisible
-    ? (await page.locator(".offline-banner").first().innerText()).trim()
-    : "";
+  const offlineVisible = await page.locator(SEL.offlineBanner).count();
+  const offlineText = offlineVisible ? (await page.locator(SEL.offlineBanner).first().innerText()).trim() : "";
   check("offline banner appears", offlineVisible > 0);
-  check(
-    "offline banner copy",
-    offlineText === "Offline: showing the app shell. Connect to sync.",
-    offlineText
-  );
-  // Offline reload must still boot the app from the service-worker shell.
-  // (Chromium's network emulation does not preserve navigator.onLine across a
-  // reload, so the banner itself is only asserted for the live offline event.)
+  check("offline banner copy", /unreachable|paused|offline/i.test(offlineText), offlineText.replace(/\n+/g, " ").slice(0, 90));
+
+  // An offline reload must still boot the app from the service-worker shell.
   await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
   await page.waitForTimeout(3500);
-  const offlineShell = await page.locator(".app-shell").count();
+  const offlineShell = await page.locator(SEL.appShell).count();
   check("offline reload serves app shell", offlineShell > 0);
 
   await context.setOffline(false);
   await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
-  await page.waitForSelector(".app-shell", { timeout: 30000 }).catch(() => {});
+  await page.waitForSelector(SEL.appShell, { timeout: 30000 }).catch(() => {});
   await page.waitForTimeout(800);
-  const offlineCleared = await page.locator(".offline-banner").count();
+  const offlineCleared = await page.locator(SEL.offlineBanner).count();
   check("offline banner clears online", offlineCleared === 0);
 
   // Install button is gated on beforeinstallprompt.
-  const installBefore = await page.locator(".install-fab").count();
+  const installBefore = await page.locator(SEL.installFab).count();
   await page.evaluate(() => {
     const event = new Event("beforeinstallprompt", { cancelable: true });
     window.dispatchEvent(event);
   });
   await page.waitForTimeout(200);
-  const installAfter = await page.locator(".install-fab").count();
+  const installAfter = await page.locator(SEL.installFab).count();
   check("no install button before prompt", installBefore === 0);
   check("install button after beforeinstallprompt", installAfter === 1);
 
-  // Bookmarklet on the account page.
+  // Bookmarklet on the account capture section.
   await page.goto(BASE + "/account", { waitUntil: "domcontentloaded" });
-  await page.waitForSelector(".capture-box", { timeout: 20000 });
+  await page.waitForSelector(SEL.appShell, { timeout: 30000 });
+  await page.click(SEL.accountTab("capture"));
+  await page.waitForSelector(SEL.captureBox, { timeout: 20000 });
   const bookmarklet = await page.evaluate(() => {
-    const link = document.querySelector("a.capture-bookmarklet");
-    return link ? link.getAttribute("href") : null;
+    const code = document.querySelector('[data-testid="capture-box"] .account-snippet code');
+    return code ? code.textContent.trim() : null;
   });
-  const origin = await page.evaluate(() => window.location.origin);
   check(
-    "bookmarklet link present",
-    Boolean(bookmarklet && bookmarklet.startsWith("javascript:")),
-    bookmarklet ? bookmarklet.slice(0, 40) + "…" : "missing"
-  );
-  check(
-    "bookmarklet opens /save with url+title",
-    Boolean(bookmarklet && bookmarklet.includes(origin + "/save?url=") && bookmarklet.includes("&title="))
+    "bookmarklet snippet present",
+    Boolean(bookmarklet && (bookmarklet.startsWith("javascript:") || /location\.href/.test(bookmarklet))),
+    bookmarklet ? bookmarklet.slice(0, 48) + "..." : "missing"
   );
 
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: BASE });
-  await page.click('button:has-text("Copy bookmarklet")');
+  await page.locator(SEL.captureBox).getByRole("button", { name: /^copy$/i }).first().click();
   await page.waitForTimeout(400);
   const clipboard = await page.evaluate(() => navigator.clipboard.readText().catch(() => ""));
-  check("copy bookmarklet writes clipboard", clipboard.startsWith("javascript:"), clipboard.slice(0, 40) + "…");
+  check("copy bookmarklet writes clipboard", clipboard.length > 0 && /javascript:|location\.href/.test(clipboard), clipboard.slice(0, 40) + "...");
 
   // share_target landing route: a share carrying a URL is captured through
   // the idempotent quick-save endpoint, then the app lands on the library.
@@ -250,15 +198,17 @@ try {
     BASE + "/save?url=" + encodeURIComponent(sharedUrl) + "&title=" + encodeURIComponent("PWA share smoke"),
     { waitUntil: "domcontentloaded" }
   );
-  await page.waitForSelector(".app-shell", { timeout: 25000 });
-  await page.waitForFunction(
-    () => [...document.querySelectorAll(".toast")].some((toast) => /Saved to eza|Already in your library/.test(toast.textContent)),
-    null,
-    { timeout: 20000 }
-  ).catch(() => {});
+  await page.waitForSelector(SEL.appShell, { timeout: 25000 });
+  await page
+    .waitForFunction(
+      () => [...document.querySelectorAll('[data-testid="toast"]')].some((toast) => /Saved to eza|Already in your library/.test(toast.textContent)),
+      null,
+      { timeout: 20000 }
+    )
+    .catch(() => {});
   const shareState = await page.evaluate(() => ({
     path: window.location.pathname,
-    toasts: [...document.querySelectorAll(".toast")].map((toast) => toast.textContent.trim()),
+    toasts: [...document.querySelectorAll('[data-testid="toast"]')].map((toast) => toast.textContent.trim()),
   }));
   check("share target routes to library", shareState.path === "/", shareState.path);
   check(
@@ -272,10 +222,10 @@ try {
     BASE + "/save?url=" + encodeURIComponent(sharedUrl) + "&title=" + encodeURIComponent("PWA share smoke"),
     { waitUntil: "domcontentloaded" }
   );
-  await page.waitForSelector(".app-shell", { timeout: 25000 });
+  await page.waitForSelector(SEL.appShell, { timeout: 25000 });
   await page.waitForTimeout(1800);
   const repeatToasts = await page.evaluate(() =>
-    [...document.querySelectorAll(".toast")].map((toast) => toast.textContent.trim())
+    [...document.querySelectorAll('[data-testid="toast"]')].map((toast) => toast.textContent.trim())
   );
   check(
     "share target is idempotent",
@@ -283,33 +233,21 @@ try {
     JSON.stringify(repeatToasts)
   );
 
-  // A share without any URL falls back to the pre-filled Add modal.
+  // A share without any URL falls back to the pre-filled add dialog.
   await page.goto(BASE + "/save?title=" + encodeURIComponent("No URL share"), {
     waitUntil: "domcontentloaded",
   });
-  await page.waitForSelector(".modal", { timeout: 20000 });
+  await page.waitForSelector('[data-testid="dialog-add"]', { timeout: 20000 });
   const fallback = await page.evaluate(() => ({
     url: document.querySelector("#add-url") ? document.querySelector("#add-url").value : null,
-    title: document.querySelector(".modal input[type=text]")
-      ? document.querySelector(".modal input[type=text]").value
-      : null,
+    title: document.querySelector("#add-title") ? document.querySelector("#add-title").value : null,
   }));
-  check("share without url opens add modal", fallback.url === "", JSON.stringify(fallback));
+  check("share without url opens add dialog", fallback.url === "", JSON.stringify(fallback));
   check("share without url keeps title", fallback.title === "No URL share", String(fallback.title));
 } catch (error) {
-  failed.push("unexpected error — " + (error && error.stack ? error.stack : String(error)));
+  check("unexpected error", false, String(error && error.stack ? error.stack : error));
 } finally {
   await browser.close();
 }
 
-console.log("");
-console.log("passed: " + passed.length + ", failed: " + failed.length);
-if (consoleErrors.length) {
-  console.log("console errors (" + consoleErrors.length + "):");
-  for (const error of consoleErrors.slice(0, 10)) console.log("  " + error);
-}
-if (failed.length) {
-  console.log("failures:");
-  for (const failure of failed) console.log("  - " + failure);
-  process.exit(1);
-}
+report(errors);

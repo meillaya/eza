@@ -106,6 +106,20 @@ Destructive actions write an undo snapshot first. The snapshot stores the full
 restores the most recent snapshot and deletes the snapshot row. The UI asks for
 confirmation before merge or prune, and the API applies one snapshot at a time.
 
+## Serving and caching
+
+Static files are served from `EZA_STATIC_DIR`: pages at `/`, a fixed entry at
+`/assets/app/index.js`, the WASM bundle, the stylesheet, and the fonts. Every
+static response carries an ETag and `Cache-Control: no-cache`, so a browser
+revalidates after a rebuild and gets a 304 when the file did not change. The
+client shell is sent with `no-store`: the HTML always comes from the server.
+
+`/sw.js` is generated per request with the build id that
+`scripts/build-web.sh` writes to `static/app/build-id`. A rebuild therefore
+installs a new service worker; the worker claims the open pages, and each tab
+reloads once into the new build. A port that is already taken reports the
+origin that is probably answering instead of a raw socket error.
+
 ## Deployment shape
 
 All deployment targets run the same `eza-bookmarks` binary. The NixOS module

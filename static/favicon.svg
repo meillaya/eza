@@ -1,4 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="18" fill="#5b5bd6"/>
-  <path d="M20 14h24v36l-12-8-12 8z" fill="#ffffff"/>
+  <rect width="64" height="64" fill="#F2EDE3"/>
+  <rect x="0.5" y="0.5" width="63" height="63" fill="none" stroke="#1A2340" stroke-width="1"/>
+  <text x="32" y="47" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-weight="600" font-size="38" fill="#1A2340">e</text>
+  <rect x="16" y="52" width="32" height="2" fill="#8A2B20"/>
 </svg>

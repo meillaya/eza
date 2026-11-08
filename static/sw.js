@@ -1,14 +1,27 @@
-/* eza service worker — versioned app-shell cache.
+/* eza service worker: versioned app-shell cache.
  *
- * The shell (HTML, CSS, JS, WASM, icons) is precached so the app starts
+ * The shell (HTML, CSS, JS, WASM, icons, fonts) is precached so the app starts
  * instantly and works offline. API and auth endpoints are never cached:
  * /api/*, /save, /login, /setup, /recover always go to the network.
  */
 "use strict";
 
-const VERSION = "eza-app-shell-v1";
+// The server replaces the dev marker with the current web build id, so every
+// `bash scripts/build-web.sh` installs a new worker instead of leaving an old
+// shell in the browser cache.
+const VERSION = "eza-app-shell-v4-dev";
 const SHELL_CACHE = VERSION + "-shell";
 const RUNTIME_CACHE = VERSION + "-runtime";
+
+// The catalogue typefaces. These are the URLs eza.css requests and the files
+// live in static/fonts, which the server serves at /assets/fonts/<file>.
+const FONT_ASSETS = [
+  "/assets/fonts/fraunces-300-900.woff2",
+  "/assets/fonts/newsreader-300-800.woff2",
+  "/assets/fonts/ibm-plex-mono-400.woff2",
+  "/assets/fonts/ibm-plex-mono-500.woff2",
+  "/assets/fonts/ibm-plex-mono-600.woff2",
+];
 
 const SHELL_ASSETS = [
   "/",
@@ -31,7 +44,7 @@ const SHELL_ASSETS = [
   "/assets/vendor/browser_wasi_shim/fs_opfs.js",
   "/assets/vendor/browser_wasi_shim/strace.js",
   "/assets/vendor/browser_wasi_shim/debug.js",
-];
+].concat(FONT_ASSETS);
 
 // Endpoints that must always talk to the network and never be cached.
 const NETWORK_ONLY_PREFIXES = ["/api/", "/save", "/login", "/setup", "/recover"];
@@ -75,6 +88,8 @@ self.addEventListener("activate", (event) => {
           .map((key) => caches.delete(key))
       );
       await self.clients.claim();
+      const windows = await self.clients.matchAll({ type: "window" });
+      windows.forEach((client) => client.postMessage({ type: "EZA_SW_UPDATED", version: VERSION }));
     })()
   );
 });
@@ -110,19 +125,9 @@ async function navigationStrategy(request) {
 }
 
 async function assetStrategy(request) {
-  const cached = await caches.match(request);
-  if (cached) {
-    // Stale-while-revalidate: serve fast, refresh the cache in the background.
-    fetch(request)
-      .then(async (response) => {
-        if (response && response.ok) {
-          const cache = await caches.open(RUNTIME_CACHE);
-          await cache.put(request, response.clone());
-        }
-      })
-      .catch(() => {});
-    return cached;
-  }
+  // Network first: a rebuilt asset must reach the page on the next load. The
+  // server answers conditional requests with 304, so the check is cheap, and
+  // the cache still covers the offline case.
   try {
     const response = await fetch(request);
     if (response && response.ok && new URL(request.url).origin === self.location.origin) {
@@ -131,6 +136,8 @@ async function assetStrategy(request) {
     }
     return response;
   } catch (error) {
+    const cached = await caches.match(request);
+    if (cached) return cached;
     const cachedShell = await caches.match("/", { cacheName: SHELL_CACHE });
     return cachedShell || new Response("", { status: 504 });
   }

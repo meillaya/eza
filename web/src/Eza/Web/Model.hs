@@ -11,11 +11,15 @@ module Eza.Web.Model (
     routeOfUri,
     routeTitle,
     routeSubtitle,
-    rowHeight,
-    colCount,
-    gridRows,
-    visibleRows,
+    AccountTab (..),
+    LedgerEntry (..),
+    ledgerEntries,
+    ledgerContentHeight,
+    yearOf,
+    isoDay,
     formatStamp,
+    formatFiled,
+    formatProseDate,
     sortLabel,
     themeToMiso,
     themeOfMiso,
@@ -42,6 +46,7 @@ import Eza.Types (
     GraphData,
     Highlight (..),
     ImportReport,
+    LibraryStats,
     SavedSearch,
     SearchPage,
     TagStat,
@@ -50,7 +55,7 @@ import Miso
 import Miso.Router (Router (..), RoutingError (..), Token (..), parseURI, routes, toCapture, toPath, toQueryParam)
 import Miso.Subscription.History (getURI)
 
-import Eza.Web.Types (AccountInfo, AiStatus, ApiError, ConsolGroup, DedupGroup, ReaderSelection, Rule (..), ShareView, TagSuggestion, TokenView)
+import Eza.Web.Types (AccountInfo, AiStatus, ApiError, ConsolGroup, DedupGroup, ReaderSelection, Rule (..), SessionInfo, ShareView, TagSuggestion, TokenView)
 
 -- | Application routes.  @Bookmark@ carries the numeric bookmark id.
 data Route
@@ -63,6 +68,7 @@ data Route
     | AiTags
     | Maintenance
     | Account
+    | Accessions
     | Save (Maybe Text) (Maybe Text) (Maybe Text)
     | NotFound
     deriving (Eq, Show)
@@ -81,6 +87,7 @@ instance Router Route where
         AiTags -> [toPath "tags", toPath "ai"]
         Maintenance -> [toPath "maintenance"]
         Account -> [toPath "account"]
+        Accessions -> [toPath "accessions"]
         Save title text url ->
             [toPath "save"]
                 ++ concat
@@ -158,6 +165,7 @@ classifyRoute uri = case splitPath (fromMisoString (uriPath uri)) of
     ["tags", "ai"] -> AiTags
     ["maintenance"] -> Maintenance
     ["account"] -> Account
+    ["accessions"] -> Accessions
     -- PWA share_target landing page: /save?title=..&text=..&url=..
     ["save"] -> Save (query "title") (query "text") (query "url")
     _ -> NotFound
@@ -183,6 +191,7 @@ routeTitle = \case
     AiTags -> "AI tags"
     Maintenance -> "Maintenance"
     Account -> "Account"
+    Accessions -> "Accessions by year"
     Save _ _ _ -> "Save bookmark"
     NotFound -> "Not found"
 
@@ -194,10 +203,11 @@ routeSubtitle = \case
     Graph -> "Explore the neighbourhood around a bookmark."
     Dedup -> "Review near-identical saves before merging them."
     Tags -> "Consolidate, rename, and prune your tag vocabulary."
-    AiTags -> "Advisory tag suggestions — nothing is written without you."
+    AiTags -> "Advisory tag suggestions. Nothing is written without you."
     Maintenance -> "Dead-link sweeps, prune candidates, and undo."
-    Account -> "Passkeys, recovery codes, and session controls."
-    Save _ _ _ -> "Saving a shared link to your library."
+    Account -> "Passkeys, recovery codes, and sessions."
+    Accessions -> "The whole archive, set as an index."
+    Save _ _ _ -> "Saving a shared link to the catalogue."
     NotFound -> "That page does not exist."
 
 data Theme = ThemeLight | ThemeDark
@@ -211,6 +221,20 @@ themeOfMiso :: MisoString -> Theme
 themeOfMiso s = if fromMisoString s == ("dark" :: String) then ThemeDark else ThemeLight
 
 data NoteMode = NoteWrite | NotePreview
+    deriving (Eq, Show)
+
+-- | Which account panel is showing.
+data AccountTab
+    = AccountPasskeys
+    | AccountRecovery
+    | AccountSessions
+    | AccountTokens
+    | AccountShares
+    | AccountRules
+    | AccountImport
+    | AccountCapture
+    | AccountAppearance
+    | AccountAbout
     deriving (Eq, Show)
 
 data ToastKind = ToastInfo | ToastOk | ToastError
@@ -235,6 +259,15 @@ data Action
     | Resized
     | GlobalKey KeyInfo
     | KeyHandled KeyInfo Bool
+    | DeleteBookmarkRequest Int
+    | DeleteBookmarkCancel
+    | DeleteBookmarkConfirm
+    | LedgerCursorNext
+    | LedgerCursorPrev
+    | LedgerCursorSet Int
+    | DrawerOpen Int
+    | DrawerClose
+    | AccountTabSelected AccountTab
     | Noop
     | -- boot
       BootLoaded BootPayload
@@ -509,6 +542,12 @@ data Model = Model
     , mNotice :: Maybe MisoString
     , mDebounce :: Maybe Int
     , mTags :: [TagStat]
+    , mStats :: Maybe LibraryStats
+    , mYearHere :: [(Int, Int)]
+    , mLedgerCursor :: Maybe Int
+    , mDrawer :: Maybe Int
+    , mAccountTab :: AccountTab
+    , mSessions :: [SessionInfo]
     , mSaved :: [SavedSearch]
     , mSavedName :: MisoString
     , -- selection / bulk
@@ -519,6 +558,7 @@ data Model = Model
     , mBulkBusy :: Bool
     , mTagPrompt :: Maybe Bool
     , mTagPromptValue :: MisoString
+    , mConfirmDelete :: Maybe Int
     , mConfirmBulkDelete :: Bool
     , -- add modal
       mAddOpen :: Bool
@@ -648,6 +688,12 @@ initialModel =
         , mNotice = Nothing
         , mDebounce = Nothing
         , mTags = []
+        , mStats = Nothing
+        , mYearHere = []
+        , mLedgerCursor = Nothing
+        , mDrawer = Nothing
+        , mAccountTab = AccountPasskeys
+        , mSessions = []
         , mSaved = []
         , mSavedName = ""
         , mSelection = IS.empty
@@ -657,6 +703,7 @@ initialModel =
         , mBulkBusy = False
         , mTagPrompt = Nothing
         , mTagPromptValue = ""
+        , mConfirmDelete = Nothing
         , mConfirmBulkDelete = False
         , mAddOpen = False
         , mAddUrl = ""
@@ -749,32 +796,57 @@ initialModel =
 {- | Virtualized grid metrics.  Card height follows the design brief:
 124px desktop, 140px mobile; rows include the 12px gap.
 -}
-rowHeight :: Int -> Int
-rowHeight w
-    | w < 768 = 152
-    | otherwise = 136
 
-colCount :: Int -> Int
-colCount w
-    | w >= 1200 = 3
-    | w >= 768 = 2
-    | otherwise = 1
+-- | Year of a unix timestamp, in UTC.
+yearOf :: Int -> Int
+yearOf t = let (y, _, _) = civilFromDays (max 0 t `div` 86400) in y
 
-gridRows :: Model -> Int
-gridRows m =
-    let n = length (mItems m)
-        c = colCount (mWidth m)
-     in (n + c - 1) `div` c
+-- | ISO day (YYYY-MM-DD) of a unix timestamp, in UTC.
+isoDay :: Int -> Text
+isoDay t =
+    let (y, mo, d) = civilFromDays (max 0 t `div` 86400)
+     in T.pack (pad y <> "-" <> pad mo <> "-" <> pad d)
+  where
+    pad :: Int -> String
+    pad n = if n < 10 then '0' : show n else show n
 
--- | First and (exclusive) last row to render, with +/- oversized overscan.
-visibleRows :: Model -> (Int, Int)
-visibleRows m =
-    let rh = rowHeight (mWidth m)
-        -- rows scrolled into / past the viewport
-        rel = max 0 (mScrollY m - mGridTop m)
-        first = max 0 (rel `div` rh - 3)
-        viewRows = (mHeight m + rh - 1) `div` rh + 1
-     in (first, first + viewRows + 6)
+-- | One line of the ledger: a year divider or a record row.
+data LedgerEntry
+    = LedgerYear Int (Maybe Int)
+    | LedgerRow Int BookmarkSummary
+
+{- | Group the loaded records into year dividers plus rows. The order the API
+returned is kept inside each year and the first appearance of a year decides
+where its divider sits, so a title sort still reads as one ledger.
+-}
+ledgerEntries :: Model -> [LedgerEntry]
+ledgerEntries m =
+    let here = M.fromList (mYearHere m)
+        rows = mItems m
+        years = orderedYears rows
+        block year =
+            LedgerYear year (M.lookup year here)
+                : [ LedgerRow idx b
+                  | (idx, b) <- zip [0 ..] rows
+                  , bsCreatedAt b > 0
+                  , yearOf (bsCreatedAt b) == year
+                  ]
+     in concatMap block years
+  where
+    orderedYears [] = []
+    orderedYears (b : rest) =
+        let y = yearOf (bsCreatedAt b)
+            restYears = orderedYears rest
+         in if y `elem` restYears then restYears else y : restYears
+
+-- | Pixel height of the whole ledger at the current width.
+ledgerContentHeight :: Model -> Int
+ledgerContentHeight m = sum (map (entryHeight (mWidth m)) (ledgerEntries m))
+
+entryHeight :: Int -> LedgerEntry -> Int
+entryHeight w = \case
+    LedgerYear _ _ -> if w < 768 then 48 else 56
+    LedgerRow _ _ -> if w < 768 then 72 else 52
 
 -- | Is a bookmark currently selected for bulk actions?
 isSelected :: Model -> Int -> Bool
@@ -845,6 +917,43 @@ formatStamp t0
         , (10, "Oct")
         , (11, "Nov")
         , (12, "Dec")
+        ]
+
+-- | Filed date in data contexts: 2025.11.03.
+formatFiled :: Int -> MisoString
+formatFiled t
+    | t <= 0 = ""
+    | otherwise =
+        let (y, mo, d) = civilFromDays (t `div` 86400)
+         in ms (two y <> "." <> two mo <> "." <> two d)
+  where
+    two :: Int -> String
+    two n = if n < 10 then '0' : show n else show n
+
+-- | Date in prose contexts: 03 nov 2025.
+formatProseDate :: Int -> MisoString
+formatProseDate t
+    | t <= 0 = ""
+    | otherwise =
+        let (y, mo, d) = civilFromDays (t `div` 86400)
+            name = fromMaybe "jan" (lookup mo proseMonths)
+         in ms (two d <> " " <> name <> " " <> show y)
+  where
+    two :: Int -> String
+    two n = if n < 10 then '0' : show n else show n
+    proseMonths =
+        [ (1, "jan")
+        , (2, "feb")
+        , (3, "mar")
+        , (4, "apr")
+        , (5, "may")
+        , (6, "jun")
+        , (7, "jul")
+        , (8, "aug")
+        , (9, "sep")
+        , (10, "oct")
+        , (11, "nov")
+        , (12, "dec")
         ]
 
 -- | Howard Hinnant's days-to-civil algorithm.

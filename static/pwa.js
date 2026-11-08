@@ -1,5 +1,5 @@
 /* eza PWA glue: service-worker registration, install prompt, clipboard.
- * External file only — index.html has no inline scripts. */
+ * External file only. index.html has no inline scripts. */
 (function () {
   "use strict";
 
@@ -12,8 +12,22 @@
 
   function registerServiceWorker() {
     if (!canUseServiceWorker()) return;
+    var hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener("message", function (event) {
+      var data = event.data || {};
+      if (data.type !== "EZA_SW_UPDATED" || !hadController || !data.version) return;
+      // One reload per new build: the worker has just replaced an older shell.
+      var key = "eza-reloaded-" + data.version;
+      try {
+        if (sessionStorage.getItem(key)) return;
+        sessionStorage.setItem(key, "1");
+      } catch (error) {
+        return;
+      }
+      window.location.reload();
+    });
     navigator.serviceWorker
-      .register("/sw.js", { scope: "/" })
+      .register("/sw.js", { scope: "/", updateViaCache: "none" })
       .catch(function (error) {
         console.warn("[eza] service worker registration failed", error);
       });
@@ -24,7 +38,7 @@
 
   // ------------------------------------------------- install prompt ------
   // The install button only exists after the browser fires
-  // beforeinstallprompt — never show a fake/manual install prompt.
+  // beforeinstallprompt. Never show a fake or manual install prompt.
   var deferredPrompt = null;
   var installButton = null;
 
@@ -40,7 +54,7 @@
     installButton = document.createElement("button");
     installButton.type = "button";
     installButton.className = "install-fab";
-    installButton.textContent = "Install eza";
+    installButton.textContent = "Install the catalogue";
     installButton.title = "Install eza as an app";
     installButton.addEventListener("click", function () {
       var promptEvent = deferredPrompt;
@@ -70,7 +84,8 @@
     var value = String(text == null ? "" : text);
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(value);
+        var writing = navigator.clipboard.writeText(value);
+        if (writing && typeof writing.catch === "function") writing.catch(function () {});
         return true;
       }
     } catch (error) {
@@ -94,6 +109,19 @@
   // ------------------------------------------------ reader selections -----
   // Character offsets of a DOM selection inside a container, used by the
   // bookmark detail page to create highlights. Returns JSON or null.
+  // The client's screens scroll inside their own containers. Forward the ledger
+  // scroll to the window so the Miso subscription can fetch the next page.
+  document.addEventListener(
+    "scroll",
+    function (event) {
+      var target = event.target;
+      if (target && target.classList && target.classList.contains("ledger")) {
+        window.dispatchEvent(new Event("scroll"));
+      }
+    },
+    true
+  );
+
   window.ezaSelectionOffsets = function (containerId) {
     try {
       var container = document.getElementById(containerId);
@@ -101,20 +129,28 @@
       if (!container || !selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
       var range = selection.getRangeAt(0);
       if (!container.contains(range.startContainer) || !container.contains(range.endContainer)) return null;
+      // Margin pins and other decorative spans carry aria-hidden. Their text is
+      // not part of the stored reading copy, so it must not shift offsets.
+      function counted(node) {
+        if (node.nodeType !== 3) return true;
+        var parent = node.parentElement;
+        return !(parent && parent.closest && parent.closest('[aria-hidden="true"]'));
+      }
       function offsetAt(node, offset) {
         var total = 0;
         var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
         var current = null;
         while ((current = walker.nextNode())) {
           if (current === node) {
-            if (node.nodeType === 3) return total + offset;
+            if (node.nodeType === 3) return counted(node) ? total + offset : total;
             var childTotal = total;
             for (var i = 0; i < offset && i < node.childNodes.length; i++) {
-              childTotal += (node.childNodes[i].textContent || "").length;
+              var child = node.childNodes[i];
+              if (child.nodeType === 3 && counted(child)) childTotal += (child.textContent || "").length;
             }
             return childTotal;
           }
-          if (current.nodeType === 3) total += current.textContent.length;
+          if (current.nodeType === 3 && counted(current)) total += current.textContent.length;
         }
         return null;
       }

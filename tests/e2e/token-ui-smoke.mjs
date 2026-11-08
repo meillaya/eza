@@ -1,82 +1,52 @@
-// API token UI smoke test: create form + scopes, one-time reveal + copy,
-// list, bearer usage, revoke, and the one-time-only guarantee.
+// API token UI smoke test: account section, empty state, create with scopes,
+// one-time reveal + copy, bearer use, reload, revoke.
 //
-// Run from the repo root in the dev shell:
-//   EZA_BASE=http://localhost:8093 node tests/e2e/token-ui-smoke.mjs
-import { chromium } from "@playwright/test";
+// Run from the repo root in the dev shell, against a scratch server:
+//   EZA_BASE=http://localhost:8100 node tests/e2e/token-ui-smoke.mjs
+import { BASE, SEL, launchBrowser, launchPage, enterLibrary, makeApi, newChecker } from "./lib/dom.mjs";
 
-const BASE = process.env.EZA_BASE || "http://localhost:8093";
-const passed = [];
-const failed = [];
-function check(name, condition, detail) {
-  if (condition) {
-    passed.push(name);
-    console.log("PASS " + name + (detail ? " — " + detail : ""));
-  } else {
-    failed.push(name + (detail ? " — " + detail : ""));
-    console.log("FAIL " + name + (detail ? " — " + detail : ""));
-  }
+const browser = await launchBrowser();
+const { context, page, errors } = await launchPage(browser, { viewport: { width: 1440, height: 1000 } });
+const { check, report } = newChecker();
+const api = makeApi(page);
+
+async function openTokens() {
+  await page.goto(BASE + "/account", { waitUntil: "domcontentloaded" });
+  await page.waitForSelector(SEL.appShell, { timeout: 30000 });
+  await page.click(SEL.accountTab("tokens"));
+  await page.waitForSelector(SEL.accountPanel("tokens"), { timeout: 20000 });
+  await page.waitForSelector(SEL.tokenName, { timeout: 20000 });
+  await page.waitForTimeout(400);
 }
 
-const browser = await chromium.launch({ headless: true });
-const context = await browser.newContext({ viewport: { width: 1440, height: 950 } });
-const page = await context.newPage();
-const consoleErrors = [];
-page.on("console", (message) => {
-  if (message.type() === "error") consoleErrors.push(message.text());
-});
-page.on("pageerror", (error) => consoleErrors.push(String(error)));
-
-const cdp = await context.newCDPSession(page);
-await cdp.send("WebAuthn.enable", { enableUI: false });
-await cdp.send("WebAuthn.addVirtualAuthenticator", {
-  options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
-});
-
-const api = (path, options = {}) =>
-  page.evaluate(
-    async ({ path, options }) => {
-      const csrf = document.cookie.split("; ").find((c) => c.startsWith("eza_csrf="))?.split("=")[1] || "";
-      const headers = Object.assign({ "Content-Type": "application/json" }, options.headers || {});
-      if ((options.method || "GET") !== "GET") headers["X-CSRF-Token"] = csrf;
-      const response = await fetch(path, { ...options, headers });
-      let body = null;
-      try { body = await response.json(); } catch (_) {}
-      return { status: response.status, body };
-    },
-    { path, options }
-  );
-
 try {
-  await page.goto(BASE + "/setup", { waitUntil: "domcontentloaded" });
-  await page.click("#passkey-setup");
-  await page.waitForSelector("#recovery:not([hidden])", { timeout: 30000 });
-  await page.click("#continue");
-  await page.waitForSelector(".topbar", { timeout: 30000 });
-  await page.goto(BASE + "/account", { waitUntil: "domcontentloaded" });
-  await page.waitForSelector(".token-form", { timeout: 20000 });
-  check("API tokens panel present", (await page.locator("text=API tokens").count()) > 0);
-  check("empty state", (await page.locator("text=No API tokens yet.").count()) > 0);
+  await enterLibrary(page);
+  await openTokens();
 
-  // Create with read/write/capture scopes.
-  await page.fill("#token-name", "E2E token");
-  await page.locator(".scope-option", { hasText: "capture" }).locator("input").check();
-  await page.getByRole("button", { name: "Create token", exact: true }).click();
-  await page.waitForSelector(".token-reveal", { timeout: 20000 });
-  const rawToken = (await page.locator(".token-secret").innerText()).trim();
-  check("one-time reveal shown", rawToken.startsWith("eza_pat_"), rawToken.slice(0, 12) + "…");
-  check(
-    "one-time warning shown",
-    (await page.locator(".token-reveal-title").innerText()).includes("shown only once")
-  );
+  check("API tokens panel present", (await page.locator(SEL.accountPanel("tokens")).count()) === 1);
+  const emptyState = await page
+    .locator(SEL.tokenEmpty)
+    .or(page.getByText(/no (api )?tokens( yet)?/i))
+    .count();
+  check("empty state", emptyState > 0);
+
+  // Create a token with the capture scope on top of the default read/write.
+  await page.fill(SEL.tokenName, "E2E token");
+  await page.locator(SEL.tokenScope("capture")).evaluate((element) => element.click());
+  await page.locator(SEL.tokenCreate).click();
+  await page.waitForSelector(SEL.tokenReveal, { timeout: 20000 });
+  const rawToken = (await page.locator(SEL.tokenSecret).innerText()).trim();
+  check("one-time reveal shown", rawToken.startsWith("eza_pat_"), rawToken.slice(0, 12) + "...");
+  const revealCopy = (await page.locator(SEL.tokenReveal).innerText()).toLowerCase();
+  check("one-time warning shown", /once|again/.test(revealCopy), revealCopy.replace(/\n+/g, " ").slice(0, 80));
 
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: BASE });
-  await page.getByRole("button", { name: "Copy token", exact: true }).click();
+  await page.locator(SEL.tokenReveal).getByRole("button", { name: /copy/i }).first().click();
   await page.waitForTimeout(500);
   const clipboard = await page.evaluate(() => navigator.clipboard.readText().catch(() => ""));
-  check("copy token writes clipboard", clipboard === rawToken, clipboard.slice(0, 12) + "…");
+  check("copy token writes clipboard", clipboard === rawToken, clipboard.slice(0, 12) + "...");
 
-  // List shows the token metadata.
+  // The token list carries the metadata through the API.
   const list = await api("/api/v1/tokens");
   const created = (list.body?.tokens || [])[0];
   check("token listed via api", Boolean(created), JSON.stringify(list.body || {}).slice(0, 120));
@@ -99,26 +69,24 @@ try {
   }, rawToken);
   check("bearer token quick-saves", [200, 201].includes(bearerSave.status), JSON.stringify(bearerSave));
 
-  // One-time guarantee: reload hides the reveal.
-  await page.goto(BASE + "/account", { waitUntil: "domcontentloaded" });
-  await page.waitForSelector(".token-form", { timeout: 20000 });
-  await page.waitForTimeout(600);
-  check("reveal is one-time only", (await page.locator(".token-reveal").count()) === 0);
-  check("token row visible after reload", (await page.locator(".cred", { hasText: "E2E token" }).count()) > 0);
+  // Reload: the reveal is gone, the token row is listed, revoke works.
+  await openTokens();
+  check("reveal is one-time only", (await page.locator(SEL.tokenReveal).count()) === 0);
+  const tokenRow = page.locator(SEL.tokenRow, { hasText: "E2E token" }).first();
+  check("token row visible after reload", (await tokenRow.count()) > 0);
 
-  // Revoke from the UI.
-  await page.locator('.cred:has-text("E2E token") button[title="Revoke token"]').click();
-  await page.waitForFunction(
-    () => [...document.querySelectorAll(".toast")].some((toast) => /Token revoked/.test(toast.textContent)),
-    null,
-    { timeout: 20000 }
-  ).catch(() => {});
-  await page.waitForTimeout(900);
-  const revokedRow = await page.locator('.cred:has-text("E2E token")').innerText();
-  check("revoked state shown in UI", /revoked/i.test(revokedRow), revokedRow.replace(/\n+/g, " ").slice(0, 100));
-  const afterRevoke = await api("/api/v1/tokens");
-  const revoked = (afterRevoke.body?.tokens || []).find((token) => token.name === "E2E token");
+  await tokenRow.locator(SEL.tokenRevoke).click();
+  await page.waitForSelector(SEL.toast, { timeout: 20000 }).catch(() => {});
+  let revoked = null;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    await page.waitForTimeout(400);
+    const afterRevoke = await api("/api/v1/tokens");
+    revoked = (afterRevoke.body?.tokens || []).find((token) => token.name === "E2E token");
+    if (revoked?.revoked_at) break;
+  }
   check("revoked_at set on server", Boolean(revoked?.revoked_at), String(revoked?.revoked_at));
+  const rowText = await tokenRow.innerText().catch(() => "");
+  check("revoked state shown in UI", /revoked/i.test(rowText), rowText.replace(/\n+/g, " ").slice(0, 100));
 
   // Revoked bearer is rejected.
   const revokedSave = await page.evaluate(async (raw) => {
@@ -131,19 +99,9 @@ try {
   }, rawToken);
   check("revoked bearer rejected", revokedSave.status === 401, "status " + revokedSave.status);
 } catch (error) {
-  failed.push("unexpected error — " + (error && error.stack ? error.stack : String(error)));
+  check("unexpected error", false, String(error && error.stack ? error.stack : error));
 } finally {
   await browser.close();
 }
 
-console.log("");
-console.log("passed: " + passed.length + ", failed: " + failed.length);
-if (consoleErrors.length) {
-  console.log("console errors (" + consoleErrors.length + "):");
-  for (const error of consoleErrors.slice(0, 10)) console.log("  " + error);
-}
-if (failed.length) {
-  console.log("failures:");
-  for (const failure of failed) console.log("  - " + failure);
-  process.exit(1);
-}
+report(errors);

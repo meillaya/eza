@@ -1,83 +1,123 @@
 # Interface design
 
-The interface has one job: find a bookmark quickly and show enough context to
-decide what to do with it. Tags replace a folder tree. The layout uses rounded
-cards, a tag rail, and one search field.
+The interface has one job: find one of thousands of saved links and show enough
+context to decide what to do with it. It is built as a catalogue: a ledger of
+numbered accessions, a printed record page, and a set of panels for upkeep.
+`static/eza.css` implements the system and is described here.
 
 ## Tokens
 
-The design tokens live in `static/eza.css`.
+Tokens live at the top of `static/eza.css`. Nothing else declares a colour.
 
-| Token | Light | Dark |
+| Token | Paper | Night |
 |---|---|---|
-| background | `#f7f7f5` | `#0f0f11` |
-| surface | `#ffffff` | `#17171a` |
-| surface 2 | `#f1f1ee` | `#1e1e23` |
-| border | `#e6e6e1` | `#2a2a30` |
-| text | `#171717` | `#f5f5f4` |
-| muted | `#6f6f6a` | `#a3a3a0` |
-| accent | `#5b5bd6` | `#9a9af7` |
+| `--paper` | `#F2EDE3` | `#10141F` |
+| `--card` | `#FBF8F1` | `#161B28` |
+| `--ink` | `#1A2340` | `#E9E3D6` |
+| `--muted` | `#6E675C` | `#A9A08F` |
+| `--accent` | `#8A2B20` | `#C98A3E` |
+| `--rule` | `#D5CBB8` | `#232A3A` |
+| `--rule-soft` | `#E2D9C8` | `#1C2230` |
+| `--sel` | `#EFE7D8` | `#1A2030` |
+| `--hover` | `#F7F2E6` | `#191F2C` |
+| `--ok` / `--warn` / `--danger` | `#3F6B4E` / `#8A5A1F` / `#8A2B20` | `#8FB08A` / `#D6B06A` / `#D98A6F` |
 
-Radii are 10, 14, 20, and 999 px. Shadows use two layers, one at 1 px and one
-at 8 px. Spacing uses a 4 px scale. Body text is 15 px in the system UI font.
-Motion runs for 120 to 180 ms with an ease-out curve, and the stylesheet honors
-`prefers-reduced-motion`.
+Paper is the default and follows the system preference until the reader picks a
+theme. The choice is stored in `localStorage` under `eza-theme`. The interface
+labels the two themes paper and reading room at night; `data-theme` keeps the
+values `light` and `dark`.
 
-## Library
+## Type
 
-The library fills the first screen. The top bar holds the brand, the search
-field, Add, Import, theme, and account controls. A scope row switches between
-All, Inbox, Graph, Duplicates, Tags, AI tags, Maintenance, and Account. The tag
-rail lists tags with counts and saved searches.
+Three families, three jobs. There is no sans-serif in the interface.
 
-The card grid uses fixed-height cards: 124 px on desktop and 140 px on mobile.
-Columns come from the container width, with a 280 px minimum card and a 12 px
-gap. A card shows the favicon, the title on two lines, the domain, and the tag
-chips. Hover actions cover open, read, and delete.
+| Family | Files | Job |
+|---|---|---|
+| Fraunces | `/assets/fonts/fraunces-300-900.woff2` | display, page titles, row titles, small caps labels |
+| Newsreader | `/assets/fonts/newsreader-300-800.woff2` | reading copy, dialog body, notes |
+| IBM Plex Mono | `/assets/fonts/ibm-plex-mono-{400,500,600}.woff2` | every number, date, label and control |
 
-The grid renders only visible rows plus three rows of overscan. It fetches 60
-more rows when the viewport is within five rows of the end. The DOM stays under
-about 100 cards for a 10,000-item library.
+Roles: display 56/60 and 44/48 for page titles, 32/36 for section titles, 24/29
+for card titles, 19/25 for ledger row titles, 19/32 Newsreader for reading, 14/20
+Plex Mono for controls, 12/18 for data, 10.5/14 for uppercase labels. Mobile
+steps down to 34/38 page titles, 17/21 row titles, 17/28 reading. Body text never
+goes below 14 px and data or labels never below 12 px. Fraunces is set with a
+fixed optical size so every browser draws the same letterforms.
 
-## Detail
+## Layout
 
-The detail view shows an editable title, the URL, a read toggle, and a graph
-link. The reader column holds extracted text plus Extract and Snapshot. The
-notes column holds the markdown editor, a preview, wikilink autocomplete, tag
-chips, and backlinks.
+- Unit 4 px. Gutters are 36 px on desktop, 40 px on tablet where the rail folds,
+  18 px on mobile.
+- The ledger is a five column grid: accession number 72 px, title flexible,
+  source 210 px, filed date 82 px, tags 152 px. Rows are 52 px tall and 72 px on
+  mobile, with year dividers every few dozen rows.
+- The record page is a 588 px reading column beside a 300 px catalogue record,
+  with a crumb and accession rule above and a note editor below the record.
+- Panels use a running head with the section links, a page head with the title
+  and figures, and then a table or ledger body.
+- Auth and share pages are centred printed cards: wordmark, one rule, one action.
 
-Save writes the title, note, read flag, and tags in one patch. The keyboard
-shortcut is Ctrl+S or Cmd+S. Leaving the page with unsaved changes opens a
-confirmation dialog.
+## Screens
 
-## Other screens
-
-| Route | Content |
+| Route | Screen |
 |---|---|
-| `/inbox` | Unread grid, mark-all-above, saved searches |
-| `/graph` | SVG neighborhood for one or two hops, depth and tag filters, pan and zoom |
-| `/dedup` | Candidate groups, keep-one choice, merge, undo |
-| `/tags` | Tag stats, case duplicates, fuzzy pairs, merge, rename, delete |
-| `/tags/ai` | Tag bucket picker, per-bookmark suggestions, apply or discard |
-| `/maintenance` | Dead-link sweep, dead list, prune candidates, confirm, undo |
-| `/account` | Passkeys, recovery code regeneration, sign out |
-| `/setup`, `/login`, `/recover` | Centered auth pages rendered by the server |
+| `/` | The ledger: masthead, facets, year dividers, rows, field drawer, selection |
+| `/inbox` | Unread ledger with mark all above read |
+| `/bookmark/:id` | Record: reading column, catalogue record, note, see also, actions |
+| `/accessions` | The archive as an index: filing days per year, ranked sources, long tail |
+| `/graph` | Tag neighbourhood around a seed bookmark |
+| `/dedup` | Duplicate groups and keep-one merges |
+| `/tags` | Tag table, case duplicates, near-duplicate pairs |
+| `/tags/ai` | Advisory tag suggestions, applied one bookmark at a time |
+| `/maintenance` | Dead-link sweep, prune candidates, undo |
+| `/account` | Passkeys, recovery, sessions, tokens, share links, rules, import, capture |
+| `/save` | Quick save from the PWA share target or bookmarklet |
+| `/login`, `/setup`, `/recover`, `/account/add-passkey` | Passkey ceremonies |
+| `/s/:token` | Read-only share page for a bookmark or saved search |
 
-## Accessibility
+Passkeys need a secure origin. The auth pages check for one and say so when the
+browser treats the page as insecure: open eza over https or on localhost, or
+sign in with a recovery code, which works on any origin. The login page does
+not offer to set up a second claim on a library that already has a passkey.
 
-The client uses semantic landmarks, labelled controls, focus traps in dialogs,
-and live regions for search results and toasts. Focus rings stay visible.
-Touch targets measure at least 44 px.
+The masthead carries the wordmark, the provenance line, the search line and the
+section links. The ledger's facet rail lists sources with leader dots, tags in
+two columns, status, filing activity and the accessions link.
 
-The grid uses three columns at 1200 px and wider, two columns from 768 to
-1199 px, and one column below 768 px.
+States are part of the design: fresh library, filtered to nothing, loading, API
+error, no extraction, enrichment queued and failed, dead link, no note, no
+backlinks, empty inbox, never-run sweep, empty account panels, expired share
+link. Every one has copy.
 
-Keyboard shortcuts:
+## Keyboard
 
 | Key | Action |
 |---|---|
-| `/` | Focus search |
-| `k` | Open the command palette |
-| `Esc` | Close the palette or dialog |
-| arrows, Enter | Move and confirm in the palette |
-| Ctrl+S, Cmd+S | Save the current bookmark |
+| `/` | Focus the search line |
+| `Shift+K`, `Cmd+K`, `Ctrl+K` | Open the command palette |
+| `j`, `k` | Move the ledger cursor and open its field drawer |
+| `Enter` | Open the record under the cursor, or run the palette item |
+| `Esc` | Close the palette, drawer or dialog; clear the query when search has focus |
+| `Cmd+S`, `Ctrl+S` | Save the note on the record page |
+
+Bare `k` moves the ledger cursor, so the palette needs the shift or command
+modifier. This is recorded here because the two habits collide.
+
+## Accessibility
+
+Focus is a 2 px accent ring with a 2 px offset and is never removed. Dialogs
+trap focus and restore it on close, and the page behind a dialog is inert. Touch
+targets are at least 44 px on mobile. Contrast stays at or above 4.5:1 for body
+text and 3:1 for large text in both themes; the audit in the design package
+checks every screen and theme. Status is never carried by colour alone: the word
+accompanies the mark. Landmarks are used for the masthead, sections, ledger,
+rail, record and dialogs. `prefers-reduced-motion` disables every transition.
+
+## Voice
+
+Dry, first person, specific. Numbers are exact and grouped: 8,988 entries, 4,283
+sources, 543 filing days. Dates are `2025.11.03` in data contexts and `03 nov
+2025` in prose. Empty and error states say what happened and what the reader can
+do next. There is no marketing copy, no exclamation marks and no emoji. Every
+number in the interface comes from the database; a surface that has never run a
+check says so instead of showing a zero that looks like a result.

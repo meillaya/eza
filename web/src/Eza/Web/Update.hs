@@ -5,7 +5,7 @@
 module Eza.Web.Update (updateModel, subscriptions) where
 
 import Control.Monad (forM_, unless, void, when)
-import Data.Aeson (Value, object, (.=))
+import Data.Aeson (Result (..), Value, fromJSON, object, (.=))
 import qualified Data.IntSet as IS
 import Data.List (nub)
 import qualified Data.Map.Strict as M
@@ -30,6 +30,7 @@ import Eza.Types (
 import Eza.Web.Api
 import Eza.Web.Model
 import Eza.Web.Types (
+    AccountInfo (..),
     AiStatus (..),
     ApiError (..),
     ConsolGroup (..),
@@ -83,7 +84,7 @@ handleApiError err = do
     case aeStatus err of
         Just 401 -> do
             putModel (\m -> m{mSignedOut = True})
-            notify "Session expired — sign in again to continue." ToastError
+            notify "Session expired. Sign in again to continue." ToastError
         Just 404 -> do
             putModel (\m -> m{mNotice = Just message})
             notify message ToastInfo
@@ -219,6 +220,8 @@ loadRoute route = do
             fetchTokens TokensLoaded TokensFailed
             fetchShares SharesLoaded SharesFailed
             fetchRules RulesLoaded RulesFailed
+        Accessions -> pure ()
+        Save _ _ _ -> pure ()
         NotFound -> pure ()
 
 scheduleSearch :: Int -> Effect () () Model Action
@@ -232,20 +235,20 @@ scheduleSearch delayMs = do
         timer <- fromJSValUnchecked =<< jsgf "setTimeout" (asyncCallback1 (\_ -> sink DebouncedSearch), delayMs :: Int)
         sink (TimerRegistered (timer :: Int))
 
+{- | The ledger owns its scroll container now, so the next page is fetched when
+that element approaches its end. The window itself does not scroll.
+-}
 measureGrid :: IO (Maybe (Int, Int, Int))
 measureGrid = do
     document <- jsg "document"
-    win <- jsg "window"
-    scrollY <- asDouble =<< (getProperty win "scrollY")
-    innerHeight <- windowInnerHeight
-    element <- getElementById "card-grid"
+    element <- (document # ("querySelector" :: MisoString)) (".ledger" :: MisoString)
     isNothingElement <- isNull element
     if isNothingElement
         then pure Nothing
         else do
-            rect <- element # "getBoundingClientRect" $ ([] :: [JSVal])
-            top <- asDouble =<< getProperty rect "top"
-            pure (Just (round scrollY, innerHeight, round (top + scrollY)))
+            scrollTop <- asDouble =<< getProperty element "scrollTop"
+            clientHeight <- asDouble =<< getProperty element "clientHeight"
+            pure (Just (round scrollTop, round clientHeight, 0))
   where
     asDouble value = fromMaybe 0 <$> (fromJSVal value :: IO (Maybe Double))
 
@@ -419,7 +422,7 @@ updateModel = \case
             copied <- fromMaybe False <$> (fromJSVal copiedValue :: IO (Maybe Bool))
             sink
                 ( ToastAdd
-                    (if copied then "Bookmarklet copied" else "Copy failed — drag the link instead")
+                    (if copied then "Bookmarklet copied" else "Copy failed. Drag the link instead")
                     (if copied then ToastOk else ToastError)
                 )
     LayoutChanged width height -> do
@@ -440,8 +443,8 @@ updateModel = \case
     ScrollMetrics (Just (scrollY, height, gridTop)) -> do
         putModel (\m -> m{mScrollY = scrollY, mHeight = height, mGridTop = gridTop})
         m <- get
-        let (_, lastRow) = visibleRows m
-        when (mHasMore m && not (mLoading m) && not (mLoadingMore m) && lastRow + 5 >= gridRows m) $
+        let content = gridTop + ledgerContentHeight m
+        when (mHasMore m && not (mLoading m) && not (mLoadingMore m) && scrollY + height + 600 >= content) $
             loadMore
     GlobalKey info -> withSink $ \sink -> do
         editable <- isEditableFocused
@@ -454,11 +457,15 @@ updateModel = \case
         case code of
             27 -> closeTopLayer m
             83 | withModifier && isDetailRoute (mRoute m) -> go SaveBookmark
-            75 | not editable && not withModifier -> go PaletteOpen
+            75 | not editable && (withModifier || shiftKey info) -> go PaletteOpen
+            75 | not editable && isListRoute (mRoute m) -> moveCursor (-1)
+            74 | not editable && isListRoute (mRoute m) -> moveCursor 1
             191 | not editable -> do
                 go PaletteClose
                 liftSinkIO (focus "search-input")
             13 | mPaletteOpen m -> go PaletteSelect
+            13 | editable -> go SearchCommit
+            13 | isListRoute (mRoute m) -> openCursorRecord m
             38 | mPaletteOpen m -> go PalettePrev
             40 | mPaletteOpen m -> go PaletteNext
             _ -> pure ()
@@ -471,6 +478,7 @@ updateModel = \case
                     { mVersion = ms (bpVersion payload)
                     , mOrigin = ms (bpOrigin payload)
                     , mTags = bpTags payload
+                    , mStats = Just (bpStats payload)
                     , mSaved = bpSavedSearches payload
                     }
             )
@@ -480,6 +488,12 @@ updateModel = \case
     ApiUnauthorized -> putModel (\m -> m{mSignedOut = True})
     ApiErrorRaised err -> handleApiError err
     TagsRefreshed stats -> putModel (\m -> m{mTags = stats})
+    LedgerCursorNext -> moveCursor 1
+    LedgerCursorPrev -> moveCursor (-1)
+    LedgerCursorSet idx -> setCursor idx
+    DrawerOpen bid -> putModel (\m -> m{mDrawer = Just bid})
+    DrawerClose -> putModel (\m -> m{mDrawer = Nothing})
+    AccountTabSelected tab -> putModel (\m -> m{mAccountTab = tab})
     -- library ---------------------------------------------------------------
     SearchInput query -> do
         putModel (\m -> m{mQ = query})
@@ -511,11 +525,17 @@ updateModel = \case
             m
                 { mItems = fresh
                 , mTotal = spTotal page
+                , mYearHere = spYearCounts page
                 , mHasMore = spHasMore page
                 , mLoading = False
                 , mLoadingMore = False
                 , mOffset = spOffset page + length (spItems page)
                 , mError = Nothing
+                , mLedgerCursor =
+                    case (append, mLedgerCursor m) of
+                        (False, _) -> Nothing
+                        (True, Just idx) | idx < length fresh -> Just idx
+                        _ -> Nothing
                 }
     ListFailed _ err -> do
         putModel (\m -> m{mLoading = False, mLoadingMore = False})
@@ -574,15 +594,8 @@ updateModel = \case
         m <- get
         let count = length (paletteEntries m)
         putModel (\x -> x{mPaletteSel = if count == 0 then 0 else min (count - 1) (mPaletteSel x + 1)})
-    PaletteSelect -> do
-        m <- get
-        let entries = paletteEntries m
-            selection = max 0 (mPaletteSel m)
-        case drop selection entries of
-            ((_, _, nextAction) : _) -> do
-                putModel (\x -> x{mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})
-                updateModel nextAction
-            [] -> pure ()
+    PaletteSelect -> choosePalette 0
+    PaletteChoose offsetFromSelection -> choosePalette offsetFromSelection
     -- detail ----------------------------------------------------------------
     DetailLoaded detail -> do
         putModel
@@ -693,6 +706,14 @@ updateModel = \case
                 liftSinkIO (setSelectionRange "note-editor" newCursor newCursor)
     LinkSuggestions suggestions -> putModel (\m -> m{mLinkResults = suggestions, mLinkSel = 0})
     RunBookmarkAction bookmarkId verb -> bookmarkAction bookmarkId verb (ToastAdd (ms (T.toTitle verb <> " queued")) ToastOk) (\err -> ApiErrorRaised err)
+    DeleteBookmarkRequest bookmarkId -> putModel (\m -> m{mConfirmDelete = Just bookmarkId})
+    DeleteBookmarkCancel -> putModel (\m -> m{mConfirmDelete = Nothing})
+    DeleteBookmarkConfirm -> do
+        m <- get
+        putModel (\x -> x{mConfirmDelete = Nothing})
+        case mConfirmDelete m of
+            Nothing -> pure ()
+            Just bookmarkId -> deleteBookmark bookmarkId (DeletedOk bookmarkId) DeleteFailed
     DeleteBookmark bookmarkId -> deleteBookmark bookmarkId (DeletedOk bookmarkId) DeleteFailed
     DeletedOk bookmarkId -> do
         m <- get
@@ -717,7 +738,7 @@ updateModel = \case
         putModel (\m -> m{mImporting = True})
         submitImport ImportDone ImportFailed
     ImportDone value -> do
-        putModel (\m -> m{mImporting = False})
+        putModel (\m -> m{mImporting = False, mImportReport = either (const Nothing) Just (decodeImportReport value)})
         let inserted = fieldInt "inserted" value
             existing = fieldInt "existing" value
             found = fieldInt "found" value
@@ -866,7 +887,7 @@ updateModel = \case
     PruneCancel -> putModel (\m -> m{mConfirmPrune = False})
     PruneDone pruned -> do
         putModel (\m -> m{mMaintBusy = False})
-        notify (ms ("Pruned " <> show pruned <> " bookmark(s) — undo available")) ToastOk
+        notify (ms ("Pruned " <> show pruned <> " bookmark(s). Undo is available")) ToastOk
         fetchPruneCandidates PruneLoaded PruneFailed
         refreshTags
     DeadCheckRun -> do
@@ -890,14 +911,22 @@ updateModel = \case
         putModel (\m -> m{mMaintBusy = False})
         handleApiError err
     -- account --------------------------------------------------------------
-    AccountLoaded info -> putModel (\m -> m{mAccount = Just info, mAccountLoading = False})
+    AccountLoaded info ->
+        putModel
+            ( \m ->
+                m
+                    { mAccount = Just info
+                    , mAccountLoading = False
+                    , mSessions = aiSessions info
+                    }
+            )
     AccountFailed err -> do
         putModel (\m -> m{mAccountLoading = False})
         handleApiError err
     RecoveryRegenerate -> regenerateRecovery RecoveryLoaded AccountFailed
     RecoveryLoaded codes -> do
         putModel (\m -> m{mRecoveryCodes = codes})
-        notify "New recovery codes generated — store them now" ToastOk
+        notify "New recovery codes generated. Store them now." ToastOk
     CredentialRenamed credentialId nickname -> do
         renameCredential credentialId (fromMisoString nickname) (ToastAdd "Passkey renamed" ToastOk) CredentialOpFailed
     CredentialDeleted credentialId -> deleteCredential credentialId (CredentialRemoved credentialId) CredentialOpFailed
@@ -1081,7 +1110,7 @@ updateModel = \case
                     , mTokenSecret = Just (raw, info)
                     }
             )
-        notify "Token created — copy it now, it is shown only once" ToastOk
+        notify "Token created. Copy it now, it is shown only once." ToastOk
     TokenCreateFailed err -> do
         putModel (\m -> m{mTokenBusy = False})
         handleApiError err
@@ -1095,7 +1124,7 @@ updateModel = \case
         copied <- fromMaybe False <$> (fromJSVal copiedValue :: IO (Maybe Bool))
         sink
             ( ToastAdd
-                (if copied then "Token copied" else "Copy failed — select the text instead")
+                (if copied then "Token copied" else "Copy failed. Select the text instead")
                 (if copied then ToastOk else ToastError)
             )
     -- highlights -----------------------------------------------------------
@@ -1251,7 +1280,7 @@ updateModel = \case
         copied <- fromMaybe False <$> (fromJSVal copiedValue :: IO (Maybe Bool))
         sink
             ( ToastAdd
-                (if copied then "Share link copied" else "Copy failed — select the text instead")
+                (if copied then "Share link copied" else "Copy failed. Select the text instead")
                 (if copied then ToastOk else ToastError)
             )
     ShareRevoke shareId -> revokeShareLink shareId ShareRevoked ShareCreateFailed
@@ -1356,8 +1385,65 @@ updateModel = \case
         | isJust (mTagPrompt m) = putModel (\x -> x{mTagPrompt = Nothing, mTagPromptValue = ""})
         | mConfirmBulkDelete m = putModel (\x -> x{mConfirmBulkDelete = False})
         | isJust (mLinkQuery m) = putModel (\x -> x{mLinkQuery = Nothing, mLinkResults = []})
+        | isJust (mDrawer m) = putModel (\x -> x{mDrawer = Nothing})
+        | isJust (mConfirmDelete m) = putModel (\x -> x{mConfirmDelete = Nothing})
         | not (IS.null (mSelection m)) = putModel (\x -> x{mSelection = IS.empty, mSelectAnchor = Nothing})
         | otherwise = pure ()
+
+    choosePalette :: Int -> Effect () () Model Action
+    choosePalette offsetFromSelection = do
+        m <- get
+        let entries = paletteEntries m
+            selection = max 0 (mPaletteSel m + offsetFromSelection)
+        case drop selection entries of
+            ((_, _, nextAction) : _) -> do
+                putModel (\x -> x{mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})
+                updateModel nextAction
+            [] -> pure ()
+
+    moveCursor :: Int -> Effect () () Model Action
+    moveCursor delta = do
+        m <- get
+        let n = length (mItems m)
+        when (n > 0) $ do
+            let start = fromMaybe (if delta > 0 then -1 else n) (mLedgerCursor m)
+                idx = max 0 (min (n - 1) (start + delta))
+            setCursor idx
+            when (idx + 8 >= n && mHasMore m) loadMore
+
+    setCursor :: Int -> Effect () () Model Action
+    setCursor idx = do
+        m <- get
+        case itemAt (mItems m) idx of
+            Nothing -> pure ()
+            Just b -> do
+                putModel (\x -> x{mLedgerCursor = Just idx, mDrawer = Just (bsId b)})
+                liftSinkIO (scrollRowIntoView (ms ("ledger-row-" <> show (bsId b))))
+
+    openCursorRecord :: Model -> Effect () () Model Action
+    openCursorRecord m =
+        case itemAt (mItems m) (fromMaybe 0 (mLedgerCursor m)) of
+            Nothing -> pure ()
+            Just b -> updateModel (Navigate (Bookmark (bsId b)))
+
+    decodeImportReport :: Value -> Either String ImportReport
+    decodeImportReport value = case fromJSON value of
+        Error message -> Left message
+        Success report -> Right report
+
+    scrollRowIntoView :: MisoString -> IO ()
+    scrollRowIntoView domId = do
+        document <- jsg ("document" :: MisoString)
+        el <- (document # ("getElementById" :: MisoString)) domId
+        _ <- (el # ("scrollIntoView" :: MisoString)) ()
+        pure ()
+
+    itemAt :: [a] -> Int -> Maybe a
+    itemAt xs i
+        | i < 0 = Nothing
+        | otherwise = case drop i xs of
+            (x : _) -> Just x
+            [] -> Nothing
 
     initialChoices groups =
         M.fromList
