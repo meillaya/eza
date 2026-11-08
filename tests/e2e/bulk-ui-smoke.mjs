@@ -28,6 +28,7 @@ const waitSelection = async (count) => {
   );
 };
 const selectRow = async (id) => {
+  await page.locator(SEL.rowById(id)).hover();
   await page.locator(SEL.rowSelectFor(id)).click();
 };
 const waitToast = async (pattern) => {
@@ -117,9 +118,9 @@ try {
   console.log("SKIP bulk undo button: not implemented in the production ledger");
 
   // Select all matching, then clear.
-  await page.fill(SEL.search, "playstation");
+  await page.fill(SEL.search, "example");
   await page.waitForTimeout(1500);
-  const matches = await api("/api/v1/bookmarks?q=playstation&limit=200&offset=0");
+  const matches = await api("/api/v1/bookmarks?q=example&limit=200&offset=0");
   const matchCount = matches.body?.total ?? 0;
   await page.getByRole("button", { name: /^select all matching$/i }).first().click();
   await page
@@ -145,6 +146,7 @@ try {
   // Keyboard: focus a row select control and toggle it with Space.
   await page.fill(SEL.search, "");
   await page.waitForTimeout(1400);
+  await page.locator(SEL.row).first().hover();
   await page.locator(SEL.rowSelect).first().focus();
   await page.keyboard.press("Space");
   await page.waitForTimeout(400);

@@ -230,9 +230,7 @@ instance FromJSON TokenView where
             <*> o .:? "last_used_at"
             <*> o .:? "revoked_at"
 
-{- | Account screen payload.
-| One browser session, as the account payload reports it. No ids or hashes.
--}
+-- | One browser session, as the account payload reports it. No ids or hashes.
 data SessionInfo = SessionInfo
     { siCreatedAt :: Int
     , siLastSeenAt :: Maybe Int
@@ -249,8 +247,15 @@ instance FromJSON SessionInfo where
             <*> o .:? "expires_at" .!= 0
             <*> o .:? "current" .!= False
 
+{- | Account screen payload. The first four fields describe the single
+account; the rest are the credentials, unused recovery codes, and sessions.
+-}
 data AccountInfo = AccountInfo
-    { aiCredentials :: [Credential]
+    { aiUsername :: Text
+    , aiHasPassword :: Bool
+    , aiRequirePasskey :: Bool
+    , aiAccountConfigured :: Bool
+    , aiCredentials :: [Credential]
     , aiRecoveryRemaining :: Int
     , aiSessions :: [SessionInfo]
     }
@@ -259,7 +264,11 @@ data AccountInfo = AccountInfo
 instance FromJSON AccountInfo where
     parseJSON = withObject "AccountInfo" $ \o ->
         AccountInfo
-            <$> o .:? "credentials" .!= []
+            <$> o .:? "username" .!= ""
+            <*> o .:? "has_password" .!= False
+            <*> o .:? "require_passkey" .!= False
+            <*> o .:? "account_configured" .!= False
+            <*> o .:? "credentials" .!= []
             <*> o .:? "recovery_codes_remaining" .!= 0
             <*> o .:? "sessions" .!= []
 

@@ -1,8 +1,8 @@
 module Main (main) where
 
 import Control.Exception (bracket)
+import Data.Aeson (object)
 import qualified Data.ByteString as BS
-import Data.Text (Text)
 import qualified Data.Text as T
 import Database.SQLite.Simple (close)
 import qualified Database.SQLite.Simple as Sqlite
@@ -12,12 +12,16 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
+import qualified ClipSpec
+import qualified DataIntegritySpec
+import qualified Eza.Auth as Auth
 import Eza.Bookmarks
-import Eza.Db (openDb, queryScalar, schemaV1, schemaVersion)
+import Eza.Db (openDb, queryScalar, schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaVersion, targetSchemaVersion)
 import Eza.Favicon (parseDataIcon, parseIconLinks, sniffImage)
 import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateHighlight)
 import Eza.Import
 import Eza.JsonExport (JsonImportReport (..), exportJson, importJson)
+import qualified Eza.Password as Password
 import Eza.Rules (Rule (..), createRule, listRules, matchingBookmarks)
 import Eza.SearchQuery
 import Eza.Shares (ShareRecord (..), ShareState (..), ShareUnavailable (..), createShare, resolveShare, resolveShareState, revokeShare, shareUnavailablePage)
@@ -57,7 +61,7 @@ main = hspec $ do
                     Sqlite.execute_ conn "PRAGMA user_version = 1"
                 migrated <- openDb path
                 version <- schemaVersion migrated
-                version `shouldBe` 5
+                version `shouldBe` targetSchemaVersion
                 books <- queryScalar migrated "SELECT COUNT(*) FROM bookmarks"
                 books `shouldBe` 1
                 tags <- queryScalar migrated "SELECT COUNT(*) FROM tags"
@@ -115,10 +119,13 @@ main = hspec $ do
                     Right highlight -> hQuote highlight `shouldBe` "H"
                 listed <- listHighlights conn bid
                 length listed `shouldBe` 1
-                updated <- updateHighlight conn bid (hId (head listed)) (Just "changed") (Just "blue")
-                updated `shouldBe` True
-                deleted <- deleteHighlight conn bid (hId (head listed))
-                deleted `shouldBe` True
+                case listed of
+                    (highlight : _) -> do
+                        updated <- updateHighlight conn bid (hId highlight) (Just "changed") (Just "blue")
+                        updated `shouldBe` True
+                        deleted <- deleteHighlight conn bid (hId highlight)
+                        deleted `shouldBe` True
+                    [] -> expectationFailure "expected one highlight"
                 close conn
 
     describe "share links" $ do
@@ -212,10 +219,13 @@ main = hspec $ do
                     spTotal fts `shouldBe` 1
                     tagged <- listBookmarks conn (defaultListQuery{lqTags = ["toolbar"]})
                     spTotal tagged `shouldBe` 1
-                    detail <- getBookmark conn (head (map bsId (spItems tagged)))
-                    case detail of
-                        Nothing -> expectationFailure "expected bookmark detail"
-                        Just d -> bdTags d `shouldContain` ["toolbar"]
+                    case map bsId (spItems tagged) of
+                        (firstId : _) -> do
+                            detail <- getBookmark conn firstId
+                            case detail of
+                                Nothing -> expectationFailure "expected bookmark detail"
+                                Just d -> bdTags d `shouldContain` ["toolbar"]
+                        [] -> expectationFailure "expected a tagged bookmark"
 
     describe "library stats" $ do
         it "counts rows, sources, top sources, years, and filing days" $
@@ -250,6 +260,362 @@ main = hspec $ do
                     piFound p `shouldBe` 9457
                     piHttp p `shouldBe` 9453
                     piNonHttp p `shouldBe` 4
-                    piDuplicates p `shouldBe` 465
-                    length (piItems p) `shouldBe` 8988
-                    piUntagged p `shouldBe` 87
+                    -- Normalizes www., fragments, tracking parameters and
+                    -- trailing slashes before deduplicating, so this is
+                    -- higher than the 465 raw duplicate anchors.
+                    piDuplicates p `shouldBe` 548
+                    length (piItems p) `shouldBe` 8905
+                    piUntagged p `shouldBe` 238
+
+    describe "password hashing" $ do
+        it "round-trips a password and rejects a wrong one" $
+            withSystemTempDirectory "eza-password" $ \_dir -> do
+                let params = Password.PasswordParams 1024 1 1
+                stored <- Password.hashPassword params "correct horse battery"
+                T.isPrefixOf "$argon2id$v=19$m=1024,t=1,p=1$" stored `shouldBe` True
+                Password.verifyPassword params stored "correct horse battery" `shouldReturn` True
+                Password.verifyPassword params stored "correct horse batterY" `shouldReturn` False
+        it "asks for a rehash when the configured cost changes" $ do
+            let weak = Password.PasswordParams 1024 1 1
+                strong = Password.PasswordParams 65536 3 2
+            stored <- Password.hashPassword weak "correct horse battery"
+            Password.needsRehash strong stored `shouldBe` True
+            Password.needsRehash weak stored `shouldBe` False
+            Password.needsRehash weak "not-a-phc-string" `shouldBe` True
+        it "validates usernames and password lengths" $ do
+            Password.validateUsername "  owner  " `shouldBe` Right "owner"
+            Password.validateUsername "  " `shouldSatisfy` isLeft
+            Password.validateUsername "bad name" `shouldSatisfy` isLeft
+            Password.validatePassword "short" `shouldSatisfy` isLeft
+            Password.validatePassword "long enough" `shouldBe` Right ()
+
+    describe "schema v6 migration" $ do
+        it "keeps v5 rows and adds the account columns" $
+            withSystemTempDirectory "eza-v6" $ \dir -> do
+                let path = dir </> "test.db"
+                bracket (Sqlite.open path) Sqlite.close $ \conn -> do
+                    mapM_ (Sqlite.execute_ conn) (schemaV1 <> schemaV2 <> schemaV3 <> schemaV4 <> schemaV5)
+                    Sqlite.execute_ conn "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://example.test/v5','V5','example.test',1,1,1)"
+                    Sqlite.execute_ conn "UPDATE app_state SET setup_claimed = 1 WHERE id = 1"
+                    Sqlite.execute_ conn "INSERT INTO recovery_codes (code_hash,used,created_at) VALUES ('deadbeef',0,1)"
+                    Sqlite.execute_ conn "PRAGMA user_version = 5"
+                migrated <- openDb path
+                version <- schemaVersion migrated
+                version `shouldBe` targetSchemaVersion
+                books <- queryScalar migrated "SELECT COUNT(*) FROM bookmarks"
+                books `shouldBe` 1
+                claimed <- queryScalar migrated "SELECT setup_claimed FROM app_state WHERE id = 1"
+                claimed `shouldBe` 1
+                account <- Auth.loadAccount migrated
+                Auth.acctUsername account `shouldBe` ""
+                Auth.accountHasPassword account `shouldBe` False
+                Auth.acctRequirePasskey account `shouldBe` False
+                codes <- Auth.recoveryCodesRemaining migrated
+                codes `shouldBe` 1
+                close migrated
+        it "keeps a legacy passkey database in legacy passkey mode" $
+            withSystemTempDirectory "eza-legacy" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                Sqlite.execute_ conn "UPDATE app_state SET setup_claimed = 1 WHERE id = 1"
+                Sqlite.execute_ conn "INSERT INTO passkey_credentials (credential_id,user_handle,public_key,created_at) VALUES (x'01',x'02',x'03',1)"
+                allowed <- Auth.setupAllowed conn
+                allowed `shouldBe` False
+                configured <- Auth.accountConfigured conn
+                configured `shouldBe` False
+                legacy <- Auth.legacyPasskeyLoginAllowed conn
+                legacy `shouldBe` True
+                close conn
+
+    describe "password login" $ do
+        it "opens a session with the configured TTL and expires it" $
+            withSystemTempDirectory "eza-login" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                let params = Password.PasswordParams 1024 1 1
+                    ac = testAuthConfig params 3600 3 900
+                stored <- Password.hashPassword params "correct horse battery"
+                Auth.setAccountPassword conn "owner" stored
+                configured <- Auth.accountConfigured conn
+                configured `shouldBe` True
+                result <- Auth.verifyPasswordLogin conn ac "owner" "correct horse battery"
+                case result of
+                    Left err -> expectationFailure ("login failed: " <> T.unpack (Auth.aeCode err))
+                    Right (Auth.LoginNeedsPasskey _) -> expectationFailure "expected a normal session when two-factor is off"
+                    Right (Auth.LoginComplete sess) -> do
+                        Auth.nsScope sess `shouldBe` "normal"
+                        Auth.nsTtlSeconds sess `shouldBe` 3600
+                        found <- Auth.getSession conn (Auth.nsToken sess)
+                        fmap Auth.sessScope found `shouldBe` Just "normal"
+                        case found of
+                            Nothing -> expectationFailure "expected a session"
+                            Just active -> do
+                                Sqlite.execute conn "UPDATE sessions SET expires_at = 1 WHERE id = ?" (Sqlite.Only (Auth.sessId active))
+                                expired <- Auth.getSession conn (Auth.nsToken sess)
+                                expired `shouldBe` Nothing
+                close conn
+        it "locks after the configured failures and reports Retry-After" $
+            withSystemTempDirectory "eza-lockout" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                let params = Password.PasswordParams 1024 1 1
+                    ac = testAuthConfig params 3600 3 900
+                stored <- Password.hashPassword params "correct horse battery"
+                Auth.setAccountPassword conn "owner" stored
+                first <- Auth.verifyPasswordLogin conn ac "owner" "wrong password one"
+                authStatus first `shouldBe` 401
+                second <- Auth.verifyPasswordLogin conn ac "owner" "wrong password two"
+                authStatus second `shouldBe` 401
+                third <- Auth.verifyPasswordLogin conn ac "owner" "wrong password three"
+                authStatus third `shouldBe` 429
+                retryAfter third `shouldBe` Just 900
+                locked <- Auth.verifyPasswordLogin conn ac "owner" "correct horse battery"
+                authStatus locked `shouldBe` 429
+                Sqlite.execute_ conn "UPDATE app_state SET login_blocked_until = 1 WHERE id = 1"
+                unlocked <- Auth.verifyPasswordLogin conn ac "owner" "correct horse battery"
+                authStatus unlocked `shouldBe` 200
+                close conn
+        it "rejects an unknown username with the same generic error" $
+            withSystemTempDirectory "eza-login-unknown" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                let params = Password.PasswordParams 1024 1 1
+                    ac = testAuthConfig params 3600 5 900
+                stored <- Password.hashPassword params "correct horse battery"
+                Auth.setAccountPassword conn "owner" stored
+                result <- Auth.verifyPasswordLogin conn ac "other" "correct horse battery"
+                authStatus result `shouldBe` 401
+                close conn
+
+    describe "recovery codes" $ do
+        it "redeems a code, clears the password and passkeys, and rotates the codes on setup" $
+            withSystemTempDirectory "eza-recovery" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                let params = Password.PasswordParams 1024 1 1
+                stored <- Password.hashPassword params "correct horse battery"
+                codes <- Auth.completeSetup conn "owner" stored
+                length codes `shouldBe` 10
+                Sqlite.execute_ conn "INSERT INTO passkey_credentials (credential_id,user_handle,public_key,created_at) VALUES (x'01',x'02',x'03',1)"
+                case codes of
+                    (firstCode : secondCode : _) -> do
+                        redeemed <- Auth.redeemRecoveryCode conn firstCode
+                        case redeemed of
+                            Left err -> expectationFailure ("redeem failed: " <> T.unpack (Auth.aeCode err))
+                            Right sess -> Auth.nsScope sess `shouldBe` "recovery"
+                        passkeys <- Auth.countCredentials conn
+                        passkeys `shouldBe` 0
+                        account <- Auth.loadAccount conn
+                        Auth.accountHasPassword account `shouldBe` False
+                        recoverable <- Auth.setupAllowed conn
+                        recoverable `shouldBe` True
+                        freshHash <- Password.hashPassword params "another good password"
+                        _ <- Auth.completeSetup conn "owner" freshHash
+                        remaining <- Auth.recoveryCodesRemaining conn
+                        remaining `shouldBe` 10
+                        stale <- Auth.redeemRecoveryCode conn secondCode
+                        authStatus stale `shouldBe` 400
+                    _ -> expectationFailure "expected at least two recovery codes"
+                close conn
+
+    describe "legacy passkey retirement" $ do
+        it "stops passkey login and setup once a password exists" $
+            withSystemTempDirectory "eza-retire" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                let params = Password.PasswordParams 1024 1 1
+                Sqlite.execute_ conn "UPDATE app_state SET setup_claimed = 1 WHERE id = 1"
+                Sqlite.execute_ conn "INSERT INTO passkey_credentials (credential_id,user_handle,public_key,created_at) VALUES (x'01',x'02',x'03',1)"
+                legacyBefore <- Auth.legacyPasskeyLoginAllowed conn
+                legacyBefore `shouldBe` True
+                stored <- Password.hashPassword params "correct horse battery"
+                Auth.setAccountPassword conn "owner" stored
+                legacyAfter <- Auth.legacyPasskeyLoginAllowed conn
+                legacyAfter `shouldBe` False
+                stillAllowed <- Auth.setupAllowed conn
+                stillAllowed `shouldBe` False
+                removed <- Auth.deleteCredential conn (BS.pack [0x01])
+                removed `shouldBe` Right ()
+                close conn
+
+    describe "passkey two-factor" $ do
+        it "refuses to enable two-factor without a passkey or the current password" $
+            withSystemTempDirectory "eza-2fa-enable" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                let params = testPasswordParams
+                    ac = testAuthConfig params 3600 5 900
+                seedPasswordAccount conn params
+                withoutPasskey <- Auth.setTwoFactorRequirement conn ac True "correct horse battery"
+                authStatus withoutPasskey `shouldBe` 409
+                account <- Auth.loadAccount conn
+                Auth.acctRequirePasskey account `shouldBe` False
+                insertTestCredential conn (BS.pack [0x01])
+                wrongPassword <- Auth.setTwoFactorRequirement conn ac True "wrong password"
+                authStatus wrongPassword `shouldBe` 403
+                stillOff <- Auth.loadAccount conn
+                Auth.acctRequirePasskey stillOff `shouldBe` False
+                wrongDisable <- Auth.setTwoFactorRequirement conn ac False "wrong password"
+                authStatus wrongDisable `shouldBe` 403
+                enabled <- Auth.setTwoFactorRequirement conn ac True "correct horse battery"
+                case enabled of
+                    Left err -> expectationFailure ("enabling two-factor failed: " <> T.unpack (Auth.aeCode err))
+                    Right accountAfter -> Auth.acctRequirePasskey accountAfter `shouldBe` True
+                required <- Auth.twoFactorRequired conn
+                required `shouldBe` True
+                disabled <- Auth.setTwoFactorRequirement conn ac False "correct horse battery"
+                case disabled of
+                    Left err -> expectationFailure ("disabling two-factor failed: " <> T.unpack (Auth.aeCode err))
+                    Right accountOff -> Auth.acctRequirePasskey accountOff `shouldBe` False
+                close conn
+        it "keeps passkey enrollment available for a password account" $
+            withSystemTempDirectory "eza-2fa-enroll" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                let params = testPasswordParams
+                    ac = testAuthConfig params 3600 5 900
+                seedPasswordAccount conn params
+                options <- Auth.addPasskeyOptions conn ac
+                case options of
+                    Left err -> expectationFailure ("passkey options were retired: " <> T.unpack (Auth.aeCode err))
+                    Right _ -> pure ()
+                challenges <- queryScalar conn "SELECT COUNT(*) FROM webauthn_challenges WHERE purpose = 'registration'"
+                challenges `shouldBe` 1
+                insertTestCredential conn (BS.pack [0x02])
+                off <- Auth.secondFactorOptions conn ac
+                authStatus off `shouldBe` 403
+                _ <- Auth.setTwoFactorRequirement conn ac True "correct horse battery"
+                on <- Auth.secondFactorOptions conn ac
+                case on of
+                    Left err -> expectationFailure ("second-factor options failed: " <> T.unpack (Auth.aeCode err))
+                    Right _ -> pure ()
+                secondFactorChallenges <- queryScalar conn "SELECT COUNT(*) FROM webauthn_challenges WHERE purpose = 'second_factor'"
+                secondFactorChallenges `shouldBe` 1
+                close conn
+        it "runs a password login through a pending passkey session" $
+            withSystemTempDirectory "eza-2fa-pending" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                let params = testPasswordParams
+                    ac = testAuthConfig params 3600 5 900
+                seedPasswordAccount conn params
+                insertTestCredential conn (BS.pack [0x01])
+                _ <- Auth.setTwoFactorRequirement conn ac True "correct horse battery"
+                result <- Auth.verifyPasswordLogin conn ac "owner" "correct horse battery"
+                case result of
+                    Left err -> expectationFailure ("login failed: " <> T.unpack (Auth.aeCode err))
+                    Right (Auth.LoginComplete _) -> expectationFailure "expected a pending session while two-factor is on"
+                    Right (Auth.LoginNeedsPasskey pendingLogin) -> do
+                        Auth.nsScope pendingLogin `shouldBe` Auth.pendingScope
+                        Auth.nsTtlSeconds pendingLogin `shouldBe` Auth.pendingSessionTtlSeconds
+                        found <- Auth.getSession conn (Auth.nsToken pendingLogin)
+                        case found of
+                            Nothing -> expectationFailure "expected a pending session row"
+                            Just pendingSession -> do
+                                Auth.sessScope pendingSession `shouldBe` Auth.pendingScope
+                                -- A normal session cannot be completed as pending.
+                                normalOnly <- Auth.createSession conn "normal" 60
+                                normalFound <- Auth.getSession conn (Auth.nsToken normalOnly)
+                                case normalFound of
+                                    Nothing -> expectationFailure "expected a normal session row"
+                                    Just normalSession -> do
+                                        refused <- Auth.completePendingLogin conn ac normalSession
+                                        authStatus refused `shouldBe` 400
+                                garbage <- Auth.verifySecondFactor conn ac (object [])
+                                authStatus garbage `shouldBe` 400
+                                completed <- Auth.completePendingLogin conn ac pendingSession
+                                case completed of
+                                    Left err -> expectationFailure ("completing the pending session failed: " <> T.unpack (Auth.aeCode err))
+                                    Right normalSession -> do
+                                        Auth.nsScope normalSession `shouldBe` "normal"
+                                        gone <- Auth.getSession conn (Auth.nsToken pendingLogin)
+                                        gone `shouldBe` Nothing
+                                        live <- Auth.getSession conn (Auth.nsToken normalSession)
+                                        fmap Auth.sessScope live `shouldBe` Just "normal"
+                close conn
+        it "keeps pending sessions out of the session list and the API scope" $
+            withSystemTempDirectory "eza-2fa-scope" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                let params = testPasswordParams
+                    ac = testAuthConfig params 3600 5 900
+                seedPasswordAccount conn params
+                insertTestCredential conn (BS.pack [0x01])
+                _ <- Auth.setTwoFactorRequirement conn ac True "correct horse battery"
+                result <- Auth.verifyPasswordLogin conn ac "owner" "correct horse battery"
+                case result of
+                    Right (Auth.LoginNeedsPasskey pendingLogin) -> do
+                        found <- Auth.getSession conn (Auth.nsToken pendingLogin)
+                        case found of
+                            Nothing -> expectationFailure "expected a pending session row"
+                            Just pendingSession -> do
+                                sessions <- Auth.listSessions conn (Just pendingSession)
+                                length sessions `shouldBe` 0
+                                Auth.scopeAllows (Auth.pendingScope) "GET" ["api", "v1", "boot"] `shouldBe` False
+                                Auth.scopeAllows (Auth.pendingScope) "GET" ["api", "v1", "account"] `shouldBe` False
+                                Auth.scopeAllows (Auth.pendingScope) "GET" ["account", "add-passkey"] `shouldBe` False
+                    _ -> expectationFailure "expected a pending login"
+                Auth.scopeAllows "normal" "GET" ["api", "v1", "boot"] `shouldBe` True
+                Auth.scopeAllows "normal" "GET" ["api", "v1", "account"] `shouldBe` True
+                Auth.scopeAllows "recovery" "POST" ["api", "setup", "password"] `shouldBe` True
+                Auth.scopeAllows "recovery" "GET" ["api", "v1", "account"] `shouldBe` True
+                Auth.scopeAllows "recovery" "GET" ["api", "v1", "boot"] `shouldBe` True
+                Auth.scopeAllows "recovery" "POST" ["api", "v1", "bookmarks"] `shouldBe` False
+                close conn
+        it "refuses to revoke the last passkey while two-factor is on" $
+            withSystemTempDirectory "eza-2fa-last" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                let params = testPasswordParams
+                    ac = testAuthConfig params 3600 5 900
+                seedPasswordAccount conn params
+                insertTestCredential conn (BS.pack [0x01])
+                _ <- Auth.setTwoFactorRequirement conn ac True "correct horse battery"
+                denied <- Auth.deleteCredential conn (BS.pack [0x01])
+                authStatus denied `shouldBe` 409
+                remaining <- Auth.countCredentials conn
+                remaining `shouldBe` 1
+                _ <- Auth.setTwoFactorRequirement conn ac False "correct horse battery"
+                allowed <- Auth.deleteCredential conn (BS.pack [0x01])
+                allowed `shouldBe` Right ()
+                left <- Auth.countCredentials conn
+                left `shouldBe` 0
+                close conn
+
+    DataIntegritySpec.spec
+    ClipSpec.spec
+
+-- ---------------------------------------------------------------------------
+-- Test helpers
+-- ---------------------------------------------------------------------------
+
+testAuthConfig :: Password.PasswordParams -> Int -> Int -> Int -> Auth.AuthConfig
+testAuthConfig params ttlSeconds attempts lockoutSeconds =
+    Auth.AuthConfig
+        { Auth.acOrigin = "http://localhost:8080"
+        , Auth.acRpId = "localhost"
+        , Auth.acRpName = "eza"
+        , Auth.acSessionTtlSeconds = ttlSeconds
+        , Auth.acPasswordParams = params
+        , Auth.acLoginMaxAttempts = attempts
+        , Auth.acLoginLockoutSeconds = lockoutSeconds
+        }
+
+authStatus :: Either Auth.AuthError a -> Int
+authStatus (Left err) = Auth.aeStatus err
+authStatus (Right _) = 200
+
+retryAfter :: Either Auth.AuthError a -> Maybe Int
+retryAfter (Left err) = Auth.aeRetryAfter err
+retryAfter (Right _) = Nothing
+
+isLeft :: Either a b -> Bool
+isLeft (Left _) = True
+isLeft (Right _) = False
+
+testPasswordParams :: Password.PasswordParams
+testPasswordParams = Password.PasswordParams 1024 1 1
+
+-- | A claimed password account, the starting point for the two-factor tests.
+seedPasswordAccount :: Sqlite.Connection -> Password.PasswordParams -> IO ()
+seedPasswordAccount conn params = do
+    stored <- Password.hashPassword params "correct horse battery"
+    Auth.setAccountPassword conn "owner" stored
+
+-- | A passkey row with a fixed credential id. WebAuthn assertions cannot be
+-- fabricated in a test, so the auth tests work at the database and Auth level.
+insertTestCredential :: Sqlite.Connection -> BS.ByteString -> IO ()
+insertTestCredential conn credentialId = do
+    Sqlite.execute
+        conn
+        "INSERT INTO passkey_credentials (credential_id,user_handle,public_key,created_at) VALUES (?,?,?,1)"
+        (credentialId, BS.pack [0x02], BS.pack [0x03])

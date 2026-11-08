@@ -15,7 +15,10 @@ await cdp.send("WebAuthn.addVirtualAuthenticator", {
 });
 
 await page.goto(BASE + "/setup", { waitUntil: "networkidle" });
-await page.click("#passkey-setup");
+await page.fill("#username", process.env.EZA_TEST_USER || "e2e");
+await page.fill("#password", process.env.EZA_TEST_PASSWORD || "e2e-password-123");
+await page.fill("#confirm-password", process.env.EZA_TEST_PASSWORD || "e2e-password-123");
+await page.click("#password-setup");
 await page.waitForSelector("#recovery:not([hidden])", { timeout: 30000 });
 
 async function api(path, options = {}) {
@@ -31,8 +34,8 @@ async function api(path, options = {}) {
   }, { path, options });
 }
 
-const addA = await api("/api/v1/bookmarks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: "https://example.com/a", title: "Alpha Reference", tags: ["smoke-a"] }) });
-const addB = await api("/api/v1/bookmarks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: "https://example.com/b", title: "Beta Reference", tags: ["smoke-b"] }) });
+const addA = await api("/api/v1/bookmarks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: "https://example.com/flow-alpha", title: "Alpha Reference", tags: ["smoke-a"] }) });
+const addB = await api("/api/v1/bookmarks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: "https://example.com/flow-beta", title: "Beta Reference", tags: ["smoke-b"] }) });
 console.log("add:", addA.status, addA.body, addB.status, addB.body);
 const a = addA.body.id, b = addB.body.id;
 

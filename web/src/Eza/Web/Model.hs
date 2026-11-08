@@ -12,6 +12,9 @@ module Eza.Web.Model (
     routeTitle,
     routeSubtitle,
     AccountTab (..),
+    accountTabSlug,
+    accountTabFromSlug,
+    TagDialog (..),
     LedgerEntry (..),
     ledgerEntries,
     ledgerContentHeight,
@@ -47,7 +50,7 @@ import Eza.Types (
     Highlight (..),
     ImportReport,
     LibraryStats,
-    SavedSearch,
+    SavedSearch (..),
     SearchPage,
     TagStat,
  )
@@ -205,7 +208,7 @@ routeSubtitle = \case
     Tags -> "Consolidate, rename, and prune your tag vocabulary."
     AiTags -> "Advisory tag suggestions. Nothing is written without you."
     Maintenance -> "Dead-link sweeps, prune candidates, and undo."
-    Account -> "Passkeys, recovery codes, and sessions."
+    Account -> "Username, password, passkeys, sessions, and tokens."
     Accessions -> "The whole archive, set as an index."
     Save _ _ _ -> "Saving a shared link to the catalogue."
     NotFound -> "That page does not exist."
@@ -223,9 +226,12 @@ themeOfMiso s = if fromMisoString s == ("dark" :: String) then ThemeDark else Th
 data NoteMode = NoteWrite | NotePreview
     deriving (Eq, Show)
 
--- | Which account panel is showing.
+{- | Which account panel is showing. The first tab is the sign-in panel; the
+slug order is the order of the section list.
+-}
 data AccountTab
-    = AccountPasskeys
+    = AccountSecurity
+    | AccountPasskeys
     | AccountRecovery
     | AccountSessions
     | AccountTokens
@@ -235,6 +241,44 @@ data AccountTab
     | AccountCapture
     | AccountAppearance
     | AccountAbout
+    deriving (Eq, Show)
+
+-- | The URL fragment for one account tab, used to make the tabs routable.
+accountTabSlug :: AccountTab -> MisoString
+accountTabSlug = \case
+    AccountSecurity -> "security"
+    AccountPasskeys -> "passkeys"
+    AccountRecovery -> "recovery"
+    AccountSessions -> "sessions"
+    AccountTokens -> "tokens"
+    AccountShares -> "shares"
+    AccountRules -> "rules"
+    AccountImport -> "import"
+    AccountCapture -> "capture"
+    AccountAppearance -> "appearance"
+    AccountAbout -> "about"
+
+-- | Read a tab back from @/account#slug@; an unknown fragment is the default.
+accountTabFromSlug :: MisoString -> AccountTab
+accountTabFromSlug raw =
+    case T.toLower (T.dropWhile (== '#') (T.strip (fromMisoString raw))) of
+        "passkeys" -> AccountPasskeys
+        "recovery" -> AccountRecovery
+        "sessions" -> AccountSessions
+        "tokens" -> AccountTokens
+        "shares" -> AccountShares
+        "rules" -> AccountRules
+        "import" -> AccountImport
+        "capture" -> AccountCapture
+        "appearance" -> AccountAppearance
+        "about" -> AccountAbout
+        _ -> AccountSecurity
+
+-- | One tag operation waiting for confirmation in the tags dialog.
+data TagDialog
+    = TagRenameDialog Text
+    | TagDeleteDialog Text
+    | TagMergeDialog [Text] Text
     deriving (Eq, Show)
 
 data ToastKind = ToastInfo | ToastOk | ToastError
@@ -268,6 +312,7 @@ data Action
     | DrawerOpen Int
     | DrawerClose
     | AccountTabSelected AccountTab
+    | AccountTabFromHash MisoString
     | Noop
     | -- boot
       BootLoaded BootPayload
@@ -282,6 +327,8 @@ data Action
     | QuickSaveFailed ApiError
     | ScrollMetrics (Maybe (Int, Int, Int))
     | TagsRefreshed [TagStat]
+    | StatsRefreshed (Maybe LibraryStats)
+    | ReloadRoute
     | -- library
       SearchInput MisoString
     | SearchCommit
@@ -295,6 +342,8 @@ data Action
     | ListFailed Bool ApiError
     | LoadMore
     | MarkAllAbove
+    | MarkAllDone Int
+    | MarkAllFailed ApiError
     | SavedSearchApply SavedSearch
     | ExportClicked
     | -- add modal
@@ -303,8 +352,11 @@ data Action
     | AddUrlInput MisoString
     | AddTitleInput MisoString
     | AddTagsInput MisoString
+    | AddNoteInput MisoString
     | AddSubmit
     | AddSucceeded Int
+    | AddNoteSaved Int
+    | AddNoteFailed Int ApiError
     | AddFailed ApiError
     | -- command palette
       PaletteOpen
@@ -315,8 +367,8 @@ data Action
     | PaletteChoose Int
     | PaletteSelect
     | -- detail
-      DetailLoaded BookmarkDetail
-    | DetailFailed ApiError
+      DetailLoaded Int BookmarkDetail
+    | DetailFailed Int ApiError
     | TitleInput MisoString
     | NoteChanged MisoString DOMRef
     | NoteMeta Int (Maybe Text)
@@ -328,9 +380,11 @@ data Action
     | SavedOk
     | SaveFailed ApiError
     | ReadToggled
+    | ReadPatched Bool
+    | ReadPatchFailed Bool ApiError
     | OpenToggled
-    | BacklinksLoaded [Backlink]
-    | BacklinksFailed ApiError
+    | BacklinksLoaded Int [Backlink]
+    | BacklinksFailed Int ApiError
     | LinkPrev
     | LinkNext
     | LinkChoose Int
@@ -354,6 +408,9 @@ data Action
     | SavedSearchDone
     | SavedSearchFailed ApiError
     | SavedSearchesLoaded [SavedSearch]
+    | SavedSearchShareOpen SavedSearch
+    | SavedSearchShareClose
+    | SavedSearchShareCreate
     | -- graph
       GraphLoaded GraphData
     | GraphFailed ApiError
@@ -370,7 +427,10 @@ data Action
     | DedupFailed ApiError
     | DedupKeep Int Int
     | DedupMerge Int
-    | DedupMerged Int
+    | DedupMergeConfirm
+    | DedupMergeCancel
+    | DedupRefresh
+    | DedupMerged Int Int
     | -- tags
       TagStatsLoaded [TagStat]
     | ConsolLoaded [ConsolGroup]
@@ -380,13 +440,21 @@ data Action
     | FilterByTag Text
     | TagRenamed Text MisoString
     | TagDeleted Text
+    | TagDialogOpen TagDialog
+    | TagDialogInput MisoString
+    | TagDialogDetach
+    | TagDialogConfirm
+    | TagDialogClose
     | TagOpFailed ApiError
     | -- AI tags
       AiTagSelected (Maybe Text)
-    | SuggestionsLoaded [TagSuggestion]
+    | SuggestionsLoaded Bool [TagSuggestion] (Maybe Text)
     | SuggestionsFailed ApiError
     | SuggestionApply Int [Text]
     | SuggestionsApplied
+    | AiStatusReload
+    | AiSuggestRetry
+    | AiSuggestDiscard
     | -- maintenance
       PruneLoaded [BookmarkSummary]
     | PruneFailed ApiError
@@ -414,6 +482,19 @@ data Action
     | CredentialEditCancel
     | CredentialRemoved Text
     | AccountReload
+    | SecurityUsernameInput MisoString
+    | SecurityCurrentPasswordInput MisoString
+    | SecurityNewPasswordInput MisoString
+    | SecurityConfirmPasswordInput MisoString
+    | Security2faWantedToggled Bool
+    | SecurityUsernameSave
+    | SecurityPasswordSave
+    | Security2faSave
+    | SecuritySaved MisoString
+    | SecurityFailed ApiError
+    | SessionsRevokeOthers
+    | SessionsRevoked Int
+    | SessionsRevokeFailed ApiError
     | Logout
     | LoggedOut
     | -- selection / bulk actions
@@ -449,8 +530,8 @@ data Action
       RetryEnrich Int
     | DetailReload Int
     | -- highlights
-      HighlightsLoaded [Highlight]
-    | HighlightsFailed ApiError
+      HighlightsLoaded Int [Highlight]
+    | HighlightsFailed Int ApiError
     | ReaderMouseUp
     | ReaderSelectionFound (Maybe ReaderSelection)
     | ReaderSelectionClear
@@ -470,8 +551,8 @@ data Action
     | HighlightDeleted
     | HighlightFailed ApiError
     | -- sharing
-      SharesLoaded [ShareView]
-    | SharesFailed ApiError
+      SharesLoaded Int [ShareView]
+    | SharesFailed Int ApiError
     | ShareDialogOpen
     | ShareDialogClose
     | ShareIncludeNoteToggle
@@ -543,13 +624,22 @@ data Model = Model
     , mDebounce :: Maybe Int
     , mTags :: [TagStat]
     , mStats :: Maybe LibraryStats
+    , mStatsError :: Maybe MisoString
     , mYearHere :: [(Int, Int)]
     , mLedgerCursor :: Maybe Int
     , mDrawer :: Maybe Int
     , mAccountTab :: AccountTab
     , mSessions :: [SessionInfo]
+    , mSecurityUsername :: MisoString
+    , mSecurityCurrent :: MisoString
+    , mSecurityNew :: MisoString
+    , mSecurityConfirm :: MisoString
+    , mSecurity2faWanted :: Bool
+    , mSecurityBusy :: Bool
+    , mSecurityError :: Maybe MisoString
     , mSaved :: [SavedSearch]
     , mSavedName :: MisoString
+    , mSavedShare :: Maybe SavedSearch
     , -- selection / bulk
       mSelection :: IS.IntSet
     , mSelectAnchor :: Maybe Int
@@ -560,11 +650,13 @@ data Model = Model
     , mTagPromptValue :: MisoString
     , mConfirmDelete :: Maybe Int
     , mConfirmBulkDelete :: Bool
+    , mConfirmMarkAll :: Bool
     , -- add modal
       mAddOpen :: Bool
     , mAddUrl :: MisoString
     , mAddTitle :: MisoString
     , mAddTags :: MisoString
+    , mAddNote :: MisoString
     , mAddBusy :: Bool
     , mAddError :: Maybe MisoString
     , -- palette
@@ -574,6 +666,8 @@ data Model = Model
     , -- detail
       mDetail :: Maybe BookmarkDetail
     , mDetailLoading :: Bool
+    , mDetailError :: Maybe MisoString
+    , mDetailEpoch :: Int
     , mEditTitle :: MisoString
     , mEditNote :: MisoString
     , mEditTags :: [Text]
@@ -595,6 +689,7 @@ data Model = Model
     , mSnapshotOpen :: Bool
     , mShares :: [ShareView]
     , mSharesLoading :: Bool
+    , mSharesError :: Maybe MisoString
     , mShareDialogOpen :: Bool
     , mShareIncludeNote :: Bool
     , mShareExpiryDays :: Int
@@ -603,6 +698,7 @@ data Model = Model
     , mAiStatus :: Maybe AiStatus
     , mRules :: [Rule]
     , mRulesLoading :: Bool
+    , mRulesError :: Maybe MisoString
     , mRuleName :: MisoString
     , mRuleField :: Text
     , mRulePattern :: MisoString
@@ -625,13 +721,23 @@ data Model = Model
     , -- dedup
       mDedup :: [DedupGroup]
     , mDedupLoading :: Bool
+    , mDedupError :: Maybe MisoString
     , mDedupChoice :: M.Map Int Int
+    , mDedupConfirm :: Maybe Int
+    , mDedupLast :: Maybe (Int, Int)
     , -- tags / ai tags
       mConsol :: [ConsolGroup]
     , mConsolLoading :: Bool
+    , mConsolError :: Maybe MisoString
+    , mTagDialog :: Maybe TagDialog
+    , mTagDialogInput :: MisoString
+    , mTagDialogBusy :: Bool
+    , mTagDialogError :: Maybe MisoString
     , mAiTag :: Maybe Text
     , mSuggestions :: [TagSuggestion]
     , mSuggestionsLoading :: Bool
+    , mSuggestionNotice :: Maybe MisoString
+    , mSuggestionError :: Maybe MisoString
     , -- maintenance
       mPrune :: [BookmarkSummary]
     , mPruneSel :: [Int]
@@ -639,13 +745,16 @@ data Model = Model
     , mCheckedCount :: Maybe Int
     , mMaintBusy :: Bool
     , mConfirmPrune :: Bool
+    , mPruneError :: Maybe MisoString
     , -- account
       mAccount :: Maybe AccountInfo
     , mAccountLoading :: Bool
+    , mAccountError :: Maybe MisoString
     , mRecoveryCodes :: [Text]
     , mCredEdit :: Maybe (Text, MisoString)
     , mTokens :: [TokenView]
     , mTokensLoading :: Bool
+    , mTokensError :: Maybe MisoString
     , mTokenName :: MisoString
     , mTokenScopes :: [Text]
     , mTokenSecret :: Maybe (Text, TokenView)
@@ -689,13 +798,22 @@ initialModel =
         , mDebounce = Nothing
         , mTags = []
         , mStats = Nothing
+        , mStatsError = Nothing
         , mYearHere = []
         , mLedgerCursor = Nothing
         , mDrawer = Nothing
-        , mAccountTab = AccountPasskeys
+        , mAccountTab = AccountSecurity
         , mSessions = []
+        , mSecurityUsername = ""
+        , mSecurityCurrent = ""
+        , mSecurityNew = ""
+        , mSecurityConfirm = ""
+        , mSecurity2faWanted = False
+        , mSecurityBusy = False
+        , mSecurityError = Nothing
         , mSaved = []
         , mSavedName = ""
+        , mSavedShare = Nothing
         , mSelection = IS.empty
         , mSelectAnchor = Nothing
         , mSelectingAll = False
@@ -705,10 +823,12 @@ initialModel =
         , mTagPromptValue = ""
         , mConfirmDelete = Nothing
         , mConfirmBulkDelete = False
+        , mConfirmMarkAll = False
         , mAddOpen = False
         , mAddUrl = ""
         , mAddTitle = ""
         , mAddTags = ""
+        , mAddNote = ""
         , mAddBusy = False
         , mAddError = Nothing
         , mPaletteOpen = False
@@ -716,6 +836,8 @@ initialModel =
         , mPaletteSel = 0
         , mDetail = Nothing
         , mDetailLoading = False
+        , mDetailError = Nothing
+        , mDetailEpoch = 0
         , mEditTitle = ""
         , mEditNote = ""
         , mEditTags = []
@@ -737,6 +859,7 @@ initialModel =
         , mSnapshotOpen = False
         , mShares = []
         , mSharesLoading = False
+        , mSharesError = Nothing
         , mShareDialogOpen = False
         , mShareIncludeNote = False
         , mShareExpiryDays = 30
@@ -745,6 +868,7 @@ initialModel =
         , mAiStatus = Nothing
         , mRules = []
         , mRulesLoading = False
+        , mRulesError = Nothing
         , mRuleName = ""
         , mRuleField = "url"
         , mRulePattern = ""
@@ -765,24 +889,37 @@ initialModel =
         , mGraphResults = []
         , mDedup = []
         , mDedupLoading = False
+        , mDedupError = Nothing
         , mDedupChoice = M.empty
+        , mDedupConfirm = Nothing
+        , mDedupLast = Nothing
         , mConsol = []
         , mConsolLoading = False
+        , mConsolError = Nothing
+        , mTagDialog = Nothing
+        , mTagDialogInput = ""
+        , mTagDialogBusy = False
+        , mTagDialogError = Nothing
         , mAiTag = Nothing
         , mSuggestions = []
         , mSuggestionsLoading = False
+        , mSuggestionNotice = Nothing
+        , mSuggestionError = Nothing
         , mPrune = []
         , mPruneSel = []
         , mDeadCount = Nothing
         , mCheckedCount = Nothing
         , mMaintBusy = False
         , mConfirmPrune = False
+        , mPruneError = Nothing
         , mAccount = Nothing
         , mAccountLoading = False
+        , mAccountError = Nothing
         , mRecoveryCodes = []
         , mCredEdit = Nothing
         , mTokens = []
         , mTokensLoading = False
+        , mTokensError = Nothing
         , mTokenName = ""
         , mTokenScopes = ["read", "write"]
         , mTokenSecret = Nothing
@@ -861,7 +998,7 @@ match the current palette query.  Kept in the model layer so both the view
 and the update function agree on what Enter selects.
 -}
 paletteEntries :: Model -> [(MisoString, MisoString, Action)]
-paletteEntries m = filter matches (commands ++ bookmarks)
+paletteEntries m = filter matches (commands ++ savedSearches ++ bookmarks)
   where
     needle = T.toLower (T.strip (toTextLow (mPaletteQ m)))
     matches (label, hint, _) =
@@ -878,9 +1015,14 @@ paletteEntries m = filter matches (commands ++ bookmarks)
         , ("Tags", "consolidate", Navigate Tags)
         , ("AI tags", "suggestions", Navigate AiTags)
         , ("Maintenance", "dead links + prune", Navigate Maintenance)
-        , ("Account", "passkeys", Navigate Account)
+        , ("Account", "security", Navigate Account)
         , ("Import bookmarks", "Netscape HTML", ImportStart)
         , ("Export bookmarks", "Netscape HTML", ExportClicked)
+        ]
+
+    savedSearches =
+        [ (ms (ssName saved), "saved search", SavedSearchApply saved)
+        | saved <- mSaved m
         ]
 
     bookmarks =

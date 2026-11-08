@@ -13,6 +13,13 @@ module Eza.Db
   , schemaVersion
   , targetSchemaVersion
   , schemaV1
+  , schemaV2
+  , schemaV3
+  , schemaV4
+  , schemaV5
+  , schemaV6
+  , schemaV7
+  , schemaV8
   , DbError (..)
   ) where
 
@@ -28,13 +35,15 @@ import System.Directory (createDirectoryIfMissing)
 import System.Environment (lookupEnv)
 import System.FilePath (takeDirectory, (</>))
 
+import Eza.Clip (clipSchema)
+
 newtype DbError = DbError Text
   deriving (Show)
 
 instance Exception DbError
 
 targetSchemaVersion :: Int
-targetSchemaVersion = 5
+targetSchemaVersion = 8
 
 -- | Open the database and bring the schema up to date.
 openDb :: FilePath -> IO Sqlite.Connection
@@ -139,7 +148,7 @@ pragmas =
   ]
 
 migrations :: [(Int, [Query])]
-migrations = [(1, schemaV1), (2, schemaV2), (3, schemaV3), (4, schemaV4), (5, schemaV5)]
+migrations = [(1, schemaV1), (2, schemaV2), (3, schemaV3), (4, schemaV4), (5, schemaV5), (6, schemaV6), (7, schemaV7), (8, schemaV8)]
 
 schemaV1 :: [Query]
 schemaV1 =
@@ -209,3 +218,47 @@ schemaV5 =
   , "ALTER TABLE undo_bookmark_rows ADD COLUMN ai_tagged_at INTEGER"
   , "CREATE TABLE IF NOT EXISTS rules (     id INTEGER PRIMARY KEY AUTOINCREMENT,     name TEXT NOT NULL,     enabled INTEGER NOT NULL DEFAULT 1,     field TEXT NOT NULL DEFAULT 'url',     pattern TEXT NOT NULL,     add_tags TEXT NOT NULL DEFAULT '[]',     mark_read INTEGER NOT NULL DEFAULT 0,     created_at INTEGER NOT NULL     )"
   ]
+
+{- | v6 turns the passkey-only account into a single username/password account.
+The passkey tables stay for installations that migrate from v5; passkeys are
+legacy credentials once a password exists. The login counters live on the same
+single row so a failed attempt survives a restart.
+-}
+schemaV6 :: [Query]
+schemaV6 =
+  [ "ALTER TABLE app_state ADD COLUMN username TEXT NOT NULL DEFAULT ''"
+  , "ALTER TABLE app_state ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''"
+  , "ALTER TABLE app_state ADD COLUMN password_updated_at INTEGER"
+  , "ALTER TABLE app_state ADD COLUMN require_passkey INTEGER NOT NULL DEFAULT 0"
+  , "ALTER TABLE app_state ADD COLUMN failed_login_count INTEGER NOT NULL DEFAULT 0"
+  , "ALTER TABLE app_state ADD COLUMN failed_login_at INTEGER"
+  , "ALTER TABLE app_state ADD COLUMN login_blocked_until INTEGER"
+  , "ALTER TABLE app_state ADD COLUMN last_login_at INTEGER"
+  ]
+
+{- | v7 makes undo lossless for the data that hangs off a bookmark or a tag.
+
+A side snapshot used to copy only bookmark rows and bookmark/tag names. It now
+also copies the highlights attached to the affected bookmarks, the wikilinks
+whose source or target is affected, and the tag rows themselves, so undoing a
+delete, prune, bulk operation or merge can bring those rows back instead of
+silently dropping them. Tag-only operations get their own snapshot tables: the
+affected tag rows and the bookmark/tag links that pointed at them.
+
+'undo_bookmark_rows' already carries every column of @bookmarks@ (v1 columns
+plus the v2 enrichment/reading columns and the v5 AI columns), so this step
+only adds the missing companion tables.
+-}
+schemaV7 :: [Query]
+schemaV7 =
+  [ "CREATE TABLE IF NOT EXISTS undo_highlight_rows (     snapshot_id INTEGER NOT NULL REFERENCES undo_snapshots(id) ON DELETE CASCADE,     id INTEGER NOT NULL,     bookmark_id INTEGER NOT NULL,     quote TEXT NOT NULL DEFAULT '',     prefix TEXT NOT NULL DEFAULT '',     suffix TEXT NOT NULL DEFAULT '',     start_offset INTEGER NOT NULL DEFAULT 0,     end_offset INTEGER NOT NULL DEFAULT 0,     note TEXT NOT NULL DEFAULT '',     color TEXT NOT NULL DEFAULT 'yellow',     created_at INTEGER NOT NULL DEFAULT 0,     updated_at INTEGER NOT NULL DEFAULT 0,     PRIMARY KEY (snapshot_id, id)     )"
+  , "CREATE TABLE IF NOT EXISTS undo_link_rows (     snapshot_id INTEGER NOT NULL REFERENCES undo_snapshots(id) ON DELETE CASCADE,     id INTEGER NOT NULL,     source_id INTEGER,     target_id INTEGER,     target_title TEXT NOT NULL DEFAULT '',     display_text TEXT,     line_number INTEGER,     PRIMARY KEY (snapshot_id, id)     )"
+  , "CREATE TABLE IF NOT EXISTS undo_tag_rows (     snapshot_id INTEGER NOT NULL REFERENCES undo_snapshots(id) ON DELETE CASCADE,     id INTEGER NOT NULL,     name TEXT NOT NULL COLLATE NOCASE,     created_at INTEGER NOT NULL DEFAULT 0,     PRIMARY KEY (snapshot_id, id)     )"
+  ]
+
+{- | v8 adds the browser-clipper capture history and the data-driven clip
+templates. The statements live in "Eza.Clip" so the payload contract and the
+schema stay together; migrations remain append-only.
+-}
+schemaV8 :: [Query]
+schemaV8 = map Query clipSchema

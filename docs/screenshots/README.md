@@ -53,15 +53,13 @@ POSTs `bookmarks_14_08_2026.html` as multipart form data to
 `/api/v1/import`. When the export is missing it falls back to a 14-bookmark
 demo set.
 
-One documented presentation step shapes the detail shot:
-
-- The detail shot uses record `EA-08987` ("Dynamic Arrays in Arenas"). The
-  library extractor output for long pages is a noisy single block, so the
-  script seeds that record's reading text from the captured article fixture in
-  `tests/e2e/fixtures/reader.html`, then adds a note and three highlights
-  through the public API so the reading spread shows the design's marks. `EZA_SEED_READER=0` captures the record as the
-  extractor left it. `EZA_SHOT_QUERY` narrows the ledger shots to a query if a representative
-  slice is wanted.
+The detail shot uses record `EA-08987` ("Dynamic Arrays in Arenas") and the
+real enrichment output. It waits for extraction, then adds a note and three
+highlights through the public API so the reading spread shows the design's
+marks. An explicit `EZA_SEED_READER=1` enables the old fixture-seeding escape
+hatch for a demo only; it is off by default and must not be used for the
+checked-in reference screenshots. `EZA_SHOT_QUERY` narrows the ledger shots to
+a query if a representative slice is wanted.
 
 `EZA_SEED_IMPORT` points the import at another export file, and
 `EZA_SEED_IMPORT=0` keeps the demo set even when the export is present.

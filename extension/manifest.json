@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "eza clipper",
+  "version": "0.1.0",
+  "description": "Save the current page, or just the selection, to your eza library.",
+  "minimum_chrome_version": "116",
+  "license": "Apache-2.0",
+  "action": {
+    "default_title": "Save to eza",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "options_page": "options.html",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "contextMenus"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "commands": {
+    "save-page": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "Command+Shift+Y"
+      },
+      "description": "Save the current page to eza"
+    },
+    "save-selection": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+U",
+        "mac": "Command+Shift+U"
+      },
+      "description": "Save the current selection to eza"
+    }
+  }
+}

@@ -23,10 +23,9 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import Database.SQLite.Simple (Connection, Query (..))
+import Database.SQLite.Simple (Connection, Only (..), query)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types
-import Network.HTTP.Types.Header (hAuthorization, hCacheControl, hETag, hIfNoneMatch)
 import Network.Wai
 import Network.Wai.Handler.Warp
 import System.Directory (canonicalizePath, doesFileExist, getFileSize, getModificationTime)
@@ -39,6 +38,7 @@ import qualified Web.Cookie as Cookie
 import Eza.AiTag (aiSuggestions)
 import qualified Eza.Auth as Auth
 import Eza.Bookmarks
+import Eza.Clip (ClipError, ClipRequest (..), ClipTemplate (..), SaveClipResult (..), TemplateError, clipErrorCode, clipErrorMessage, clipErrorStatus, createTemplate, deleteTemplate, getTemplate, previewClip, saveClip, templateErrorCode, templateErrorMessage, templateErrorStatus, templatesPayload, updateTemplate)
 import Eza.Config
 import qualified Eza.Db as Db
 import Eza.DeadLinks (checkDead)
@@ -51,13 +51,15 @@ import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateH
 import Eza.Import (defaultImportOptions, importParsed, parseNetscape)
 import Eza.Jobs (resetRunningJobs)
 import Eza.JsonExport (exportJson, importJson)
-import Eza.Pages (addPasskeyPage, loginPage, recoverPage, setupPage)
+import Eza.Pages (addPasskeyPage, loginPage, passkeyLoginPage, recoverySetupPage, recoverPage, setupPage)
 import Eza.Rules (Rule (..), createRule, deleteRule, listRules, matchingBookmarks, updateRule)
 import Eza.SavedSearches (createSavedSearch, deleteSavedSearch, listSavedSearches)
 import Eza.Shares (ShareRecord (..), ShareState (..), ShareUnavailable (..), createShare, listShares, resolveShareState, revokeShare, shareBookmarkPage, shareSearchFeed, shareSearchPage, shareUnavailablePage)
 import Eza.Snapshot (captureSnapshot)
-import Eza.Tags (consolidationCandidates, deleteTag, mergeTags, renameTag)
-import Eza.Tokens (Token (..), TokenView (..), authenticateToken, createToken, listTokens, revokeToken, tokenAllows)
+import Eza.Tags (consolidationCandidates, deleteTag, deleteTagWithLinks, mergeTags, renameTag)
+import Eza.Password (validatePassword, validateUsername)
+import qualified Eza.Password as Password
+import Eza.Tokens (Token (..), authenticateToken, createToken, listTokens, revokeToken, tokenAllows)
 import Eza.Types
 import Eza.Undo (undoLast)
 import Network.Wai.Parse (FileInfo (..), defaultParseRequestBodyOptions, lbsBackEnd, parseRequestBodyEx)
@@ -66,6 +68,7 @@ runServer :: Config -> Connection -> IO ()
 runServer cfg conn = do
     Auth.cleanupExpired conn
     resetRunningJobs conn
+    recoveryLimiter <- Auth.newRateLimiter 5 900
     manager <- newTlsManager
     forM_ [1 .. cfgEnrichWorkers cfg] $ \_ -> void (async (runEnrichWorker manager cfg))
     db <- newMVar conn
@@ -75,7 +78,7 @@ runServer cfg conn = do
                 . setServerName "eza"
                 . setBeforeMainLoop (hPutStrLn stderr ("eza listening on " <> cfgBind cfg))
                 $ defaultSettings
-    outcome <- try (runSettings settings (securityMiddleware cfg (app cfg db))) :: IO (Either IOException ())
+    outcome <- try (runSettings settings (securityMiddleware cfg (app cfg db recoveryLimiter))) :: IO (Either IOException ())
     case outcome of
         Right () -> pure ()
         Left err
@@ -120,76 +123,39 @@ isSnapshotRequest r = case pathInfo r of
 type DbVar = MVar Connection
 
 authConfig :: Config -> Auth.AuthConfig
-authConfig cfg = Auth.AuthConfig (cfgPublicOrigin cfg) (cfgRpId cfg) (cfgRpName cfg)
+authConfig cfg =
+    Auth.AuthConfig
+        { Auth.acOrigin = cfgPublicOrigin cfg
+        , Auth.acRpId = cfgRpId cfg
+        , Auth.acRpName = cfgRpName cfg
+        , Auth.acSessionTtlSeconds = cfgSessionTtlSeconds cfg
+        , Auth.acPasswordParams = cfgArgon2 cfg
+        , Auth.acLoginMaxAttempts = cfgLoginMaxAttempts cfg
+        , Auth.acLoginLockoutSeconds = cfgLoginLockoutSeconds cfg
+        }
 
-app :: Config -> DbVar -> Application
-app cfg db req respond = do
+app :: Config -> DbVar -> Auth.RateLimiter -> Application
+app cfg db recoveryLimiter req respond = do
     case (requestMethod req, pathInfo req) of
-        -- Public: health + auth pages/ceremonies.
+        -- CORS preflight for the browser clipper. This must run before the
+        -- auth guard: the preflight deliberately carries no Authorization.
+        ("OPTIONS", path) | isClipPath path -> clipPreflight cfg req respond
+        -- Public: health + password auth pages/ceremonies.
         ("GET", ["healthz"]) -> health db respond
-        ("GET", ["login"]) -> withDb db $ \conn -> do
-            msess <- sessionFromReq conn req
-            case msess of
-                Just _ -> respond (redirectTo "/")
-                Nothing -> do
-                    n <- Auth.countCredentials conn
-                    if n == 0 then respond (redirectTo "/setup") else respond (htmlResponse loginPage)
-        ("GET", ["setup"]) -> withDb db $ \conn -> do
-            allowed <- Auth.setupAllowed conn
-            if allowed then respond (htmlResponse setupPage) else respond (redirectTo "/login")
+        ("GET", ["login"]) -> withDb db $ \conn -> loginHandler conn req respond
+        ("GET", ["setup"]) -> withDb db $ \conn -> setupHandler conn req respond
         ("GET", ["recover"]) -> respond (htmlResponse recoverPage)
         ("GET", ["s", token]) -> withDb db $ \conn -> publicShareHandler conn token respond
-        ("POST", ["api", "auth", "options"]) -> withDb db $ \conn -> do
-            ensureOrigin cfg req
-            r <- Auth.authenticationOptions conn (authConfig cfg)
-            either (respond . authErrResponse) (respond . jsonResponse status200) r
-        ("POST", ["api", "auth", "verify"]) -> withDb db $ \conn -> do
-            ensureOrigin cfg req
-            body <- jsonBody req
-            case body of
-                Left e -> respond (jsonError status400 "bad_request" e)
-                Right v -> do
-                    r <- Auth.verifyLogin conn (authConfig cfg) v
-                    case r of
-                        Left e -> respond (authErrResponse e)
-                        Right sess -> respond (withAuthCookies cfg sess (jsonResponse status200 (object ["redirect" .= ("/" :: Text)])))
-        ("POST", ["api", "setup", "options"]) -> withDb db $ \conn -> do
-            ensureOrigin cfg req
-            r <- Auth.registrationOptions conn (authConfig cfg) True
-            either (respond . authErrResponse) (respond . jsonResponse status200) r
-        ("POST", ["api", "setup", "verify"]) -> withDb db $ \conn -> do
-            ensureOrigin cfg req
-            body <- jsonBody req
-            case body of
-                Left e -> respond (jsonError status400 "bad_request" e)
-                Right v -> do
-                    r <- Auth.verifyRegistration conn (authConfig cfg) True v
-                    case r of
-                        Left e -> respond (authErrResponse e)
-                        Right (Auth.RegistrationOutcome codes msess) ->
-                            case msess of
-                                Nothing -> respond (jsonError status400 "bad_request" "no session")
-                                Just sess ->
-                                    respond
-                                        ( withAuthCookies
-                                            cfg
-                                            sess
-                                            (jsonResponse status200 (object ["codes" .= fromMaybe [] codes, "redirect" .= ("/" :: Text)]))
-                                        )
-        ("POST", ["api", "recovery", "redeem"]) -> withDb db $ \conn -> do
-            ensureOrigin cfg req
-            body <- jsonBody req
-            case body of
-                Left e -> respond (jsonError status400 "bad_request" e)
-                Right v -> case parseMaybeObj v of
-                    Nothing -> respond (jsonError status400 "bad_request" "invalid body")
-                    Just o -> case parseMaybe (.: "code") o of
-                        Nothing -> respond (jsonError status400 "bad_request" "code is required")
-                        Just code -> do
-                            r <- Auth.redeemRecoveryCode conn code
-                            case r of
-                                Left e -> respond (authErrResponse e)
-                                Right sess -> respond (withAuthCookies cfg sess (jsonResponse status200 (object ["redirect" .= ("/setup" :: Text)])))
+        ("POST", ["api", "auth", "login"]) -> withDb db $ \conn -> passwordLoginHandler cfg conn req respond
+        ("POST", ["api", "auth", "passkey", "options"]) -> withDb db $ \conn -> passkeySecondFactorOptionsHandler cfg conn req respond
+        ("POST", ["api", "auth", "passkey", "verify"]) -> withDb db $ \conn -> passkeySecondFactorVerifyHandler cfg conn req respond
+        ("POST", ["api", "auth", "options"]) -> withDb db $ \conn -> legacyPasskeyOptionsHandler cfg conn req respond
+        ("POST", ["api", "auth", "verify"]) -> withDb db $ \conn -> legacyPasskeyVerifyHandler cfg conn req respond
+        ("POST", ["api", "setup", "password"]) -> withDb db $ \conn -> passwordSetupHandler cfg conn req respond
+        -- Passkey-first setup is retired. Recovery sets a password too.
+        ("POST", ["api", "setup", "options"]) -> respond passkeySetupRetired
+        ("POST", ["api", "setup", "verify"]) -> respond passkeySetupRetired
+        ("POST", ["api", "recovery", "redeem"]) -> withDb db $ \conn -> recoveryRedeemHandler cfg recoveryLimiter conn req respond
         ("GET", ("assets" : rest)) -> serveAsset cfg rest req respond
         ("GET", ["favicon.svg"]) -> serveAsset cfg ["favicon.svg"] req respond
         ("GET", ["theme.js"]) -> serveAsset cfg ["theme.js"] req respond
@@ -199,10 +165,324 @@ app cfg db req respond = do
         ("GET", []) -> withDb db $ \conn -> do
             msess <- sessionFromReq conn req
             case msess of
-                Nothing -> respond (redirectTo "/login")
-                Just _ -> indexResponse cfg req respond
+                Just sess | Auth.sessScope sess == "normal" -> indexResponse cfg req respond
+                _ -> respond (redirectTo "/login")
         -- Authenticated API.
         _ -> withAuthed cfg db req respond $ \ctx conn -> authedRoute cfg db req respond ctx conn
+
+-- ---------------------------------------------------------------------------
+-- Public auth handlers
+-- ---------------------------------------------------------------------------
+
+loginHandler :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+loginHandler conn req respond = do
+    msess <- sessionFromReq conn req
+    if maybe False (\sess -> Auth.sessScope sess == "normal") msess
+        then respond (redirectTo "/")
+        else do
+            configured <- Auth.accountConfigured conn
+            allowed <- Auth.setupAllowed conn
+            legacy <- Auth.legacyPasskeyLoginAllowed conn
+            if allowed
+                then respond (redirectTo "/setup")
+                else
+                    if configured
+                        then respond (htmlResponse loginPage)
+                        else
+                            if legacy
+                                then respond (htmlResponse passkeyLoginPage)
+                                else respond (htmlResponse loginPage)
+
+{- | A fresh database and a recovery session both open the password setup;
+anything else goes back to sign in.
+-}
+setupHandler :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+setupHandler conn req respond = do
+    msess <- sessionFromReq conn req
+    case msess of
+        Just sess
+            | Auth.sessScope sess == "recovery" -> do
+                account <- Auth.loadAccount conn
+                respond (htmlResponse (recoverySetupPage (Auth.acctUsername account)))
+        Just _ -> respond (redirectTo "/")
+        Nothing -> do
+            allowed <- Auth.setupAllowed conn
+            if allowed then respond (htmlResponse setupPage) else respond (redirectTo "/login")
+
+passkeySetupRetired :: Response
+passkeySetupRetired =
+    jsonError status410 "passkey_setup_retired" "passkey setup is retired; create a username and password first"
+
+passwordLoginHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+passwordLoginHandler cfg conn req respond =
+    case requireOrigin cfg req of
+        Left err -> respond (authErrResponse err)
+        Right () -> do
+            body <- readAuthBody cfg req
+            case body of
+                Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
+                Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
+                Right value -> case parseMaybeObj value of
+                    Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+                    Just o -> case (parseMaybe (.: "username") o, parseMaybe (.: "password") o) of
+                        (Just username, Just password) -> do
+                            result <- Auth.verifyPasswordLogin conn (authConfig cfg) username password
+                            case result of
+                                Left err -> respond (authErrResponse err)
+                                Right (Auth.LoginComplete sess) ->
+                                    respond
+                                        ( withAuthCookies
+                                            cfg
+                                            sess
+                                            (jsonResponse status200 (object ["requires_2fa" .= False, "redirect" .= ("/" :: Text)]))
+                                        )
+                                Right (Auth.LoginNeedsPasskey pending) ->
+                                    respond
+                                        ( withPendingCookie
+                                            cfg
+                                            pending
+                                            (jsonResponse status200 (object ["requires_2fa" .= True]))
+                                        )
+                        _ -> respond (jsonError status400 "bad_request" "username and password are required")
+
+{- | The passkey half of a two-factor sign-in. Both handlers need the pending
+cookie that the password step set; without it there is no sign-in to finish.
+-}
+passkeySecondFactorOptionsHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+passkeySecondFactorOptionsHandler cfg conn req respond =
+    case requireOrigin cfg req of
+        Left err -> respond (authErrResponse err)
+        Right () -> do
+            mpending <- pendingSessionFromReq conn req
+            case mpending of
+                Nothing -> respond pendingRequired
+                Just _ -> do
+                    result <- Auth.secondFactorOptions conn (authConfig cfg)
+                    either (respond . authErrResponse) (respond . jsonResponse status200) result
+
+passkeySecondFactorVerifyHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+passkeySecondFactorVerifyHandler cfg conn req respond =
+    case requireOrigin cfg req of
+        Left err -> respond (authErrResponse err)
+        Right () -> do
+            mpending <- pendingSessionFromReq conn req
+            case mpending of
+                Nothing -> respond pendingRequired
+                Just pending -> do
+                    body <- readAuthBody cfg req
+                    case body of
+                        Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
+                        Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
+                        Right value -> do
+                            result <- Auth.verifySecondFactor conn (authConfig cfg) value
+                            case result of
+                                Left err -> respond (authErrResponse err)
+                                Right () -> do
+                                    completed <- Auth.completePendingLogin conn (authConfig cfg) pending
+                                    case completed of
+                                        Left err -> respond (authErrResponse err)
+                                        Right sess ->
+                                            respond
+                                                ( clearPendingCookie
+                                                    cfg
+                                                    ( withAuthCookies
+                                                        cfg
+                                                        sess
+                                                        (jsonResponse status200 (object ["requires_2fa" .= False, "redirect" .= ("/" :: Text)]))
+                                                    )
+                                                )
+
+pendingRequired :: Response
+pendingRequired = jsonError status401 "pending_required" "the password sign-in expired; sign in again"
+
+{- | Legacy passkey sign-in: only while the database has passkeys and no
+password, and never during a recovery setup.
+-}
+legacyPasskeyOptionsHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+legacyPasskeyOptionsHandler cfg conn req respond =
+    case requireOrigin cfg req of
+        Left err -> respond (authErrResponse err)
+        Right () -> do
+            allowed <- legacyCeremonyAllowed conn
+            if not allowed
+                then respond passkeysRetired
+                else do
+                    result <- Auth.authenticationOptions conn (authConfig cfg)
+                    either (respond . authErrResponse) (respond . jsonResponse status200) result
+
+legacyPasskeyVerifyHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+legacyPasskeyVerifyHandler cfg conn req respond =
+    case requireOrigin cfg req of
+        Left err -> respond (authErrResponse err)
+        Right () -> do
+            allowed <- legacyCeremonyAllowed conn
+            if not allowed
+                then respond passkeysRetired
+                else do
+                    body <- readAuthBody cfg req
+                    case body of
+                        Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
+                        Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
+                        Right value -> do
+                            result <- Auth.verifyLogin conn (authConfig cfg) value
+                            case result of
+                                Left err -> respond (authErrResponse err)
+                                Right sess -> respond (withAuthCookies cfg sess (jsonResponse status200 (object ["redirect" .= ("/" :: Text)])))
+
+legacyCeremonyAllowed :: Connection -> IO Bool
+legacyCeremonyAllowed conn = do
+    rec <- Auth.hasRecoverySession conn
+    configured <- Auth.accountConfigured conn
+    pure (not configured && not rec)
+
+passkeysRetired :: Response
+passkeysRetired =
+    jsonError status403 "passkeys_retired" "password sign-in is active; passkeys are legacy credentials"
+
+{- | Create the account on a fresh database or finish a recovery setup: store
+the Argon2id hash, claim the database, replace the recovery codes, and sign
+the browser in.
+-}
+passwordSetupHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+passwordSetupHandler cfg conn req respond =
+    case requireOrigin cfg req of
+        Left err -> respond (authErrResponse err)
+        Right () -> do
+            body <- readAuthBody cfg req
+            case body of
+                Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
+                Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
+                Right value -> case parseSetupBody value of
+                    Left message -> respond (jsonError status400 "bad_request" message)
+                    Right (rawUsername, password) -> do
+                        allowed <- Auth.setupAllowed conn
+                        claimed <- Auth.setupClaimed conn
+                        msess <- sessionFromReq conn req
+                        let recoverySession = maybe False (\sess -> Auth.sessScope sess == "recovery") msess
+                        if not allowed
+                            then respond (jsonError status403 "setup_unavailable" "setup is not available")
+                            else
+                                if claimed && not recoverySession
+                                    then respond (jsonError status403 "recovery_session_required" "a recovery session is required to finish recovery setup")
+                                    else case validateUsername rawUsername of
+                                Left message -> respond (jsonError status400 "invalid_username" message)
+                                Right username -> case validatePassword password of
+                                    Left message -> respond (jsonError status400 "weak_password" message)
+                                    Right () -> do
+                                        passwordHash <- Password.hashPassword (cfgArgon2 cfg) password
+                                        codes <- Auth.completeSetup conn username passwordHash
+                                        sess <- Auth.createSession conn "normal" (cfgSessionTtlSeconds cfg)
+                                        respond
+                                            ( withAuthCookies
+                                                cfg
+                                                sess
+                                                (jsonResponse status200 (object ["codes" .= codes, "redirect" .= ("/" :: Text)]))
+                                            )
+
+parseSetupBody :: Value -> Either Text (Text, Text)
+parseSetupBody value = case parseMaybeObj value of
+    Nothing -> Left "invalid body"
+    Just o -> case (parseMaybe (.: "username") o, parseMaybe (.: "password") o, parseMaybe (.: "confirm") o) of
+        (Just username, Just password, Just confirm)
+            | password /= confirm -> Left "the passwords do not match"
+            | otherwise -> Right (username, password)
+        _ -> Left "username, password, and confirm are required"
+
+recoveryRedeemHandler :: Config -> Auth.RateLimiter -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+recoveryRedeemHandler cfg limiter conn req respond =
+    case requireOrigin cfg req of
+        Left err -> respond (authErrResponse err)
+        Right () -> do
+            body <- readAuthBody cfg req
+            case body of
+                Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
+                Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
+                Right value -> do
+                    let clientKey = T.pack (show (remoteHost req))
+                    attempt <- Auth.checkRateLimit limiter clientKey
+                    case attempt of
+                        Left retryAfter ->
+                            respond
+                                ( mapResponseHeaders
+                                    (<> [("Retry-After", BSC.pack (show retryAfter))])
+                                    (jsonError status429 "recovery_locked" "too many recovery attempts; try again later")
+                                )
+                        Right () -> case parseMaybeObj value of
+                            Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+                            Just o -> case parseMaybe (.: "code") o of
+                                Nothing -> respond (jsonError status400 "bad_request" "code is required")
+                                Just code -> do
+                                    result <- Auth.redeemRecoveryCode conn code
+                                    case result of
+                                        Left err -> respond (authErrResponse err)
+                                        Right sess -> do
+                                            Auth.resetRateLimit limiter clientKey
+                                            respond (withAuthCookies cfg sess (jsonResponse status200 (object ["redirect" .= ("/setup" :: Text)])))
+
+-- ---------------------------------------------------------------------------
+-- Auth body size and origin checks
+-- ---------------------------------------------------------------------------
+
+data AuthBodyError
+    = AuthBodyTooLarge
+    | AuthBodyInvalid Text
+
+{- | Read a public auth JSON body with a hard size cap. The declared length is
+checked first, then the streamed body is cut off at the limit so a chunked
+request cannot grow without bound.
+-}
+readAuthBody :: Config -> Request -> IO (Either AuthBodyError Value)
+readAuthBody cfg req = do
+    let limit = cfgAuthBodyLimitBytes cfg
+    case declaredContentLength req of
+        Just declared | declared > limit -> pure (Left AuthBodyTooLarge)
+        _ -> do
+            raw <- readBodyLimited limit req
+            pure $ case raw of
+                Left () -> Left AuthBodyTooLarge
+                Right body -> case eitherDecode body :: Either String Value of
+                    Left err -> Left (AuthBodyInvalid (T.pack err))
+                    Right value -> Right value
+
+declaredContentLength :: Request -> Maybe Int
+declaredContentLength req = do
+    header <- lookup hContentLength (requestHeaders req)
+    readInt (TE.decodeUtf8 header)
+
+readBodyLimited :: Int -> Request -> IO (Either () LBS.ByteString)
+readBodyLimited limit req = go [] 0
+  where
+    go chunks total = do
+        chunk <- getRequestBodyChunk req
+        if BS.null chunk
+            then pure (Right (LBS.fromChunks (reverse chunks)))
+            else
+                let total' = total + BS.length chunk
+                 in if total' > limit then pure (Left ()) else go (chunk : chunks) total'
+
+payloadTooLargeResponse :: Config -> Response
+payloadTooLargeResponse cfg =
+    jsonError status413 "payload_too_large" ("request body must be at most " <> T.pack (show (cfgAuthBodyLimitBytes cfg)) <> " bytes")
+
+{- | Public auth POSTs need a real origin check. A browser request must carry
+an Origin header that matches the public origin or one of the extras; a
+missing Origin is allowed only for non-browser clients, and any @Sec-Fetch-Site@
+value marks the caller as a browser.
+-}
+requireOrigin :: Config -> Request -> Either Auth.AuthError ()
+requireOrigin cfg req =
+    case lookup "Origin" (requestHeaders req) of
+        Just raw ->
+            let origin = T.dropWhileEnd (== '/') (TE.decodeUtf8 raw)
+                allowed = map (T.dropWhileEnd (== '/')) (cfgAllowedOrigins cfg)
+             in if origin `elem` allowed
+                    then Right ()
+                    else Left (Auth.authError 403 "origin" "request origin is not allowed")
+        Nothing ->
+            case fmap (T.toLower . TE.decodeUtf8) (lookup "Sec-Fetch-Site" (requestHeaders req)) of
+                Just "cross-site" -> Left (Auth.authError 403 "origin" "cross-site request rejected")
+                Just _ -> Left (Auth.authError 403 "origin" "a browser request must carry an Origin header")
+                Nothing -> Right ()
 
 data AuthContext
     = CookieSession Auth.Session
@@ -211,12 +491,33 @@ data AuthContext
 authedRoute :: Config -> DbVar -> Request -> (Response -> IO ResponseReceived) -> AuthContext -> Connection -> IO ResponseReceived
 authedRoute cfg _db req respond ctx conn =
     case (requestMethod req, pathInfo req) of
+        ("GET", ["api", "v1", "whoami"]) -> whoAmI cfg conn req ctx respond
+        ("POST", ["api", "v1", "clip"]) -> clipSaveHandler cfg conn req respond
+        ("POST", ["api", "v1", "clip", "preview"]) -> clipPreviewHandler cfg conn req respond
+        ("GET", ["api", "v1", "clip-templates"]) -> do
+            payload <- templatesPayload conn
+            respond (withCors cfg req (jsonResponse status200 payload))
+        ("GET", ["api", "v1", "clip-templates", idTxt]) -> case readInt idTxt of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid template id")
+            Just tid -> do
+                found <- getTemplate conn tid
+                case found of
+                    Nothing -> respond (withCors cfg req (jsonError status404 "template_not_found" "template not found"))
+                    Just template -> respond (withCors cfg req (jsonResponse status200 template))
+        ("POST", ["api", "v1", "clip-templates"]) -> templateWriteSession respond ctx (templateCreateHandler conn req respond)
+        ("PATCH", ["api", "v1", "clip-templates", idTxt]) -> case readInt idTxt of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid template id")
+            Just tid -> templateWriteSession respond ctx (templateUpdateHandler conn tid req respond)
+        ("DELETE", ["api", "v1", "clip-templates", idTxt]) -> case readInt idTxt of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid template id")
+            Just tid -> templateWriteSession respond ctx (templateDeleteHandler conn tid respond)
         ("GET", ["save"]) -> indexResponse cfg req respond
         ("GET", ["api", "v1", "boot"]) -> do
             page <- listBookmarks conn defaultListQuery
             tags <- allTags conn
             stats <- libraryStats conn
-            respond (jsonResponse status200 (BootPayload "0.1.0" (cfgPublicOrigin cfg) tags [] page stats))
+            searches <- listSavedSearches conn
+            respond (jsonResponse status200 (BootPayload "0.1.0" (cfgPublicOrigin cfg) tags searches page stats))
         ("GET", ["api", "v1", "bookmarks"]) -> do
             page <- listBookmarks conn (listQueryFrom req)
             respond (jsonResponse status200 page)
@@ -278,21 +579,24 @@ authedRoute cfg _db req respond ctx conn =
         ("POST", ["api", "v1", "bookmarks", idTxt, action]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid bookmark id")
             Just bid -> do
-                case action of
-                    "open" -> recordOpen conn bid >> respond (jsonResponse status200 (object ["ok" .= True]))
-                    "enrich" -> do
-                        enqueueEnrichment conn bid
-                        respond (jsonResponse status200 (object ["ok" .= True, "queued" .= True]))
-                    "extract" -> do
-                        enqueueEnrichment conn bid
-                        respond (jsonResponse status200 (object ["ok" .= True, "queued" .= True]))
-                    "snapshot" -> do
-                        m <- captureSnapshot cfg conn bid
-                        case m of
-                            Nothing -> respond (jsonError status404 "not_found" "bookmark not found")
-                            Just (kind, value) ->
-                                respond (jsonResponse status200 (object ["ok" .= True, "kind" .= kind, "value" .= value]))
-                    _ -> respond (jsonError status404 "not_found" "No such action")
+                exists <- query conn "SELECT 1 FROM bookmarks WHERE id = ?" (Only bid) :: IO [Only Int]
+                if null exists
+                    then respond (jsonError status404 "not_found" "bookmark not found")
+                    else case action of
+                        "open" -> recordOpen conn bid >> respond (jsonResponse status200 (object ["ok" .= True]))
+                        "enrich" -> do
+                            enqueueEnrichment conn bid
+                            respond (jsonResponse status200 (object ["ok" .= True, "queued" .= True]))
+                        "extract" -> do
+                            enqueueEnrichment conn bid
+                            respond (jsonResponse status200 (object ["ok" .= True, "queued" .= True]))
+                        "snapshot" -> do
+                            m <- captureSnapshot cfg conn bid
+                            case m of
+                                Nothing -> respond (jsonError status502 "snapshot_failed" "the snapshot could not be captured")
+                                Just (kind, value) ->
+                                    respond (jsonResponse status200 (object ["ok" .= True, "kind" .= kind, "value" .= value]))
+                        _ -> respond (jsonError status404 "not_found" "No such action")
         ("GET", ["api", "v1", "bookmarks", idTxt, "backlinks"]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid bookmark id")
             Just bid -> do
@@ -393,7 +697,8 @@ authedRoute cfg _db req respond ctx conn =
                             if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status409 "conflict" "tag rename failed")
         ("DELETE", ("api" : "v1" : "tags" : rest)) -> do
             let tagName = T.intercalate "/" rest
-            ok <- deleteTag conn tagName
+                detach = parseBool =<< param "detach" req
+            ok <- if detach == Just True then deleteTagWithLinks conn tagName else deleteTag conn tagName
             if ok then respond (emptyResponse status204) else respond (jsonError status409 "conflict" "tag is not empty or does not exist")
         ("POST", ["api", "v1", "maintenance", "check-dead"]) -> do
             body <- jsonBody req
@@ -553,19 +858,18 @@ authedRoute cfg _db req respond ctx conn =
                 ok <- revokeToken conn tokenId
                 if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "token not found")
         ("GET", ["api", "v1", "account"]) -> do
-            creds <- Auth.listCredentials conn
-            remaining <- Auth.recoveryCodesRemaining conn
-            sessions <- Auth.listSessions conn (case ctx of CookieSession sess -> Just sess; BearerToken _ -> Nothing)
-            respond
-                ( jsonResponse
-                    status200
-                    ( object
-                        [ "credentials" .= creds
-                        , "recovery_codes_remaining" .= remaining
-                        , "sessions" .= sessions
-                        ]
-                    )
-                )
+            payload <- accountPayload conn ctx
+            respond (jsonResponse status200 payload)
+        ("POST", ["api", "v1", "account", "2fa"]) -> accountTwoFactorHandler cfg conn ctx req respond
+        ("POST", ["api", "v1", "account", "password"]) ->
+            accountPasswordHandler cfg conn ctx req respond
+        ("POST", ["api", "v1", "account", "username"]) ->
+            accountUsernameHandler cfg conn req respond
+        ("POST", ["api", "v1", "account", "sessions", "revoke-others"]) -> case ctx of
+            CookieSession sess -> do
+                revoked <- Auth.deleteOtherSessions conn sess
+                respond (jsonResponse status200 (object ["revoked" .= revoked]))
+            BearerToken _ -> respond (jsonError status403 "session_required" "a bearer token cannot revoke browser sessions")
         ("POST", ["api", "v1", "account", "passkeys", "options"]) -> do
             r <- Auth.addPasskeyOptions conn (authConfig cfg)
             either (respond . authErrResponse) (respond . jsonResponse status200) r
@@ -616,6 +920,182 @@ authedRoute cfg _db req respond ctx conn =
 -- Auth guard
 -- ---------------------------------------------------------------------------
 
+
+-- ---------------------------------------------------------------------------
+-- Browser clipper
+-- ---------------------------------------------------------------------------
+
+isClipPath :: [Text] -> Bool
+isClipPath path = case path of
+    ("api" : "v1" : "clip" : _) -> True
+    ("api" : "v1" : "clip-templates" : _) -> True
+    ["api", "v1", "whoami"] -> True
+    _ -> False
+
+isExtensionOrigin :: Text -> Bool
+isExtensionOrigin origin =
+    any (`T.isPrefixOf` T.toLower origin)
+        [ "chrome-extension://"
+        , "moz-extension://"
+        , "safari-web-extension://"
+        ]
+
+clipOriginAllowed :: Config -> Request -> Bool
+clipOriginAllowed cfg req =
+    case lookup "Origin" (requestHeaders req) of
+        Nothing -> True
+        Just raw ->
+            let origin = TE.decodeUtf8 raw
+             in origin `elem` cfgClipOrigins cfg
+                    || origin `elem` cfgAllowedOrigins cfg
+                    || isExtensionOrigin origin
+
+requestOriginAllowed :: Config -> Request -> Bool
+requestOriginAllowed cfg req
+    | isClipPath (pathInfo req) = clipOriginAllowed cfg req
+    | otherwise = originAllowed cfg req
+
+corsHeaders :: Config -> Request -> ResponseHeaders
+corsHeaders cfg req =
+    case lookup "Origin" (requestHeaders req) of
+        Just raw
+            | clipOriginAllowed cfg req ->
+                [ ("Access-Control-Allow-Origin", raw)
+                , ("Vary", "Origin")
+                , ("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+                , ("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, X-Eza-Client")
+                , ("Access-Control-Max-Age", "600")
+                ]
+        _ -> []
+
+withCors :: Config -> Request -> Response -> Response
+withCors cfg req = mapResponseHeaders (<> corsHeaders cfg req)
+
+clipPreflight :: Config -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+clipPreflight cfg req respond
+    | clipOriginAllowed cfg req =
+        respond
+            ( mapResponseHeaders
+                (<> corsHeaders cfg req)
+                (responseLBS status204 [] "")
+            )
+    | otherwise = respond (jsonError status403 "origin" "origin is not allowed")
+
+clipErrorResponse :: Config -> Request -> ClipError -> Response
+clipErrorResponse cfg req err =
+    withCors cfg req (jsonError (mkStatus (clipErrorStatus err) "") (clipErrorCode err) (clipErrorMessage err))
+
+clipSaveHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+clipSaveHandler cfg conn req respond = do
+    body <- readBodyLimited (8 * 1024 * 1024) req
+    case body of
+        Left () -> respond (jsonError status413 "payload_too_large" "clip body must be at most 8 MiB")
+        Right raw -> case eitherDecode raw of
+            Left err -> respond (withCors cfg req (jsonError status400 "bad_request" (T.pack err)))
+            Right request -> do
+                let headerKey = fmap TE.decodeUtf8 (lookup "Idempotency-Key" (requestHeaders req))
+                    request' = request {clIdempotencyKey = headerKey `orElse` clIdempotencyKey request}
+                result <- saveClip conn request'
+                case result of
+                    Left err -> respond (clipErrorResponse cfg req err)
+                    Right saved -> do
+                        if scrNeedsEnrichment saved
+                            then enqueueEnrichment conn (scrBookmarkId saved)
+                            else pure ()
+                        let status = if scrBookmarkCreated saved && not (scrReplayed saved) then status201 else status200
+                        respond (withCors cfg req (jsonResponse status saved))
+  where
+    orElse (Just value) _ = Just value
+    orElse Nothing fallback = fallback
+
+clipPreviewHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+clipPreviewHandler cfg conn req respond = do
+    body <- readBodyLimited (8 * 1024 * 1024) req
+    case body of
+        Left () -> respond (payloadTooLargeResponse cfg)
+        Right raw -> case eitherDecode raw of
+            Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+            Right request -> do
+                result <- previewClip conn request
+                case result of
+                    Left err -> respond (clipErrorResponse cfg req err)
+                    Right preview -> respond (jsonResponse status200 preview)
+
+whoAmI :: Config -> Connection -> Request -> AuthContext -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+whoAmI cfg conn req ctx respond =
+    case ctx of
+        BearerToken token -> do
+            account <- Auth.loadAccount conn
+            respond
+                ( withCors cfg req
+                    ( jsonResponse
+                        status200
+                        ( object
+                            [ "username" .= Auth.acctUsername account
+                            , "token_name" .= tokenName token
+                            , "scopes" .= tokenScopes token
+                            ]
+                        )
+                    )
+                )
+        CookieSession _ -> do
+            account <- Auth.loadAccount conn
+            respond
+                ( withCors cfg req
+                    ( jsonResponse
+                        status200
+                        ( object
+                            [ "username" .= Auth.acctUsername account
+                            , "token_name" .= ("" :: Text)
+                            , "scopes" .= (["session"] :: [Text])
+                            ]
+                        )
+                    )
+                )
+
+templateWriteSession :: (Response -> IO ResponseReceived) -> AuthContext -> IO ResponseReceived -> IO ResponseReceived
+templateWriteSession respond ctx action =
+    case ctx of
+        CookieSession _ -> action
+        BearerToken _ -> respond (jsonError status403 "session_required" "template writes require a browser session")
+
+templateCreateHandler :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+templateCreateHandler conn req respond = do
+    body <- readBodyLimited (2 * 1024 * 1024) req
+    case body of
+        Left () -> respond (jsonError status413 "payload_too_large" "template is too large")
+        Right raw -> case eitherDecode raw of
+            Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+            Right template -> do
+                result <- createTemplate conn template
+                case result of
+                    Left err -> respond (templateErrorResponse err)
+                    Right created -> respond (jsonResponse status201 created)
+
+templateUpdateHandler :: Connection -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+templateUpdateHandler conn templateId req respond = do
+    body <- readBodyLimited (2 * 1024 * 1024) req
+    case body of
+        Left () -> respond (jsonError status413 "payload_too_large" "template is too large")
+        Right raw -> case eitherDecode raw of
+            Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+            Right template -> do
+                result <- updateTemplate conn template {ctId = templateId}
+                case result of
+                    Left err -> respond (templateErrorResponse err)
+                    Right updated -> respond (jsonResponse status200 updated)
+
+templateDeleteHandler :: Connection -> Int -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+templateDeleteHandler conn templateId respond = do
+    result <- deleteTemplate conn templateId
+    case result of
+        Left err -> respond (templateErrorResponse err)
+        Right () -> respond (emptyResponse status204)
+
+templateErrorResponse :: TemplateError -> Response
+templateErrorResponse err =
+    jsonError (mkStatus (templateErrorStatus err) "") (templateErrorCode err) (templateErrorMessage err)
+
 withAuthed :: Config -> DbVar -> Request -> (Response -> IO ResponseReceived) -> (AuthContext -> Connection -> IO ResponseReceived) -> IO ResponseReceived
 withAuthed cfg db req respond action = withMVar db $ \conn -> do
     case bearerToken req of
@@ -628,7 +1108,7 @@ withAuthed cfg db req respond action = withMVar db $ \conn -> do
                         respond (jsonError status403 "session_required" "this route requires a browser session")
                     | not (tokenAllows token (TE.decodeUtf8 (requestMethod req)) (pathInfo req)) ->
                         respond (jsonError status403 "token_scope" "this token does not allow the request")
-                    | not (originAllowed cfg req) ->
+                    | not (requestOriginAllowed cfg req) ->
                         respond (jsonError status403 "origin" "origin is not allowed")
                     | otherwise -> action (BearerToken token) conn
         Nothing -> do
@@ -636,10 +1116,10 @@ withAuthed cfg db req respond action = withMVar db $ \conn -> do
             case msess of
                 Nothing -> respond (unauthorized req)
                 Just sess -> do
-                    if not (recoveryScopeAllowed (requestMethod req) (pathInfo req) (Auth.sessScope sess))
-                        then respond (jsonError status403 "recovery_scope" "this recovery session may only re-enroll a passkey")
+                    if not (Auth.scopeAllows (Auth.sessScope sess) (TE.decodeUtf8 (requestMethod req)) (pathInfo req))
+                        then respond (jsonError status403 "session_scope" "this session may not use this route")
                         else
-                            if not (originAllowed cfg req)
+                            if not (requestOriginAllowed cfg req)
                                 then respond (jsonError status403 "origin" "origin is not allowed")
                                 else
                                     if not (csrfOk req sess)
@@ -663,17 +1143,6 @@ requiresSession path = case path of
     ["save"] -> True
     _ -> False
 
-recoveryScopeAllowed :: Method -> [Text] -> Text -> Bool
-recoveryScopeAllowed method path scope
-    | scope /= "recovery" = True
-    | otherwise = case (method, path) of
-        ("POST", ["api", "setup", "options"]) -> True
-        ("POST", ["api", "setup", "verify"]) -> True
-        ("POST", ["api", "auth", "logout"]) -> True
-        ("GET", ["api", "v1", "boot"]) -> True
-        ("GET", ["api", "v1", "account"]) -> True
-        _ -> False
-
 csrfOk :: Request -> Auth.Session -> Bool
 csrfOk req sess
     | requestMethod req `notElem` ["POST", "PUT", "PATCH", "DELETE"] = True
@@ -688,32 +1157,29 @@ originAllowed cfg req =
         Nothing -> True
         Just raw -> TE.decodeUtf8 raw `elem` cfgAllowedOrigins cfg
 
-ensureOrigin :: Config -> Request -> IO ()
-ensureOrigin cfg req = do
-    if originAllowed cfg req then pure () else pure ()
-
--- Auth ceremony requests are same-origin; a missing Origin is accepted for
--- non-browser clients, but a present mismatching Origin is rejected in
--- withAuthed/CSRF paths. This helper is intentionally a no-op placeholder
--- for the public ceremony endpoints; rate limiting and stricter origin
--- checks land with the auth hardening pass.
-
-acceptsHtml :: Request -> Bool
-acceptsHtml req =
-    case lookup hAccept (requestHeaders req) of
-        Nothing -> True
-        Just raw -> "text/html" `BS.isInfixOf` raw
-
-sessionFromReq :: Connection -> Request -> IO (Maybe Auth.Session)
-sessionFromReq conn req =
+sessionCookieFrom :: Connection -> Text -> Request -> IO (Maybe Auth.Session)
+sessionCookieFrom conn cookieName req =
     case lookup hCookie (requestHeaders req) of
         Nothing -> pure Nothing
         Just rawCookie -> do
             let cookies = Cookie.parseCookies rawCookie
-                rawToken = lookup (TE.encodeUtf8 Auth.sessionCookieName) cookies
+                rawToken = lookup (TE.encodeUtf8 cookieName) cookies
             case rawToken of
                 Nothing -> pure Nothing
                 Just token -> Auth.getSession conn (TE.decodeUtf8 token)
+
+sessionFromReq :: Connection -> Request -> IO (Maybe Auth.Session)
+sessionFromReq conn = sessionCookieFrom conn Auth.sessionCookieName
+
+{- | The pending cookie that the password step set. Only a live @pending_2fa@
+session resolves; the normal session cookie is not consulted here.
+-}
+pendingSessionFromReq :: Connection -> Request -> IO (Maybe Auth.Session)
+pendingSessionFromReq conn req = do
+    msess <- sessionCookieFrom conn Auth.pendingCookieName req
+    pure $ case msess of
+        Just sess | Auth.sessScope sess == Auth.pendingScope -> Just sess
+        _ -> Nothing
 
 unauthorized :: Request -> Response
 unauthorized req
@@ -733,6 +1199,7 @@ withAuthCookies cfg sess =
     mapResponseHeaders (\hs -> hs <> [sessionCookie, csrfCookie])
   where
     securePart = if cfgSecureCookies cfg then "; Secure" else ""
+    maxAge = T.pack (show (Auth.nsTtlSeconds sess))
     sessionCookie =
         ( hSetCookie
         , BSC.pack
@@ -740,7 +1207,8 @@ withAuthCookies cfg sess =
                 ( Auth.sessionCookieName
                     <> "="
                     <> Auth.nsToken sess
-                    <> "; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"
+                    <> "; Path=/; HttpOnly; SameSite=Lax; Max-Age="
+                    <> maxAge
                     <> securePart
                 )
             )
@@ -752,11 +1220,45 @@ withAuthCookies cfg sess =
                 ( Auth.csrfCookieName
                     <> "="
                     <> Auth.nsCsrf sess
-                    <> "; Path=/; SameSite=Lax; Max-Age=2592000"
+                    <> "; Path=/; SameSite=Lax; Max-Age="
+                    <> maxAge
                     <> securePart
                 )
             )
         )
+
+{- | The short-lived cookie of a two-factor sign-in. It is HttpOnly, carries no
+CSRF token, and can only finish the passkey step; it never opens a route on its
+own.
+-}
+withPendingCookie :: Config -> Auth.NewSession -> Response -> Response
+withPendingCookie cfg sess =
+    mapResponseHeaders (\hs -> hs <> [pendingCookie (Auth.nsToken sess) (Auth.nsTtlSeconds sess)])
+  where
+    pendingCookie token ttl =
+        ( hSetCookie
+        , BSC.pack
+            ( T.unpack
+                ( Auth.pendingCookieName
+                    <> "="
+                    <> token
+                    <> "; Path=/; HttpOnly; SameSite=Lax; Max-Age="
+                    <> T.pack (show ttl)
+                    <> securePart
+                )
+            )
+        )
+    securePart = if cfgSecureCookies cfg then "; Secure" else ""
+
+clearPendingCookie :: Config -> Response -> Response
+clearPendingCookie cfg =
+    mapResponseHeaders
+        ( \hs ->
+            hs
+                <> [(hSetCookie, BSC.pack (T.unpack (Auth.pendingCookieName <> "=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0" <> securePart)))]
+        )
+  where
+    securePart = if cfgSecureCookies cfg then "; Secure" else ""
 
 clearAuthCookies :: Config -> Response -> Response
 clearAuthCookies cfg =
@@ -765,6 +1267,7 @@ clearAuthCookies cfg =
             hs
                 <> [ (hSetCookie, BSC.pack (T.unpack (Auth.sessionCookieName <> "=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0" <> securePart)))
                    , (hSetCookie, BSC.pack (T.unpack (Auth.csrfCookieName <> "=; Path=/; SameSite=Lax; Max-Age=0" <> securePart)))
+                   , (hSetCookie, BSC.pack (T.unpack (Auth.pendingCookieName <> "=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0" <> securePart)))
                    ]
         )
   where
@@ -802,11 +1305,7 @@ faviconHandler conn req domain respond = do
                             (LBS.fromStrict (fvBytes favicon))
                         )
 
-data AddBody = AddBody
-    { abUrl :: Text
-    , abTitle :: Maybe Text
-    , abTags :: Maybe [Text]
-    }
+data AddBody = AddBody Text (Maybe Text) (Maybe [Text])
 
 instance FromJSON AddBody where
     parseJSON = withObject "AddBody" $ \o ->
@@ -837,15 +1336,7 @@ sanitizeRule rule =
         , ruleAddTags = [T.toLower (T.strip tag) | tag <- ruleAddTags rule, not (T.null (T.strip tag))]
         }
 
-data HighlightCreateBody = HighlightCreateBody
-    { hcbQuote :: Text
-    , hcbPrefix :: Maybe Text
-    , hcbSuffix :: Maybe Text
-    , hcbStart :: Int
-    , hcbEnd :: Int
-    , hcbNote :: Maybe Text
-    , hcbColor :: Maybe Text
-    }
+data HighlightCreateBody = HighlightCreateBody Text (Maybe Text) (Maybe Text) Int Int (Maybe Text) (Maybe Text)
 
 instance FromJSON HighlightCreateBody where
     parseJSON = withObject "HighlightCreateBody" $ \o ->
@@ -869,10 +1360,7 @@ highlightCreateHandler conn bid req respond = do
                 Left err -> respond (jsonError status400 "bad_request" err)
                 Right highlight -> respond (jsonResponse status201 highlight)
 
-data HighlightPatchBody = HighlightPatchBody
-    { hpbNote :: Maybe Text
-    , hpbColor :: Maybe Text
-    }
+data HighlightPatchBody = HighlightPatchBody (Maybe Text) (Maybe Text)
 
 instance FromJSON HighlightPatchBody where
     parseJSON = withObject "HighlightPatchBody" $ \o ->
@@ -887,12 +1375,7 @@ highlightUpdateHandler conn bid hid req respond = do
             ok <- updateHighlight conn bid hid note color
             if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status404 "not_found" "highlight not found")
 
-data ShareCreateBody = ShareCreateBody
-    { scbScope :: Text
-    , scbTargetId :: Int
-    , scbIncludeNote :: Maybe Bool
-    , scbExpiresInDays :: Maybe Int
-    }
+data ShareCreateBody = ShareCreateBody Text Int (Maybe Bool) (Maybe Int)
 
 instance FromJSON ShareCreateBody where
     parseJSON = withObject "ShareCreateBody" $ \o ->
@@ -972,12 +1455,7 @@ snapshotHandler cfg conn bid respond = do
                     else respond (jsonError status404 "not_found" "snapshot file not found")
         Nothing -> respond (jsonError status404 "not_found" "bookmark not found")
 
-data BulkBody = BulkBody
-    { bbAction :: Text
-    , bbIds :: [Int]
-    , bbTags :: Maybe [Text]
-    , bbConfirm :: Maybe Bool
-    }
+data BulkBody = BulkBody Text [Int] (Maybe [Text]) (Maybe Bool)
 
 instance FromJSON BulkBody where
     parseJSON = withObject "BulkBody" $ \o ->
@@ -1006,20 +1484,13 @@ bulkHandler conn req respond = do
                         Right (updated, snapshotId) ->
                             respond (jsonResponse status200 (object ["updated" .= updated, "snapshot_id" .= snapshotId]))
 
-data TokenCreateBody = TokenCreateBody
-    { tcbName :: Text
-    , tcbScopes :: Maybe [Text]
-    }
+data TokenCreateBody = TokenCreateBody Text (Maybe [Text])
 
 instance FromJSON TokenCreateBody where
     parseJSON = withObject "TokenCreateBody" $ \o ->
         TokenCreateBody <$> o .: "name" <*> o .:? "scopes"
 
-data QuickBody = QuickBody
-    { qbUrl :: Text
-    , qbTitle :: Maybe Text
-    , qbTags :: Maybe [Text]
-    }
+data QuickBody = QuickBody Text (Maybe Text) (Maybe [Text])
 
 instance FromJSON QuickBody where
     parseJSON = withObject "QuickBody" $ \o ->
@@ -1042,7 +1513,7 @@ quickSaveHandler conn req respond = do
                             else enqueueEnrichment conn bid
                         respond (jsonResponse (if existing then status200 else status201) (object ["id" .= bid, "existing" .= existing]))
 
-data MarkAboveBody = MarkAboveBody {mabAboveId :: Maybe Int}
+data MarkAboveBody = MarkAboveBody (Maybe Int)
 
 instance FromJSON MarkAboveBody where
     parseJSON = withObject "MarkAboveBody" $ \o -> MarkAboveBody <$> o .:? "above_id"
@@ -1056,12 +1527,7 @@ markAbove conn req respond = do
             n <- markAllAbove conn aid
             respond (jsonResponse status200 (object ["updated" .= n]))
 
-data PatchBody = PatchBody
-    { pbTitle :: Maybe Text
-    , pbNote :: Maybe Text
-    , pbRead :: Maybe Bool
-    , pbTags :: Maybe [Text]
-    }
+data PatchBody = PatchBody (Maybe Text) (Maybe Text) (Maybe Bool) (Maybe [Text])
 
 instance FromJSON PatchBody where
     parseJSON = withObject "PatchBody" $ \o ->
@@ -1100,12 +1566,127 @@ parseMaybeObj :: Value -> Maybe Object
 parseMaybeObj (Object o) = Just o
 parseMaybeObj _ = Nothing
 
-resultToMaybe :: Result a -> Maybe a
-resultToMaybe (Success a) = Just a
-resultToMaybe (Error _) = Nothing
-
 authErrResponse :: Auth.AuthError -> Response
-authErrResponse e = jsonError (mkStatus (Auth.aeStatus e) "") (Auth.aeCode e) (Auth.aeMessage e)
+authErrResponse e =
+    let base = jsonError (mkStatus (Auth.aeStatus e) "") (Auth.aeCode e) (Auth.aeMessage e)
+     in case Auth.aeRetryAfter e of
+            Nothing -> base
+            Just seconds -> mapResponseHeaders (<> [("Retry-After", BSC.pack (show seconds))]) base
+
+-- ---------------------------------------------------------------------------
+-- Account handlers
+-- ---------------------------------------------------------------------------
+
+{- | The account document. @GET /api/v1/account@ and the two-factor toggle
+return the same shape, so the account page can replace its copy after a
+change without a second request.
+-}
+accountPayload :: Connection -> AuthContext -> IO Value
+accountPayload conn ctx = do
+    creds <- Auth.listCredentials conn
+    remaining <- Auth.recoveryCodesRemaining conn
+    sessions <- Auth.listSessions conn (case ctx of CookieSession sess -> Just sess; BearerToken _ -> Nothing)
+    account <- Auth.loadAccount conn
+    configured <- Auth.accountConfigured conn
+    pure
+        ( object
+            [ "credentials" .= creds
+            , "recovery_codes_remaining" .= remaining
+            , "sessions" .= sessions
+            , "username" .= Auth.acctUsername account
+            , "has_password" .= Auth.accountHasPassword account
+            , "require_passkey" .= Auth.acctRequirePasskey account
+            , "account_configured" .= configured
+            ]
+        )
+
+{- | Turn optional passkey two-factor on or off. Both directions need the
+current password, and turning it on needs an already-registered passkey.
+-}
+accountTwoFactorHandler :: Config -> Connection -> AuthContext -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+accountTwoFactorHandler cfg conn ctx req respond = do
+    body <- jsonBody req
+    case body of
+        Left e -> respond (jsonError status400 "bad_request" e)
+        Right value -> case parseMaybeObj value of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+            Just o -> case parseMaybe (.: "required") o :: Maybe Bool of
+                Nothing -> respond (jsonError status400 "bad_request" "required is required")
+                Just required -> do
+                    let current = fromMaybe "" (parseMaybe (.: "current_password") o :: Maybe Text)
+                    result <- Auth.setTwoFactorRequirement conn (authConfig cfg) required current
+                    case result of
+                        Left err -> respond (authErrResponse err)
+                        Right _ -> do
+                            payload <- accountPayload conn ctx
+                            respond (jsonResponse status200 payload)
+
+{- | Change the account password. A current password is required once one
+exists; the session vouches for the first password on a legacy passkey-only
+account. Other browser sessions are revoked so a stolen session does not keep
+the old access.
+-}
+accountPasswordHandler :: Config -> Connection -> AuthContext -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+accountPasswordHandler cfg conn ctx req respond = do
+    body <- jsonBody req
+    case body of
+        Left e -> respond (jsonError status400 "bad_request" e)
+        Right value -> case parseMaybeObj value of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+            Just o -> do
+                let current = parseMaybe (.: "current_password") o :: Maybe Text
+                    newPassword = parseMaybe (.: "new_password") o :: Maybe Text
+                    confirm = parseMaybe (.: "confirm") o :: Maybe Text
+                case (newPassword, confirm) of
+                    (Just wanted, Just repeated)
+                        | wanted /= repeated ->
+                            respond (jsonError status400 "password_mismatch" "the new passwords do not match")
+                        | otherwise -> case validatePassword wanted of
+                            Left message -> respond (jsonError status400 "weak_password" message)
+                            Right () -> do
+                                account <- Auth.loadAccount conn
+                                authorized <- case current of
+                                    Just currentPassword -> Auth.verifyCurrentPassword conn (authConfig cfg) currentPassword
+                                    Nothing -> pure (not (Auth.accountHasPassword account))
+                                if not authorized
+                                    then respond (jsonError status403 "invalid_password" "the current password is incorrect")
+                                    else
+                                        if T.null (Auth.acctUsername account)
+                                            then respond (jsonError status409 "username_required" "set a username before setting a password")
+                                            else do
+                                                passwordHash <- Password.hashPassword (cfgArgon2 cfg) wanted
+                                                Auth.setAccountPassword conn (Auth.acctUsername account) passwordHash
+                                                case ctx of
+                                                    CookieSession sess -> void (Auth.deleteOtherSessions conn sess)
+                                                    BearerToken _ -> pure ()
+                                                respond (jsonResponse status200 (object ["ok" .= True]))
+                    _ -> respond (jsonError status400 "bad_request" "new_password and confirm are required")
+
+-- | Rename the single account. A password, when set, must be confirmed.
+accountUsernameHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+accountUsernameHandler cfg conn req respond = do
+    body <- jsonBody req
+    case body of
+        Left e -> respond (jsonError status400 "bad_request" e)
+        Right value -> case parseMaybeObj value of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+            Just o -> do
+                let current = parseMaybe (.: "current_password") o :: Maybe Text
+                    wanted = parseMaybe (.: "username") o :: Maybe Text
+                case wanted of
+                    Nothing -> respond (jsonError status400 "bad_request" "username is required")
+                    Just rawUsername -> do
+                        account <- Auth.loadAccount conn
+                        authorized <- case current of
+                            Just currentPassword -> Auth.verifyCurrentPassword conn (authConfig cfg) currentPassword
+                            Nothing -> pure (not (Auth.accountHasPassword account))
+                        if not authorized
+                            then respond (jsonError status403 "invalid_password" "the current password is incorrect")
+                            else case validateUsername rawUsername of
+                                Left message -> respond (jsonError status400 "invalid_username" message)
+                                Right username -> do
+                                    Auth.setAccountUsername conn username
+                                    respond (jsonResponse status200 (object ["ok" .= True]))
 
 -- ---------------------------------------------------------------------------
 -- Query parsing
@@ -1166,10 +1747,10 @@ sendFile req cachePolicy headers path respond = do
     let tag = BSC.pack ("\"" <> show size <> "-" <> show (round (utcTimeToPOSIXSeconds modified) :: Integer) <> "\"")
         cacheable = cachePolicy /= "no-store"
         fresh = cacheable && lookup hIfNoneMatch (requestHeaders req) == Just tag
-        responseHeaders = headers <> [(hCacheControl, cachePolicy)] <> [(hETag, tag) | cacheable]
+        allHeaders = headers <> [(hCacheControl, cachePolicy)] <> [(hETag, tag) | cacheable]
     if fresh
-        then respond (responseLBS status304 responseHeaders "")
-        else respond (responseFile status200 responseHeaders path Nothing)
+        then respond (responseLBS status304 allHeaders "")
+        else respond (responseFile status200 allHeaders path Nothing)
 
 serveStaticFile :: Config -> FilePath -> [(HeaderName, BS.ByteString)] -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 serveStaticFile cfg relative headers req respond = case cfgStaticDir cfg of

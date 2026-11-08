@@ -1,27 +1,33 @@
 module Main (main) where
 
-import Control.Exception (bracket)
+import Control.Exception (IOException, SomeException, bracket, onException, try)
+import Control.Monad (forM)
 import Data.Aeson (encode, object, (.=))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.Text (Text)
 import qualified Data.Text as T
-import Database.SQLite.Simple (close)
+import qualified Data.Text.IO as TIO
+import Database.SQLite.Simple (Connection, Only (..), close, query, query_)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types.Status (statusCode)
 import Options.Applicative
-import System.Environment (lookupEnv)
 import System.Exit (exitFailure, exitSuccess)
-import System.IO (hPutStrLn, stderr)
+import System.IO (hFlush, hGetEcho, hPutStr, hPutStrLn, hSetEcho, stdin, stderr)
 
+import qualified Eza.Auth as Auth
 import Eza.Backup (runBackup)
 import Eza.Bench (runBench)
 import Eza.Bookmarks
 import Eza.Config
 import Eza.DeadLinks (checkDead)
+import Eza.Enrich (enrichBookmark)
 import qualified Eza.Db as Db
+import Eza.Export (exportBookmarks)
 import Eza.Import
+import Eza.JsonExport (exportJson)
+import qualified Eza.Password as Password
 import Eza.Types (ImportReport (..), TagStat (..))
 import Eza.Server (runServer)
 
@@ -37,6 +43,24 @@ data Command
   | CheckDead CheckDeadOpts
   | Healthcheck
   | Bench Int
+  | ExportCmd Bool
+  | EnrichCmd EnrichOpts
+  | SetPasswordCmd SetPasswordOpts
+  deriving (Show, Eq)
+
+data EnrichOpts = EnrichOpts
+  { eoId :: Maybe Int
+  , eoLimit :: Int
+  , eoAll :: Bool
+  , eoDryRun :: Bool
+  }
+  deriving (Show, Eq)
+
+data SetPasswordOpts = SetPasswordOpts
+  { spUsername :: Maybe String
+  , spResetSessions :: Bool
+  , spDisable2fa :: Bool
+  }
   deriving (Show, Eq)
 
 data CheckDeadOpts = CheckDeadOpts
@@ -57,9 +81,9 @@ data ImportOpts = ImportOpts
 
 main :: IO ()
 main = do
-  command <- execParser opts
+  cmd <- execParser opts
   cfg <- loadConfig
-  case command of
+  case cmd of
     Version -> putStrLn "eza 0.1.0"
     Init -> do
       Db.initDb (cfgDbPath cfg)
@@ -85,6 +109,26 @@ main = do
         putStrLn (LBS8.unpack (encode (object ["checked" .= checked, "dead" .= dead, "alive" .= alive])))
     Bench iterations ->
       bracket (Db.openDb (cfgDbPath cfg)) close $ \conn -> runBench conn iterations
+    ExportCmd json ->
+      bracket (Db.openDb (cfgDbPath cfg)) close $ \conn ->
+        if json
+          then do
+            document <- exportJson conn
+            LBS8.putStrLn (encode document)
+          else TIO.putStrLn =<< exportBookmarks conn
+    EnrichCmd eo ->
+      bracket (Db.openDb (cfgDbPath cfg)) close $ \conn -> do
+        ids <- enrichIds conn eo
+        if eoDryRun eo
+          then putStrLn (LBS8.unpack (encode (object ["candidates" .= length ids, "dry_run" .= True])))
+          else do
+            manager <- newTlsManager
+            results <- forM ids $ \bid -> do
+              result <- try (enrichBookmark manager cfg conn bid) :: IO (Either SomeException (Either Text ()))
+              pure (bid, result)
+            let ok = length [() | (_, Right (Right ())) <- results]
+                failed = length results - ok
+            putStrLn (LBS8.unpack (encode (object ["attempted" .= length results, "ok" .= ok, "failed" .= failed])))
     Healthcheck -> do
       let port = bindPort (cfgBind cfg)
           url = "http://127.0.0.1:" <> show port <> "/healthz"
@@ -109,6 +153,7 @@ main = do
         if ftsCount == bookmarks
           then putStrLn "verify: ok" >> exitSuccess
           else hPutStrLn stderr "verify: FTS row count does not match bookmarks" >> exitFailure
+    SetPasswordCmd sp -> setPassword cfg sp
     ImportCmd io -> do
       raw <- BS.readFile (optFile io)
       let parsed = parseNetscape (ImportOptions (optMode io) (not (optKeepNoise io)) (optMarkRead io)) raw
@@ -174,7 +219,50 @@ commandParser =
               (ImportCmd <$> importOpts)
               (progDesc "Import a Netscape bookmarks.html export")
           )
+        <> command
+          "enrich"
+          ( info
+              (EnrichCmd <$> enrichOpts)
+              (progDesc "Extract text and metadata for bookmarks, one at a time")
+          )
+        <> command
+          "export"
+          ( info
+              (ExportCmd <$> switch (long "json" <> help "Write the versioned eza JSON document instead of Netscape HTML"))
+              (progDesc "Export the library to stdout")
+          )
+        <> command
+          "set-password"
+          ( info
+              (SetPasswordCmd <$> setPasswordOpts)
+              (progDesc "Set the account password (prompts twice with echo off)")
+          )
     )
+
+enrichOpts :: Parser EnrichOpts
+enrichOpts =
+  EnrichOpts
+    <$> optional (option auto (long "id" <> metavar "ID" <> help "Only this bookmark id"))
+    <*> option auto (long "limit" <> value 100 <> metavar "N" <> help "Maximum bookmarks (default: 100)")
+    <*> switch (long "all" <> help "Ignore --limit and process every idle or failed bookmark")
+    <*> switch (long "dry-run" <> help "Print the candidate count without fetching")
+
+enrichIds :: Connection -> EnrichOpts -> IO [Int]
+enrichIds conn eo = case eoId eo of
+  Just bid -> pure [bid]
+  Nothing ->
+    if eoAll eo
+      then map fromOnly <$> query_ conn "SELECT id FROM bookmarks WHERE enrich_state IN ('idle','failed') ORDER BY id"
+      else map fromOnly <$> query conn "SELECT id FROM bookmarks WHERE enrich_state IN ('idle','failed') ORDER BY id LIMIT ?" (Only (max 1 (eoLimit eo)))
+  where
+    fromOnly (Only bid) = bid
+
+setPasswordOpts :: Parser SetPasswordOpts
+setPasswordOpts =
+  SetPasswordOpts
+    <$> optional (strOption (long "username" <> metavar "NAME" <> help "Username to store (prompted when the account has none)"))
+    <*> switch (long "reset-sessions" <> help "Revoke every browser session after the change")
+    <*> switch (long "disable-2fa" <> help "Clear the passkey requirement (already off in this release)")
 
 importOpts :: Parser ImportOpts
 importOpts =
@@ -206,3 +294,68 @@ parseMode raw = case raw of
   "path" -> Right TagPath
   "none" -> Right TagNone
   _ -> Left "tag mode must be one of: leaf, deepest, path, none"
+
+{- | Operator escape hatch: set or reset the account password from the host.
+The password is read from the terminal with echo off and never accepted as an
+argument, so it cannot leak through the process table or a shell history.
+-}
+setPassword :: Config -> SetPasswordOpts -> IO ()
+setPassword cfg sp = do
+    bracket (Db.openDb (cfgDbPath cfg)) close $ \conn -> do
+        first <- readHidden "new password: "
+        second <- readHidden "repeat password: "
+        if first /= second
+            then hPutStrLn stderr "set-password: the passwords do not match" >> exitFailure
+            else case Password.validatePassword first of
+                Left message -> hPutStrLn stderr ("set-password: " <> T.unpack message) >> exitFailure
+                Right () -> do
+                    account <- Auth.loadAccount conn
+                    rawUsername <- case spUsername sp of
+                        Just name | not (null name) -> pure (T.pack name)
+                        _ ->
+                            if T.null (Auth.acctUsername account)
+                                then promptLine "username: "
+                                else pure (Auth.acctUsername account)
+                    case Password.validateUsername rawUsername of
+                        Left message -> hPutStrLn stderr ("set-password: " <> T.unpack message) >> exitFailure
+                        Right username -> do
+                            passwordHash <- Password.hashPassword (cfgArgon2 cfg) first
+                            Auth.setAccountPassword conn username passwordHash
+                            if spResetSessions sp
+                                then do
+                                    revoked <- Auth.deleteAllSessions conn
+                                    putStrLn ("sessions revoked: " <> show revoked)
+                                else pure ()
+                            if spDisable2fa sp
+                                then do
+                                    Auth.setRequirePasskey conn False
+                                    putStrLn "passkey requirement cleared"
+                                else pure ()
+                            remaining <- Auth.recoveryCodesRemaining conn
+                            putStrLn ("password updated for " <> T.unpack username)
+                            if remaining == 0
+                                then putStrLn "note: no unused recovery codes remain; regenerate them from the account page"
+                                else putStrLn ("recovery codes unchanged: " <> show remaining <> " unused")
+
+-- | Read a line with the terminal echo off. When stdin is not a terminal
+-- (for example a piped deployment script) the read still works, without the
+-- echo suppression.
+readHidden :: String -> IO Text
+readHidden label = do
+    hPutStr stderr label
+    hFlush stderr
+    echoed <- try (hGetEcho stdin) :: IO (Either IOException Bool)
+    case echoed of
+        Left _ -> TIO.getLine
+        Right original -> do
+            hSetEcho stdin False
+            line <- TIO.getLine `onException` hSetEcho stdin original
+            hSetEcho stdin original
+            hPutStrLn stderr ""
+            pure line
+
+promptLine :: String -> IO Text
+promptLine label = do
+    hPutStr stderr label
+    hFlush stderr
+    T.strip <$> TIO.getLine

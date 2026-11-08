@@ -1,0 +1,223 @@
+/* Shared styles for the popup and the options page.
+   Neutral, compact, system fonts; the extension is a tool, not the library. */
+
+:root {
+  color-scheme: light dark;
+  --paper: #f6f2ea;
+  --card: #fffdf8;
+  --ink: #1a2340;
+  --muted: #6e675c;
+  --rule: #d5cbb8;
+  --accent: #8a2b20;
+  --accent-ink: #fffdf8;
+  --ok: #1f6f43;
+  --err: #8a2b20;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #10141f;
+    --card: #171d2b;
+    --ink: #e9e3d6;
+    --muted: #a9a08f;
+    --rule: #2a3245;
+    --accent: #c98a3e;
+    --accent-ink: #10141f;
+    --ok: #7cc29b;
+    --err: #e0958c;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+main {
+  width: 360px;
+  padding: 16px;
+}
+
+body.options main {
+  width: min(560px, 100%);
+  margin: 0 auto;
+  padding: 28px 20px 40px;
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+}
+
+h2 {
+  margin: 22px 0 10px;
+  font-size: 15px;
+}
+
+p {
+  margin: 0 0 12px;
+}
+
+.hint,
+.note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+label {
+  display: block;
+  margin: 0 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+input[type='url'],
+input[type='text'],
+input[type='password'],
+select,
+textarea {
+  display: block;
+  width: 100%;
+  margin-top: 5px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+input:focus-visible,
+select:focus-visible,
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--ink);
+  border-radius: 3px;
+  padding: 8px 14px;
+  background: var(--card);
+  color: var(--ink);
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+button.link {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 10px 0;
+}
+
+.checkline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.checkline input {
+  margin: 0;
+}
+
+details {
+  margin: 18px 0 0;
+  border-top: 1px solid var(--rule);
+  padding-top: 12px;
+}
+
+summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.url-line {
+  display: block;
+  margin: -4px 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+#status {
+  min-height: 20px;
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+#status.ok {
+  color: var(--ok);
+}
+
+#status.err {
+  color: var(--err);
+}
+
+#status a {
+  color: inherit;
+}
+
+.selection-row {
+  display: flex;
+}
+
+.spacer {
+  height: 8px;
+}
+
+.token-state {
+  margin-top: -6px;
+}

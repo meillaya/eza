@@ -6,11 +6,10 @@
 // multipart POST to /api/v1/import. Set EZA_SEED_IMPORT to a different
 // export path, or EZA_SEED_IMPORT=0 to fall back to the 14-bookmark demo seed.
 //
-// One record is prepared for the detail shot: the library extractor output for
-// long articles is noisy, so the script seeds readable article text on record
-// 8987 from the captured article in tests/e2e/fixtures/reader.html, adds a
-// note and three highlights through the public API, then captures the reading
-// spread. Set EZA_SEED_READER=0 to capture that record as stored.
+// The detail shot uses the real enrichment output. A legacy fallback can seed
+// a fixture directly into SQLite, but it is off by default: set
+// EZA_SEED_READER=1 only when capturing a deliberately seeded demo, never for
+// the checked-in reference screenshots.
 //
 // Run from the repo root in the dev shell, against a scratch server:
 //   EZA_BASE=http://localhost:8100 EZA_DB=.eza-scratch/eza.db \
@@ -27,7 +26,7 @@ const IMPORT_PATH = process.env.EZA_SEED_IMPORT || "bookmarks_14_08_2026.html";
 const IMPORT_ENABLED = !["0", "false", "no"].includes(String(process.env.EZA_SEED_IMPORT || "").toLowerCase());
 const READER_PATH = process.env.EZA_READER_HTML || "tests/e2e/fixtures/reader.html";
 const DB_PATH = process.env.EZA_DB || ".eza-scratch/eza.db";
-const SEED_READER = !["0", "false", "no"].includes(String(process.env.EZA_SEED_READER || "").toLowerCase());
+const SEED_READER = ["1", "true", "yes"].includes(String(process.env.EZA_SEED_READER || "").toLowerCase());
 const FEATURE_ID = Number(process.env.EZA_FEATURE_ID || 8987);
 const VIEWPORT = { width: 1440, height: 900 };
 const DPR = 2;
@@ -63,6 +62,7 @@ const SEL = {
   highlightRow: '[data-testid="highlight-row"]',
   sharePage: '[data-testid="share-page"]',
   passkeyLogin: "#passkey-login",
+  passwordLogin: "#password-login",
 };
 
 mkdirSync(OUT, { recursive: true });
@@ -151,11 +151,16 @@ async function shot(name) {
 async function enterLibrary() {
   await page.goto(BASE + "/", { waitUntil: "domcontentloaded" });
   if (page.url().includes("/setup")) {
-    await page.click("#passkey-setup");
+    await page.fill("#username", process.env.EZA_TEST_USER || "e2e");
+await page.fill("#password", process.env.EZA_TEST_PASSWORD || "e2e-password-123");
+await page.fill("#confirm-password", process.env.EZA_TEST_PASSWORD || "e2e-password-123");
+await page.click("#password-setup");
     await page.waitForSelector("#recovery:not([hidden])", { timeout: 30000 });
     await page.click("#continue");
   } else if (page.url().includes("/login")) {
-    await page.click(SEL.passkeyLogin);
+    await page.fill("#username", process.env.EZA_TEST_USER || "e2e");
+    await page.fill("#password", process.env.EZA_TEST_PASSWORD || "e2e-password-123");
+    await page.click("#password-login");
   }
   await page.waitForSelector(SEL.appShell, { timeout: 30000 });
 }
@@ -479,7 +484,7 @@ try {
   });
   const loginPage = await anonymous.newPage();
   await loginPage.goto(BASE + "/login", { waitUntil: "domcontentloaded" });
-  await loginPage.waitForSelector(SEL.passkeyLogin, { timeout: 30000 });
+  await loginPage.waitForSelector(SEL.passwordLogin, { timeout: 30000 });
   await loginPage.evaluate(() => document.fonts.ready);
   await loginPage.waitForTimeout(400);
   await loginPage.screenshot({ path: join(OUT, "login.png") });

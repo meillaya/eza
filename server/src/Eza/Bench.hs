@@ -30,10 +30,10 @@ runBench conn iterations = do
       end <- getPOSIXTime
       pure (realToFrac ((end - start) * 1000) :: Double, spTotal page)
     let sorted = sort (map fst times)
-        total = fst (head times)
-        index = min (length sorted - 1) (floor (fromIntegral (length sorted) * 0.95 :: Double))
-        p95 = sorted !! max 0 index
-        avg = sum sorted / fromIntegral (length sorted)
+        total = sum sorted
+        rank = max 1 (ceiling (fromIntegral (length sorted) * 0.95 :: Double))
+        p95 = sorted !! min (length sorted - 1) (rank - 1)
+        avg = total / fromIntegral (length sorted)
     putStrLn
       ( T.unpack name
           <> ": total=" <> show total

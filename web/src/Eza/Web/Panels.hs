@@ -36,6 +36,7 @@ import Eza.Types (
     GraphNode (..),
     ImportReport (..),
     LibraryStats (..),
+    SavedSearch (..),
     TagStat (..),
  )
 import Eza.Web.Model
@@ -176,6 +177,36 @@ emptyPanel kicker title body extra endLeft endRight =
 quietNote :: MisoString -> View () () Model Action
 quietNote message = H.p_ [HP.class_ "pnl-quiet"] [text message]
 
+{- | A panel read failed: say what failed and offer a retry instead of the
+clean empty state, which would read as a result.
+-}
+panelError :: MisoString -> MisoString -> Maybe MisoString -> View () () Model Action
+panelError kicker title maybeMessage =
+    H.div_
+        [HP.class_ "empty", HP.role_ "alert"]
+        [ H.p_ [HP.class_ "empty-kicker meta"] [text kicker]
+        , H.h2_ [HP.class_ "empty-title display"] [text title]
+        , H.p_ [HP.class_ "empty-body"] [text (fromMaybe "The server did not answer." maybeMessage)]
+        , H.p_ [HP.class_ "empty-try"] [smallAction "try again" ReloadRoute]
+        , H.p_
+            [HP.class_ "empty-end meta"]
+            [H.span_ [] [text "the library is untouched"], H.span_ [] [text "retry"]]
+        ]
+
+-- | The same for the account panels, at the smaller panel scale.
+accountReadError :: MisoString -> Maybe MisoString -> View () () Model Action
+accountReadError title maybeMessage =
+    H.div_
+        [HP.class_ "account-empty", HP.role_ "alert"]
+        [ H.p_ [HP.class_ "account-empty-title display"] [text title]
+        , H.p_
+            [HP.class_ "account-empty-body"]
+            [text (fromMaybe "The server did not answer." maybeMessage)]
+        , H.div_
+            [HP.class_ "account-actions"]
+            [smallAction "try again" ReloadRoute]
+        ]
+
 smallAction :: MisoString -> Action -> View () () Model Action
 smallAction label action =
     H.button_
@@ -188,24 +219,37 @@ strongAction label extra action =
         ([HP.class_ "btn btn--sm btn--strong", HP.type_ "button", HE.onClick action] ++ extra)
         [text label]
 
+-- | The shared head for the panel confirmation dialogs.
+confirmationHead :: MisoString -> View () () Model Action
+confirmationHead title =
+    H.div_
+        [HP.class_ "dialog__head"]
+        [H.h2_ [HP.class_ "dialog__title"] [text title], H.kbd_ [] [text "esc"]]
+
+-- | One line of an inline write error inside a confirmation dialog.
+confirmationError :: Maybe MisoString -> [View () () Model Action]
+confirmationError Nothing = []
+confirmationError (Just message) =
+    [H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]]
+
 -- ================================================================== graph ===
 
 graphPage :: Model -> View () () Model Action
 graphPage m =
     pageWith
         "The graph"
-        "A record and the records around it. Lines are cross-references between records: a note that points at another, or a record that points back. The seed sits at the centre."
+        "A record and the records that share its tags. A line joins two records that share at least one tag, and the line is heavier when they share more tags. The seed sits at the centre."
         (graphFigures m)
-        [ "links from the record's cross-references"
+        [ "records joined by shared tags"
+        , "line weight is tags shared"
         , "depth 1 or 2 hops"
-        , "seed chosen by hand"
         ]
         [graphToolbar m, graphContent m]
 
 graphFigures :: Model -> [View () () Model Action]
 graphFigures m =
     [ figure "records" (countOrNotYet (length . gdNodes <$> mGraph m))
-    , figure "links" (countOrNotYet (length . gdEdges <$> mGraph m))
+    , figure "lines" (countOrNotYet (length . gdEdges <$> mGraph m))
     , figure "depth" (ms (show (mGraphDepth m)))
     ]
 
@@ -331,7 +375,7 @@ graphContent m
         emptyPanel
             "0 neighbours"
             "This neighbourhood is empty."
-            "No record references this seed, or is referenced by it, at the current depth. A larger depth may find one."
+            "No other record shares a tag with this seed at the current depth. A larger depth may find one."
             []
             "0 neighbours"
             "try another seed"
@@ -444,14 +488,22 @@ graphCanvas m graph =
         case (M.lookup (geSource edge) positions, M.lookup (geTarget edge) positions) of
             (Just (x1, y1), Just (x2, y2)) ->
                 Svg.line_
-                    [ key_ (ms ("edge-" <> show (geSource edge) <> "-" <> show (geTarget edge)))
-                    , SP.x1_ (coord x1)
-                    , SP.y1_ (coord y1)
-                    , SP.x2_ (coord x2)
-                    , SP.y2_ (coord y2)
-                    , HP.class_ (edgeClass edge)
-                    ]
+                    ( [ key_ (ms ("edge-" <> show (geSource edge) <> "-" <> show (geTarget edge)))
+                      , SP.x1_ (coord x1)
+                      , SP.y1_ (coord y1)
+                      , SP.x2_ (coord x2)
+                      , SP.y2_ (coord y2)
+                      , HP.class_ (edgeClass edge)
+                      , HP.data_ "weight" (ms (show (geWeight edge)))
+                      , HP.aria_ "hidden" "true"
+                      , C.styleInline_ ("stroke-width:" <> ms (show (edgeWidth edge)))
+                      ]
+                    )
             _ -> Svg.g_ [] []
+
+    -- \| One shared tag is the thin base line; each extra shared tag thickens
+    -- it, up to five. When the server omits the weight the line stays thin.
+    edgeWidth edge = 1 + min 4 (max 0 (geWeight edge - 1))
 
     edgeClass edge
         | max (hopOf (geSource edge)) (hopOf (geTarget edge)) >= 2 = "g-edge g-edge--2"
@@ -466,7 +518,7 @@ graphCanvas m graph =
                     [ key_ (gnId entry)
                     , HP.class_ (nodeClass entry)
                     , HP.role_ "button"
-                    , HP.aria_ "label" (ms (gnTitle entry <> T.pack (", " <> show (gnIndegree entry) <> " incoming links")))
+                    , HP.aria_ "label" (ms (gnTitle entry <> T.pack (", " <> show (gnIndegree entry) <> " shared tags with the seed")))
                     , HP.title_ (ms (gnTitle entry))
                     , HE.onClick (Navigate (Bookmark (gnId entry)))
                     ]
@@ -496,7 +548,15 @@ graphKeyHead graph =
         [ H.span_ [HP.class_ "sc"] [text "key"]
         , H.span_
             [HP.class_ "meta"]
-            [text (ms (show (length (gdNodes graph)) <> if length (gdNodes graph) == 1 then " record drawn, incoming links on the right" else " records drawn, incoming links on the right"))]
+            [ text
+                ( ms
+                    ( show (length (gdNodes graph))
+                        <> if length (gdNodes graph) == 1
+                            then " record drawn · the number is tags shared with the seed · line weight is tags shared between two records"
+                            else " records drawn · the number is tags shared with the seed · line weight is tags shared between two records"
+                    )
+                )
+            ]
         ]
 
 graphKey :: Model -> GraphData -> View () () Model Action
@@ -516,7 +576,11 @@ graphKey m graph =
                 [ H.span_ [HP.class_ "g-key-no mono"] [text (ms (show index))]
                 , H.span_ [HP.class_ "g-key-name"] [text (ms (gnTitle entry))]
                 , H.span_ [HP.class_ "lead", HP.aria_ "hidden" "true"] []
-                , H.span_ [HP.class_ "g-key-n mono"] [text (num (gnIndegree entry))]
+                , H.span_
+                    [ HP.class_ "g-key-n mono"
+                    , HP.title_ "tags shared with the seed"
+                    ]
+                    [text (num (gnIndegree entry))]
                 , H.span_ [HP.class_ "g-key-w mono"] [text (hopLabel (M.findWithDefault 3 (gnId entry) hops))]
                 ]
             ]
@@ -539,7 +603,7 @@ graphStrip m graph =
                 , H.h2_ [HP.class_ "g-strip-name"] [text (ms (gnTitle seedEntry))]
                 , H.p_
                     [HP.class_ "g-strip-count"]
-                    [H.span_ [HP.class_ "mono"] [text (num (gnIndegree seedEntry))], H.span_ [HP.class_ "meta"] [text "incoming links"]]
+                    [H.span_ [HP.class_ "mono"] [text (num (gnIndegree seedEntry))], H.span_ [HP.class_ "meta"] [text "shared tags with the seed"]]
                 , H.div_
                     [HP.class_ "g-strip-sec"]
                     [ H.h3_ [] [text "tags"]
@@ -592,38 +656,62 @@ dedupPage :: Model -> View () () Model Action
 dedupPage m =
     pageWith
         "Duplicates"
-        "The same page, saved more than once. The test is the normalised URL: the protocol, a leading www. and trailing slashes do not make a different source."
+        "The same page, saved more than once. Two tests run over the whole library: the normalised URL (the protocol, a leading www. and trailing slashes do not make a different source), then, for records the URL test does not catch, the same normalised title on the same source. Keep one copy and merge the rest."
         (dedupFigures m)
-        [ "normalised URLs"
+        [ "normalised URLs and titles"
         , "merges write an undo snapshot"
+        , "undo lives in maintenance"
         ]
-        (dedupBody m)
+        ( dedupBody m
+            ++ [dedupMergeDialog m | isJust (mDedupConfirm m)]
+        )
 
 dedupFigures :: Model -> [View () () Model Action]
 dedupFigures m =
-    [ figure "groups" (countOrNotYet (loadingGuard (length (mDedup m))))
-    , figure "records" (countOrNotYet (loadingGuard (sum (map (length . dgItems) (mDedup m)))))
-    , figure "after merge" (countOrNotYet (loadingGuard (length (mDedup m))))
+    [ figure "groups" (countOrNotYet (loadingGuard (Just (length (mDedup m)))))
+    , figure "records" (countOrNotYet (loadingGuard (Just (sum (map (length . dgItems) (mDedup m))))))
+    , figure "after merge" (countOrNotYet (loadingGuard (dedupAfterMerge m)))
     ]
   where
+    loadingGuard :: Maybe Int -> Maybe Int
     loadingGuard value
         | mDedupLoading m && null (mDedup m) = Nothing
-        | otherwise = Just value
+        | otherwise = value
+
+{- | The size the library would have if every group were merged into its
+keeper: each group loses one record per absorbed copy. This is the number the
+old figure repeated from the group count.
+-}
+dedupAfterMerge :: Model -> Maybe Int
+dedupAfterMerge m = do
+    stats <- mStats m
+    let records = sum (map (length . dgItems) (mDedup m))
+        groups = length (mDedup m)
+        surplus = max 0 (records - groups)
+    pure (max 0 (lsTotal stats - surplus))
 
 dedupBody :: Model -> [View () () Model Action]
 dedupBody m
     | mDedupLoading m && null (mDedup m) = [H.p_ [HP.class_ "pnl-quiet"] [text "Finding duplicate candidates."]]
+    | Just message <- mDedupError m =
+        [panelError "read failed" "The duplicate test did not run." (Just message)]
     | null (mDedup m) =
-        [ emptyPanel
+        [ case mDedupLast m of
+            Just _ -> dedupAfterBanner m
+            Nothing -> H.span_ [] []
+        , emptyPanel
             "0 groups"
             "No duplicates."
-            "Every saved URL is unique after normalisation. The test runs over the whole library: strip the protocol, a leading www. and trailing slashes, then compare."
+            "Every saved URL is unique after normalisation, and no two records on one source share a title. The test runs over the whole library: strip the protocol, a leading www. and trailing slashes, then compare."
             []
             "0 groups"
             "0 records to merge"
         ]
     | otherwise =
-        [ H.div_
+        [ case mDedupLast m of
+            Just _ -> dedupAfterBanner m
+            Nothing -> H.span_ [] []
+        , H.div_
             [HP.class_ "dd-note"]
             [ secHead "The test" (ms (show (length (mDedup m)) <> " groups in the library"))
             ]
@@ -634,6 +722,38 @@ dedupBody m
             , H.span_ [HP.class_ "meta"] [text "each merge writes an undo snapshot"]
             ]
         ]
+
+{- | After a merge the panel offers the two exits the old page omitted: undo
+the snapshot, or read the candidates again.
+-}
+dedupAfterBanner :: Model -> View () () Model Action
+dedupAfterBanner m = case mDedupLast m of
+    Nothing -> H.span_ [] []
+    Just (merged, keeper) ->
+        H.div_
+            [HP.class_ "dd-after", HP.role_ "status", HP.data_ "testid" "dedup-after-merge"]
+            [ H.p_
+                [HP.class_ "dd-after-text"]
+                [ text
+                    ( ms
+                        ( "Merged "
+                            <> show merged
+                            <> (if merged == 1 then " duplicate record into " else " duplicate records into ")
+                            <> fromMisoString (accno keeper)
+                            <> ". The snapshot is the most recent undo record."
+                        )
+                    )
+                ]
+            , H.div_
+                [HP.class_ "dd-actions"]
+                [ H.button_
+                    [HP.class_ "btn btn--sm", HP.type_ "button", HP.data_ "testid" "dedup-undo", HE.onClick UndoRun]
+                    [text "undo the merge"]
+                , H.button_
+                    [HP.class_ "btn btn--sm", HP.type_ "button", HP.data_ "testid" "dedup-refresh", HE.onClick DedupRefresh]
+                    [text "refresh the candidates"]
+                ]
+            ]
 
 dedupGroupView :: Model -> Int -> DedupGroup -> View () () Model Action
 dedupGroupView m groupIndex (DedupGroup key items) =
@@ -651,11 +771,14 @@ dedupGroupView m groupIndex (DedupGroup key items) =
             (map (dedupRow m groupIndex kept) (zip [0 :: Int ..] items))
         , H.div_
             [HP.class_ "dd-foot"]
-            [ H.span_ [HP.class_ "dd-sum"] [text (ms (keepSummary items))]
+            [ H.span_ [HP.class_ "dd-sum"] [text (ms (keepSummary kept items))]
             , H.span_
                 [HP.class_ "dd-actions"]
                 [ smallAction "open the kept record" (Navigate (Bookmark kept))
-                , strongAction (ms ("merge " <> show (max 0 (length items - 1)) <> " into 1")) [] (DedupMerge groupIndex)
+                , strongAction
+                    (ms ("merge " <> show (max 0 (length items - 1)) <> " into 1"))
+                    [HP.data_ "testid" "dedup-merge"]
+                    (DedupMerge groupIndex)
                 ]
             ]
         ]
@@ -672,6 +795,8 @@ dedupRow _ groupIndex kept (_itemIndex, item) =
               , HP.type_ "radio"
               , HP.name_ (ms ("keep-" <> show groupIndex))
               , HP.aria_ "label" (ms ("Keep " <> T.unpack (bsTitle item)))
+              , HP.data_ "testid" "dedup-keep"
+              , HE.onClick (DedupKeep groupIndex (bsId item))
               ]
                 ++ attrChecked (kept == bsId item)
             )
@@ -687,6 +812,95 @@ dedupRow _ groupIndex kept (_itemIndex, item) =
         , H.span_ [HP.class_ "dd-c-tags meta"] [text (tagLine (bsTags item))]
         ]
 
+{- | The merge confirmation: the keeper and every absorbed copy named, and the
+side effects on notes, highlights, tags and cross-references stated before the
+write. Nothing is merged until the confirm button is pressed.
+-}
+dedupMergeDialog :: Model -> View () () Model Action
+dedupMergeDialog m = case mDedupConfirm m of
+    Nothing -> H.span_ [] []
+    Just groupIndex -> case drop groupIndex (mDedup m) of
+        [] -> H.span_ [] []
+        (group : _) ->
+            let items = dgItems group
+                keep = dedupKeep m groupIndex items
+                absorbed = filter ((/= keep) . bsId) items
+                keeper =
+                    [ item
+                    | item <- items
+                    , bsId item == keep
+                    ]
+             in H.div_
+                    [HP.class_ "overlay is-open", HP.data_ "testid" "dialog", HE.onClick DedupMergeCancel]
+                    [ H.div_
+                        [ HP.class_ "dialog"
+                        , HP.data_ "testid" "dialog-dedup-merge"
+                        , HP.role_ "dialog"
+                        , HP.aria_ "modal" "true"
+                        , HP.aria_ "label" "Merge duplicate records"
+                        , HE.onClickWithOptions stopPropagation Noop
+                        ]
+                        [ confirmationHead "Merge duplicates"
+                        , H.div_
+                            [HP.class_ "dialog__body", HP.data_ "testid" "dialog-body"]
+                            ( [ H.p_
+                                    [HP.class_ "read"]
+                                    [ text
+                                        ( ms
+                                            ( "Keep one copy and absorb "
+                                                <> show (length absorbed)
+                                                <> (if length absorbed == 1 then " record into it." else " records into it.")
+                                            )
+                                        )
+                                    ]
+                              , H.div_
+                                    [HP.class_ "dd-dialog-list"]
+                                    ( [ dedupDialogRow "keeper" item
+                                      | item <- keeper
+                                      ]
+                                        ++ [ dedupDialogRow "absorbed" item
+                                           | item <- absorbed
+                                           ]
+                                    )
+                              , H.p_
+                                    [HP.class_ "dd-dialog-warn read"]
+                                    [text "Notes, highlights, tags and cross-references from the absorbed copies are folded onto the keeper. The merge writes an undo snapshot first, so it can be undone from Maintenance."]
+                              ]
+                            )
+                        , H.div_
+                            [HP.class_ "dialog__foot"]
+                            [ H.span_ [HP.class_ "spacer"] []
+                            , H.button_
+                                [ HP.class_ "btn"
+                                , HP.type_ "button"
+                                , HP.data_ "testid" "dialog-cancel"
+                                , HP.autofocus_ True
+                                , HE.onClick DedupMergeCancel
+                                ]
+                                [text "cancel"]
+                            , H.button_
+                                ( [ HP.class_ "btn btn--strong"
+                                  , HP.type_ "button"
+                                  , HP.data_ "testid" "dialog-confirm"
+                                  , HE.onClick DedupMergeConfirm
+                                  ]
+                                    ++ attrDisabled (null absorbed)
+                                )
+                                [text "merge the records"]
+                            ]
+                        ]
+                    ]
+
+dedupDialogRow :: MisoString -> BookmarkSummary -> View () () Model Action
+dedupDialogRow roleLabel bookmark =
+    H.div_
+        [HP.class_ "dd-dialog-row"]
+        [ H.span_ [HP.class_ "dd-dialog-role sc"] [text roleLabel]
+        , H.span_ [HP.class_ "dd-dialog-no mono"] [text (accno (bsId bookmark))]
+        , H.span_ [HP.class_ "dd-dialog-title"] [text (ms (bsTitle bookmark))]
+        , H.span_ [HP.class_ "dd-dialog-src meta"] [text (showDomain (bsDomain bookmark))]
+        ]
+
 {- | The keeper the client action will use: the explicit choice when there is
 one, otherwise the first member of the group (matching Update's fallback).
 -}
@@ -695,13 +909,13 @@ dedupKeep _ _ [] = 0
 dedupKeep m groupIndex (first : _) =
     fromMaybe (bsId first) (M.lookup groupIndex (mDedupChoice m))
 
-keepSummary :: [BookmarkSummary] -> String
-keepSummary items =
+keepSummary :: Int -> [BookmarkSummary] -> String
+keepSummary kept items =
     "keep "
-        <> T.unpack (accnoText (maybe 0 bsId (safeHead items)))
+        <> T.unpack (accnoText kept)
         <> " · absorb "
         <> show (max 0 (length items - 1))
-        <> " · tags union"
+        <> " · notes, highlights and tags union"
 
 monogram :: Text -> String
 monogram domain = case T.unpack (T.replace "www." "" domain) of
@@ -727,14 +941,16 @@ tagsPage m =
         "The working vocabulary of the library, every tag counted, and the near misses that are worth a decision."
         (tagsFigures m)
         [ "counts from bookmark_tags"
-        , "merge and rename write a snapshot first"
+        , "rename, detach and merge write a snapshot first"
         ]
-        [ H.div_
-            [HP.class_ "tg-grid"]
-            [ tagsTable m
-            , H.aside_ [HP.class_ "tg-side"] (consolidationBlock m ++ tagsMethodBlock)
-            ]
-        ]
+        ( [ H.div_
+                [HP.class_ "tg-grid"]
+                [ tagsTable m
+                , H.aside_ [HP.class_ "tg-side"] (consolidationBlock m ++ tagsMethodBlock)
+                ]
+          ]
+            ++ [tagDialogView m | isJust (mTagDialog m)]
+        )
 
 tagsFigures :: Model -> [View () () Model Action]
 tagsFigures m =
@@ -769,6 +985,7 @@ tagsTable m =
                         , H.th_ [] [text "tag"]
                         , H.th_ [HP.class_ "r"] [text "entries"]
                         , H.th_ [HP.class_ "r"] [text "of entries"]
+                        , H.th_ [HP.class_ "r"] [text "actions"]
                         ]
                     ]
                 , H.tbody_ [] (map (tagRow m) (zip [1 :: Int ..] (sortOn (negate . tsCount) (mTags m))))
@@ -789,6 +1006,25 @@ tagRow m (index, tag) =
             ]
         , H.td_ [HP.class_ "tg-n mono"] [text (num (tsCount tag))]
         , H.td_ [HP.class_ "tg-pct mono"] [text (shareText m (tsCount tag))]
+        , H.td_
+            [HP.class_ "tg-actions"]
+            [ H.button_
+                [ HP.class_ "account-link"
+                , HP.type_ "button"
+                , HP.data_ "testid" "tag-rename"
+                , HP.aria_ "label" ("Rename " <> ms (tsName tag))
+                , HE.onClick (TagDialogOpen (TagRenameDialog (tsName tag)))
+                ]
+                [text "rename"]
+            , H.button_
+                [ HP.class_ "account-link account-link--danger"
+                , HP.type_ "button"
+                , HP.data_ "testid" "tag-delete"
+                , HP.aria_ "label" ("Remove " <> ms (tsName tag))
+                , HE.onClick (TagDialogOpen (TagDeleteDialog (tsName tag)))
+                ]
+                [text (if tsCount tag > 0 then "detach" else "delete")]
+            ]
         ]
 
 shareText :: Model -> Int -> MisoString
@@ -813,13 +1049,16 @@ consolidationBlock m =
     [ H.section_
         [HP.class_ "pnl-block"]
         [ secHead "Consolidation" (ms (show (length (mConsol m)) <> " groups"))
-        , case mConsol m of
-            _
-                | mConsolLoading m && null (mConsol m) -> quietNote "Scanning tags."
-                | otherwise -> consolRows
+        , case mConsolError m of
+            Just message ->
+                panelError "read failed" "The consolidation scan did not run." (Just message)
+            Nothing -> case mConsol m of
+                _
+                    | mConsolLoading m && null (mConsol m) -> quietNote "Scanning tags."
+                    | otherwise -> consolRows
         , H.p_
             [HP.class_ "pnl-quiet"]
-            [text "Case duplicates cannot exist: the tags table is unique by name, case-insensitive. Near misses are pairs of names worth a review."]
+            [text "The tags table is unique by name, but SQLite's case folding covers ASCII only, so a case group here is two names that differ outside ASCII. Near misses are pairs of names worth a review."]
         ]
     ]
   where
@@ -840,7 +1079,7 @@ consolRow group =
   where
     kindLabel :: Text -> MisoString
     kindLabel kind = case kind of
-        "junk" -> "junk · delete a name with its cross"
+        "junk" -> "junk · prune the name"
         "case" -> "case duplicate"
         "fuzzy" -> "near duplicate"
         _ -> ms (T.toTitle kind)
@@ -850,8 +1089,8 @@ consolRow group =
             [ H.span_ [HP.class_ "fz-d mono"] [text (ms (cgSuggested group))]
             , strongAction
                 (ms ("merge into " <> T.unpack (cgSuggested group)))
-                []
-                (TagMerge (map tsName (cgTags group)) (cgSuggested group))
+                [HP.data_ "testid" "tag-merge"]
+                (TagDialogOpen (TagMergeDialog (map tsName (cgTags group)) (cgSuggested group)))
             ]
 
 tagChipButton :: TagStat -> View () () Model Action
@@ -859,12 +1098,194 @@ tagChipButton tag =
     H.button_
         [ HP.class_ "tagpill"
         , HP.type_ "button"
-        , HP.title_ "Delete this tag"
-        , HE.onClick (TagDeleted (tsName tag))
+        , HP.title_ "Remove this tag"
+        , HP.data_ "testid" "tag-chip-remove"
+        , HE.onClick (TagDialogOpen (TagDeleteDialog (tsName tag)))
         ]
         [ text (ms (tsName tag))
         , H.span_ [HP.class_ "chip-x"] [text " ×"]
         ]
+
+-- | The count a tag carries in the loaded table, used by the delete dialog.
+tagCountFor :: Model -> Text -> Int
+tagCountFor m tag = case [entry | entry <- mTags m, tsName entry == tag] of
+    (entry : _) -> tsCount entry
+    [] -> 0
+
+{- | Rename, delete/detach and merge all ask for confirmation here. The dialog
+opens from the tag table and the consolidation list and never runs a write
+itself: the confirm button leaves through the same actions the API uses.
+-}
+tagDialogView :: Model -> View () () Model Action
+tagDialogView m = case mTagDialog m of
+    Nothing -> H.span_ [] []
+    Just dialog ->
+        let (hook, title) = case dialog of
+                TagRenameDialog _ -> ("dialog-tag-rename" :: MisoString, "Rename tag" :: MisoString)
+                TagDeleteDialog _ -> ("dialog-tag-delete", "Remove tag")
+                TagMergeDialog _ _ -> ("dialog-tag-merge", "Merge tags")
+            primary = case dialog of
+                TagRenameDialog _ ->
+                    [ H.button_
+                        ( [ HP.class_ "btn btn--strong"
+                          , HP.type_ "button"
+                          , HP.data_ "testid" "dialog-confirm"
+                          , HE.onClick TagDialogConfirm
+                          ]
+                            ++ attrDisabled (mTagDialogBusy m)
+                        )
+                        [text "rename the tag"]
+                    ]
+                TagDeleteDialog tag
+                    | tagCountFor m tag > 0 ->
+                        [ H.button_
+                            ( [ HP.class_ "btn btn--danger"
+                              , HP.type_ "button"
+                              , HP.data_ "testid" "dialog-confirm"
+                              , HP.data_ "detach" "true"
+                              , HE.onClick TagDialogDetach
+                              ]
+                                ++ attrDisabled (mTagDialogBusy m)
+                            )
+                            [text "detach from the records"]
+                        ]
+                    | otherwise ->
+                        [ H.button_
+                            ( [ HP.class_ "btn btn--danger"
+                              , HP.type_ "button"
+                              , HP.data_ "testid" "dialog-confirm"
+                              , HE.onClick TagDialogConfirm
+                              ]
+                                ++ attrDisabled (mTagDialogBusy m)
+                            )
+                            [text "delete the tag"]
+                        ]
+                TagMergeDialog _ _ ->
+                    [ H.button_
+                        ( [ HP.class_ "btn btn--strong"
+                          , HP.type_ "button"
+                          , HP.data_ "testid" "dialog-confirm"
+                          , HE.onClick TagDialogConfirm
+                          ]
+                            ++ attrDisabled (mTagDialogBusy m)
+                        )
+                        [text "merge the tags"]
+                    ]
+         in H.div_
+                [HP.class_ "overlay is-open", HP.data_ "testid" "dialog", HE.onClick TagDialogClose]
+                [ H.div_
+                    [ HP.class_ "dialog"
+                    , HP.data_ "testid" hook
+                    , HP.role_ "dialog"
+                    , HP.aria_ "modal" "true"
+                    , HP.aria_ "label" title
+                    , HE.onClickWithOptions stopPropagation Noop
+                    ]
+                    [ confirmationHead title
+                    , H.div_
+                        [HP.class_ "dialog__body", HP.data_ "testid" "dialog-body"]
+                        (tagDialogBody m dialog ++ confirmationError (mTagDialogError m))
+                    , H.div_
+                        [HP.class_ "dialog__foot"]
+                        ( [ H.span_ [HP.class_ "spacer"] []
+                          , H.button_
+                                ( [ HP.class_ "btn"
+                                  , HP.type_ "button"
+                                  , HP.data_ "testid" "dialog-cancel"
+                                  , HE.onClick TagDialogClose
+                                  ]
+                                    ++ [ HP.autofocus_ True
+                                       | case dialog of
+                                            TagRenameDialog _ -> False
+                                            _ -> True
+                                       ]
+                                )
+                                [text "cancel"]
+                          ]
+                            ++ primary
+                        )
+                    ]
+                ]
+
+tagDialogBody :: Model -> TagDialog -> [View () () Model Action]
+tagDialogBody m dialog = case dialog of
+    TagRenameDialog tag ->
+        [ H.p_
+            [HP.class_ "read"]
+            [ text (ms (tsName' tag <> " is filed on "))
+            , H.strong_ [] [text (num (tagCountFor m tag))]
+            , text " records. The records keep the tag; only the name changes."
+            ]
+        , H.div_
+            [HP.class_ "field"]
+            [ H.label_
+                [HP.class_ "field-label", HP.for_ "tag-rename-input"]
+                [text "new name"]
+            , H.input_
+                [ HP.id_ "tag-rename-input"
+                , HP.class_ "input"
+                , HP.type_ "text"
+                , HP.autofocus_ True
+                , HP.autocomplete_ "off"
+                , HP.value_ (mTagDialogInput m)
+                , HE.onInput TagDialogInput
+                , HE.onKeyDown
+                    ( \code -> case code of
+                        KeyCode 13 -> TagDialogConfirm
+                        _ -> Noop
+                    )
+                ]
+            ]
+        ]
+    TagDeleteDialog tag ->
+        let count = tagCountFor m tag
+         in [ H.p_
+                [HP.class_ "read"]
+                ( [text (ms (tsName' tag <> " is filed on ")), text (num count)]
+                    ++ [ text
+                            ( " records. The records stay in the library; only the tag name is removed from them." ::
+                                MisoString
+                            )
+                       | count > 0
+                       ]
+                    ++ [text " records." | count == 0]
+                )
+            , H.p_
+                [HP.class_ "read"]
+                [text "Detach removes the name from every record that carries it and leaves the records in place. Delete is only offered for an empty tag. Either way a snapshot is written first."]
+            ]
+    TagMergeDialog from into ->
+        [ H.p_
+            [HP.class_ "read"]
+            [text (ms ("Fold " <> listText from <> " into " <> tsName' into <> ". Every record carrying one of those names is refiled under the keeper."))]
+        , H.div_
+            [HP.class_ "tg-dialog-pair"]
+            ( [ H.span_
+                    [HP.class_ "tagpill"]
+                    [ text (ms (tsName' into))
+                    , H.span_ [HP.class_ "meta"] [text (ms (" · " <> show (tagCountFor m into) <> " entries"))]
+                    ]
+              ]
+                ++ [ H.span_
+                        [HP.class_ "tagpill tagpill--sug"]
+                        [ text (ms (tsName' name))
+                        , H.span_ [HP.class_ "meta"] [text (ms (" · " <> show (tagCountFor m name) <> " entries"))]
+                        ]
+                   | name <- from
+                   ]
+            )
+        , H.p_
+            [HP.class_ "read"]
+            [text "Merge writes an undo snapshot first; undo lives in Maintenance."]
+        ]
+  where
+    tsName' :: Text -> String
+    tsName' = T.unpack
+    listText :: [Text] -> String
+    listText names = case names of
+        [] -> "the tags"
+        [one] -> T.unpack one
+        many -> T.unpack (T.intercalate ", " (init many)) <> " and " <> T.unpack (last many)
 
 tagsMethodBlock :: [View () () Model Action]
 tagsMethodBlock =
@@ -873,7 +1294,7 @@ tagsMethodBlock =
         [ secHead "Making changes" "undo snapshot"
         , H.p_
             [HP.class_ "pnl-quiet"]
-            [text "Click a tag to filter the library by it. The cross beside a tag in a consolidation group deletes that name; merge folds a group into the suggested name. Every change writes an undo snapshot first."]
+            [text "Click a tag name to filter the library by it. Rename and delete ask for confirmation in a dialog; delete offers detaching a non-empty name, which removes the tag from its records and leaves the records in place. Merge in a consolidation group folds the other names into the suggested keeper. Every change writes an undo snapshot first."]
         ]
     ]
 
@@ -946,6 +1367,16 @@ aiBanner m =
                 [ H.p_
                     [HP.class_ "ai-banner-lead read"]
                     [text "The provider status has not loaded yet. Suggestions are advisory and nothing is written until you apply one."]
+                , H.div_
+                    [HP.class_ "ai-tools"]
+                    [ H.button_
+                        [ HP.class_ "btn btn--sm"
+                        , HP.type_ "button"
+                        , HP.data_ "testid" "ai-status-retry"
+                        , HE.onClick AiStatusReload
+                        ]
+                        [text "read the provider status"]
+                    ]
                 ]
             Just status ->
                 [ H.div_
@@ -982,6 +1413,28 @@ suggestionSection m =
         , H.span_ [HP.class_ "ai-fixture"] [text "advisory"]
         ]
     , suggestionBody m
+    , H.div_
+        [HP.class_ "ai-tools"]
+        ( [ H.button_
+                ( [ HP.class_ "btn btn--sm"
+                  , HP.type_ "button"
+                  , HP.data_ "testid" "ai-retry"
+                  , HE.onClick AiSuggestRetry
+                  ]
+                    ++ attrDisabled (mAiTag m == Nothing)
+                )
+                [text "ask again"]
+          ]
+            ++ [ H.button_
+                    [ HP.class_ "btn btn--sm btn--ghost"
+                    , HP.type_ "button"
+                    , HP.data_ "testid" "ai-discard"
+                    , HE.onClick AiSuggestDiscard
+                    ]
+                    [text "discard the suggestions"]
+               | not (null (mSuggestions m))
+               ]
+        )
     , H.p_
         [HP.class_ "ai-foot"]
         [ H.span_ [HP.class_ "meta"] [text "suggestions are advisory"]
@@ -992,25 +1445,49 @@ suggestionSection m =
 suggestionBody :: Model -> View () () Model Action
 suggestionBody m
     | mSuggestionsLoading m && null (mSuggestions m) = quietNote "Asking the provider."
-    | null (mSuggestions m) = quietNote (noSuggestionsText m)
-    | otherwise =
+    | Just message <- mSuggestionError m =
         H.div_
-            [HP.class_ "ai-table-wrap"]
-            [ H.table_
-                [HP.class_ "ai-table"]
-                [ H.thead_
-                    []
-                    [ H.tr_
-                        []
-                        [ H.th_ [] [text "accession"]
-                        , H.th_ [] [text "record"]
-                        , H.th_ [] [text "suggested"]
-                        , H.th_ [HP.class_ "r"] [text "action"]
-                        ]
-                    ]
-                , H.tbody_ [] (map suggestionRow (mSuggestions m))
+            [HP.class_ "ai-provider-error", HP.role_ "alert"]
+            [ H.p_ [HP.class_ "ai-error-title display"] [text "The provider did not answer."]
+            , H.p_ [HP.class_ "ai-error-body read"] [text message]
+            , H.div_
+                [HP.class_ "ai-tools"]
+                [ smallAction "try again" AiSuggestRetry
                 ]
             ]
+    | null (mSuggestions m) =
+        H.div_
+            []
+            ( quietNote (noSuggestionsText m)
+                : [ H.p_ [HP.class_ "ai-notice read"] [text notice]
+                  | Just notice <- [mSuggestionNotice m]
+                  ]
+            )
+    | otherwise =
+        H.div_
+            []
+            ( [ H.p_ [HP.class_ "ai-notice read"] [text notice]
+              | Just notice <- [mSuggestionNotice m]
+              ]
+                ++ [ H.div_
+                        [HP.class_ "ai-table-wrap"]
+                        [ H.table_
+                            [HP.class_ "ai-table"]
+                            [ H.thead_
+                                []
+                                [ H.tr_
+                                    []
+                                    [ H.th_ [] [text "accession"]
+                                    , H.th_ [] [text "record"]
+                                    , H.th_ [] [text "suggested"]
+                                    , H.th_ [HP.class_ "r"] [text "action"]
+                                    ]
+                                ]
+                            , H.tbody_ [] (map suggestionRow (mSuggestions m))
+                            ]
+                        ]
+                   ]
+            )
 
 noSuggestionsText :: Model -> MisoString
 noSuggestionsText m
@@ -1158,27 +1635,31 @@ pruneSection m =
                 )
                 [text "cancel"]
             ]
-        , if null (mPrune m)
-            then quietNote "No prune candidates right now."
-            else
-                H.div_
-                    [HP.class_ "mt-table-wrap"]
-                    [ H.table_
-                        [HP.class_ "mt-table"]
-                        [ H.thead_
-                            []
-                            [ H.tr_
-                                []
-                                [ H.th_ [] [text ""]
-                                , H.th_ [] [text "accession"]
-                                , H.th_ [] [text "record"]
-                                , H.th_ [] [text "filed"]
-                                , H.th_ [HP.class_ "r"] [text "state"]
+        , case mPruneError m of
+            Just message ->
+                panelError "read failed" "The prune candidates could not be read." (Just message)
+            Nothing ->
+                if null (mPrune m)
+                    then quietNote "No prune candidates right now."
+                    else
+                        H.div_
+                            [HP.class_ "mt-table-wrap"]
+                            [ H.table_
+                                [HP.class_ "mt-table"]
+                                [ H.thead_
+                                    []
+                                    [ H.tr_
+                                        []
+                                        [ H.th_ [] [text ""]
+                                        , H.th_ [] [text "accession"]
+                                        , H.th_ [] [text "record"]
+                                        , H.th_ [] [text "filed"]
+                                        , H.th_ [HP.class_ "r"] [text "state"]
+                                        ]
+                                    ]
+                                , H.tbody_ [] (map (pruneRow m) (mPrune m))
                                 ]
                             ]
-                        , H.tbody_ [] (map (pruneRow m) (mPrune m))
-                        ]
-                    ]
         ]
 
 pruneRow :: Model -> BookmarkSummary -> View () () Model Action
@@ -1219,9 +1700,7 @@ undoSection m =
         [HP.class_ "mt-sec", HP.aria_ "label" "Undo record"]
         [ H.div_
             [HP.class_ "pnl-sec-head"]
-            [ H.h2_ [HP.class_ "pnl-sec-title"] [text "Undo record"]
-            , H.span_ [HP.class_ "mt-state"] [H.span_ [HP.class_ "meta"] [text "none recorded"]]
-            ]
+            [H.h2_ [HP.class_ "pnl-sec-title"] [text "Undo record"]]
         , H.p_
             [HP.class_ "mt-note read"]
             [text "Merge and prune write an undo snapshot before they change anything. Undo restores the rows, their tags and read state."]
@@ -1272,7 +1751,8 @@ accountIndex m =
         ]
   where
     tabs =
-        [ (AccountPasskeys, "passkeys", "passkeys", credentialCount m)
+        [ (AccountSecurity, "security", "security", Nothing)
+        , (AccountPasskeys, "passkeys", "passkeys", credentialCount m)
         , (AccountRecovery, "recovery", "recovery", Nothing)
         , (AccountSessions, "sessions", "sessions", Just (length (mSessions m)))
         , (AccountTokens, "api tokens", "tokens", Just (length (mTokens m)))
@@ -1308,6 +1788,7 @@ activeShares m = filter (not . isJust . svRevokedAt) (mShares m)
 
 activeAccountPanel :: Model -> View () () Model Action
 activeAccountPanel m = case mAccountTab m of
+    AccountSecurity -> securityPanel m
     AccountPasskeys -> passkeysPanel m
     AccountRecovery -> recoveryPanel m
     AccountSessions -> sessionsPanel m
@@ -1337,6 +1818,200 @@ accountPanel slug title note children =
             : children
         )
 
+-- -------------------------------------------------------------- security ---
+
+{- | The sign-in panel: one username, the password, and whether a passkey is
+required after it. Every write is confirmed with the current password once one
+exists; the server checks it again, so this is an affordance rather than the
+authority.
+-}
+securityPanel :: Model -> View () () Model Action
+securityPanel m =
+    accountPanel "security" "Sign-in" panelNote (body (mAccount m))
+  where
+    panelNote = case mAccount m of
+        Nothing -> "not loaded"
+        Just account
+            | aiHasPassword account && not (null (aiCredentials account)) -> "password + passkey"
+            | aiHasPassword account -> "password"
+            | not (null (aiCredentials account)) -> "passkey only, no password"
+            | otherwise -> "not configured"
+
+    body Nothing
+        | mAccountLoading m = [quietNote "Loading the account."]
+        | isJust (mAccountError m) =
+            [accountReadError "The account could not be read." (mAccountError m)]
+        | otherwise = [unavailable m]
+    body (Just account) =
+        [ H.p_
+            [HP.class_ "account-lede"]
+            [text "One username and one password open the library. A passkey registered on the account can be required as a second factor after the password."]
+        , H.dl_
+            [HP.class_ "account-fields"]
+            [ statusFact "username" (if T.null (T.strip (aiUsername account)) then "not set" else ms (aiUsername account))
+            , statusFact "password" (if aiHasPassword account then "set" else "not set")
+            , statusFact "passkeys" (ms (show (length (aiCredentials account))))
+            , statusFact "passkey 2FA" (if aiRequirePasskey account then "required" else "off")
+            ]
+        , H.p_
+            [HP.class_ "account-note meta"]
+            [ text
+                ( if aiHasPassword account
+                    then "Every change below is confirmed with the current password."
+                    else "No password is set yet. Set one below; the current password is not needed for the first one."
+                )
+            ]
+        , case aiHasPassword account of
+            True ->
+                H.div_
+                    [HP.class_ "account-form", HP.data_ "testid" "security-current-password-block"]
+                    [ H.h3_ [HP.class_ "account-h3 display"] [text "Current password"]
+                    , H.div_
+                        [HP.class_ "account-form-grid"]
+                        [field "current password" "security-current-password" "password" "current-password" (mSecurityCurrent m) SecurityCurrentPasswordInput]
+                    , H.p_
+                        [HP.class_ "account-note meta"]
+                        [text "Used to confirm the changes below. The field is never stored in the browser."]
+                    ]
+            False -> H.span_ [] []
+        , H.div_
+            [HP.class_ "account-form"]
+            ( [ H.h3_ [HP.class_ "account-h3 display"] [text "Username"]
+              , H.div_
+                    [HP.class_ "account-form-grid"]
+                    [field "username" "security-username" "text" "username" (mSecurityUsername m) SecurityUsernameInput]
+              , H.p_
+                    [HP.class_ "account-note meta"]
+                    [text "The one name this catalogue knows. The password still opens it after a rename."]
+              , H.div_
+                    [HP.class_ "account-form-foot"]
+                    [saveButton "save the username" "security-username-save" SecurityUsernameSave]
+              ]
+            )
+        , H.div_
+            [HP.class_ "account-form"]
+            [ H.h3_
+                [HP.class_ "account-h3 display"]
+                [text (if aiHasPassword account then "Change the password" else "Set a password")]
+            , H.div_
+                [HP.class_ "account-form-grid"]
+                [ field "new password" "security-new-password" "password" "new-password" (mSecurityNew m) SecurityNewPasswordInput
+                , field "confirm new password" "security-confirm-password" "password" "new-password" (mSecurityConfirm m) SecurityConfirmPasswordInput
+                ]
+            , H.p_
+                [HP.class_ "account-note meta"]
+                [text "At least ten characters. Changing the password signs out every other browser and rotates the session for this one."]
+            , H.div_
+                [HP.class_ "account-form-foot"]
+                [saveButton "save the new password" "security-password-save" SecurityPasswordSave]
+            ]
+        , H.div_
+            [HP.class_ "account-form"]
+            [ H.h3_ [HP.class_ "account-h3 display"] [text "Second factor"]
+            , H.p_
+                [HP.class_ "account-lede"]
+                [text "With the requirement on, the password alone does not open the library: the browser must also present a passkey. The option needs a password and at least one registered passkey."]
+            , H.label_
+                [HP.class_ "toggle"]
+                ( [ H.input_
+                        ( [ HP.type_ "checkbox"
+                          , HP.data_ "testid" "security-2fa-toggle"
+                          , HP.checked_ (mSecurity2faWanted m)
+                          , HE.onClick (Security2faWantedToggled (not (mSecurity2faWanted m)))
+                          ]
+                            ++ attrDisabled
+                                ( mSecurityBusy m
+                                    || not (aiHasPassword account)
+                                    || (null (aiCredentials account) && not (aiRequirePasskey account))
+                                )
+                        )
+                  , text "require a passkey after the password"
+                  ]
+                )
+            , H.div_
+                [HP.class_ "account-actions"]
+                [ H.button_
+                    ( [ HP.class_ "btn btn--strong"
+                      , HP.type_ "button"
+                      , HP.data_ "testid" "security-2fa-save"
+                      , HE.onClick Security2faSave
+                      ]
+                        ++ attrDisabled
+                            ( mSecurityBusy m
+                                || not (aiHasPassword account)
+                                || mSecurity2faWanted m == aiRequirePasskey account
+                                || (null (aiCredentials account) && mSecurity2faWanted m)
+                            )
+                    )
+                    [text "save the requirement"]
+                , H.a_
+                    [ HP.class_ "btn btn--ghost"
+                    , HP.href_ "/account/add-passkey"
+                    ]
+                    [text "add a passkey"]
+                ]
+            , H.p_
+                [HP.class_ "account-note meta"]
+                [ text
+                    ( if not (aiHasPassword account)
+                        then "Set a password before requiring a passkey."
+                        else
+                            if null (aiCredentials account)
+                                then "Add a passkey before requiring one."
+                                else "The requirement is checked after the password on every sign-in."
+                    )
+                ]
+            ]
+        , case mSecurityError m of
+            Just message ->
+                H.p_
+                    [HP.class_ "account-error", HP.role_ "alert", HP.data_ "testid" "security-error"]
+                    [text message]
+            Nothing -> H.span_ [] []
+        ]
+
+    statusFact :: MisoString -> MisoString -> View () () Model Action
+    statusFact label value =
+        H.div_
+            []
+            [H.dt_ [] [text label], H.dd_ [HP.class_ "mono"] [text value]]
+
+    field ::
+        MisoString ->
+        MisoString ->
+        MisoString ->
+        MisoString ->
+        MisoString ->
+        (MisoString -> Action) ->
+        View () () Model Action
+    field labelText domId inputType autocomplete value onInput =
+        H.div_
+            [HP.class_ "field"]
+            [ H.label_
+                [HP.class_ "field-label account-label", HP.for_ domId]
+                [text labelText]
+            , H.input_
+                [ HP.id_ domId
+                , HP.class_ "input"
+                , HP.type_ inputType
+                , HP.autocomplete_ autocomplete
+                , HP.value_ value
+                , HE.onInput onInput
+                ]
+            ]
+
+    saveButton :: MisoString -> MisoString -> Action -> View () () Model Action
+    saveButton labelText domId action =
+        H.button_
+            ( [ HP.class_ "btn btn--strong"
+              , HP.type_ "button"
+              , HP.data_ "testid" domId
+              , HE.onClick action
+              ]
+                ++ attrDisabled (mSecurityBusy m)
+            )
+            [text (if mSecurityBusy m then "saving" else labelText)]
+
 -- -------------------------------------------------------------- passkeys ---
 
 passkeysPanel :: Model -> View () () Model Action
@@ -1348,22 +2023,46 @@ passkeysPanel m =
          in ms (show count <> if count == 1 then " device" else " devices")
     body Nothing
         | mAccountLoading m = [quietNote "Loading the account."]
+        | isJust (mAccountError m) =
+            [accountReadError "The account could not be read." (mAccountError m)]
         | otherwise = [unavailable m]
     body (Just account) =
         [ H.p_
             [HP.class_ "account-lede"]
-            [text "The library opens with a passkey. The private half stays in the device's keychain or security key; eza keeps only the public half."]
-        , H.div_ [HP.class_ "account-list"] (map (credentialRecord m) (aiCredentials account))
-        , H.div_
-            [HP.class_ "account-actions"]
-            [ H.a_
-                [HP.class_ "btn btn--strong", HP.href_ "/account/add-passkey"]
-                [text "add another device"]
-            , H.button_
-                [HP.class_ "btn", HP.type_ "button", HE.onClick (AccountTabSelected AccountRecovery)]
-                [text "see recovery codes"]
-            ]
+            [text "A passkey registered on the account is an optional second factor. The private half stays in the device's keychain or security key; eza keeps only the public half."]
         ]
+            ++ [ H.p_
+                    [HP.class_ "account-note meta"]
+                    [ text "No password is set for this library yet, so this passkey is still the only way in. "
+                    , H.button_
+                        [HP.class_ "account-link", HP.type_ "button", HE.onClick (AccountTabSelected AccountSecurity)]
+                        [text "set a password"]
+                    , text "."
+                    ]
+               | not (aiHasPassword account)
+               ]
+            ++ [ H.div_ [HP.class_ "account-list"] (map (credentialRecord m) (aiCredentials account))
+               , H.p_
+                    [HP.class_ "account-note meta"]
+                    [ text
+                        ( if aiHasPassword account
+                            then "Passkeys registered before the password release are legacy credentials: they sign in only while the database has no password. With passkey two-factor on, the last passkey cannot be removed."
+                            else "Passkeys registered before the password release sign in on their own. Add a password from the sign-in section and they become second factors instead."
+                        )
+                    ]
+               , H.div_
+                    [HP.class_ "account-actions"]
+                    [ H.a_
+                        [HP.class_ "btn btn--strong", HP.href_ "/account/add-passkey", HP.data_ "testid" "passkey-add"]
+                        [text "add another device"]
+                    , H.button_
+                        [HP.class_ "btn", HP.type_ "button", HE.onClick (AccountTabSelected AccountRecovery)]
+                        [text "see recovery codes"]
+                    , H.button_
+                        [HP.class_ "btn btn--ghost", HP.type_ "button", HE.onClick (AccountTabSelected AccountSecurity)]
+                        [text "sign-in settings"]
+                    ]
+               ]
 
 unavailable :: Model -> View () () Model Action
 unavailable _m =
@@ -1487,12 +2186,21 @@ sessionsPanel m =
         , H.div_
             [HP.class_ "account-actions"]
             [ H.button_
-                [HP.class_ "btn btn--danger", HP.type_ "button", HE.onClick Logout]
+                ( [ HP.class_ "btn btn--danger"
+                  , HP.type_ "button"
+                  , HP.data_ "testid" "account-sessions-revoke-others"
+                  , HE.onClick SessionsRevokeOthers
+                  ]
+                    ++ attrDisabled (mAccountLoading m || length (mSessions m) <= 1)
+                )
+                [text "revoke other sessions"]
+            , H.button_
+                [HP.class_ "btn", HP.type_ "button", HE.onClick Logout]
                 [text "sign out"]
             ]
         , H.p_
             [HP.class_ "account-note meta"]
-            [text "Signing out ends this browser's session. The passkey stays on the device."]
+            [text "Revoking signs out every other browser and keeps this one. Signing out ends this browser's session too. Passkeys stay on their devices."]
         ]
   where
     sessionNote =
@@ -1532,13 +2240,16 @@ tokensPanel m =
     accountPanel "tokens" "API tokens" tokenNote $
         [ H.p_
             [HP.class_ "account-lede"]
-            [text "Tokens let the command line and the phone's share sheet file links without a passkey. Each one is scoped and can be revoked at any time."]
+            [text "Tokens let the command line and the phone's share sheet file links without opening the library. Each one is scoped and can be revoked at any time."]
         ]
             ++ created
-            ++ [ H.div_ [HP.class_ "account-list"] tokenRows
-               , if null (mTokens m) then tokenEmpty m else H.span_ [] []
-               , tokenForm m
-               ]
+            ++ case mTokensError m of
+                Just message -> [accountReadError "The tokens could not be read." (Just message)]
+                Nothing ->
+                    [ H.div_ [HP.class_ "account-list"] tokenRows
+                    , if null (mTokens m) then tokenEmpty m else H.span_ [] []
+                    , tokenForm m
+                    ]
   where
     tokenNote =
         let count = length (mTokens m)
@@ -1682,14 +2393,61 @@ sharesPanel m =
             [HP.class_ "account-lede"]
             [text "A share link is a read-only page outside the login. Anyone with the link can read that record or saved search until it expires or is revoked."]
         ]
-            ++ ( if null (activeShares m)
-                    then [shareEmpty m]
-                    else [H.div_ [HP.class_ "account-list"] (map shareRecord (mShares m))]
-               )
+            ++ [savedSearchShareSection m]
+            ++ case mSharesError m of
+                Just message -> [accountReadError "The share links could not be read." (Just message)]
+                Nothing ->
+                    if null (activeShares m)
+                        then [shareEmpty m]
+                        else [H.div_ [HP.class_ "account-list"] (map (shareRecord m) (mShares m))]
   where
     shareNote =
         let count = length (activeShares m)
          in ms (show count <> if count == 1 then " active link" else " active links")
+
+{- | A saved search can be shared from the ledger rail or from here. The row
+opens the same slip the rail uses; both create @scope:"saved_search"@ links.
+-}
+savedSearchShareSection :: Model -> View () () Model Action
+savedSearchShareSection m =
+    H.div_
+        [HP.class_ "account-form", HP.data_ "testid" "saved-search-share-section"]
+        [ H.h3_ [HP.class_ "account-h3 display"] [text "Share a saved search"]
+        , H.p_
+            [HP.class_ "account-note meta"]
+            [text "A saved-search link is a read-only page of the results, with an Atom feed at the same address. It never makes the library public."]
+        , if null (mSaved m)
+            then
+                H.p_
+                    [HP.class_ "account-note meta"]
+                    [text "No saved searches yet. Save a search from the rail on the ledger first."]
+            else
+                H.div_ [HP.class_ "account-list"] (map savedShareRow (mSaved m))
+        ]
+  where
+    savedShareRow saved =
+        H.div_
+            [HP.class_ "account-record", HP.data_ "testid" "saved-search-share-row"]
+            [ H.div_
+                [HP.class_ "account-record-main"]
+                [ H.h3_ [HP.class_ "account-record-title"] [text (ms (ssName saved))]
+                , H.p_
+                    [HP.class_ "account-record-meta meta"]
+                    ( [text (ms (ssQ saved)) | not (T.null (T.strip (ssQ saved)))]
+                        ++ [text (ms (T.intercalate " · " (ssTags saved)))]
+                    )
+                ]
+            , H.div_
+                [HP.class_ "account-record-actions"]
+                [ H.button_
+                    [ HP.class_ "account-link"
+                    , HP.type_ "button"
+                    , HP.data_ "testid" "saved-search-share"
+                    , HE.onClick (SavedSearchShareOpen saved)
+                    ]
+                    [text "share"]
+                ]
+            ]
 
 shareEmpty :: Model -> View () () Model Action
 shareEmpty m
@@ -1706,15 +2464,15 @@ shareEmpty m
                 [text "Records stay inside the login unless a link is made for one. Nothing here is public by default."]
             ]
 
-shareRecord :: ShareView -> View () () Model Action
-shareRecord share =
+shareRecord :: Model -> ShareView -> View () () Model Action
+shareRecord m share =
     H.div_
         [ HP.class_ ("account-record" <> if isJust (svRevokedAt share) then " is-revoked" else "")
         , testId "share-link-row"
         ]
         [ H.div_
             [HP.class_ "account-record-main"]
-            [ H.h3_ [HP.class_ "account-record-title"] [text (ms (shareTargetLabel share))]
+            [ H.h3_ [HP.class_ "account-record-title"] [text (shareTargetLabel m share)]
             , H.p_
                 [HP.class_ "account-record-meta meta"]
                 [ text (ms (T.unpack (svPrefix share)))
@@ -1741,10 +2499,17 @@ shareRecord share =
             ]
         ]
   where
-    shareTargetLabel target = case svScope target of
+    shareTargetLabel model target = case svScope target of
         "bookmark" -> ms ("record " <> show (svTargetId target))
-        "saved_search" -> ms ("saved search " <> show (svTargetId target))
+        "saved_search" -> ms ("saved query · " <> T.unpack (savedSearchName model (svTargetId target)))
         other -> ms other
+
+-- | Resolve a saved-search share target to the name the rail shows.
+savedSearchName :: Model -> Int -> Text
+savedSearchName m targetId =
+    case [ss | saved <- mSaved m, let ss = ssName saved, ssId saved == targetId] of
+        (name : _) -> name
+        [] -> "saved search " <> T.pack (show targetId)
 
 -- ----------------------------------------------------------------- rules ---
 
@@ -1755,9 +2520,14 @@ rulesPanel m =
             [HP.class_ "account-lede"]
             [text "A rule files new links automatically: match on the address, the source or the title, then add tags or mark the record read."]
         ]
-            ++ [ H.div_ [HP.class_ "account-list", testId "rules-table"] (map ruleRecord (mRules m))
-               ]
-            ++ [ruleEmpty m | null (mRules m)]
+            ++ ( case mRulesError m of
+                    Just message ->
+                        [accountReadError "The rules could not be read." (Just message)]
+                    Nothing ->
+                        [ H.div_ [HP.class_ "account-list", testId "rules-table"] (map ruleRecord (mRules m))
+                        ]
+                            ++ [ruleEmpty m | null (mRules m)]
+               )
             ++ [ruleDryRun m, ruleForm m]
   where
     ruleNote =

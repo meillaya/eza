@@ -6,6 +6,6 @@ const response = await page.goto(BASE + "/login", { waitUntil: "networkidle" });
 console.log("status", response?.status(), "url", page.url());
 console.log("title", await page.title());
 console.log("body", (await page.locator("body").innerText()).slice(0, 300));
-console.log("passkey button", await page.locator("#passkey-login").count());
+console.log("password button", await page.locator("#password-login").count());
 await page.screenshot({ path: ".dsh-cache/login-fixed.png" });
 await browser.close();

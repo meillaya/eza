@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>eza clipper options</title>
+    <link rel="stylesheet" href="ui.css" />
+  </head>
+  <body class="options">
+    <main>
+      <header>
+        <h1>eza clipper</h1>
+        <span class="hint">v0.1.0</span>
+      </header>
+      <p>
+        Save pages and selections to your eza library. Create a capture token in eza under
+        <strong>Account → Tokens</strong> with the <code>capture</code> scope, then paste it here.
+      </p>
+
+      <section id="connection">
+        <label for="server-url">Server address</label>
+        <input
+          id="server-url"
+          type="url"
+          inputmode="url"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="https://eza.example.com"
+        />
+
+        <label for="token">Capture token</label>
+        <input
+          id="token"
+          type="password"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="eza_pat_…"
+        />
+        <p id="token-state" class="hint token-state"></p>
+
+        <label for="default-template">Default template</label>
+        <select id="default-template">
+          <option value="0">Default</option>
+        </select>
+
+        <div class="row">
+          <button id="save" class="primary" type="button">Save</button>
+          <button id="test" type="button">Test connection</button>
+          <button id="grant" type="button">Grant access</button>
+        </div>
+        <div id="status" role="status" aria-live="polite"></div>
+      </section>
+
+      <details>
+        <summary>How access works</summary>
+        <p class="hint">
+          The extension asks Chrome for permission to contact only the server origin you configure.
+          The capture token is stored in this browser profile and sent only in the
+          <code>Authorization</code> header. It is never placed in a URL, a page, or a log.
+        </p>
+        <p class="hint">
+          If saving fails with an access error, press <strong>Grant access</strong>, or re-save the
+          options after the prompt appears.
+        </p>
+      </details>
+
+      <details>
+        <summary>Keyboard shortcuts</summary>
+        <p class="hint">
+          Ctrl+Shift+Y saves the whole page, Ctrl+Shift+U saves the selection (Command on macOS).
+          Rebind them at <code>chrome://extensions/shortcuts</code>.
+        </p>
+      </details>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

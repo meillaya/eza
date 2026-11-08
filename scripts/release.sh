@@ -17,14 +17,20 @@ BIN="$(cabal list-bin exe:eza-bookmarks)"
 bash scripts/build-web.sh
 
 rm -rf "$OUT"
-mkdir -p "$OUT/bin" "$OUT/share/eza/static/app" "$OUT/share/eza/static/vendor"
+mkdir -p "$OUT/bin" "$OUT/share/eza"
 
 cp "$BIN" "$OUT/bin/eza-bookmarks"
-cp static/index.html static/eza.css static/theme.js static/auth.js static/favicon.svg "$OUT/share/eza/static/" 2>/dev/null || true
-cp static/favicon-fallback.svg "$OUT/share/eza/static/" 2>/dev/null || true
-cp -r static/app/. "$OUT/share/eza/static/app/"
-cp -r static/vendor/. "$OUT/share/eza/static/vendor/"
+cp -a static "$OUT/share/eza/static"
 cp secretspec.toml "$OUT/share/eza/secretspec.toml"
+
+if [ -d extension ]; then
+  mkdir -p "$OUT/share/eza/extension"
+  tar --exclude=node_modules --exclude=dist -C extension -cf - . | tar -C "$OUT/share/eza/extension" -xf -
+fi
+if [ -d sidecar ]; then
+  mkdir -p "$OUT/share/eza/sidecar"
+  tar --exclude=node_modules -C sidecar -cf - . | tar -C "$OUT/share/eza/sidecar" -xf -
+fi
 
 cat > "$OUT/share/eza/README.txt" <<'EOF'
 Run:

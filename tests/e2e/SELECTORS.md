@@ -82,7 +82,7 @@ as non-mapping steps and undo stays covered by `undo-smoke.mjs` and
 | `#/accessions` + `[data-testid="accessions"]` | accessions index |
 | `#/tags/ai` + `[data-testid="ai-banner"]` | AI tags and its provider banner |
 | `[data-testid="share-page"]` / `[data-testid="share-unavailable"]` | server-rendered public share page and its invalid/revoked state |
-| `#passkey-login`, `#passkey-setup`, `#recovery`, `#codes`, `#copy-codes`, `#continue`, `#recovery-code`, `#redeem`, `#auth-error`, `#passkey-add` | auth pages |
+| `#auth-form`, `#username`, `#password`, `#confirm-password`, `#password-login`, `#password-setup`, `#recovery`, `#codes`, `#copy-codes`, `#continue`, `#recovery-code`, `#redeem`, `#auth-error`, legacy `#passkey-login`, `#passkey-add` | auth pages |
 | `#boot-splash`, `#boot-error` | shell boot states |
 
 ## Routes

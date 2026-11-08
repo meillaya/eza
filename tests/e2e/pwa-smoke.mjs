@@ -66,7 +66,7 @@ check(
   String(swResponse.headers.get("service-worker-allowed"))
 );
 check("service worker javascript content-type", swType.includes("javascript"), swType);
-check("service worker versioned shell cache", /eza-app-shell-v\d+/.test(swText), (swText.match(/eza-app-shell-v\d+/) || [])[0]);
+check("service worker versioned shell cache", /eza-app-shell-[A-Za-z0-9-]+/.test(swText), (swText.match(/eza-app-shell-[A-Za-z0-9-]+/) || [])[0] || swText.slice(0, 80));
 check(
   "service worker never caches API/auth",
   ["/api/", "/save", "/login", "/setup", "/recover"].every((path) => swText.includes(path))
@@ -191,58 +191,37 @@ try {
   const clipboard = await page.evaluate(() => navigator.clipboard.readText().catch(() => ""));
   check("copy bookmarklet writes clipboard", clipboard.length > 0 && /javascript:|location\.href/.test(clipboard), clipboard.slice(0, 40) + "...");
 
-  // share_target landing route: a share carrying a URL is captured through
-  // the idempotent quick-save endpoint, then the app lands on the library.
+  // share_target landing route: /save is a prefilled form now; the user
+  // confirms the record instead of the page silently filing it.
   const sharedUrl = "https://example.com/pwa-share-smoke-" + Date.now();
   await page.goto(
     BASE + "/save?url=" + encodeURIComponent(sharedUrl) + "&title=" + encodeURIComponent("PWA share smoke"),
     { waitUntil: "domcontentloaded" }
   );
   await page.waitForSelector(SEL.appShell, { timeout: 25000 });
-  await page
-    .waitForFunction(
-      () => [...document.querySelectorAll('[data-testid="toast"]')].some((toast) => /Saved to eza|Already in your library/.test(toast.textContent)),
-      null,
-      { timeout: 20000 }
-    )
-    .catch(() => {});
+  await page.waitForSelector("#save-url", { timeout: 15000 });
   const shareState = await page.evaluate(() => ({
     path: window.location.pathname,
-    toasts: [...document.querySelectorAll('[data-testid="toast"]')].map((toast) => toast.textContent.trim()),
+    url: document.querySelector("#save-url")?.value || "",
+    title: document.querySelector("#save-title")?.value || "",
   }));
-  check("share target routes to library", shareState.path === "/", shareState.path);
-  check(
-    "share target quick-saves url",
-    shareState.toasts.some((text) => /Saved to eza|Already in your library/.test(text)),
-    JSON.stringify(shareState.toasts)
-  );
+  check("share target renders the save form", shareState.path === "/save" && shareState.url === sharedUrl, JSON.stringify(shareState));
+  check("share target keeps the title", shareState.title === "PWA share smoke", String(shareState.title));
+  await page.locator('[data-testid="save-submit"]').click();
+  await page.waitForFunction(() => /\/bookmark\/\d+/.test(window.location.pathname) || [...document.querySelectorAll('[data-testid="toast"]')].some((toast) => /Saved to eza|Already in your library/.test(toast.textContent)), null, { timeout: 20000 }).catch(() => {});
+  const saved = await page.evaluate(() => ({ path: window.location.pathname, toasts: [...document.querySelectorAll('[data-testid="toast"]')].map((t) => t.textContent) }));
+  check("share target saves the record", /\/bookmark\/\d+/.test(saved.path) || saved.toasts.some((t) => /Saved to eza/.test(t)), JSON.stringify(saved));
 
-  // Sharing the same URL again is idempotent.
-  await page.goto(
-    BASE + "/save?url=" + encodeURIComponent(sharedUrl) + "&title=" + encodeURIComponent("PWA share smoke"),
-    { waitUntil: "domcontentloaded" }
-  );
-  await page.waitForSelector(SEL.appShell, { timeout: 25000 });
-  await page.waitForTimeout(1800);
-  const repeatToasts = await page.evaluate(() =>
-    [...document.querySelectorAll('[data-testid="toast"]')].map((toast) => toast.textContent.trim())
-  );
-  check(
-    "share target is idempotent",
-    repeatToasts.some((text) => /Already in your library/.test(text)),
-    JSON.stringify(repeatToasts)
-  );
-
-  // A share without any URL falls back to the pre-filled add dialog.
+  // A share without a URL still renders the form, with the address empty.
   await page.goto(BASE + "/save?title=" + encodeURIComponent("No URL share"), {
     waitUntil: "domcontentloaded",
   });
-  await page.waitForSelector('[data-testid="dialog-add"]', { timeout: 20000 });
+  await page.waitForSelector("#save-url", { timeout: 20000 });
   const fallback = await page.evaluate(() => ({
-    url: document.querySelector("#add-url") ? document.querySelector("#add-url").value : null,
-    title: document.querySelector("#add-title") ? document.querySelector("#add-title").value : null,
+    url: document.querySelector("#save-url") ? document.querySelector("#save-url").value : null,
+    title: document.querySelector("#save-title") ? document.querySelector("#save-title").value : null,
   }));
-  check("share without url opens add dialog", fallback.url === "", JSON.stringify(fallback));
+  check("share without url opens the save form", fallback.url === "", JSON.stringify(fallback));
   check("share without url keeps title", fallback.title === "No URL share", String(fallback.title));
 } catch (error) {
   check("unexpected error", false, String(error && error.stack ? error.stack : error));

@@ -117,16 +117,28 @@ export async function enableWebAuthn(context, page) {
   return cdp;
 }
 
+const TEST_USER = process.env.EZA_TEST_USER || "e2e";
+const TEST_PASSWORD = process.env.EZA_TEST_PASSWORD || "e2e-password-123";
+
 // First-run setup (or login when the scratch database is already claimed).
 // Leaves the ledger mounted and returns when the app shell has painted.
 export async function enterLibrary(page) {
   await page.goto(BASE + "/", { waitUntil: "domcontentloaded" });
   if (page.url().includes("/setup")) {
-    await page.click("#passkey-setup");
+    await page.fill("#username", TEST_USER);
+    await page.fill("#password", TEST_PASSWORD);
+    await page.fill("#confirm-password", TEST_PASSWORD);
+    await page.click("#password-setup");
     await page.waitForSelector("#recovery:not([hidden])", { timeout: 60000 });
     await page.click("#continue");
   } else if (page.url().includes("/login")) {
-    await page.click("#passkey-login");
+    if (await page.locator("#password-login").count()) {
+      await page.fill("#username", TEST_USER);
+      await page.fill("#password", TEST_PASSWORD);
+      await page.click("#password-login");
+    } else {
+      await page.click("#passkey-login");
+    }
   }
   await page.waitForSelector(SEL.appShell, { timeout: 60000 });
 }

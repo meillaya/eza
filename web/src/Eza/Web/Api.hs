@@ -27,6 +27,7 @@ module Eza.Web.Api (
     fetchPruneCandidates,
     fetchAccount,
     fetchTags,
+    fetchStats,
     fetchTokens,
     fetchHighlights,
     fetchShares,
@@ -59,6 +60,7 @@ module Eza.Web.Api (
     mergeTags,
     renameTag,
     deleteTag,
+    detachTag,
     applyTagSuggestion,
     runPrune,
     checkDead,
@@ -66,6 +68,10 @@ module Eza.Web.Api (
     regenerateRecovery,
     renameCredential,
     deleteCredential,
+    patchUsername,
+    changePassword,
+    setPasskeyRequirement,
+    revokeOtherSessions,
     logout,
     submitImport,
     -- links
@@ -73,7 +79,10 @@ module Eza.Web.Api (
     notesExportUrl,
 ) where
 
-import Data.Aeson (FromJSON, ToJSON, Value, object, toJSON, (.=))
+import Data.Aeson (FromJSON, ToJSON, Value (..), object, toJSON, withObject, (.!=), (.:?), (.=))
+import qualified Data.Aeson as A
+import qualified Data.Aeson.Key as K
+import qualified Data.Aeson.KeyMap as KM
 import Data.Char (chr, isAlphaNum, ord)
 import Data.List (stripPrefix)
 import qualified Data.Map.Strict as M
@@ -90,8 +99,11 @@ import Eza.Types (
     BookmarkDetail,
     BookmarkSummary,
     BootPayload,
-    GraphData,
+    GraphData (..),
+    GraphEdge (..),
+    GraphNode (..),
     Highlight,
+    LibraryStats,
     SavedSearch,
     SearchPage,
     TagStat,
@@ -152,8 +164,98 @@ trim = dropWhile isSpaceEnd . reverse . dropWhile isSpaceEnd . reverse
 isSpaceEnd :: Char -> Bool
 isSpaceEnd c = c == ' ' || c == '\t' || c == '\n' || c == '\r'
 
-{- | Fire a request.  The response body is handed over as a raw 'Value' so
-callers can decode strictly (shared DTOs) or leniently (planned routes).
+{- | One raw HTTP exchange as the browser reports it.  @rfStatus@ is @0@ when
+the request never reached the server; @rfError@ then carries the transport
+message.  The body is read before deciding success, so the server's JSON
+error envelope (a duplicate 409, a 403, a 404) survives instead of only its
+status code.
+-}
+data RawResponse = RawResponse
+    { rfStatus :: Int
+    , rfText :: Text
+    , rfError :: Maybe Text
+    }
+
+instance FromJSON RawResponse where
+    parseJSON = withObject "RawResponse" $ \o ->
+        RawResponse
+            <$> o .:? "status" .!= 0
+            <*> o .:? "text" .!= ""
+            <*> o .:? "error"
+
+decodeRawResponse :: MisoString -> RawResponse
+decodeRawResponse raw = case MJ.eitherDecode raw of
+    Right response -> response
+    Left err -> RawResponse 0 "" (Just (toText err))
+
+{- | Build the request headers: JSON in and JSON out, plus the CSRF token
+when the cookie is present.
+-}
+requestHeaders :: [(MisoString, MisoString)] -> MisoString -> [(MisoString, MisoString)]
+requestHeaders extra token =
+    [ ("Accept", "application/json")
+    , ("Content-Type", "application/json")
+    ]
+        ++ (if T.null (toText token) then [] else [("X-CSRF-Token", token)])
+        ++ extra
+
+{- | Map a raw exchange onto the API contract: transport failure, non-2xx
+(envelope message preserved), then body decoding.
+-}
+rawOutcome :: CONTENT_TYPE -> RawResponse -> Either ApiError Value
+rawOutcome responseType raw = case (rfStatus raw, rfError raw) of
+    (0, Just message)
+        | not (T.null (T.strip message)) -> Left (mkApiError Nothing (Just message))
+    (status, _)
+        | status < 200 || status >= 300 -> Left (statusError status raw)
+        | responseType == JSON ->
+            case (MJ.eitherDecode (ms (T.unpack (rfText raw))) :: Either MisoString Value) of
+                Right value -> Right value
+                Left err ->
+                    Left
+                        ( mkApiError
+                            (Just status)
+                            (Just ("the server sent a response the client could not read: " <> toText err))
+                        )
+        | otherwise -> Right Null
+
+{- | The server answers failures with @{"error":{"code":...,"message":...}}@.
+The message is worth showing verbatim: it explains duplicates, expired
+sessions and refused writes.
+-}
+statusError :: Int -> RawResponse -> ApiError
+statusError status raw = mkApiError (Just status) (serverMessage (rfText raw))
+
+serverMessage :: Text -> Maybe Text
+serverMessage body
+    | T.null trimmed = Nothing
+    | "{" `T.isPrefixOf` trimmed =
+        case (MJ.eitherDecode (ms (T.unpack trimmed)) :: Either MisoString Value) of
+            Right value -> firstText [["error", "message"], ["message"], ["error", "code"]] value
+            Left _ -> Nothing
+    | "<" `T.isPrefixOf` trimmed = Nothing
+    | otherwise = Just (T.take 300 trimmed)
+  where
+    trimmed = T.strip body
+
+firstText :: [[Text]] -> Value -> Maybe Text
+firstText paths value = firstJust (map (`textAtPath` value) paths)
+
+firstJust :: [Maybe a] -> Maybe a
+firstJust [] = Nothing
+firstJust (Just value : _) = Just value
+firstJust (Nothing : rest) = firstJust rest
+
+textAtPath :: [Text] -> Value -> Maybe Text
+textAtPath [] value = case value of
+    A.String message | not (T.null (T.strip message)) -> Just (T.strip message)
+    _ -> Nothing
+textAtPath (key : rest) value = case value of
+    A.Object fields -> textAtPath rest =<< KM.lookup (K.fromText key) fields
+    _ -> Nothing
+
+{- | Fire a request.  The success callback receives the decoded body for JSON
+responses; failures carry the server's own message.
 -}
 sendValue ::
     MisoString ->
@@ -164,34 +266,25 @@ sendValue ::
     (Value -> action) ->
     (ApiError -> action) ->
     Eff model action
-sendValue method url requestedBody extraHeaders responseType onOk onErr =
-    withSink $ \sink -> do
-        token <- csrfToken
-        bodyVal <- traverse (toJSVal . MJ.encode) requestedBody
-        let authHeader =
-                if T.null (toText token) then [] else [("X-CSRF-Token", token)]
-            headers =
-                [ ("Accept", "application/json")
-                , ("Content-Type", "application/json")
-                ]
-                    ++ authHeader
-                    ++ extraHeaders
-        fetch
-            url
-            method
-            bodyVal
-            headers
-            (\resp -> sink (onOk (body resp)))
-            (\resp -> sink (onErr (responseError resp)))
-            responseType
+sendValue method url requestedBody extraHeaders responseType onOk onErr = withSink $ \sink -> do
+    token <- csrfToken
+    encodedBody <- traverse (toJSVal . MJ.encode) requestedBody
+    let report raw =
+            case rawOutcome responseType raw of
+                Left err -> onErr err
+                Right value -> onOk value
+    finish <- asyncCallback1 $ \raw -> do
+        rawText <- fromJSVal raw
+        sink (report (decodeRawResponse (fromMaybe "" (rawText :: Maybe MisoString))))
+    net <- jsg ("EzaNet" :: MisoString)
+    urlValue <- toJSVal url
+    methodValue <- toJSVal method
+    bodyValue <- toJSVal encodedBody
+    headersValue <- toJSVal (M.fromList (requestHeaders extraHeaders token))
+    _ <- net # ("fetch" :: MisoString) $ (urlValue, methodValue, bodyValue, headersValue, finish)
+    pure ()
 
-{- | Error callback receives the raw JS response; the server's JSON error
-envelope is not available here (fetch rejects before parsing), so we map
-the HTTP status to a friendly message.
--}
-responseError :: Response JSVal -> ApiError
-responseError resp = mkApiError (status resp) Nothing
-
+-- | Decode a raw body into the shared (or lenient) DTO.
 decode :: (FromJSON a) => Value -> Either ApiError a
 decode value =
     case MJ.fromJSON value of
@@ -215,23 +308,6 @@ getValue ::
     Eff model action
 getValue url headers = sendValue "GET" url Nothing headers JSON
 
-apiPost ::
-    (ToJSON b, FromJSON r) =>
-    MisoString ->
-    b ->
-    (r -> action) ->
-    (ApiError -> action) ->
-    Eff model action
-apiPost url requestBody onOk onErr =
-    sendValue
-        "POST"
-        url
-        (Just (toJSON requestBody))
-        []
-        JSON
-        (\v -> either onErr onOk (decode v))
-        onErr
-
 -- | A write whose response body we do not care about.
 apiWrite ::
     (ToJSON b) =>
@@ -241,8 +317,13 @@ apiWrite ::
     action ->
     (ApiError -> action) ->
     Eff model action
+
+{- | Writes whose response body the client never reads.  They use 'NONE':
+the server answers most of them with @204 No Content@, and a JSON decode of
+an empty 204 body would turn a successful write into an error.
+-}
 apiWrite method url requestBody onOk onErr =
-    sendValue method url (toJSON <$> requestBody) [] JSON (\_ -> onOk) onErr
+    sendValue method url (toJSON <$> requestBody) [] NONE (\_ -> onOk) onErr
 
 apiDelete :: MisoString -> action -> (ApiError -> action) -> Eff model action
 apiDelete url onOk onErr =
@@ -381,13 +462,29 @@ fetchGraph ::
     (GraphData -> action) ->
     (ApiError -> action) ->
     Eff model action
-fetchGraph seed depth =
-    apiGet url
+fetchGraph seed depth onOk onErr =
+    getValue url [] (\value -> onOk (decodeGraph value)) onErr
   where
     url =
         "/api/v1/graph?depth="
             <> ms (show depth)
             <> maybe "" (\sid -> "&seed=" <> ms (show sid)) seed
+
+    -- The shared DTO always carries the edge weight, but a server from
+    -- before tag-weighted edges does not. Fall back to a lenient read that
+    -- defaults the weight and keeps the plate drawable.
+    decodeGraph :: Value -> GraphData
+    decodeGraph value = case (MJ.fromJSON value :: MJ.Result GraphData) of
+        MJ.Success graph -> graph
+        MJ.Error _ ->
+            GraphData
+                (fieldList "nodes" value :: [GraphNode])
+                [ GraphEdge
+                    (fieldInt "source" edge)
+                    (fieldInt "target" edge)
+                    (max 1 (fieldInt "weight" edge))
+                | edge <- fieldList "edges" value
+                ]
 
 fetchSavedSearches ::
     ([SavedSearch] -> action) ->
@@ -414,16 +511,32 @@ fetchConsolidation onOk onErr =
         (\v -> onOk (fieldList "groups" v))
         onErr
 
+{- | @GET /api/v1/tags/{tag}/suggestions@.  The server answers an unconfigured
+provider with 200, @configured: false@, an empty list and a notice; hand all
+three to the caller so the page can say what happened instead of showing an
+empty result that looks like a clean scan.
+-}
 fetchSuggestions ::
     Text ->
-    ([TagSuggestion] -> action) ->
+    (Bool -> [TagSuggestion] -> Maybe Text -> action) ->
     (ApiError -> action) ->
     Eff model action
 fetchSuggestions tag onOk onErr =
     getValue
         ("/api/v1/tags/" <> percentEncode (ms tag) <> "/suggestions")
         []
-        (\v -> onOk (fieldList "suggestions" v))
+        ( \v ->
+            let fields = case v of
+                    A.Object o -> o
+                    _ -> KM.empty
+                configured =
+                    not (KM.member (K.fromText "configured") fields)
+                        || fieldBool "configured" v
+                notice = case T.strip (fieldText "notice" v) of
+                    "" -> Nothing
+                    text -> Just text
+             in onOk configured (fieldList "suggestions" v) notice
+        )
         onErr
 
 fetchPruneCandidates ::
@@ -449,6 +562,47 @@ fetchTags ::
     Eff model action
 fetchTags onOk onErr =
     getValue "/api/v1/tags" [] (\v -> onOk (fieldList "tags" v)) onErr
+
+{- | @GET /api/v1/stats@ — the whole library count read again after a write.
+The server names its fields for the API (``bookmarks``, ``bookmark_tags``,
+``jobs_pending``); rename them onto the shared 'LibraryStats' decoder so the
+client keeps one DTO, then decode with the shared instance.
+-}
+fetchStats ::
+    (Maybe LibraryStats -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+fetchStats onOk onErr =
+    getValue "/api/v1/stats" [] (\value -> onOk (statsFromPayload value)) onErr
+
+statsFromPayload :: Value -> Maybe LibraryStats
+statsFromPayload value =
+    case (MJ.eitherDecode (MJ.encode (statsObject value)) :: Either MisoString LibraryStats) of
+        Right stats -> Just stats
+        Left _ -> Nothing
+
+-- | The API's field names, mapped onto the shared DTO's names.
+statsObject :: Value -> Value
+statsObject value =
+    object
+        [ "total" .= fieldInt "bookmarks" value
+        , "tags" .= fieldInt "tags" value
+        , "tag_links" .= fieldInt "bookmark_tags" value
+        , "sources" .= fieldInt "sources" value
+        , "top_sources" .= (fieldList "top_sources" value :: [(Text, Int)])
+        , "sources_once" .= fieldInt "sources_once" value
+        , "first_day" .= fieldText "first_day" value
+        , "last_day" .= fieldText "last_day" value
+        , "days" .= fieldInt "days" value
+        , "years" .= (fieldList "years" value :: [(Int, Int)])
+        , "filing_days" .= (fieldList "filing_days" value :: [(Text, Int)])
+        , "unread" .= fieldInt "unread" value
+        , "dead" .= fieldInt "dead" value
+        , "queued" .= fieldInt "jobs_pending" value
+        , "favicon_bytes" .= fieldInt "favicon_bytes" value
+        , "highlights" .= fieldInt "highlights" value
+        , "shares" .= fieldInt "shares" value
+        ]
 
 -- ----------------------------------------------------------------- writes --
 
@@ -591,6 +745,14 @@ renameTag old newName =
 deleteTag :: Text -> action -> (ApiError -> action) -> Eff model action
 deleteTag tag = apiDelete ("/api/v1/tags/" <> percentEncode (ms tag))
 
+{- | @DELETE /api/v1/tags/{tag}?detach=true@ removes a non-empty tag from every
+record that carries it and leaves the records in place. A server that predates
+the detach query ignores it and answers 409 for a non-empty tag; the UI shows
+that message instead of pretending the tag was removed.
+-}
+detachTag :: Text -> action -> (ApiError -> action) -> Eff model action
+detachTag tag = apiDelete ("/api/v1/tags/" <> percentEncode (ms tag) <> "?detach=true")
+
 applyTagSuggestion ::
     Int ->
     [Text] ->
@@ -619,7 +781,8 @@ checkDead onOk onErr =
     sendValue
         "POST"
         "/api/v1/maintenance/check-dead"
-        (Nothing :: Maybe Value)
+        -- the handler parses a JSON object even though every field is optional
+        (Just (object []))
         []
         JSON
         (\v -> onOk (fieldInt "checked" v, fieldInt "dead" v))
@@ -657,6 +820,76 @@ renameCredential cid nickname =
 deleteCredential :: Text -> action -> (ApiError -> action) -> Eff model action
 deleteCredential cid = apiDelete ("/api/v1/account/passkeys/" <> percentEncode (ms cid))
 
+{- | @POST /api/v1/account/username@ renames the one account. Once a password
+exists the current password must be sent with the change.
+-}
+patchUsername :: Maybe Text -> Text -> action -> (ApiError -> action) -> Eff model action
+patchUsername currentPassword username =
+    apiWrite "POST" "/api/v1/account/username" (Just payload)
+  where
+    payload =
+        object
+            ( ["username" .= username]
+                ++ [ "current_password" .= value
+                   | Just value <- [currentPassword]
+                   ]
+            )
+
+{- | @POST /api/v1/account/password@ sets or changes the password. Other
+browser sessions are revoked by the server on success.
+-}
+changePassword ::
+    Maybe Text ->
+    Text ->
+    Text ->
+    action ->
+    (ApiError -> action) ->
+    Eff model action
+changePassword currentPassword newPassword confirm =
+    apiWrite "POST" "/api/v1/account/password" (Just payload)
+  where
+    payload =
+        object
+            ( ["new_password" .= newPassword, "confirm" .= confirm]
+                ++ [ "current_password" .= value
+                   | Just value <- [currentPassword]
+                   ]
+            )
+
+{- | @POST /api/v1/account/2fa@ requires or clears the passkey second factor.
+The body is @{"required": Bool, "current_password": Text?}@; the option is
+listed in "docs/API.md" as planned, so a server that has not shipped it yet is
+reported rather than papered over.
+-}
+setPasskeyRequirement ::
+    Bool ->
+    Maybe Text ->
+    action ->
+    (ApiError -> action) ->
+    Eff model action
+setPasskeyRequirement required currentPassword =
+    apiWrite "POST" "/api/v1/account/2fa" (Just payload)
+  where
+    payload =
+        object
+            ( ["required" .= required]
+                ++ [ "current_password" .= value
+                   | Just value <- [currentPassword]
+                   ]
+            )
+
+-- | @POST /api/v1/account/sessions/revoke-others@ — keep only this browser.
+revokeOtherSessions :: (Int -> action) -> (ApiError -> action) -> Eff model action
+revokeOtherSessions onOk onErr =
+    sendValue
+        "POST"
+        "/api/v1/account/sessions/revoke-others"
+        (Nothing :: Maybe Value)
+        []
+        JSON
+        (\v -> onOk (fieldInt "revoked" v))
+        onErr
+
 logout :: action -> (ApiError -> action) -> Eff model action
 logout = apiWrite "POST" "/api/auth/logout" (Nothing :: Maybe Value)
 
@@ -670,28 +903,20 @@ submitImport ::
     Eff model action
 submitImport onOk onErr = withSink $ \sink -> do
     token <- csrfToken
-    -- FileList is not a JS Array, so miso's FromJSVal [File] cannot decode it
-    -- (fromJSVal_List requires Array.isArray). Build the FormData in JS and
-    -- hand the whole multipart body straight to fetch instead.
-    built <-
-        inline
-            "const el = document.getElementById('import-file'); const fd = new FormData(); if (!el || !el.files || !el.files.length) { return null; } fd.append('file', el.files[0]); return fd;"
-            (M.empty :: M.Map MisoString JSVal)
-    case built of
-        Nothing -> sink (onErr (mkApiError Nothing (Just "Choose an HTML bookmarks file first.")))
-        Just formData -> do
-            let headers =
-                    if T.null (toText token)
-                        then []
-                        else [("X-CSRF-Token", token)]
-            fetch
-                "/api/v1/import"
-                "POST"
-                (Just formData)
-                headers
-                (\resp -> sink (onOk (body resp)))
-                (\resp -> sink (onErr (responseError resp)))
-                JSON
+    -- The file input and the multipart FormData live in the external
+    -- @EzaNet.upload@ helper (static/pwa.js): the CSP forbids eval, so the
+    -- client cannot build JavaScript at runtime.
+    finish <- asyncCallback1 $ \raw -> do
+        rawText <- fromJSVal raw
+        let raw' = decodeRawResponse (fromMaybe "" (rawText :: Maybe MisoString))
+        sink $ case rawOutcome JSON raw' of
+            Left err -> onErr err
+            Right value -> onOk value
+    net <- jsg ("EzaNet" :: MisoString)
+    inputId <- toJSVal ("import-file" :: MisoString)
+    tokenValue <- toJSVal token
+    _ <- net # ("upload" :: MisoString) $ (inputId, tokenValue, finish)
+    pure ()
 
 -- ------------------------------------------------------------------ bulk --
 

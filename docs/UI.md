@@ -70,15 +70,21 @@ fixed optical size so every browser draws the same letterforms.
 | `/tags` | Tag table, case duplicates, near-duplicate pairs |
 | `/tags/ai` | Advisory tag suggestions, applied one bookmark at a time |
 | `/maintenance` | Dead-link sweep, prune candidates, undo |
-| `/account` | Passkeys, recovery, sessions, tokens, share links, rules, import, capture |
+| `/account` | Username, password, optional passkey second factor, recovery, sessions, tokens, share links, rules, import, capture |
 | `/save` | Quick save from the PWA share target or bookmarklet |
-| `/login`, `/setup`, `/recover`, `/account/add-passkey` | Passkey ceremonies |
+| `/login`, `/setup`, `/recover`, `/account/add-passkey` | Username/password sign-in, optional passkey second factor, first claim, recovery reset |
 | `/s/:token` | Read-only share page for a bookmark or saved search |
 
-Passkeys need a secure origin. The auth pages check for one and say so when the
-browser treats the page as insecure: open eza over https or on localhost, or
-sign in with a recovery code, which works on any origin. The login page does
-not offer to set up a second claim on a library that already has a passkey.
+One username and one Argon2id password hash open the library. The setup page
+chooses them and shows ten recovery codes once. A recovery code clears the
+password and passkeys and opens a password-reset setup page. A password
+account can register passkeys and turn on a second factor from Account >
+security; with it on, a normal password login yields a short-lived pending
+session and then a WebAuthn assertion. A library claimed before passwords
+kept its passkey sign-in until a password was set. The auth pages explain the
+secure origin rule, the IP-literal RP-ID restriction, and the `set-password`
+CLI alternative. Sign-in attempts are rate-limited and locked out in the
+database.
 
 The masthead carries the wordmark, the provenance line, the search line and the
 section links. The ledger's facet rail lists sources with leader dots, tags in

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Save to eza</title>
+    <link rel="stylesheet" href="ui.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>eza</h1>
+        <button id="open-options" class="link" type="button">Options</button>
+      </header>
+
+      <section id="loading-panel" aria-live="polite">
+        <p class="hint">Reading the page…</p>
+      </section>
+
+      <section id="setup-panel" hidden>
+        <p>Connect the clipper to your eza server before saving anything.</p>
+        <div class="row">
+          <button id="setup-open-options" class="primary" type="button">Open options</button>
+        </div>
+      </section>
+
+      <section id="clip-panel" hidden>
+        <span id="page-url" class="url-line"></span>
+        <label for="title">Title</label>
+        <input id="title" type="text" autocomplete="off" spellcheck="true" />
+        <label for="tags">Tags <span class="hint">comma separated</span></label>
+        <input id="tags" type="text" autocomplete="off" placeholder="reading, design" />
+        <label for="template">Template</label>
+        <select id="template"></select>
+        <label class="checkline selection-row" id="selection-row" hidden>
+          <input id="include-selection" type="checkbox" />
+          Include the selected text
+        </label>
+        <p id="extractor-note" class="note" hidden></p>
+        <div class="row">
+          <button id="save" class="primary" type="button">Save to eza</button>
+        </div>
+        <div id="clip-status" role="status" aria-live="polite"></div>
+      </section>
+
+      <section id="done-panel" hidden>
+        <p id="done-text"></p>
+        <div class="row">
+          <button id="open-library" class="primary" type="button">Open eza</button>
+          <button id="done-again" type="button">Save another</button>
+        </div>
+      </section>
+
+      <section id="error-panel" hidden>
+        <p id="error-text"></p>
+        <div class="row">
+          <button id="retry" type="button">Try again</button>
+          <button id="error-open-options" type="button">Options</button>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

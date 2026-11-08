@@ -10,14 +10,17 @@ module Eza.Config
   ) where
 
 import Data.Char (toLower)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, nub)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Word (Word32)
 import System.Directory (createDirectoryIfMissing)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>), takeDirectory)
 import Text.Read (readMaybe)
+
+import Eza.Password (PasswordParams (..), defaultPasswordParams)
 
 data Config = Config
   { cfgDataDir :: FilePath
@@ -27,6 +30,8 @@ data Config = Config
   , cfgRpId :: Text
   , cfgRpName :: Text
   , cfgAllowedOrigins :: [Text]
+  , cfgClipOrigins :: [Text]
+  , cfgSidecarCmd :: Maybe String
   , cfgSessionTtlSeconds :: Int
   , cfgSecureCookies :: Bool
   , cfgStaticDir :: Maybe FilePath
@@ -44,6 +49,10 @@ data Config = Config
   , cfgOllamaBaseUrl :: String
   , cfgAiModel :: String
   , cfgAiAutoTag :: Bool
+  , cfgArgon2 :: PasswordParams
+  , cfgLoginMaxAttempts :: Int
+  , cfgLoginLockoutSeconds :: Int
+  , cfgAuthBodyLimitBytes :: Int
   }
   deriving (Show)
 
@@ -61,9 +70,17 @@ loadConfig = do
   rpId <- maybe rpIdDefault T.pack <$> lookupEnv "EZA_RP_ID"
   rpName <- maybe "eza" T.pack <$> lookupEnv "EZA_RP_NAME"
   allowedRaw <- lookupEnv "EZA_ALLOWED_ORIGINS"
-  let allowed = case allowedRaw of
-        Nothing -> [origin]
+  let extras = case allowedRaw of
+        Nothing -> []
         Just raw -> map T.pack (filter (not . null) (splitOn ',' raw))
+      -- The public origin is always allowed; the environment can add origins
+      -- (for a reverse proxy on another host) but never replace it.
+      allowed = nub (origin : extras)
+  clipRaw <- lookupEnv "EZA_CLIP_ORIGINS"
+  let clipOrigins = case clipRaw of
+        Nothing -> []
+        Just raw -> map T.pack (filter (not . null) (splitOn ',' raw))
+  sidecarCmd <- lookupEnv "EZA_DEFUDDLE_CMD"
   ttl <- readIntEnv "EZA_SESSION_TTL_SECONDS" (30 * 24 * 3600)
   secureRaw <- lookupEnv "EZA_SECURE_COOKIES"
   let secure = case secureRaw of
@@ -88,6 +105,17 @@ loadConfig = do
   ollamaUrl <- fromMaybe "http://127.0.0.1:11434" <$> lookupEnv "EZA_OLLAMA_BASE_URL"
   aiModel <- fromMaybe "llama3.2" <$> lookupEnv "EZA_AI_MODEL"
   aiAutoTag <- readBoolEnv "EZA_AI_AUTO_TAG" False
+  argonMemory <- readIntEnv "EZA_ARGON2_MEMORY_KIB" (fromIntegral (ppMemoryKiB defaultPasswordParams))
+  argonIterations <- readIntEnv "EZA_ARGON2_ITERATIONS" (fromIntegral (ppIterations defaultPasswordParams))
+  argonParallelism <- readIntEnv "EZA_ARGON2_PARALLELISM" (fromIntegral (ppParallelism defaultPasswordParams))
+  let argon2Params =
+        let par = clampWord32 1 16 argonParallelism
+            -- Argon2 requires memory >= 8 * parallelism.
+            mem = max (8 * par) (clampWord32 8 maxBound argonMemory)
+         in PasswordParams mem (clampWord32 1 maxBound argonIterations) par
+  loginMaxAttempts <- readIntEnv "EZA_LOGIN_MAX_ATTEMPTS" 5
+  loginLockout <- readIntEnv "EZA_LOGIN_LOCKOUT_SECONDS" 900
+  authBodyLimit <- readIntEnv "EZA_AUTH_BODY_LIMIT_BYTES" 8192
   pure
     Config
       { cfgDataDir = dataDir
@@ -97,6 +125,8 @@ loadConfig = do
       , cfgRpId = rpId
       , cfgRpName = rpName
       , cfgAllowedOrigins = allowed
+      , cfgClipOrigins = clipOrigins
+      , cfgSidecarCmd = sidecarCmd >>= nonEmpty
       , cfgSessionTtlSeconds = ttl
       , cfgSecureCookies = secure
       , cfgStaticDir = staticDir
@@ -114,6 +144,10 @@ loadConfig = do
       , cfgOllamaBaseUrl = ollamaUrl
       , cfgAiModel = aiModel
       , cfgAiAutoTag = aiAutoTag
+      , cfgArgon2 = argon2Params
+      , cfgLoginMaxAttempts = max 1 loginMaxAttempts
+      , cfgLoginLockoutSeconds = max 1 loginLockout
+      , cfgAuthBodyLimitBytes = max 1024 authBodyLimit
       }
 
 originHost :: Text -> Text
@@ -144,6 +178,11 @@ readIntEnv name fallback = do
     Just n -> n
     Nothing -> fallback
 
+-- | Clamp an environment integer into a Word32 range without wrapping on
+-- negative input.
+clampWord32 :: Word32 -> Word32 -> Int -> Word32
+clampWord32 low high raw = max low (min high (fromIntegral (max 1 raw)))
+
 readBoolEnv :: String -> Bool -> IO Bool
 readBoolEnv name fallback = do
   raw <- lookupEnv name
@@ -171,3 +210,6 @@ _unused xs = any (isInfixOf ",,") xs || null (mapMaybe (\x -> if null x then Not
 
 _lower :: Char -> Char
 _lower = toLower
+
+nonEmpty :: String -> Maybe String
+nonEmpty value = if null value then Nothing else Just value

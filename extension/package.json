@@ -1,0 +1,19 @@
+{
+  "name": "eza-clipper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Chromium MV3 clipper for the eza bookmark library",
+  "license": "Apache-2.0",
+  "author": "eza",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:defuddle": "node build.mjs --with-defuddle",
+    "check": "node --check background.js && node --check popup.js && node --check options.js && node --check src/config.js && node --check src/api.js && node --check src/extract.js && node --check src/defuddle-page.js && node --check src/version.js && node --check build.mjs && node --check test/check.mjs",
+    "test": "node test/check.mjs"
+  },
+  "devDependencies": {
+    "defuddle": "0.19.6",
+    "esbuild": "0.28.2"
+  }
+}

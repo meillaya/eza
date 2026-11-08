@@ -7,7 +7,10 @@ const cdp = await context.newCDPSession(page);
 await cdp.send("WebAuthn.enable", { enableUI: false });
 await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
 await page.goto(BASE + "/setup", { waitUntil: "networkidle" });
-await page.click("#passkey-setup");
+await page.fill("#username", process.env.EZA_TEST_USER || "e2e");
+await page.fill("#password", process.env.EZA_TEST_PASSWORD || "e2e-password-123");
+await page.fill("#confirm-password", process.env.EZA_TEST_PASSWORD || "e2e-password-123");
+await page.click("#password-setup");
 await page.waitForSelector("#recovery:not([hidden])", { timeout: 30000 });
 async function cookieApi(path, options = {}) {
   return page.evaluate(async ({ path, options }) => {

@@ -60,12 +60,15 @@ failedView m =
     H.div_
         [HP.class_ "empty"]
         [ H.span_ [HP.class_ "empty-kicker sc"] [text "record unavailable"]
-        , H.h1_ [HP.class_ "empty-title"] [text "This record is no longer in the ledger."]
+        , H.h1_ [HP.class_ "empty-title"] [text "This record could not be opened."]
         , H.p_
             [HP.class_ "empty-body"]
             [ text
-                "It may have been deleted, or the server is not answering. The rest of the ledger is still here."
+                "It may have been deleted, or the server did not answer. The rest of the ledger is still here."
             ]
+        , H.p_
+            [HP.class_ "ledg-error-code mono"]
+            [text (fromMaybe "the record request failed" (mDetailError m))]
         , H.p_
             [HP.class_ "empty-try"]
             ( H.button_
@@ -1044,9 +1047,7 @@ snapshotCard detail
                 [HP.class_ "snap-row"]
                 [ H.div_
                     [HP.class_ "snap-facts"]
-                    [ snapFact "kind" (ms ("single-file page" :: MisoString))
-                    , snapFact "captured" (ms ("at extraction" :: MisoString))
-                    , snapFact "size" (ms ("not recorded" :: MisoString))
+                    [ snapFact "kind" (snapshotKindLabel detail)
                     ]
                 , H.button_
                     [ HP.class_ "btn snap-open"
@@ -1077,6 +1078,16 @@ hasSnapshot detail =
     stringEq (bdSnapshotKind detail) "file"
         && not (T.null (T.strip (bdSnapshotPath detail)))
 
+{- | The record card reports the stored snapshot kind only; the DTO carries no
+capture timestamp or file size, so the card does not invent one.
+-}
+snapshotKindLabel :: BookmarkDetail -> MisoString
+snapshotKindLabel detail
+    | stringEq (bdSnapshotKind detail) "file" = ms ("single file" :: MisoString)
+    | stringEq (bdSnapshotKind detail) "wayback" = ms ("wayback copy" :: MisoString)
+    | T.null (T.strip (bdSnapshotKind detail)) = ms ("not recorded" :: MisoString)
+    | otherwise = ms (T.strip (bdSnapshotKind detail))
+
 -- ---------------------------------------------------------------- share --
 
 shareSlip :: Model -> BookmarkDetail -> [View () () Model Action]
@@ -1088,6 +1099,9 @@ shareSlip m detail
             [ H.div_
                 [ HP.class_ "dshare-slip"
                 , HP.data_ "testid" "dialog-share"
+                , HP.role_ "dialog"
+                , HP.aria_ "modal" "true"
+                , HP.aria_ "label" "Share this record"
                 , HE.onClickWithOptions stopPropagation Noop
                 ]
                 ( [ H.div_
@@ -1202,6 +1216,8 @@ expiryOption current days =
 
 shareLinksSection :: Model -> BookmarkDetail -> View () () Model Action
 shareLinksSection m detail
+    | Just message <- mSharesError m =
+        H.p_ [HP.class_ "dshare-note"] [text ("existing links could not be read: " <> message)]
     | null activeLinks = H.span_ [] []
     | otherwise =
         H.div_
@@ -1264,6 +1280,9 @@ deleteDialog m detail
             [ H.div_
                 [ HP.class_ "dialog detail-ov"
                 , HP.data_ "testid" "dialog-delete"
+                , HP.role_ "dialog"
+                , HP.aria_ "modal" "true"
+                , HP.aria_ "label" "Delete this record"
                 , HE.onClickWithOptions stopPropagation Noop
                 ]
                 [ H.div_
@@ -1431,6 +1450,9 @@ dialogShell title closeAction bodyViews footViews =
         [ H.div_
             [ HP.class_ "dialog detail-ov"
             , HP.data_ "testid" "dialog"
+            , HP.role_ "dialog"
+            , HP.aria_ "modal" "true"
+            , HP.aria_ "label" title
             , HE.onClickWithOptions stopPropagation Noop
             ]
             [ H.div_
@@ -1456,6 +1478,9 @@ snapshotDialog m detail
             [ H.div_
                 [ HP.class_ "dialog"
                 , C.styleInline_ "width:min(1040px,100%)"
+                , HP.role_ "dialog"
+                , HP.aria_ "modal" "true"
+                , HP.aria_ "label" "Snapshot"
                 , HE.onClickWithOptions stopPropagation Noop
                 ]
                 [ H.div_

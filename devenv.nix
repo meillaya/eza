@@ -63,8 +63,8 @@ in
     test.exec = "cabal test all";
     lint.exec = "fourmolu --mode check core server web && hlint core server web";
     fmt.exec = "fourmolu --mode inplace core server web";
-    e2e.exec = "bun x playwright test";
-    bench.exec = "cabal run eza-bench";
+    e2e.exec = "bash scripts/e2e.sh";
+    bench.exec = "cabal run eza-bookmarks -- bench --iterations 100";
     db-init.exec = "cabal run eza-bookmarks -- init";
     import.exec = "cabal run eza-bookmarks -- import";
     export.exec = "cabal run eza-bookmarks -- export";

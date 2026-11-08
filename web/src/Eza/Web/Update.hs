@@ -4,20 +4,20 @@
 -- | The MVU update function: every action's state transition and side effect.
 module Eza.Web.Update (updateModel, subscriptions) where
 
-import Control.Monad (forM_, unless, void, when)
-import Data.Aeson (Result (..), Value, fromJSON, object, (.=))
+import Control.Monad (unless, void, when)
+import Data.Aeson (Result (..), Value (..), fromJSON, object, (.=))
 import qualified Data.IntSet as IS
 import Data.List (nub)
 import qualified Data.Map.Strict as M
-import Data.Maybe (fromMaybe, isJust, mapMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 
 import Miso
 import qualified Miso.JSON as MJ
+import Miso.Router (toURI)
 
 import Eza.Types (
-    Backlinks (..),
     BookmarkDetail (..),
     BookmarkSummary (..),
     BootPayload (..),
@@ -25,20 +25,15 @@ import Eza.Types (
     ImportReport,
     SavedSearch (..),
     SearchPage (..),
-    TagStat (..),
  )
 import Eza.Web.Api
 import Eza.Web.Model
 import Eza.Web.Types (
     AccountInfo (..),
-    AiStatus (..),
     ApiError (..),
-    ConsolGroup (..),
     DedupGroup (..),
     ReaderSelection (..),
     Rule (..),
-    ShareView (..),
-    TagSuggestion (..),
     TokenView (..),
     fieldInt,
  )
@@ -96,6 +91,57 @@ redirectTo url = do
     _ <- location # "assign" $ (url :: MisoString)
     pure ()
 
+{- | Focus an input after the VDOM patch that creates the dialog has run.
+Focusing in the same update runs before the element exists, which left
+focus on the body behind the palette and the add dialog.
+-}
+focusAfterRender :: MisoString -> IO ()
+focusAfterRender domId = do
+    _ <- jsgf "setTimeout" (asyncCallback (focus domId), 60 :: Int)
+    pure ()
+
+-- | Set the browser tab title from the route.
+setDocumentTitle :: MisoString -> IO ()
+setDocumentTitle title = do
+    document <- jsg ("document" :: MisoString)
+    setField document ("title" :: MisoString) title
+
+documentTitle :: Route -> MisoString
+documentTitle route = case route of
+    Index -> "eza, the catalogue"
+    _ -> routeTitle route <> " · eza"
+
+{- | Read the whole library count again after a write, so the masthead and
+the panels stop showing a pre-write number.
+-}
+refreshStats :: Effect () () Model Action
+refreshStats = fetchStats StatsRefreshed (\_ -> Noop)
+
+-- | Reload the current route: the retry path for panel read errors.
+reloadRoute :: Effect () () Model Action
+reloadRoute = do
+    m <- get
+    loadRoute (mRoute m)
+
+{- | Accept an in-flight detail fetch only while its request epoch is
+current.  Every route change starts a new epoch, so a slow response for
+the record the reader left behind is dropped rather than painted.
+-}
+sameEpoch :: Int -> Effect () () Model Action -> Effect () () Model Action
+sameEpoch epoch action = do
+    m <- get
+    when (mDetailEpoch m == epoch) action
+
+{- | The detail record only counts while its route is open.  Save, delete,
+read and highlight actions arriving after a navigation are dropped.
+-}
+currentDetail :: Model -> Maybe BookmarkDetail
+currentDetail m = case mRoute m of
+    Bookmark bid -> case mDetail m of
+        Just detail | bdId detail == bid -> Just detail
+        _ -> Nothing
+    _ -> Nothing
+
 isHttpUrlText :: MisoString -> Bool
 isHttpUrlText value =
     let lowered = T.toLower (T.strip (fromMisoString value))
@@ -132,6 +178,11 @@ isListRoute = \case
     Inbox -> True
     _ -> False
 
+isSaveRoute :: Route -> Bool
+isSaveRoute = \case
+    Save{} -> True
+    _ -> False
+
 listParams :: Model -> Bool -> ListParams
 listParams m append =
     defaultListParams
@@ -145,7 +196,19 @@ listParams m append =
 reloadList :: Effect () () Model Action
 reloadList = do
     m <- get
-    put m{mLoading = True, mLoadingMore = False, mError = Nothing}
+    put
+        m
+            { mLoading = True
+            , mLoadingMore = False
+            , mError = Nothing
+            , -- a new result set invalidates the old selection
+              mSelection = IS.empty
+            , mSelectAnchor = Nothing
+            , mSelectingAll = False
+            , mConfirmMarkAll = False
+            , mBulkBusy = False
+            , mConfirmBulkDelete = False
+            }
     fetchBookmarks (listParams m False) (ListLoaded False) (ListFailed False)
 
 loadMore :: Effect () () Model Action
@@ -161,20 +224,82 @@ refreshTags = fetchTags TagsRefreshed (\_ -> Noop)
 loadRoute :: Route -> Effect () () Model Action
 loadRoute route = do
     m <- get
+    let enteringNewDetail = case route of
+            Bookmark bookmarkId -> case mRoute m of
+                Bookmark currentId -> currentId /= bookmarkId
+                _ -> True
+            _ -> True
+        keepDetail = isDetailRoute route && not enteringNewDetail
+        epoch = mDetailEpoch m + 1
     put
         m
             { mRoute = route
+            , mDetailEpoch = epoch
             , mLoading = isListRoute route
             , mLoadingMore = False
             , mError = Nothing
             , mNotice = Nothing
-            , mDetail = if isDetailRoute route then mDetail m else Nothing
+            , mStatsError = Nothing
+            , mDetail = if keepDetail then mDetail m else Nothing
+            , mDetailError = if keepDetail then mDetailError m else Nothing
             , mDetailLoading = isDetailRoute route
-            , mDirty = if isDetailRoute route then mDirty m else False
+            , mEditTitle = if keepDetail then mEditTitle m else ""
+            , mEditNote = if keepDetail then mEditNote m else ""
+            , mEditTags = if keepDetail then mEditTags m else []
+            , mNewTag = ""
+            , mNoteMode = NoteWrite
+            , mNoteCursor = 0
+            , mLinkQuery = Nothing
+            , mLinkResults = []
+            , mLinkSel = 0
+            , mBacklinks = if keepDetail then mBacklinks m else []
+            , mHighlights = if keepDetail then mHighlights m else []
+            , mHighlightsLoading = isDetailRoute route
+            , mReaderSel = Nothing
+            , mHighlightNoteOpen = False
+            , mHighlightNote = ""
+            , mHighlightEdit = Nothing
+            , mHighlightEditNote = ""
+            , mHighlightEditColor = "yellow"
+            , mSnapshotOpen = False
+            , mShares = if keepDetail then mShares m else []
+            , mSharesLoading = False
+            , mSharesError = Nothing
+            , mShareDialogOpen = False
+            , mShareIncludeNote = False
+            , mShareExpiryDays = 30
+            , mShareBusy = False
+            , mShareUrl = Nothing
+            , mSaving = False
+            , mDirty = if keepDetail then mDirty m else False
+            , mConfirmDelete = Nothing
+            , mConfirmMarkAll = False
             , mGraphLoading = route == Graph
             , mDedupLoading = route == Dedup
+            , mDedupError = Nothing
             , mConsolLoading = route == Tags
+            , mConsolError = Nothing
             , mAccountLoading = route == Account
+            , mAccountError = Nothing
+            , mSecurityUsername = ""
+            , mSecurityCurrent = ""
+            , mSecurityNew = ""
+            , mSecurityConfirm = ""
+            , mSecurity2faWanted = False
+            , mSecurityBusy = False
+            , mSecurityError = Nothing
+            , mSavedShare = Nothing
+            , mTagDialog = Nothing
+            , mTagDialogInput = ""
+            , mTagDialogBusy = False
+            , mTagDialogError = Nothing
+            , mDedupConfirm = Nothing
+            , mDedupLast = Nothing
+            , mSuggestionNotice = Nothing
+            , mSuggestionError = Nothing
+            , mPruneError = Nothing
+            , mTokensError = Nothing
+            , mRulesError = Nothing
             , mAiTag = if route == AiTags then mAiTag m else Nothing
             , mSuggestions = if route == AiTags then mSuggestions m else []
             , mSelection = IS.empty
@@ -184,23 +309,23 @@ loadRoute route = do
             , mTagPrompt = Nothing
             , mTagPromptValue = ""
             , mConfirmBulkDelete = False
-            , mHighlights = if isDetailRoute route then mHighlights m else []
-            , mHighlightsLoading = isDetailRoute route
-            , mReaderSel = Nothing
-            , mHighlightNoteOpen = False
-            , mHighlightEdit = Nothing
-            , mShareDialogOpen = False
-            , mShareUrl = Nothing
-            , mSnapshotOpen = False
+            , mAddOpen = False
+            , mAddBusy = False
+            , mAddError = Nothing
+            , mAddUrl = if isSaveRoute route then mAddUrl m else ""
+            , mAddTitle = if isSaveRoute route then mAddTitle m else ""
+            , mAddTags = if isSaveRoute route then mAddTags m else ""
+            , mAddNote = if isSaveRoute route then mAddNote m else ""
             }
+    withSink $ \_ -> setDocumentTitle (documentTitle route)
     case route of
         Index -> reloadList
         Inbox -> reloadList
-        Bookmark bid -> do
-            fetchDetail bid DetailLoaded DetailFailed
-            fetchBacklinks bid BacklinksLoaded BacklinksFailed
-            fetchHighlights bid HighlightsLoaded HighlightsFailed
-            fetchShares SharesLoaded SharesFailed
+        Bookmark bookmarkId -> do
+            fetchDetail bookmarkId (DetailLoaded epoch) (DetailFailed epoch)
+            fetchBacklinks bookmarkId (BacklinksLoaded epoch) (BacklinksFailed epoch)
+            fetchHighlights bookmarkId (HighlightsLoaded epoch) (HighlightsFailed epoch)
+            fetchShares (\shares -> SharesLoaded epoch shares) (SharesFailed epoch)
         Graph -> do
             current <- get
             case mGraphSeed current of
@@ -215,14 +340,41 @@ loadRoute route = do
             fetchAiStatus AiStatusLoaded (\_ -> Noop)
         Maintenance -> fetchPruneCandidates PruneLoaded PruneFailed
         Account -> do
-            fetchAccount AccountLoaded AccountFailed
             putModel (\x -> x{mTokensLoading = True, mSharesLoading = True, mRulesLoading = True})
+            fetchAccount AccountLoaded AccountFailed
             fetchTokens TokensLoaded TokensFailed
-            fetchShares SharesLoaded SharesFailed
+            fetchShares (\shares -> SharesLoaded epoch shares) (SharesFailed epoch)
             fetchRules RulesLoaded RulesFailed
         Accessions -> pure ()
-        Save _ _ _ -> pure ()
+        Save sharedTitle sharedText sharedUrl -> do
+            let urlFromShare = case fmap (T.strip) sharedUrl of
+                    Just url | isHttpUrlText (ms (T.unpack url)) -> ms (T.unpack url)
+                    _ -> firstUrlIn sharedText
+                titleFromShare = ms (fromMaybe "" sharedTitle)
+                noteFromShare =
+                    ms
+                        ( fromMaybe "" $
+                            case fmap T.strip sharedText of
+                                Just text
+                                    | T.null text -> Nothing
+                                    | "http://" `T.isPrefixOf` text || "https://" `T.isPrefixOf` text -> Nothing
+                                    | otherwise -> Just text
+                                Nothing -> Nothing
+                        )
+            putModel
+                ( \x ->
+                    x
+                        { mAddUrl = urlFromShare
+                        , mAddTitle = titleFromShare
+                        , mAddTags = ""
+                        , mAddNote = noteFromShare
+                        , mAddError = Nothing
+                        }
+                )
         NotFound -> pure ()
+    when (route == Account) $ withSink $ \sink -> do
+        hash <- readAccountHash
+        sink (AccountTabFromHash hash)
 
 scheduleSearch :: Int -> Effect () () Model Action
 scheduleSearch delayMs = do
@@ -277,6 +429,42 @@ readOrigin = do
     value <- location' ! "origin"
     origin <- fromJSVal value
     pure (fromMaybe "" (origin :: Maybe MisoString))
+
+{- | The fragment of the current URL, used to make the account tabs addressable:
+@/account#sessions@ opens the sessions panel directly.
+-}
+readAccountHash :: IO MisoString
+readAccountHash = do
+    window' <- jsg "window"
+    location' <- window' ! "location"
+    raw <- fromJSVal =<< getProperty location' "hash"
+    pure
+        ( maybe
+            ""
+            (ms . (fromMisoString :: MisoString -> String))
+            (raw :: Maybe MisoString)
+        )
+
+{- | Record the selected account tab in the fragment without a history entry,
+so the back button still leaves the page rather than walking the tabs.
+-}
+setAccountHash :: MisoString -> IO ()
+setAccountHash slug = do
+    window' <- jsg "window"
+    history' <- window' ! "history"
+    location' <- window' ! "location"
+    path <- fromJSVal =<< getProperty location' "pathname"
+    let pathname :: String
+        pathname = case (path :: Maybe MisoString) of
+            Just value
+                | not (T.null (T.strip (fromMisoString value))) ->
+                    fromMisoString value
+            _ -> "/account"
+    stateValue <- toJSVal (Null :: Value)
+    titleValue <- toJSVal ("" :: MisoString)
+    urlValue <- toJSVal (ms (pathname <> "#" <> (fromMisoString slug :: String)))
+    _ <- history' # ("replaceState" :: MisoString) $ (stateValue, titleValue, urlValue)
+    pure ()
 
 readTheme :: IO Theme
 readTheme = do
@@ -363,27 +551,8 @@ updateModel = \case
         m <- get
         case routeResult of
             Left _ -> loadRoute NotFound
-            -- PWA share_target landing page.  A share normally carries a URL, so
-            -- capture it through the idempotent quick-save endpoint; when there is
-            -- no URL, fall back to the pre-filled Add modal.
-            Right (Save title text url) -> do
-                let sharedUrl = maybe (firstUrlIn text) (ms . T.strip) url
-                    sharedTitle = ms (fromMaybe "" title)
-                putModel (\x -> x{mRoute = Index, mAddOpen = False})
-                withSink $ \_ -> pushRoute Index
-                if T.null (T.strip (fromMisoString sharedUrl))
-                    then
-                        putModel
-                            ( \x ->
-                                x
-                                    { mAddOpen = True
-                                    , mAddUrl = ""
-                                    , mAddTitle = sharedTitle
-                                    , mAddTags = ""
-                                    , mAddError = Nothing
-                                    }
-                            )
-                    else quickSave sharedUrl sharedTitle QuickSaved QuickSaveFailed
+            -- The share-target landing page is a real page now: it renders the
+            -- prefilled save form instead of quietly writing a bookmark.
             Right route ->
                 if mDirty m && route /= mRoute m && isDetailRoute (mRoute m)
                     then put m{mGuardOpen = True, mPendingRoute = Just route}
@@ -413,6 +582,7 @@ updateModel = \case
             ToastOk
         reloadList
         refreshTags
+        refreshStats
     QuickSaveFailed err -> handleApiError err
     CopyBookmarklet bookmarklet
         | T.null (T.strip (fromMisoString bookmarklet)) ->
@@ -488,15 +658,31 @@ updateModel = \case
     ApiUnauthorized -> putModel (\m -> m{mSignedOut = True})
     ApiErrorRaised err -> handleApiError err
     TagsRefreshed stats -> putModel (\m -> m{mTags = stats})
+    StatsRefreshed maybeStats -> case maybeStats of
+        Nothing -> putModel (\m -> m{mStatsError = Just "The library figures could not be read."})
+        Just stats -> putModel (\m -> m{mStats = Just stats, mStatsError = Nothing})
+    ReloadRoute -> reloadRoute
     LedgerCursorNext -> moveCursor 1
     LedgerCursorPrev -> moveCursor (-1)
     LedgerCursorSet idx -> setCursor idx
     DrawerOpen bid -> putModel (\m -> m{mDrawer = Just bid})
     DrawerClose -> putModel (\m -> m{mDrawer = Nothing})
-    AccountTabSelected tab -> putModel (\m -> m{mAccountTab = tab})
+    AccountTabSelected tab -> do
+        putModel (\m -> m{mAccountTab = tab})
+        liftSinkIO (setAccountHash (accountTabSlug tab))
+    AccountTabFromHash hash -> putModel (\m -> m{mAccountTab = accountTabFromSlug hash})
     -- library ---------------------------------------------------------------
     SearchInput query -> do
-        putModel (\m -> m{mQ = query})
+        putModel
+            ( \m ->
+                m
+                    { mQ = query
+                    , mSelection = IS.empty
+                    , mSelectAnchor = Nothing
+                    , mSelectingAll = False
+                    , mConfirmMarkAll = False
+                    }
+            )
         scheduleSearch 180
     SearchCommit -> reloadList
     DebouncedSearch -> do
@@ -531,6 +717,10 @@ updateModel = \case
                 , mLoadingMore = False
                 , mOffset = spOffset page + length (spItems page)
                 , mError = Nothing
+                , mConfirmMarkAll = False
+                , mSelection = if append then mSelection m else IS.empty
+                , mSelectAnchor = if append then mSelectAnchor m else Nothing
+                , mSelectingAll = False
                 , mLedgerCursor =
                     case (append, mLedgerCursor m) of
                         (False, _) -> Nothing
@@ -538,15 +728,59 @@ updateModel = \case
                         _ -> Nothing
                 }
     ListFailed _ err -> do
-        putModel (\m -> m{mLoading = False, mLoadingMore = False})
+        putModel
+            ( \m ->
+                m
+                    { mLoading = False
+                    , mLoadingMore = False
+                    , mError = Just (ms (aeMessage err))
+                    , mConfirmMarkAll = False
+                    }
+            )
         handleApiError err
     LoadMore -> loadMore
+    -- The old call sent the first row's id to an id-cutoff endpoint and marked
+    -- rows the reader could not see.  Now the client confirms and sends the
+    -- explicit ids of the loaded, unread records.
     MarkAllAbove -> do
         m <- get
-        let above = case mItems m of
-                (firstItem : _) -> Just (bsId firstItem)
-                [] -> Nothing
-        markAllAbove above (\updated -> ToastAdd (ms ("Marked " <> show updated <> " as read")) ToastOk) (\err -> ToastAdd ("Could not mark as read: " <> ms (aeMessage err)) ToastError)
+        let loadedUnread = [bsId bookmark | bookmark <- mItems m, not (bsIsRead bookmark)]
+        case loadedUnread of
+            [] -> notify "No loaded unread records to mark read." ToastInfo
+            ids
+                | not (mConfirmMarkAll m) -> do
+                    putModel (\x -> x{mConfirmMarkAll = True})
+                    notify
+                        ( ms
+                            ( "Mark "
+                                <> show (length ids)
+                                <> " loaded unread record"
+                                <> (if length ids == 1 then "" else "s")
+                                <> " read? Click again to confirm."
+                            )
+                        )
+                        ToastInfo
+                | otherwise -> do
+                    putModel (\x -> x{mConfirmMarkAll = False, mBulkBusy = True})
+                    bulkUpdate (BulkMarkRead True) ids MarkAllDone MarkAllFailed
+    MarkAllDone updated -> do
+        putModel (\m -> m{mBulkBusy = False, mConfirmMarkAll = False})
+        notify
+            ( ms
+                ( "Marked "
+                    <> show updated
+                    <> " record"
+                    <> (if updated == 1 then "" else "s")
+                    <> " as read"
+                )
+            )
+            ToastOk
+        reloadList
+        refreshTags
+        refreshStats
+    MarkAllFailed err -> do
+        putModel (\m -> m{mBulkBusy = False, mConfirmMarkAll = False})
+        handleApiError err
     SavedSearchApply saved -> do
         putModel
             ( \m ->
@@ -560,30 +794,52 @@ updateModel = \case
     -- add modal -------------------------------------------------------------
     AddOpen -> do
         putModel (\m -> m{mAddOpen = True, mAddError = Nothing})
-        liftSinkIO (focus "add-url")
+        liftSinkIO (focusAfterRender "add-url")
     AddClose -> putModel (\m -> m{mAddOpen = False, mAddError = Nothing})
     AddUrlInput url -> putModel (\m -> m{mAddUrl = url})
     AddTitleInput title -> putModel (\m -> m{mAddTitle = title})
     AddTagsInput tags -> putModel (\m -> m{mAddTags = tags})
+    AddNoteInput note -> putModel (\m -> m{mAddNote = note})
     AddSubmit -> do
         m <- get
-        if not (isHttpUrlText (mAddUrl m))
-            then putModel (\x -> x{mAddError = Just "Enter a valid http(s) URL."})
-            else do
-                putModel (\x -> x{mAddBusy = True, mAddError = Nothing})
-                createBookmark (mAddUrl m) (mAddTitle m) (splitTags (mAddTags m)) AddSucceeded AddFailed
+        if mAddBusy m
+            then pure ()
+            else
+                if not (isHttpUrlText (mAddUrl m))
+                    then putModel (\x -> x{mAddError = Just "Enter a valid http(s) URL."})
+                    else do
+                        putModel (\x -> x{mAddBusy = True, mAddError = Nothing})
+                        createBookmark
+                            (mAddUrl m)
+                            (mAddTitle m)
+                            (splitTags (mAddTags m))
+                            AddSucceeded
+                            AddFailed
     AddSucceeded bookmarkId -> do
-        putModel (\m -> m{mAddOpen = False, mAddBusy = False, mAddUrl = "", mAddTitle = "", mAddTags = "", mAddError = Nothing})
-        notify (ms ("Saved bookmark #" <> show bookmarkId)) ToastOk
-        reloadList
-        refreshTags
+        m <- get
+        if T.null (T.strip (fromMisoString (mAddNote m)))
+            then finalizeAdd bookmarkId
+            else
+                -- The create endpoint has no note field, so a note is attached
+                -- with the same PATCH the record editor uses.
+                patchBookmark
+                    bookmarkId
+                    (object ["note_body" .= mAddNote m])
+                    (AddNoteSaved bookmarkId)
+                    (AddNoteFailed bookmarkId)
+    AddNoteSaved bookmarkId -> finalizeAdd bookmarkId
+    AddNoteFailed bookmarkId _ -> do
+        notify
+            "The record was filed, but the note could not be attached. Open the record to add it."
+            ToastError
+        finalizeAdd bookmarkId
     AddFailed err -> do
         putModel (\m -> m{mAddBusy = False, mAddError = Just (ms (aeMessage err))})
         handleApiError err
     -- command palette -------------------------------------------------------
     PaletteOpen -> do
         putModel (\m -> m{mPaletteOpen = True, mPaletteQ = "", mPaletteSel = 0})
-        liftSinkIO (focus "palette-input")
+        liftSinkIO (focusAfterRender "palette-input")
     PaletteClose -> putModel (\m -> m{mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})
     PaletteInput query -> putModel (\m -> m{mPaletteQ = query, mPaletteSel = 0})
     PalettePrev -> do
@@ -597,23 +853,29 @@ updateModel = \case
     PaletteSelect -> choosePalette 0
     PaletteChoose offsetFromSelection -> choosePalette offsetFromSelection
     -- detail ----------------------------------------------------------------
-    DetailLoaded detail -> do
-        putModel
-            ( \m ->
-                m
-                    { mDetail = Just detail
-                    , mDetailLoading = False
-                    , mEditTitle = ms (bdTitle detail)
-                    , mEditNote = ms (bdNoteBody detail)
-                    , mEditTags = bdTags detail
-                    , mDirty = False
-                    , mNoteMode = NoteWrite
-                    , mLinkQuery = Nothing
-                    , mLinkResults = []
-                    }
-            )
-    DetailFailed err -> do
-        putModel (\m -> m{mDetailLoading = False})
+    DetailLoaded epoch detail -> sameEpoch epoch $ do
+        m <- get
+        case mRoute m of
+            Bookmark bookmarkId | bookmarkId /= bdId detail -> pure ()
+            Bookmark _ ->
+                putModel
+                    ( \x ->
+                        x
+                            { mDetail = Just detail
+                            , mDetailLoading = False
+                            , mDetailError = Nothing
+                            , mEditTitle = ms (bdTitle detail)
+                            , mEditNote = ms (bdNoteBody detail)
+                            , mEditTags = bdTags detail
+                            , mDirty = False
+                            , mNoteMode = NoteWrite
+                            , mLinkQuery = Nothing
+                            , mLinkResults = []
+                            }
+                    )
+            _ -> pure ()
+    DetailFailed epoch err -> sameEpoch epoch $ do
+        putModel (\m -> m{mDetailLoading = False, mDetail = Nothing, mDetailError = Just (ms (aeMessage err))})
         handleApiError err
     TitleInput title -> putModel (\m -> m{mEditTitle = title, mDirty = True})
     NoteChanged text domRef -> do
@@ -650,7 +912,7 @@ updateModel = \case
     TagRemove tag -> putModel (\m -> m{mEditTags = filter (/= tag) (mEditTags m), mDirty = True})
     SaveBookmark -> do
         m <- get
-        case mDetail m of
+        case currentDetail m of
             Nothing -> pure ()
             Just detail -> do
                 putModel (\x -> x{mSaving = True})
@@ -668,20 +930,45 @@ updateModel = \case
     SavedOk -> do
         putModel (\m -> m{mSaving = False, mDirty = False})
         notify "Saved" ToastOk
+        refreshStats
     SaveFailed err -> do
         putModel (\m -> m{mSaving = False})
         handleApiError err
+    -- A read toggle is its own patch: it must not clear the unsaved note and
+    -- it must not claim the note was saved.
     ReadToggled -> do
         m <- get
-        case mDetail m of
+        case currentDetail m of
             Nothing -> pure ()
             Just detail -> do
                 let nextRead = not (bdIsRead detail)
                 putModel (\x -> x{mDetail = Just detail{bdIsRead = nextRead}})
-                patchBookmark (bdId detail) (object ["is_read" .= nextRead]) SavedOk SaveFailed
+                patchBookmark
+                    (bdId detail)
+                    (object ["is_read" .= nextRead])
+                    (ReadPatched nextRead)
+                    (ReadPatchFailed nextRead)
+    ReadPatched readFlag -> do
+        m <- get
+        case currentDetail m of
+            Nothing -> pure ()
+            Just detail -> putModel (\x -> x{mDetail = Just detail{bdIsRead = readFlag}})
+        refreshStats
+    ReadPatchFailed readFlag err -> do
+        m <- get
+        case currentDetail m of
+            Just detail
+                | bdIsRead detail == readFlag ->
+                    putModel (\x -> x{mDetail = Just detail{bdIsRead = not readFlag}})
+            _ -> pure ()
+        handleApiError err
     OpenToggled -> pure ()
-    BacklinksLoaded links -> putModel (\m -> m{mBacklinks = links})
-    BacklinksFailed _ -> pure ()
+    BacklinksLoaded epoch links -> sameEpoch epoch $ do
+        m <- get
+        case mRoute m of
+            Bookmark _ -> putModel (\x -> x{mBacklinks = links})
+            _ -> pure ()
+    BacklinksFailed epoch err -> sameEpoch epoch (handleApiError err)
     LinkPrev -> putModel (\m -> m{mLinkSel = max 0 (mLinkSel m - 1)})
     LinkNext -> do
         m <- get
@@ -706,18 +993,30 @@ updateModel = \case
                 liftSinkIO (setSelectionRange "note-editor" newCursor newCursor)
     LinkSuggestions suggestions -> putModel (\m -> m{mLinkResults = suggestions, mLinkSel = 0})
     RunBookmarkAction bookmarkId verb -> bookmarkAction bookmarkId verb (ToastAdd (ms (T.toTitle verb <> " queued")) ToastOk) (\err -> ApiErrorRaised err)
-    DeleteBookmarkRequest bookmarkId -> putModel (\m -> m{mConfirmDelete = Just bookmarkId})
+    DeleteBookmarkRequest bookmarkId -> do
+        m <- get
+        case currentDetail m of
+            Just detail | bdId detail == bookmarkId -> putModel (\x -> x{mConfirmDelete = Just bookmarkId})
+            _ -> pure ()
     DeleteBookmarkCancel -> putModel (\m -> m{mConfirmDelete = Nothing})
     DeleteBookmarkConfirm -> do
         m <- get
         putModel (\x -> x{mConfirmDelete = Nothing})
-        case mConfirmDelete m of
-            Nothing -> pure ()
-            Just bookmarkId -> deleteBookmark bookmarkId (DeletedOk bookmarkId) DeleteFailed
-    DeleteBookmark bookmarkId -> deleteBookmark bookmarkId (DeletedOk bookmarkId) DeleteFailed
+        case (mConfirmDelete m, currentDetail m) of
+            (Just bookmarkId, Just detail) | bdId detail == bookmarkId -> do
+                putModel (\x -> x{mDetail = Nothing, mDetailLoading = False})
+                deleteBookmark bookmarkId (DeletedOk bookmarkId) DeleteFailed
+            _ -> pure ()
+    DeleteBookmark bookmarkId -> do
+        m <- get
+        case currentDetail m of
+            Just detail | bdId detail == bookmarkId -> deleteBookmark bookmarkId (DeletedOk bookmarkId) DeleteFailed
+            _ -> pure ()
     DeletedOk bookmarkId -> do
         m <- get
         notify "Bookmark deleted" ToastOk
+        refreshTags
+        refreshStats
         case mRoute m of
             Bookmark currentId | currentId == bookmarkId -> withSink $ \_ -> pushRoute Index
             _ -> reloadList
@@ -756,14 +1055,20 @@ updateModel = \case
             ToastOk
         reloadList
         refreshTags
+        refreshStats
     ImportFailed err -> do
         putModel (\m -> m{mImporting = False})
         handleApiError err
     -- saved searches --------------------------------------------------------
     SavedSearchSave -> do
         m <- get
-        let name = if T.null (T.strip (fromMisoString (mSavedName m))) then mQ m else mSavedName m
-        saveSavedSearch name (mQ m) (mTagsFilter m) (\_ -> SavedSearchDone) SavedSearchFailed
+        let queryText = T.strip (fromMisoString (mQ m))
+            explicitName = T.strip (fromMisoString (mSavedName m))
+        if T.null queryText && null (mTagsFilter m)
+            then notify "Type a search or choose a tag before saving it" ToastInfo
+            else do
+                let name = if T.null explicitName then mQ m else mSavedName m
+                saveSavedSearch name (mQ m) (mTagsFilter m) (\_ -> SavedSearchDone) SavedSearchFailed
     SavedSearchNameInput name -> putModel (\m -> m{mSavedName = name})
     SavedSearchDelete savedSearchId -> deleteSavedSearch savedSearchId SavedSearchDone SavedSearchFailed
     SavedSearchDone -> do
@@ -772,6 +1077,34 @@ updateModel = \case
         fetchSavedSearches SavedSearchesLoaded (\_ -> Noop)
     SavedSearchFailed err -> handleApiError err
     SavedSearchesLoaded saved -> putModel (\m -> m{mSaved = saved})
+    SavedSearchShareOpen saved -> do
+        m <- get
+        let epoch = mDetailEpoch m
+        putModel
+            ( \x ->
+                x
+                    { mSavedShare = Just saved
+                    , mShareUrl = Nothing
+                    , mShareBusy = False
+                    , mSharesLoading = True
+                    , mSharesError = Nothing
+                    }
+            )
+        fetchShares (\shares -> SharesLoaded epoch shares) (SharesFailed epoch)
+    SavedSearchShareClose -> putModel (\m -> m{mSavedShare = Nothing, mShareUrl = Nothing})
+    SavedSearchShareCreate -> do
+        m <- get
+        case mSavedShare m of
+            Nothing -> pure ()
+            Just saved -> do
+                putModel (\x -> x{mShareBusy = True})
+                createShareLink
+                    "saved_search"
+                    (ssId saved)
+                    False
+                    (mShareExpiryDays m)
+                    ShareCreated
+                    ShareCreateFailed
     -- graph ----------------------------------------------------------------
     GraphLoaded graph -> putModel (\m -> m{mGraph = Just graph, mGraphLoading = False})
     GraphFailed err -> do
@@ -809,64 +1142,212 @@ updateModel = \case
                 putModel (\x -> x{mGraphLoading = True})
                 fetchGraph (mGraphSeed m) (mGraphDepth m) GraphLoaded GraphFailed
     -- dedup ----------------------------------------------------------------
-    DedupLoaded groups -> putModel (\m -> m{mDedup = groups, mDedupLoading = False, mDedupChoice = initialChoices groups})
+    DedupLoaded groups ->
+        putModel
+            ( \m ->
+                m
+                    { mDedup = groups
+                    , mDedupLoading = False
+                    , mDedupError = Nothing
+                    , mDedupChoice = initialChoices groups
+                    }
+            )
     DedupFailed err -> do
-        putModel (\m -> m{mDedupLoading = False})
+        putModel (\m -> m{mDedupLoading = False, mDedupError = Just (ms (aeMessage err))})
         handleApiError err
     DedupKeep groupIndex bookmarkId -> putModel (\m -> m{mDedupChoice = M.insert groupIndex bookmarkId (mDedupChoice m)})
     DedupMerge groupIndex -> do
         m <- get
         case drop groupIndex (mDedup m) of
-            (group : _) -> case dgItems group of
-                [] -> pure ()
-                (firstItem : rest) -> do
-                    let keep = fromMaybe (bsId firstItem) (M.lookup groupIndex (mDedupChoice m))
-                        mergeIds = [bsId item | item <- rest, bsId item /= keep]
-                    if null mergeIds
-                        then notify "Nothing to merge in this group" ToastInfo
-                        else mergeDedup keep mergeIds (\merged -> DedupMerged merged) DedupFailed
-            [] -> pure ()
-    DedupMerged merged -> do
-        notify (ms ("Merged " <> show merged <> " duplicate(s)")) ToastOk
+            (group : _) | not (null (dgItems group)) -> putModel (\x -> x{mDedupConfirm = Just groupIndex})
+            _ -> notify "Nothing to merge in this group" ToastInfo
+    DedupMergeCancel -> putModel (\m -> m{mDedupConfirm = Nothing})
+    DedupRefresh -> do
+        putModel (\m -> m{mDedupLoading = True, mDedupError = Nothing})
         fetchDedup DedupLoaded DedupFailed
+    DedupMergeConfirm -> do
+        m <- get
+        case mDedupConfirm m of
+            Nothing -> pure ()
+            Just groupIndex -> case drop groupIndex (mDedup m) of
+                (group : _) -> case dgItems group of
+                    [] -> putModel (\x -> x{mDedupConfirm = Nothing})
+                    (firstItem : rest) -> do
+                        let keep = fromMaybe (bsId firstItem) (M.lookup groupIndex (mDedupChoice m))
+                            mergeIds = [bsId item | item <- rest, bsId item /= keep]
+                        if null mergeIds
+                            then do
+                                putModel (\x -> x{mDedupConfirm = Nothing})
+                                notify "Nothing to merge in this group" ToastInfo
+                            else mergeDedup keep mergeIds (DedupMerged keep) DedupFailed
+                [] -> putModel (\x -> x{mDedupConfirm = Nothing})
+    DedupMerged merged keeper -> do
+        putModel (\m -> m{mDedupConfirm = Nothing, mDedupLast = Just (merged, keeper)})
+        notify
+            ( ms
+                ( "Merged "
+                    <> show merged
+                    <> (if merged == 1 then " duplicate record into " else " duplicate records into ")
+                    <> fromMisoString (accessionLabel keeper)
+                )
+            )
+            ToastOk
+        fetchDedup DedupLoaded DedupFailed
+        refreshStats
     -- tags -----------------------------------------------------------------
     TagStatsLoaded stats -> putModel (\m -> m{mTags = stats})
-    ConsolLoaded groups -> putModel (\m -> m{mConsol = groups, mConsolLoading = False})
+    ConsolLoaded groups ->
+        putModel (\m -> m{mConsol = groups, mConsolLoading = False, mConsolError = Nothing})
     ConsolFailed err -> do
-        putModel (\m -> m{mConsolLoading = False})
+        putModel (\m -> m{mConsolLoading = False, mConsolError = Just (ms (aeMessage err))})
         handleApiError err
     TagMerge from into -> mergeTags from into TagMerged TagOpFailed
     TagRenamed old newName -> renameTag old (fromMisoString newName) TagMerged TagOpFailed
     TagDeleted tag -> deleteTag tag TagMerged TagOpFailed
+    TagDialogOpen dialog -> do
+        let draft = case dialog of
+                TagRenameDialog tag -> ms tag
+                _ -> ""
+        putModel
+            ( \m ->
+                m
+                    { mTagDialog = Just dialog
+                    , mTagDialogInput = draft
+                    , mTagDialogBusy = False
+                    , mTagDialogError = Nothing
+                    }
+            )
+        case dialog of
+            TagRenameDialog _ -> liftSinkIO (focusAfterRender "tag-rename-input")
+            _ -> pure ()
+    TagDialogInput value -> putModel (\m -> m{mTagDialogInput = value})
+    TagDialogDetach -> do
+        m <- get
+        case mTagDialog m of
+            Just (TagDeleteDialog tag) -> do
+                putModel (\x -> x{mTagDialogBusy = True, mTagDialogError = Nothing})
+                detachTag tag TagMerged TagOpFailed
+            _ -> pure ()
+    TagDialogConfirm -> do
+        m <- get
+        case mTagDialog m of
+            Nothing -> pure ()
+            Just (TagRenameDialog old) -> do
+                let wanted = T.strip (fromMisoString (mTagDialogInput m))
+                if T.null wanted
+                    then putModel (\x -> x{mTagDialogError = Just "Enter a name for the tag."})
+                    else
+                        if wanted == old
+                            then putModel (\x -> x{mTagDialogError = Just "That is already this tag's name."})
+                            else do
+                                putModel (\x -> x{mTagDialogBusy = True, mTagDialogError = Nothing})
+                                updateModel (TagRenamed old (ms wanted))
+            Just (TagDeleteDialog tag) -> do
+                putModel (\x -> x{mTagDialogBusy = True, mTagDialogError = Nothing})
+                updateModel (TagDeleted tag)
+            Just (TagMergeDialog from into) -> do
+                putModel (\x -> x{mTagDialogBusy = True, mTagDialogError = Nothing})
+                updateModel (TagMerge from into)
+    TagDialogClose ->
+        putModel
+            ( \m ->
+                m
+                    { mTagDialog = Nothing
+                    , mTagDialogInput = ""
+                    , mTagDialogBusy = False
+                    , mTagDialogError = Nothing
+                    }
+            )
     FilterByTag tag -> do
         putModel (\m -> m{mTagsFilter = [tag]})
         updateModel (Navigate Index)
     TagMerged -> do
+        putModel
+            ( \m ->
+                m
+                    { mTagDialog = Nothing
+                    , mTagDialogInput = ""
+                    , mTagDialogBusy = False
+                    , mTagDialogError = Nothing
+                    }
+            )
         notify "Tag vocabulary updated" ToastOk
         fetchConsolidation ConsolLoaded ConsolFailed
         refreshTags
+        refreshStats
         reloadList
-    TagOpFailed err -> handleApiError err
+    TagOpFailed err -> do
+        putModel (\m -> m{mTagDialogBusy = False, mTagDialogError = Just (ms (aeMessage err))})
+        when (aeStatus err == Just 401) (handleApiError err)
     -- ai tags ---------------------------------------------------------------
     AiTagSelected tag -> do
-        putModel (\m -> m{mAiTag = tag, mSuggestions = [], mSuggestionsLoading = isJust tag})
+        putModel
+            ( \m ->
+                m
+                    { mAiTag = tag
+                    , mSuggestions = []
+                    , mSuggestionsLoading = isJust tag
+                    , mSuggestionNotice = Nothing
+                    , mSuggestionError = Nothing
+                    }
+            )
         case tag of
             Nothing -> pure ()
             Just selected -> fetchSuggestions selected SuggestionsLoaded SuggestionsFailed
-    SuggestionsLoaded suggestions -> putModel (\m -> m{mSuggestions = suggestions, mSuggestionsLoading = False})
+    SuggestionsLoaded configured suggestions notice ->
+        putModel
+            ( \m ->
+                m
+                    { mSuggestions = suggestions
+                    , mSuggestionsLoading = False
+                    , mSuggestionError = Nothing
+                    , mSuggestionNotice = fmap ms notice
+                    }
+            )
     SuggestionsFailed err -> do
-        putModel (\m -> m{mSuggestionsLoading = False})
-        handleApiError err
+        putModel (\m -> m{mSuggestionsLoading = False, mSuggestionError = Just (ms (aeMessage err))})
+        when (aeStatus err == Just 401) (handleApiError err)
+    AiStatusReload -> fetchAiStatus AiStatusLoaded AiStatusFailed
+    AiSuggestRetry -> do
+        m <- get
+        case mAiTag m of
+            Nothing -> pure ()
+            Just tag -> do
+                putModel (\x -> x{mSuggestionsLoading = True, mSuggestionError = Nothing, mSuggestionNotice = Nothing})
+                fetchSuggestions tag SuggestionsLoaded SuggestionsFailed
+    AiSuggestDiscard ->
+        putModel
+            ( \m ->
+                m
+                    { mSuggestions = []
+                    , mSuggestionsLoading = False
+                    , mSuggestionNotice = Nothing
+                    , mSuggestionError = Nothing
+                    }
+            )
     SuggestionApply bookmarkId tags -> applyTagSuggestion bookmarkId tags SuggestionsApplied SuggestionsFailed
     SuggestionsApplied -> do
         notify "Tags applied" ToastOk
+        refreshTags
+        refreshStats
         m <- get
         case mAiTag m of
             Nothing -> pure ()
             Just tag -> fetchSuggestions tag SuggestionsLoaded SuggestionsFailed
     -- maintenance ----------------------------------------------------------
-    PruneLoaded items -> putModel (\m -> m{mPrune = items, mPruneSel = [], mConfirmPrune = False})
-    PruneFailed err -> handleApiError err
+    PruneLoaded items ->
+        putModel
+            ( \m ->
+                m
+                    { mPrune = items
+                    , mPruneSel = []
+                    , mConfirmPrune = False
+                    , mPruneError = Nothing
+                    }
+            )
+    PruneFailed err -> do
+        putModel (\m -> m{mPruneError = Just (ms (aeMessage err))})
+        handleApiError err
     PruneToggle bookmarkId -> putModel (\m -> m{mPruneSel = toggleMember bookmarkId (mPruneSel m)})
     PruneAll -> do
         m <- get
@@ -890,6 +1371,7 @@ updateModel = \case
         notify (ms ("Pruned " <> show pruned <> " bookmark(s). Undo is available")) ToastOk
         fetchPruneCandidates PruneLoaded PruneFailed
         refreshTags
+        refreshStats
     DeadCheckRun -> do
         putModel (\m -> m{mMaintBusy = True})
         checkDead
@@ -899,14 +1381,17 @@ updateModel = \case
         putModel (\m -> m{mMaintBusy = False, mCheckedCount = Just checked, mDeadCount = Just dead})
         notify (ms ("Checked " <> show checked <> " links, " <> show dead <> " dead")) ToastOk
         reloadList
+        refreshStats
     UndoRun -> do
         putModel (\m -> m{mMaintBusy = True})
         runUndo UndoDone MaintFailed
     UndoDone restored -> do
-        putModel (\m -> m{mMaintBusy = False})
+        putModel (\m -> m{mMaintBusy = False, mDedupLast = Nothing})
         notify (ms ("Restored " <> show restored <> " bookmark(s)")) ToastOk
         fetchPruneCandidates PruneLoaded PruneFailed
+        fetchDedup DedupLoaded DedupFailed
         reloadList
+        refreshStats
     MaintFailed err -> do
         putModel (\m -> m{mMaintBusy = False})
         handleApiError err
@@ -917,11 +1402,17 @@ updateModel = \case
                 m
                     { mAccount = Just info
                     , mAccountLoading = False
+                    , mAccountError = Nothing
                     , mSessions = aiSessions info
+                    , mSecurityUsername =
+                        if T.null (T.strip (fromMisoString (mSecurityUsername m)))
+                            then ms (aiUsername info)
+                            else mSecurityUsername m
+                    , mSecurity2faWanted = aiRequirePasskey info
                     }
             )
     AccountFailed err -> do
-        putModel (\m -> m{mAccountLoading = False})
+        putModel (\m -> m{mAccountLoading = False, mAccountError = Just (ms (aeMessage err))})
         handleApiError err
     RecoveryRegenerate -> regenerateRecovery RecoveryLoaded AccountFailed
     RecoveryLoaded codes -> do
@@ -944,6 +1435,111 @@ updateModel = \case
                 putModel (\x -> x{mCredEdit = Nothing})
                 renameCredential credentialId (fromMisoString nickname) AccountReload CredentialOpFailed
     CredentialEditCancel -> putModel (\m -> m{mCredEdit = Nothing})
+    SecurityUsernameInput value -> putModel (\m -> m{mSecurityUsername = value, mSecurityError = Nothing})
+    SecurityCurrentPasswordInput value -> putModel (\m -> m{mSecurityCurrent = value, mSecurityError = Nothing})
+    SecurityNewPasswordInput value -> putModel (\m -> m{mSecurityNew = value, mSecurityError = Nothing})
+    SecurityConfirmPasswordInput value -> putModel (\m -> m{mSecurityConfirm = value, mSecurityError = Nothing})
+    Security2faWantedToggled wanted ->
+        putModel (\m -> m{mSecurity2faWanted = wanted, mSecurityError = Nothing})
+    SecurityUsernameSave -> do
+        m <- get
+        case mAccount m of
+            Nothing -> setSecurityError "The account has not loaded yet."
+            Just account ->
+                let wanted = T.strip (fromMisoString (mSecurityUsername m))
+                    current = fromMisoString (mSecurityCurrent m)
+                 in if T.null wanted
+                        then setSecurityError "Enter the username."
+                        else
+                            if aiHasPassword account && T.null (T.strip current)
+                                then setSecurityError "Enter the current password to rename the account."
+                                else do
+                                    putModel (\x -> x{mSecurityBusy = True, mSecurityError = Nothing})
+                                    patchUsername
+                                        (if aiHasPassword account then Just current else Nothing)
+                                        wanted
+                                        (SecuritySaved "Username saved")
+                                        SecurityFailed
+    SecurityPasswordSave -> do
+        m <- get
+        case mAccount m of
+            Nothing -> setSecurityError "The account has not loaded yet."
+            Just account ->
+                let current = fromMisoString (mSecurityCurrent m)
+                    wanted = fromMisoString (mSecurityNew m)
+                    repeated = fromMisoString (mSecurityConfirm m)
+                 in if T.length wanted < 10
+                        then setSecurityError "The new password must be at least ten characters."
+                        else
+                            if wanted /= repeated
+                                then setSecurityError "The two new passwords do not match."
+                                else
+                                    if aiHasPassword account && T.null current
+                                        then setSecurityError "Enter the current password."
+                                        else do
+                                            putModel (\x -> x{mSecurityBusy = True, mSecurityError = Nothing})
+                                            changePassword
+                                                (if aiHasPassword account then Just current else Nothing)
+                                                wanted
+                                                repeated
+                                                (SecuritySaved "Password changed")
+                                                SecurityFailed
+    Security2faSave -> do
+        m <- get
+        case mAccount m of
+            Nothing -> setSecurityError "The account has not loaded yet."
+            Just account
+                | aiRequirePasskey account == mSecurity2faWanted m ->
+                    setSecurityError "The passkey requirement is already in that state."
+                | mSecurity2faWanted m && null (aiCredentials account) ->
+                    setSecurityError "Add a passkey before requiring one for sign-in."
+                | aiHasPassword account
+                , T.null (T.strip (fromMisoString (mSecurityCurrent m))) ->
+                    setSecurityError "Enter the current password."
+                | otherwise -> do
+                    putModel (\x -> x{mSecurityBusy = True, mSecurityError = Nothing})
+                    setPasskeyRequirement
+                        (mSecurity2faWanted m)
+                        ( if aiHasPassword account
+                            then Just (fromMisoString (mSecurityCurrent m))
+                            else Nothing
+                        )
+                        (SecuritySaved "Sign-in requirement saved")
+                        SecurityFailed
+    SecuritySaved message -> do
+        putModel
+            ( \m ->
+                m
+                    { mSecurityBusy = False
+                    , mSecurityCurrent = ""
+                    , mSecurityNew = ""
+                    , mSecurityConfirm = ""
+                    , mSecurityUsername = ""
+                    , mSecurityError = Nothing
+                    }
+            )
+        notify message ToastOk
+        fetchAccount AccountLoaded AccountFailed
+    SecurityFailed err -> do
+        putModel (\m -> m{mSecurityBusy = False, mSecurityError = Just (ms (aeMessage err))})
+        when (aeStatus err == Just 401) (handleApiError err)
+    SessionsRevokeOthers -> do
+        putModel (\m -> m{mAccountLoading = True})
+        revokeOtherSessions SessionsRevoked SessionsRevokeFailed
+    SessionsRevoked revoked -> do
+        putModel (\m -> m{mAccountLoading = False})
+        notify
+            ( ms
+                ( "Revoked "
+                    <> show revoked
+                    <> (if revoked == 1 then " other session" else " other sessions")
+                )
+            )
+            ToastOk
+        fetchAccount AccountLoaded AccountFailed
+    SessionsRevokeFailed err -> do
+        putModel (\m -> m{mAccountLoading = False})
+        handleApiError err
     AccountReload -> fetchAccount AccountLoaded AccountFailed
     Logout -> logout LoggedOut (\err -> ApiErrorRaised err)
     LoggedOut -> liftSinkIO (redirectTo "/login")
@@ -951,16 +1547,16 @@ updateModel = \case
     SelectToggled bookmarkId shift -> do
         m <- get
         let current = mSelection m
-            ids = map bsId (mItems m)
-            indexOf target = case [i | (i, item) <- zip [0 ..] (mItems m), bsId item == target] of
+            indexOf :: Int -> Maybe Int
+            indexOf target = case [i | (i, item) <- zip [0 :: Int ..] (mItems m), bsId item == target] of
                 (i : _) -> Just i
                 [] -> Nothing
         case (shift, mSelectAnchor m >>= \anchor -> (,) anchor <$> indexOf anchor) of
-            (True, Just (anchor, anchorIndex)) ->
+            (True, Just (_anchor, anchorIndex)) ->
                 case indexOf bookmarkId of
                     Just currentIndex -> do
                         let (from, to) = (min anchorIndex currentIndex, max anchorIndex currentIndex)
-                            rangeIds = [bsId item | (i, item) <- zip [0 ..] (mItems m), i >= from, i <= to]
+                            rangeIds = [bsId item | (i, item) <- zip [0 :: Int ..] (mItems m), i >= from, i <= to]
                         putModel (\x -> x{mSelection = IS.union current (IS.fromList rangeIds)})
                     Nothing -> pure ()
             _ ->
@@ -1006,7 +1602,9 @@ updateModel = \case
     SelectPageFailed err -> do
         putModel (\m -> m{mSelectingAll = False})
         handleApiError err
-    BulkTagPromptOpen adding -> putModel (\m -> m{mTagPrompt = Just adding, mTagPromptValue = ""})
+    BulkTagPromptOpen adding -> do
+        putModel (\m -> m{mTagPrompt = Just adding, mTagPromptValue = ""})
+        liftSinkIO (focusAfterRender "bulk-tag-input")
     BulkTagInput value -> putModel (\m -> m{mTagPromptValue = value})
     BulkTagCancel -> putModel (\m -> m{mTagPrompt = Nothing, mTagPromptValue = ""})
     BulkTagSubmit -> do
@@ -1060,6 +1658,7 @@ updateModel = \case
         notify (ms ("Updated " <> show updated <> " bookmarks")) ToastOk
         reloadList
         refreshTags
+        refreshStats
     BulkActionFailed err -> do
         putModel (\m -> m{mBulkBusy = False})
         handleApiError err
@@ -1071,12 +1670,13 @@ updateModel = \case
                         fmap (\detail -> detail{bdEnrichState = "queued", bdEnrichError = ""}) (mDetail m)
                     }
             )
-        bookmarkAction bookmarkId "enrich" (DetailReload bookmarkId) DetailFailed
-    DetailReload bookmarkId -> fetchDetail bookmarkId DetailLoaded DetailFailed
+        bookmarkAction bookmarkId "enrich" (DetailReload bookmarkId) (\err -> ApiErrorRaised err)
+    DetailReload bookmarkId -> reloadDetail bookmarkId
     -- api tokens -----------------------------------------------------------
-    TokensLoaded tokens -> putModel (\m -> m{mTokens = tokens, mTokensLoading = False})
+    TokensLoaded tokens ->
+        putModel (\m -> m{mTokens = tokens, mTokensLoading = False, mTokensError = Nothing})
     TokensFailed err -> do
-        putModel (\m -> m{mTokensLoading = False})
+        putModel (\m -> m{mTokensLoading = False, mTokensError = Just (ms (aeMessage err))})
         handleApiError err
     TokenNameInput value -> putModel (\m -> m{mTokenName = value})
     TokenScopeToggled scope ->
@@ -1128,8 +1728,12 @@ updateModel = \case
                 (if copied then ToastOk else ToastError)
             )
     -- highlights -----------------------------------------------------------
-    HighlightsLoaded highlights -> putModel (\m -> m{mHighlights = highlights, mHighlightsLoading = False})
-    HighlightsFailed err -> do
+    HighlightsLoaded epoch highlights -> sameEpoch epoch $ do
+        m <- get
+        case mRoute m of
+            Bookmark _ -> putModel (\x -> x{mHighlights = highlights, mHighlightsLoading = False})
+            _ -> pure ()
+    HighlightsFailed epoch err -> sameEpoch epoch $ do
         putModel (\m -> m{mHighlightsLoading = False})
         handleApiError err
     ReaderMouseUp -> withSink $ \sink -> do
@@ -1145,7 +1749,7 @@ updateModel = \case
     ReaderSelectionClear -> putModel (\m -> m{mReaderSel = Nothing})
     HighlightCreateQuick -> do
         m <- get
-        case (mDetail m, mReaderSel m) of
+        case (currentDetail m, mReaderSel m) of
             (Just detail, Just selection) ->
                 createHighlight
                     (bdId detail)
@@ -1164,7 +1768,7 @@ updateModel = \case
     HighlightNoteCancel -> putModel (\m -> m{mHighlightNoteOpen = False, mHighlightNote = ""})
     HighlightNoteSubmit -> do
         m <- get
-        case (mDetail m, mReaderSel m) of
+        case (currentDetail m, mReaderSel m) of
             (Just detail, Just selection) -> do
                 putModel (\x -> x{mHighlightNoteOpen = False})
                 createHighlight
@@ -1190,6 +1794,7 @@ updateModel = \case
                     }
             )
         notify "Highlight saved" ToastOk
+        refreshStats
     HighlightEditStart highlightId -> do
         m <- get
         case [highlight | highlight <- mHighlights m, hId highlight == highlightId] of
@@ -1208,7 +1813,7 @@ updateModel = \case
     HighlightEditCancel -> putModel (\m -> m{mHighlightEdit = Nothing, mHighlightEditNote = ""})
     HighlightEditSave -> do
         m <- get
-        case (mDetail m, mHighlightEdit m) of
+        case (currentDetail m, mHighlightEdit m) of
             (Just detail, Just highlightId) -> do
                 putModel (\x -> x{mHighlightEdit = Nothing})
                 patchHighlight
@@ -1221,7 +1826,7 @@ updateModel = \case
             _ -> putModel (\x -> x{mHighlightEdit = Nothing})
     HighlightDelete highlightId -> do
         m <- get
-        case mDetail m of
+        case currentDetail m of
             Just detail -> deleteHighlight (bdId detail) highlightId HighlightDeleted HighlightFailed
             Nothing -> pure ()
     HighlightPatched -> do
@@ -1230,16 +1835,26 @@ updateModel = \case
     HighlightDeleted -> do
         notify "Highlight deleted" ToastOk
         reloadHighlights
+        refreshStats
     HighlightFailed err -> handleApiError err
     -- sharing --------------------------------------------------------------
-    SharesLoaded shares -> putModel (\m -> m{mShares = shares, mSharesLoading = False})
-    SharesFailed err -> do
-        putModel (\m -> m{mSharesLoading = False})
+    SharesLoaded epoch shares -> sameEpoch epoch $ do
+        putModel
+            ( \m ->
+                m
+                    { mShares = shares
+                    , mSharesLoading = False
+                    , mSharesError = Nothing
+                    }
+            )
+    SharesFailed epoch err -> sameEpoch epoch $ do
+        putModel (\m -> m{mSharesLoading = False, mSharesError = Just (ms (aeMessage err))})
         handleApiError err
     ShareDialogOpen -> do
         m <- get
-        case mDetail m of
-            Just detail -> do
+        case currentDetail m of
+            Just _ -> do
+                let epoch = mDetailEpoch m
                 putModel
                     ( \x ->
                         x
@@ -1248,16 +1863,18 @@ updateModel = \case
                             , mShareExpiryDays = 30
                             , mShareUrl = Nothing
                             , mShareBusy = False
+                            , mSharesLoading = True
+                            , mSharesError = Nothing
                             }
                     )
-                fetchShares SharesLoaded SharesFailed
+                fetchShares (\shares -> SharesLoaded epoch shares) (SharesFailed epoch)
             Nothing -> pure ()
     ShareDialogClose -> putModel (\m -> m{mShareDialogOpen = False, mShareUrl = Nothing})
     ShareIncludeNoteToggle -> putModel (\m -> m{mShareIncludeNote = not (mShareIncludeNote m)})
     ShareExpirySelected days -> putModel (\m -> m{mShareExpiryDays = days})
     ShareCreate -> do
         m <- get
-        case mDetail m of
+        case currentDetail m of
             Just detail -> do
                 putModel (\x -> x{mShareBusy = True})
                 createShareLink
@@ -1271,7 +1888,8 @@ updateModel = \case
     ShareCreated shareId url -> do
         putModel (\m -> m{mShareBusy = False, mShareUrl = Just url})
         notify (ms ("Share link created (#" <> show shareId <> ")")) ToastOk
-        fetchShares SharesLoaded SharesFailed
+        refreshShares
+        refreshStats
     ShareCreateFailed err -> do
         putModel (\m -> m{mShareBusy = False})
         handleApiError err
@@ -1286,7 +1904,8 @@ updateModel = \case
     ShareRevoke shareId -> revokeShareLink shareId ShareRevoked ShareCreateFailed
     ShareRevoked -> do
         notify "Share link revoked" ToastOk
-        fetchShares SharesLoaded SharesFailed
+        refreshShares
+        refreshStats
     -- snapshot -------------------------------------------------------------
     SnapshotOpen -> putModel (\m -> m{mSnapshotOpen = True})
     SnapshotClose -> putModel (\m -> m{mSnapshotOpen = False})
@@ -1294,9 +1913,10 @@ updateModel = \case
     AiStatusLoaded status -> putModel (\m -> m{mAiStatus = Just status})
     AiStatusFailed _ -> pure ()
     -- rules ----------------------------------------------------------------
-    RulesLoaded rules -> putModel (\m -> m{mRules = rules, mRulesLoading = False})
+    RulesLoaded rules ->
+        putModel (\m -> m{mRules = rules, mRulesLoading = False, mRulesError = Nothing})
     RulesFailed err -> do
-        putModel (\m -> m{mRulesLoading = False})
+        putModel (\m -> m{mRulesLoading = False, mRulesError = Just (ms (aeMessage err))})
         handleApiError err
     RuleNameInput value -> putModel (\m -> m{mRuleName = value})
     RuleFieldSelected field -> putModel (\m -> m{mRuleField = field})
@@ -1370,13 +1990,97 @@ updateModel = \case
   where
     reloadHighlights = do
         m <- get
-        case mDetail m of
-            Just detail -> fetchHighlights (bdId detail) HighlightsLoaded HighlightsFailed
+        case currentDetail m of
+            Just detail -> do
+                let epoch = mDetailEpoch m
+                fetchHighlights (bdId detail) (HighlightsLoaded epoch) (HighlightsFailed epoch)
             Nothing -> pure ()
+
+    finalizeAdd :: Int -> Effect () () Model Action
+    finalizeAdd bookmarkId = do
+        m <- get
+        putModel
+            ( \x ->
+                x
+                    { mAddOpen = False
+                    , mAddBusy = False
+                    , mAddUrl = ""
+                    , mAddTitle = ""
+                    , mAddTags = ""
+                    , mAddNote = ""
+                    , mAddError = Nothing
+                    }
+            )
+        notify (ms ("Saved bookmark #" <> show bookmarkId)) ToastOk
+        refreshTags
+        refreshStats
+        if isSaveRoute (mRoute m)
+            then withSink $ \_ -> replaceURI (toURI (Bookmark bookmarkId))
+            else reloadList
+
+    -- \| Reload one record after an enrichment or a cancelled edit: new epoch,
+    -- empty editor, loading view rather than the previous record.
+    reloadDetail :: Int -> Effect () () Model Action
+    reloadDetail bookmarkId = do
+        m <- get
+        let epoch = mDetailEpoch m + 1
+        put
+            m
+                { mDetail = Nothing
+                , mDetailLoading = True
+                , mDetailError = Nothing
+                , mDetailEpoch = epoch
+                , mEditTitle = ""
+                , mEditNote = ""
+                , mEditTags = []
+                , mNewTag = ""
+                , mDirty = False
+                , mNoteMode = NoteWrite
+                , mLinkQuery = Nothing
+                , mLinkResults = []
+                , mBacklinks = []
+                , mHighlights = []
+                , mHighlightsLoading = True
+                , mReaderSel = Nothing
+                , mHighlightNoteOpen = False
+                , mHighlightNote = ""
+                , mHighlightEdit = Nothing
+                , mSnapshotOpen = False
+                , mShareDialogOpen = False
+                , mShareUrl = Nothing
+                , mConfirmDelete = Nothing
+                }
+        fetchDetail bookmarkId (DetailLoaded epoch) (DetailFailed epoch)
+        fetchBacklinks bookmarkId (BacklinksLoaded epoch) (BacklinksFailed epoch)
+        fetchHighlights bookmarkId (HighlightsLoaded epoch) (HighlightsFailed epoch)
+
+    -- \| Refresh the share list without starting a new route epoch.
+    refreshShares :: Effect () () Model Action
+    refreshShares = do
+        m <- get
+        let epoch = mDetailEpoch m
+        fetchShares (\shares -> SharesLoaded epoch shares) (SharesFailed epoch)
+
+    -- \| Put a validation or server message in the security panel instead of
+    -- a toast: the field it belongs to is on the same screen.
+    setSecurityError :: MisoString -> Effect () () Model Action
+    setSecurityError message =
+        putModel (\m -> m{mSecurityBusy = False, mSecurityError = Just message})
+
+    -- \| EA-00417: the accession form used by the dedup toast and dialog.
+    accessionLabel :: Int -> MisoString
+    accessionLabel bookmarkId =
+        ms ("EA-" <> replicate (max 0 (5 - length raw)) '0' <> raw)
+      where
+        raw = show bookmarkId
+
     closeTopLayer m
         | mHighlightNoteOpen m = putModel (\x -> x{mHighlightNoteOpen = False, mHighlightNote = ""})
         | isJust (mHighlightEdit m) = putModel (\x -> x{mHighlightEdit = Nothing, mHighlightEditNote = ""})
         | mShareDialogOpen m = putModel (\x -> x{mShareDialogOpen = False, mShareUrl = Nothing})
+        | isJust (mSavedShare m) = putModel (\x -> x{mSavedShare = Nothing, mShareUrl = Nothing})
+        | isJust (mTagDialog m) = putModel (\x -> x{mTagDialog = Nothing, mTagDialogError = Nothing})
+        | isJust (mDedupConfirm m) = putModel (\x -> x{mDedupConfirm = Nothing})
         | mSnapshotOpen m = putModel (\x -> x{mSnapshotOpen = False})
         | isJust (mReaderSel m) = putModel (\x -> x{mReaderSel = Nothing})
         | mPaletteOpen m = putModel (\x -> x{mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})

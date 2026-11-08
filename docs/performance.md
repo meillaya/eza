@@ -39,7 +39,9 @@ from the sub-millisecond range it held before the counts existed; the absolute
 cost is under 4 ms at p95.
 
 The import of the full export runs in about 2.5 to 3.0 seconds on the same
-host. It writes 8,988 rows, 75 tags, and 21,316 links in one transaction.
+host. With normalized deduplication and the default leaf mode it writes 8,905
+rows, 74 tags, and 9,016 links in one transaction; tag counts depend on the
+`--tag-mode` setting.
 
 ## Limits
 

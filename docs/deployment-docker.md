@@ -78,6 +78,8 @@ WebAuthn passkeys require a **secure origin**, so plain
 | `EZA_RP_ID` | host of origin | WebAuthn relying-party ID (host only, no scheme/port). |
 | `EZA_RP_NAME` | `eza` | Passkey prompt display name. |
 | `EZA_ALLOWED_ORIGINS` | `$PUBLIC_ORIGIN` | Comma-separated extra allowed origins. |
+| `EZA_CLIP_ORIGINS` | empty | Comma-separated extension origins for the clipper; extension schemes are accepted automatically. |
+| `EZA_DEFUDDLE_CMD` | unset | Optional `node .../sidecar/src/main.mjs` command for Defuddle extraction. |
 | `EZA_SESSION_TTL_SECONDS` | `2592000` | Session lifetime. |
 | `EZA_SECURE_COOKIES` | derived from origin | Force Secure cookies on/off. |
 | `EZA_STATIC_DIR` | `<webAssets>/share/eza/static` | Web bundle location (already set in the image). |

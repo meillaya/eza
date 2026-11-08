@@ -18,19 +18,32 @@ exportBookmarks conn = do
   rows <-
     query_
       conn
-      "SELECT b.id,b.url,b.title,b.created_at FROM bookmarks b ORDER BY b.created_at ASC, b.id ASC" :: IO [(Int, Text, Text, Int)]
+      "SELECT b.id,b.url,b.title,b.description,b.created_at FROM bookmarks b ORDER BY b.created_at ASC, b.id ASC" :: IO [(Int, Text, Text, Text, Int)]
   tagRows <-
     query_
       conn
       "SELECT bt.bookmark_id,t.name FROM bookmark_tags bt JOIN tags t ON t.id=bt.tag_id ORDER BY t.name" :: IO [(Int, Text)]
   let tagsBy = Map.fromListWith (flip (<>)) [(i, [t]) | (i, t) <- tagRows]
-      usable = [(i, u, t, c) | (i, u, t, c) <- rows, isHttpUrl u]
-      toolbar = [(i, u, t, c) | (i, u, t, c) <- usable, maybe False (elem "toolbar") (Map.lookup i tagsBy)]
-      other = [(i, u, t, c) | (i, u, t, c) <- usable, not (maybe False (elem "toolbar") (Map.lookup i tagsBy))]
-      line (_, u, t, c) =
-        "    <DT><A HREF=\"" <> escapeAttr u <> "\" ADD_DATE=\"" <> T.pack (show c) <> "\">"
+      usable = [(i, u, t, d, c) | (i, u, t, d, c) <- rows, isHttpUrl u]
+      hasToolbar i = maybe False (elem "toolbar") (Map.lookup i tagsBy)
+      toolbar = [entry | entry@(i, _, _, _, _) <- usable, hasToolbar i]
+      other = [entry | entry@(i, _, _, _, _) <- usable, not (hasToolbar i)]
+      line (i, u, t, d, c) =
+        "    <DT><A HREF=\""
+          <> escapeAttr u
+          <> "\" ADD_DATE=\""
+          <> T.pack (show c)
+          <> "\""
+          <> tagsAttr (Map.findWithDefault [] i tagsBy)
+          <> ">"
           <> escapeContent (if T.null (T.strip t) then u else t)
           <> "</A>\r\n"
+          <> descriptionLine d
+      tagsAttr [] = ""
+      tagsAttr tags = " TAGS=\"" <> escapeAttr (T.intercalate "," tags) <> "\""
+      descriptionLine d
+        | T.null (T.strip d) = ""
+        | otherwise = "    <DD>" <> escapeContent d <> "\r\n"
       header =
         T.concat
           [ "<!DOCTYPE NETSCAPE-Bookmark-file-1>\r\n"
@@ -56,7 +69,7 @@ exportBookmarks conn = do
   pure (header <> toolbarBlock <> T.concat (map line other) <> footer)
 
 escapeAttr :: Text -> Text
-escapeAttr = T.replace "&" "&amp;" . T.replace "\"" "&quot;" . T.replace ">" "&gt;" . T.replace "<" "&lt;"
+escapeAttr = T.replace "\"" "&quot;" . T.replace ">" "&gt;" . T.replace "<" "&lt;" . T.replace "&" "&amp;"
 
 escapeContent :: Text -> Text
-escapeContent = T.replace "&" "&amp;" . T.replace ">" "&gt;" . T.replace "<" "&lt;"
+escapeContent = T.replace ">" "&gt;" . T.replace "<" "&lt;" . T.replace "&" "&amp;"

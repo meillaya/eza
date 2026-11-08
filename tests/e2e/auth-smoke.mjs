@@ -29,7 +29,10 @@ await installAuthenticator(context, page);
 
 await page.goto(BASE + "/setup", { waitUntil: "networkidle" });
 console.log("setup page title:", await page.title());
-await page.click("#passkey-setup");
+await page.fill("#username", process.env.EZA_TEST_USER || "e2e");
+await page.fill("#password", process.env.EZA_TEST_PASSWORD || "e2e-password-123");
+await page.fill("#confirm-password", process.env.EZA_TEST_PASSWORD || "e2e-password-123");
+await page.click("#password-setup");
 await page.waitForSelector("#recovery:not([hidden])", { timeout: 30000 });
 const codes = (await page.locator("#codes").textContent()).trim().split("\n").filter(Boolean);
 console.log("recovery codes:", codes.length, codes[0] ? "non-empty" : "EMPTY");
@@ -54,7 +57,9 @@ const logout = await page.evaluate(async () => {
 });
 console.log("logout:", logout);
 await page.goto(BASE + "/login", { waitUntil: "networkidle" });
-await page.click("#passkey-login");
+await page.fill("#username", process.env.EZA_TEST_USER || "e2e");
+await page.fill("#password", process.env.EZA_TEST_PASSWORD || "e2e-password-123");
+await page.click("#password-login");
 await page.waitForFunction(async () => {
   try {
     const r = await fetch("/api/v1/boot");

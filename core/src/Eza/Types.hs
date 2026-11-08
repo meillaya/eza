@@ -209,6 +209,7 @@ instance FromJSON GraphNode where
 data GraphEdge = GraphEdge
     { geSource :: Int
     , geTarget :: Int
+    , geWeight :: Int
     }
     deriving stock (Show, Eq, Generic)
 

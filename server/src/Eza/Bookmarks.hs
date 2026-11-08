@@ -29,21 +29,17 @@ module Eza.Bookmarks (
 ) where
 
 import Control.Monad (forM, forM_)
-import Data.Aeson (encode, object, (.=))
-import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
-import Database.SQLite.Simple (Query (..))
 
-import qualified Data.Text.Encoding as TE
 import Eza.Links (syncLinks)
 import Eza.Rules (applyRules)
 import Eza.SearchQuery
 import Eza.Types
-import Eza.Undo (recordUndo, recordUndoIds, snapshotBookmarks)
+import Eza.Undo (recordUndoIds)
 import Eza.Url (hostOf, normalizeUrl)
 
 data ListQuery = ListQuery
@@ -391,7 +387,13 @@ allTags conn = do
 
 findBookmarkIdByUrl :: Connection -> Text -> IO (Maybe Int)
 findBookmarkIdByUrl conn url = do
-    rows <- query conn "SELECT id FROM bookmarks WHERE url = ?" (Only url) :: IO [Only Int]
+    let normalized = normalizeUrl url
+    rows <-
+        query
+            conn
+            "SELECT id FROM bookmarks WHERE url = ? OR url = ? ORDER BY id LIMIT 1"
+            (url, normalized) ::
+            IO [Only Int]
     pure (case rows of [Only i] -> Just i; _ -> Nothing)
 
 {- | Fast save path: normalize, return an existing row, or insert a minimal
@@ -412,12 +414,13 @@ quickSave conn rawUrl title tags = do
                     pure (maybe (Left message) (\bid -> Right (bid, True)) raced)
 
 insertBookmark :: Connection -> Text -> Text -> [Text] -> IO (Either Text Int)
-insertBookmark conn url title tags = do
+insertBookmark conn rawUrl title tags = do
     now <- (floor <$> getPOSIXTime) :: IO Int
-    existing <- query conn "SELECT id FROM bookmarks WHERE url = ?" (Only url) :: IO [Only Int]
+    let url = normalizeUrl rawUrl
+    existing <- findBookmarkIdByUrl conn rawUrl
     case existing of
-        (Only i : _) -> pure (Left ("already saved as bookmark " <> T.pack (show i)))
-        [] -> do
+        Just i -> pure (Left ("already saved as bookmark " <> T.pack (show i)))
+        Nothing -> do
             bid <-
                 withImmediateTransaction conn $ do
                     execute
@@ -435,6 +438,9 @@ insertBookmark conn url title tags = do
                     pure newId
             pure (Right bid)
 
+{- | Delete one bookmark. The side snapshot recorded first also captures the
+highlights and wikilinks that the delete cascades away, so undo restores the
+whole record rather than an empty shell. -}
 deleteBookmark :: Connection -> Int -> IO Bool
 deleteBookmark conn bid = do
     n <- withImmediateTransaction conn $ do
@@ -467,10 +473,13 @@ bulkUpdate conn action ids
                 BulkMarkRead True -> "bulk_mark_read"
                 BulkMarkRead False -> "bulk_mark_unread"
                 BulkDelete -> "bulk_delete"
-         in withImmediateTransaction conn $ do
-                snapshotId <- recordUndoIds conn op uniqueIds
-                updated <- applyBulk uniqueIds
-                pure (Right (updated, snapshotId))
+         in if null uniqueIds
+                then pure (Left "no valid bookmark ids supplied")
+                else
+                    withImmediateTransaction conn $ do
+                        snapshotId <- recordUndoIds conn op uniqueIds
+                        updated <- applyBulk uniqueIds
+                        pure (Right (updated, snapshotId))
   where
     applyBulk uniqueIds = case action of
         BulkAddTags tags -> do
@@ -513,15 +522,31 @@ dedupeTextIds = go []
     go seen [] = reverse seen
     go seen (x : xs) = if x <= 0 || x `elem` seen then go seen xs else go (x : seen) xs
 
+{- | Mark the unread rows at or above one boundary in the ledger. The caller
+must name a real row: an empty list previously meant "mark the whole library
+read", which is not a safe interpretation of an empty inbox. -}
 markAllAbove :: Connection -> Maybe Int -> IO Int
-markAllAbove conn Nothing =
-    withImmediateTransaction conn $ do
-        execute_ conn "UPDATE bookmarks SET is_read = 1 WHERE is_read = 0"
-        changes conn
+markAllAbove _conn Nothing = pure 0
 markAllAbove conn (Just bid) =
     withImmediateTransaction conn $ do
-        execute conn "UPDATE bookmarks SET is_read = 1 WHERE is_read = 0 AND id > ?" (Only bid)
-        changes conn
+        boundary <- query conn "SELECT created_at FROM bookmarks WHERE id = ?" (Only bid) :: IO [Only Int]
+        case boundary of
+            [Only createdAt] -> do
+                execute
+                    conn
+                    "UPDATE bookmarks SET is_read = 1 WHERE is_read = 0 AND created_at >= ?"
+                    (Only createdAt)
+                changes conn
+            _ -> pure 0
+
+{- | Keep stored wikilinks pointing at a renamed bookmark, and resolve any
+unresolved links that now match its new title. -}
+resolveIncomingLinks :: Connection -> Int -> Text -> IO ()
+resolveIncomingLinks conn targetId newTitle =
+    execute
+        conn
+        "UPDATE links SET target_id = ?, target_title = ? WHERE target_id = ? OR (target_id IS NULL AND lower(target_title) = lower(?))"
+        (targetId, newTitle, targetId, newTitle)
 
 {- | Apply a partial edit.  Title/note/read are updated only when supplied;
 tags are authoritative when supplied.  Returns False when the row is gone.
@@ -535,7 +560,9 @@ updateBookmark conn bid mTitle mNote mRead mTags = do
         else do
             withImmediateTransaction conn $ do
                 case mTitle of
-                    Just t -> execute conn "UPDATE bookmarks SET title = ? WHERE id = ?" (t, bid)
+                    Just t -> do
+                        execute conn "UPDATE bookmarks SET title = ? WHERE id = ?" (t, bid)
+                        resolveIncomingLinks conn bid t
                     Nothing -> pure ()
                 case mNote of
                     Just n -> do
@@ -584,7 +611,7 @@ autocomplete conn q limit = do
     if T.null queryText
         then pure []
         else do
-            let pattern = "%" <> queryText <> "%"
+            let likePattern = "%" <> queryText <> "%"
                 prefix = queryText <> "%"
             rows <-
                 query
@@ -597,7 +624,7 @@ autocomplete conn q limit = do
                             <> "ORDER BY CASE WHEN b.title LIKE ? COLLATE NOCASE THEN 0 ELSE 1 END, b.title COLLATE NOCASE LIMIT ?"
                         )
                     )
-                    (pattern, pattern, prefix, limit) ::
+                    (likePattern, likePattern, prefix, limit) ::
                     IO [SummaryRow]
             summariesFromRows conn rows
 
@@ -664,21 +691,26 @@ pruneCandidates conn days = do
             IO [SummaryRow]
     summariesFromRows conn rows
 
+{- | Delete the pruned rows. Prune is destructive, so it writes the same side
+snapshot as a delete (bookmark rows, tags, highlights, wikilinks) before it
+touches anything; undo restores all of it. The legacy JSON snapshot path is
+deliberately not used here. -}
 pruneApply :: Connection -> [Int] -> IO Int
 pruneApply conn ids =
-    let uniqueIds = filter (> 0) ids
+    let uniqueIds = dedupeTextIds ids
      in if null uniqueIds
             then pure 0
-            else do
-                now <- (floor <$> getPOSIXTime) :: IO Int
+            else
                 withImmediateTransaction conn $ do
                     let marks = T.intercalate "," (replicate (length uniqueIds) "?")
                     rows <- query conn (Query ("SELECT id FROM bookmarks WHERE id IN (" <> marks <> ")")) uniqueIds :: IO [Only Int]
                     let found = [i | Only i <- rows]
-                    snapshot <- snapshotBookmarks conn found
-                    recordUndo conn "prune" snapshot
-                    execute conn (Query ("DELETE FROM bookmarks WHERE id IN (" <> marks <> ")")) uniqueIds
-                    pure (length found)
+                    if null found
+                        then pure 0
+                        else do
+                            _ <- recordUndoIds conn "prune" found
+                            execute conn (Query ("DELETE FROM bookmarks WHERE id IN (" <> marks <> ")")) uniqueIds
+                            pure (length found)
 
 bookmarksByIds :: Connection -> [Int] -> IO [BookmarkSummary]
 bookmarksByIds _ [] = pure []
@@ -753,7 +785,7 @@ libraryStats conn = do
             "SELECT COALESCE(MIN(date(created_at, 'unixepoch')), ''), COALESCE(MAX(date(created_at, 'unixepoch')), '') FROM bookmarks WHERE created_at > 0" ::
             IO [(Text, Text)]
     let (firstDay, lastDay) = case dayRows of
-            ((first, last) : _) -> (first, last)
+            ((first, lastRow) : _) -> (first, lastRow)
             [] -> ("", "")
     [Only days] <-
         query_

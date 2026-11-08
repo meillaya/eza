@@ -340,7 +340,25 @@ shareNote body
             <> T.concat ["<p>" <> escape paragraph <> "</p>" | paragraph <- paragraphs]
             <> "</div>"
   where
-    paragraphs = filter (not . T.null) (map (T.unwords . T.words) (T.splitOn "\n\n" (T.replace "\r\n" "\n" body)))
+    paragraphs =
+        filter
+            (not . T.null)
+            (map (plainWikilinks . T.unwords . T.words) (T.splitOn "\n\n" (T.replace "\r\n" "\n" body)))
+    plainWikilinks text =
+        case T.breakOn "[[" text of
+            (before, rest)
+                | T.null rest -> text
+                | otherwise ->
+                    let afterOpen = T.drop 2 rest
+                        (inner, suffix) = T.breakOn "]]" afterOpen
+                     in if T.null suffix
+                            then text
+                            else before <> wikilinkLabel inner <> plainWikilinks (T.drop 2 suffix)
+    wikilinkLabel inner =
+        case T.breakOn "|" inner of
+            (target, display)
+                | T.null display -> T.strip target
+                | otherwise -> T.strip (T.drop 1 display)
 
 shareTags :: [Text] -> Text
 shareTags [] = ""
@@ -355,7 +373,7 @@ shareResult bookmark =
         [ "      <li class=\"share-result\">"
         , "        <span class=\"share-result-acc mono\">" <> accessionNo (bsId bookmark) <> "</span>"
         , "        <span class=\"share-result-body\">"
-        , "          <span class=\"share-result-title\">" <> escape (bsTitle bookmark) <> "</span>"
+        , "          <a class=\"share-result-title\" href=\"" <> escape (bsUrl bookmark) <> "\" target=\"_blank\" rel=\"noopener noreferrer\">" <> escape (bsTitle bookmark) <> "</a>"
         , "          <span class=\"share-result-meta meta\">" <> escape (bsDomain bookmark) <> sep <> "filed " <> dateDot (bsCreatedAt bookmark) <> "</span>"
         , "        </span>"
         , "      </li>"
@@ -400,7 +418,8 @@ countText = T.pack . reverse . go . reverse . show
 
 escape :: Text -> Text
 escape value =
-    T.replace ">" "&gt;" (T.replace "<" "&lt;" (T.replace "&" "&amp;" (T.replace "\"" "&quot;" value)))
+    T.replace "\"" "&quot;"
+        (T.replace ">" "&gt;" (T.replace "<" "&lt;" (T.replace "&" "&amp;" value)))
 
 xmlEscape :: Text -> Text
 xmlEscape = escape

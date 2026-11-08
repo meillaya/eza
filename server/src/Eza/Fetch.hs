@@ -4,43 +4,57 @@
 -- | Outbound HTTP with a size cap, a timeout, and a private-network guard.
 -- The guard resolves the host on every hop and rejects loopback, link-local,
 -- private, documentation, and multicast addresses unless the caller opts in.
+--
+-- Requests identify eza with a versioned user agent, negotiate HTML with
+-- @Accept@, and ask for English pages.  Responses expose the parsed content
+-- type, the resolved charset (BOM, HTTP header, or meta tag), and whether the
+-- body was truncated at the configured cap.  Document requests reject
+-- non-text payloads and empty bodies instead of treating them as success.
 module Eza.Fetch
   ( FetchOptions (..)
   , FetchPage (..)
   , FetchError (..)
   , fetchUrl
+  , documentOptions
+  , anyOptions
   ) where
 
 import Control.Exception (SomeException, try)
-import Data.Bits ((.&.))
+import Data.Bits ((.&.), (.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
-import Data.Char (toLower)
+import Data.Char (isAlphaNum, toLower)
 import Data.List (find)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word32)
 import Network.HTTP.Client
-import Network.HTTP.Client (HttpException)
-import Network.HTTP.Types.Header (hContentType, hLocation, hUserAgent)
+import Network.HTTP.Types.Header (hAccept, hAcceptLanguage, hContentType, hLocation, hUserAgent)
 import Network.HTTP.Types.Status (statusCode)
 import Network.Socket
-import Network.URI (parseURI, relativeTo, uriScheme)
+import Network.URI (parseURI, parseURIReference, relativeTo, uriScheme)
 
+-- | Options for one fetch.  @foDocument@ marks a page fetch: non-text
+-- content and empty bodies become errors.  @foMethod@ lets callers use HEAD.
 data FetchOptions = FetchOptions
   { foManager :: Manager
   , foTimeoutMs :: Int
   , foMaxBytes :: Int
   , foAllowPrivate :: Bool
+  , foMethod :: BS.ByteString
+  , foDocument :: Bool
   }
 
 data FetchPage = FetchPage
   { fpFinalUrl :: Text
   , fpStatus :: Int
   , fpContentType :: Text
+  , fpCharset :: Maybe Text
   , fpBody :: BS.ByteString
+  , fpTruncated :: Bool
   }
   deriving (Show, Eq)
 
@@ -51,7 +65,26 @@ data FetchError
   | FetchRedirect
   | FetchHttp Int
   | FetchNetwork Text
+  | FetchUnsupported Text
+  | FetchEmpty
   deriving (Show, Eq)
+
+-- | A page fetch with the default GET method.
+documentOptions :: Manager -> Int -> Int -> Bool -> FetchOptions
+documentOptions manager timeoutMs maxBytes allowPrivate =
+  FetchOptions
+    { foManager = manager
+    , foTimeoutMs = timeoutMs
+    , foMaxBytes = maxBytes
+    , foAllowPrivate = allowPrivate
+    , foMethod = "GET"
+    , foDocument = True
+    }
+
+-- | A status/assets fetch: any content type and an empty body is acceptable.
+anyOptions :: Manager -> Int -> Int -> Bool -> FetchOptions
+anyOptions manager timeoutMs maxBytes allowPrivate =
+  (documentOptions manager timeoutMs maxBytes allowPrivate) {foDocument = False}
 
 fetchUrl :: FetchOptions -> Text -> IO (Either FetchError FetchPage)
 fetchUrl opts rawUrl
@@ -75,7 +108,18 @@ fetchUrl opts rawUrl
                       case allowed of
                         Left err -> pure (Left err)
                         Right () -> do
-                          responseResult <- try (httpLbs (request {redirectCount = 0, responseTimeout = responseTimeoutMicro (foTimeoutMs opts * 1000), requestHeaders = mergeHeaders request}) (foManager opts))
+                          responseResult <-
+                            try
+                              ( httpLbs
+                                  ( request
+                                      { method = foMethod opts
+                                      , redirectCount = 0
+                                      , responseTimeout = responseTimeoutMicro (foTimeoutMs opts * 1000)
+                                      , requestHeaders = mergeHeaders (requestHeaders request)
+                                      }
+                                  )
+                                  (foManager opts)
+                              )
                           case responseResult of
                             Left (err :: HttpException) -> pure (Left (FetchNetwork (T.pack (show err))))
                             Right response ->
@@ -90,26 +134,120 @@ fetchUrl opts rawUrl
                                     else if code >= 400
                                       then pure (Left (FetchHttp code))
                                       else do
-                                        let body = LBS.toStrict (LBS.take (fromIntegral (foMaxBytes opts)) (responseBody response))
-                                            contentType = maybe "" TE.decodeUtf8 (lookup hContentType headers)
-                                        pure (Right (FetchPage url code contentType body))
+                                        let fullBody = LBS.toStrict (LBS.take (fromIntegral (foMaxBytes opts) + 1) (responseBody response))
+                                            truncated = BS.length fullBody > foMaxBytes opts
+                                            body = BS.take (foMaxBytes opts) fullBody
+                                            rawContentType = maybe "" TE.decodeUtf8 (lookup hContentType headers)
+                                            (contentType, headerCharset) = parseContentType rawContentType
+                                        if foDocument opts && BS.null body
+                                          then pure (Left FetchEmpty)
+                                          else if foDocument opts && not (supportedContentType contentType)
+                                            then pure (Left (FetchUnsupported contentType))
+                                            else
+                                              pure
+                                                ( Right
+                                                    FetchPage
+                                                      { fpFinalUrl = url
+                                                      , fpStatus = code
+                                                      , fpContentType = contentType
+                                                      , fpCharset = detectCharset body headerCharset
+                                                      , fpBody = body
+                                                      , fpTruncated = truncated
+                                                      }
+                                                )
               where
                 scheme = map toLower (takeWhile (/= ':') (uriScheme uri))
 
-    mergeHeaders request =
-      (hUserAgent, "eza-bookmarks")
-        : (hContentType, "text/html,application/xhtml+xml,image/*;q=0.8,*/*;q=0.5")
-        : filter (\(name, _) -> name /= hUserAgent && name /= hContentType) (requestHeaders request)
+    mergeHeaders existing =
+      [ (hUserAgent, userAgent)
+      , (hAccept, acceptHeader)
+      , (hAcceptLanguage, "en-US,en;q=0.9")
+      ]
+        <> filter (\(name, _) -> name `notElem` [hUserAgent, hAccept, hAcceptLanguage, hContentType]) existing
 
     resolve base reference =
-      case parseURI (T.unpack reference) of
+      case parseURIReference (T.unpack reference) of
         Just uri
           | uriScheme uri /= "" -> Just (T.pack (show uri))
         _ -> case parseURI (T.unpack base) of
-          Just baseUri -> case parseURI (T.unpack reference) of
+          Just baseUri -> case parseURIReference (T.unpack reference) of
             Just resolved -> Just (T.pack (show (resolved `relativeTo` baseUri)))
             Nothing -> Nothing
           Nothing -> Nothing
+
+userAgent :: BS.ByteString
+userAgent = "eza-bookmarks/0.1 (+https://github.com/meillaya/eza)"
+
+acceptHeader :: BS.ByteString
+acceptHeader = "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,image/*;q=0.7,*/*;q=0.5"
+
+-- | Split @text/html; charset=UTF-8@ into the media type and the charset.
+parseContentType :: Text -> (Text, Maybe Text)
+parseContentType raw =
+  let parts = T.splitOn ";" raw
+      mediaType = T.toLower (T.strip (fromMaybe "" (listToMaybe parts)))
+      charset =
+        listToMaybe
+          [ T.toLower (trimQuotes (T.drop (T.length "charset=") trimmed))
+          | param <- drop 1 parts
+          , let trimmed = T.strip param
+          , let lowered = T.toLower trimmed
+          , "charset=" `T.isPrefixOf` lowered
+          ]
+   in (mediaType, charset)
+  where
+    trimQuotes value =
+      let unquoted = T.dropAround (\c -> c == '"' || c == '\'') value
+       in T.filter (\c -> not (c == ' ' || c == '\t')) unquoted
+
+-- | Document requests only accept text-ish payloads.
+supportedContentType :: Text -> Bool
+supportedContentType contentType
+  | T.null contentType = True
+  | contentType `elem` ["application/xhtml+xml", "application/xml", "application/xml-dtd"] = True
+  | "json" `T.isSuffixOf` contentType = False
+  | "+json" `T.isSuffixOf` contentType = False
+  | "text/" `T.isPrefixOf` contentType = True
+  | otherwise = False
+
+-- | Pick a charset from the BOM, then the HTTP header, then a meta tag.
+detectCharset :: BS.ByteString -> Maybe Text -> Maybe Text
+detectCharset body headerCharset =
+  case bomCharset body of
+    Just charset -> Just charset
+    Nothing -> headerCharset `orElse` metaCharset (BS.take 4096 body)
+
+bomCharset :: BS.ByteString -> Maybe Text
+bomCharset body
+  | BS.take 3 body == BS.pack [0xEF, 0xBB, 0xBF] = Just "utf-8"
+  | BS.take 2 body == BS.pack [0xFF, 0xFE] = Just "utf-16le"
+  | BS.take 2 body == BS.pack [0xFE, 0xFF] = Just "utf-16be"
+  | otherwise = Nothing
+
+metaCharset :: BS.ByteString -> Maybe Text
+metaCharset prefix =
+  let lowered = T.toLower (T.pack (BSC.unpack (BS.map (\byte -> if byte < 128 then byte else 32) prefix)))
+      candidates =
+        [ takeCharset afterEq
+        | (_, afterEq) <- splitsOn "charset=" lowered
+        ]
+   in listToMaybe (mapMaybe id candidates)
+  where
+    splitsOn needle haystack =
+      case T.breakOn needle haystack of
+        (_, rest) | T.null rest -> []
+        (before, rest) -> (before, T.drop (T.length needle) rest) : splitsOn needle (T.drop (T.length needle) rest)
+    takeCharset value =
+      let cleaned = T.takeWhile (\c -> isAlphaNum c || c == '-' || c == '_') (T.dropWhile (\c -> c == '"' || c == '\'' || c == ' ' || c == '\t') value)
+       in if T.null cleaned then Nothing else Just (T.toLower cleaned)
+
+orElse :: Maybe a -> Maybe a -> Maybe a
+orElse (Just value) _ = Just value
+orElse Nothing fallback = fallback
+
+-- ---------------------------------------------------------------------------
+-- Private-network guard
+-- ---------------------------------------------------------------------------
 
 assertPublicHost :: FetchOptions -> Text -> IO (Either FetchError ())
 assertPublicHost opts host
@@ -127,9 +265,18 @@ assertPublicHost opts host
 
 isPrivateAddress :: SockAddr -> Bool
 isPrivateAddress address = case address of
-  SockAddrInet _ hostAddress -> not (publicV4 hostAddress)
+  -- SockAddrInet stores the address in network byte order; the masks below
+  -- are written in host order.
+  SockAddrInet _ hostAddress -> not (publicV4 (byteSwap32 hostAddress))
   SockAddrInet6 _ _ hostAddress _ -> not (publicV6 hostAddress)
   _ -> True
+
+byteSwap32 :: Word32 -> Word32
+byteSwap32 value =
+  (value .&. 0x000000ff) `shiftL` 24
+    .|. (value .&. 0x0000ff00) `shiftL` 8
+    .|. (value .&. 0x00ff0000) `shiftR` 8
+    .|. (value .&. 0xff000000) `shiftR` 24
 
 publicV4 :: Word32 -> Bool
 publicV4 address =

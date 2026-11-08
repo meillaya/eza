@@ -15,7 +15,10 @@ const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", {
 });
 
 await page.goto(BASE + "/setup", { waitUntil: "networkidle" });
-await page.click("#passkey-setup");
+await page.fill("#username", process.env.EZA_TEST_USER || "e2e");
+await page.fill("#password", process.env.EZA_TEST_PASSWORD || "e2e-password-123");
+await page.fill("#confirm-password", process.env.EZA_TEST_PASSWORD || "e2e-password-123");
+await page.click("#password-setup");
 await page.waitForSelector("#recovery:not([hidden])", { timeout: 30000 });
 console.log("setup: ok");
 
@@ -31,6 +34,13 @@ async function api(path, options = {}) {
     return { status: r.status, body, contentType: r.headers.get("content-type") };
   }, { path, options });
 }
+
+const seeded = await api("/api/v1/bookmarks", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ url: "https://example.com/api-smoke", title: "API smoke", tags: ["smoke"] }),
+});
+console.log("seed", seeded.status, seeded.body?.id);
 
 const boot = await api("/api/v1/boot");
 console.log("boot", boot.status, "total", boot.body?.initial?.total, "first", boot.body?.initial?.items?.[0]?.id);

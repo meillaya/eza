@@ -1,13 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
+
+-- | Single-file page snapshots through the configured monolith binary.
 module Eza.Snapshot
   ( captureSnapshot
   ) where
 
 import Control.Exception (SomeException, try)
+import Control.Monad (void, when)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Database.SQLite.Simple
-import System.Directory (createDirectoryIfMissing, doesFileExist, getFileSize)
+import System.Directory (createDirectoryIfMissing, doesFileExist, getFileSize, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.Process (readProcessWithExitCode)
@@ -15,12 +18,10 @@ import System.Timeout (timeout)
 
 import Eza.Config (Config (..))
 
-data SnapshotKind = SnapshotFile | SnapshotWayback
-  deriving (Show, Eq)
-
 -- | Capture a single-file snapshot with the configured monolith binary.
--- The subprocess runs outside any write transaction.  On failure the Wayback
--- availability URL is recorded instead, matching the old behaviour.
+-- The subprocess runs outside any write transaction.  On failure nothing is
+-- recorded: a bookmark without a real local file has no snapshot, and the
+-- caller reports it rather than storing a placeholder URL.
 captureSnapshot :: Config -> Connection -> Int -> IO (Maybe (Text, Text))
 captureSnapshot cfg conn bid = do
   rows <- query conn "SELECT url FROM bookmarks WHERE id = ?" (Only bid) :: IO [Only Text]
@@ -29,21 +30,38 @@ captureSnapshot cfg conn bid = do
     (Only url : _) -> do
       createDirectoryIfMissing True (cfgSnapshotDir cfg)
       let path = cfgSnapshotDir cfg </> show bid <> ".html"
-      result <- try (timeout (30 * 1000000) (readProcessWithExitCode (cfgMonolith cfg) ["-o", path, T.unpack url] "")) :: IO (Either SomeException (Maybe (ExitCode, String, String)))
+      result <-
+        try (timeout (30 * 1000000) (readProcessWithExitCode (cfgMonolith cfg) ["-o", path, T.unpack url] "")) ::
+          IO (Either SomeException (Maybe (ExitCode, String, String)))
       ok <- case result of
-        Right (Just (ExitSuccess, _, _)) -> do
-          exists <- doesFileExist path
-          size <- if exists then getFileSize path else pure 0
-          pure (exists && size > 0)
+        Right (Just (ExitSuccess, _, _)) -> fileHasContent path
         _ -> pure False
       if ok
         then do
           store conn bid (T.pack path) "file"
           pure (Just ("file", T.pack path))
         else do
-          let wayback = "https://web.archive.org/web/2/" <> url
-          store conn bid wayback "wayback"
-          pure (Just ("wayback", wayback))
+          discardPartialFile path
+          pure Nothing
+
+fileHasContent :: FilePath -> IO Bool
+fileHasContent path = do
+  exists <- doesFileExist path
+  if not exists
+    then pure False
+    else do
+      size <- getFileSize path
+      pure (size > 0)
+
+-- | Remove a zero-byte file left by a failed monolith run.  A previous
+-- successful snapshot is never deleted.
+discardPartialFile :: FilePath -> IO ()
+discardPartialFile path = do
+  exists <- doesFileExist path
+  when exists $ do
+    size <- getFileSize path
+    when (size == 0) $
+      void (try (removeFile path) :: IO (Either SomeException ()))
 
 store :: Connection -> Int -> Text -> Text -> IO ()
 store conn bid value kind =

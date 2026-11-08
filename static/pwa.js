@@ -78,6 +78,102 @@
     removeInstallButton();
   });
 
+  // ------------------------------------------------------------ network -----
+  // Miso's fetch drops the response body on non-2xx, and the CSP forbids
+  // runtime JavaScript (no unsafe-eval), so the client calls these static
+  // helpers instead. Reporting status and body text together keeps the
+  // server's JSON error message: duplicate 409, 403, 404 and so on.
+  function report(done, status, text, error) {
+    try {
+      done(JSON.stringify({ status: status, text: text, error: error }));
+    } catch (failure) {
+      /* the page moved on before the request resolved */
+    }
+  }
+
+  window.EzaNet = {
+    fetch: function (url, method, body, headers, done) {
+      var options = { method: method, headers: headers };
+      if (body) options.body = body;
+      fetch(url, options)
+        .then(function (response) {
+          return response.text().then(function (text) {
+            report(done, response.status, text, null);
+          });
+        })
+        .catch(function (error) {
+          report(done, 0, "", String((error && error.message) || error));
+        });
+    },
+    // Netscape HTML import: the FormData body lets the browser set the
+    // multipart boundary, which a JSON fetch cannot do.
+    upload: function (inputId, token, done) {
+      var input = document.getElementById(inputId);
+      if (!input || !input.files || !input.files.length) {
+        report(done, 0, "", "Choose an HTML bookmarks file first.");
+        return;
+      }
+      var form = new FormData();
+      form.append("file", input.files[0]);
+      input.value = "";
+      var headers = { Accept: "application/json" };
+      if (token) headers["X-CSRF-Token"] = token;
+      fetch("/api/v1/import", { method: "POST", body: form, headers: headers })
+        .then(function (response) {
+          return response.text().then(function (text) {
+            report(done, response.status, text, null);
+          });
+        })
+        .catch(function (error) {
+          report(done, 0, "", String((error && error.message) || error));
+        });
+    }
+  };
+
+  // ------------------------------------------------------ dialog focus ----
+  // Dialogs declare role="dialog" aria-modal="true". Keep Tab inside the
+  // open dialog instead of letting it walk the page behind.
+  var focusableSelector =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
+    'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  function openDialogs() {
+    return Array.prototype.filter.call(
+      document.querySelectorAll('[role="dialog"][aria-modal="true"]'),
+      function (node) {
+        return node.getClientRects().length > 0 && node.offsetParent !== null;
+      }
+    );
+  }
+
+  function focusableInside(dialog) {
+    return Array.prototype.filter.call(dialog.querySelectorAll(focusableSelector), function (node) {
+      return node.offsetParent !== null && !node.hasAttribute("aria-hidden");
+    });
+  }
+
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Tab") return;
+    var dialogs = openDialogs();
+    if (!dialogs.length) return;
+    var dialog = dialogs[dialogs.length - 1];
+    var items = focusableInside(dialog);
+    if (!items.length) return;
+    var first = items[0];
+    var last = items[items.length - 1];
+    var active = document.activeElement;
+    var inside = dialog.contains(active);
+    if (event.shiftKey) {
+      if (!inside || active === first || active === dialog) {
+        event.preventDefault();
+        last.focus();
+      }
+    } else if (!inside || active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+
   // ------------------------------------------------------ clipboard ------
   // Used by the Miso account page ("Copy bookmarklet"). Returns a boolean.
   window.ezaCopy = function (text) {

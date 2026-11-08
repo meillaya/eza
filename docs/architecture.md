@@ -13,13 +13,19 @@ write connection behind an `MVar`.
 
 Every API route passes the table in `Eza.Server`. The table is deny-by-default,
 so a new route without a guard returns 401. Unsafe methods also require the
-`X-CSRF-Token` header. The browser holds a passkey and a session cookie; the
-server stores only the SHA-256 hash of the session token.
+`X-CSRF-Token` header. The single account signs in with a username and
+password: the server stores the Argon2id password hash and only the SHA-256
+hash of each session token. Login attempts are counted in `app_state` so a
+restart does not clear a lockout. A password account can register passkeys
+and enable a second factor; a password login then returns a short-lived
+pending session and requires a WebAuthn assertion before a normal session is
+created. Pending scopes cannot reach `/api/v1`. Recovery clears the flag.
 
 ![Architecture: one process, one SQLite file](figures/architecture.png)
 
-The CLI commands (`import`, `export`, `verify`, `backup`,
-`check-dead`) open the same file from a separate process. SQLite serializes
+The CLI commands (`import`, `export`, `enrich`, `verify`, `backup`,
+`check-dead`, `set-password`) open the same file from a separate process. `set-password`
+prompts twice with the terminal echo off, so the password never reaches argv. SQLite serializes
 the writers, so a running server and a one-off CLI command do not corrupt the
 database.
 
@@ -27,27 +33,47 @@ database.
 
 The reference export contains `A = 9457` anchors. The importer keeps the
 http(s) subset `H = 9453`, skips `N = 4` non-http anchors, and collapses
-`D = 465` duplicate anchors by normalized URL. The unique bookmark count is
+`D = 548` anchors that normalize to the same URL. The unique bookmark count is
 
 ```
-U = H - D = 9453 - 465 = 8988
+U = H - D = 9453 - 548 = 8905
 ```
 
 The tag links come from the folder stack and the `TAGS` attribute. For each
-bookmark `b`, let `T_b` be its tag set. The stored link count is
+bookmark `b`, let `T_b` be its tag set. With the default leaf mode the stored
+link count is
 
 ```
-L = sum over b of |T_b| = 21316
+L = sum over b of |T_b| = 9016
 ```
 
 The importer writes the rows, tags, and links in one transaction. A second run
-matches all 8,988 URLs and inserts zero rows.
+matches all 8,905 URLs and inserts zero rows. The tag counts are mode-dependent;
+the historical 8,988-row reference database was imported before normalized
+deduplication and before the leaf-only rule, so its 21,316 links are not
+directly comparable.
 
-![Import: 9,457 anchors collapse to 8,988 rows](figures/import.png)
+![Import: 9,457 anchors collapse to 8,905 rows](figures/import.png)
 
 Two timestamps matter. `created_at` is the earliest `ADD_DATE` for the URL,
 which preserves when the bookmark was saved. `added_at` records when eza first
 saw the row, and the prune view uses it.
+
+## Capture and extraction
+
+The browser extension extracts the current page with Defuddle and sends a
+typed `ClipRequest` to `POST /api/v1/clip`. The server normalizes the URL,
+inserts or finds the bookmark, writes a `captures` row, applies clip templates
+and save rules, and stores the rendered Markdown as the note. Capture tokens
+are scoped to whoami/clip/template reads; template writes need a session.
+Idempotency keys make extension retries safe.
+
+The in-process TagSoup extractor remains the default for background
+enrichment. When `EZA_DEFUDDLE_CMD` is set, `Eza.Enrich` first sends the page
+through the JSON-lines Node/Defuddle sidecar and falls back to the Haskell
+extractor on any error. The sidecar has no network access and a 5 MiB/15 s
+limit. Schema v7 adds the lossless undo side tables; v8 adds `captures` and
+`clip_templates`.
 
 ## Search model
 
@@ -132,8 +158,9 @@ Kubernetes manifests use one replica, a `Recreate` strategy, and a
 ![Deployment: one binary across NixOS, Docker, and Kubernetes](figures/deployment.png)
 
 Tailscale Serve or Caddy terminates HTTPS in front of the process. Set
-`PUBLIC_ORIGIN` and `EZA_RP_ID` to the public hostname before registering the
-first passkey.
+`PUBLIC_ORIGIN` to the public hostname before claiming the library. A legacy
+passkey is bound to `PUBLIC_ORIGIN` and `EZA_RP_ID` at registration time, so
+keep both stable while a passkey is still in use.
 
 ## What the design leaves out
 

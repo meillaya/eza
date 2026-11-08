@@ -70,8 +70,8 @@ listRules conn = do
       "SELECT id,name,enabled,field,pattern,add_tags,mark_read,created_at FROM rules ORDER BY id" :: IO [(Int, Text, Int, Text, Text, Text, Int, Int)]
   pure [toRule row | row <- rows]
   where
-    toRule (rid, name, enabled, field, pattern, tags, markRead, created) =
-      Rule rid name (enabled /= 0) field pattern (parseTags tags) (markRead /= 0) created
+    toRule (rid, name, enabled, field, rulePattern, tags, markRead, created) =
+      Rule rid name (enabled /= 0) field rulePattern (parseTags tags) (markRead /= 0) created
 
 createRule :: Connection -> Rule -> IO Rule
 createRule conn rule = do
@@ -128,13 +128,13 @@ applyRules conn bookmarkId url title = do
        in ruleEnabled rule && not (T.null needle) && needle `T.isInfixOf` haystack
 
 matchingBookmarks :: Connection -> Text -> Text -> IO [Int]
-matchingBookmarks conn field pattern = do
+matchingBookmarks conn field rulePattern = do
   let column = case T.toLower field of
         "domain" -> "domain"
         "title" -> "title"
         _ -> "url"
-      pattern' = "%" <> T.strip pattern <> "%"
-  rows <- query conn (Query ("SELECT id FROM bookmarks WHERE " <> column <> " LIKE ? COLLATE NOCASE ORDER BY id LIMIT 100")) (Only pattern') :: IO [Only Int]
+      likePattern = "%" <> T.strip rulePattern <> "%"
+  rows <- query conn (Query ("SELECT id FROM bookmarks WHERE " <> column <> " LIKE ? COLLATE NOCASE ORDER BY id LIMIT 100")) (Only likePattern) :: IO [Only Int]
   pure [i | Only i <- rows]
 
 domainOf :: Text -> Text

@@ -29,6 +29,8 @@ library
                     Eza.Backup
                     Eza.Bench
                     Eza.Bookmarks
+                    Eza.Clip
+                    Eza.ClipTemplates
                     Eza.Config
                     Eza.Db
                     Eza.DeadLinks
@@ -45,9 +47,11 @@ library
                     Eza.Jobs
                     Eza.Links
                     Eza.Pages
+                    Eza.Password
                     Eza.SavedSearches
                     Eza.Rules
                     Eza.Server
+                    Eza.Sidecar
                     Eza.Shares
                     Eza.Snapshot
                     Eza.Tags
@@ -110,6 +114,8 @@ test-suite eza-test
   type:             exitcode-stdio-1.0
   hs-source-dirs:   test
   main-is:          Spec.hs
+  other-modules:    ClipSpec
+                    DataIntegritySpec
   build-depends:    base
                   , aeson
                   , bytestring

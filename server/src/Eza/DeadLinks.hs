@@ -1,22 +1,32 @@
 {-# LANGUAGE OverloadedStrings #-}
+
+-- | Dead-link sweep.  Requests go through 'Eza.Fetch' so the private-address
+-- guard, timeout, redirect limit, and user agent apply here too.  Only a
+-- definitive HTTP answer changes @is_dead@: network errors, timeouts, rate
+-- limiting, and 5xx responses are transient and leave the flag untouched.
 module Eza.DeadLinks
   ( checkDead
   ) where
 
-import Control.Concurrent.QSem
 import Control.Concurrent.Async (mapConcurrently)
-import Control.Exception (SomeException, try)
+import Control.Concurrent.QSem
+import Control.Exception (bracket_)
 import Data.Text (Text)
-import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
-import Network.HTTP.Client
+import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
-import Network.HTTP.Types.Status (statusCode)
 
--- | Bounded HEAD sweep.  A link is dead when the final response is >= 400 or
--- the host is unreachable.  HEAD 403/405 without a content-length gets a
--- ranged GET fallback (matching the old Python behaviour).
+import Eza.Fetch
+
+-- | Outcome of one check.  'LinkUnknown' is a transient failure: the row's
+-- @is_dead@ value is preserved.
+data LinkState = LinkAlive | LinkDead | LinkUnknown
+  deriving (Show, Eq)
+
+-- | Bounded HEAD sweep.  A link is dead when the final response is a
+-- definitive 4xx.  HEAD 403/405 gets a GET fallback (matching the old Python
+-- behaviour).  Network and transient failures count as unchecked, not dead.
 checkDead :: Connection -> Int -> Int -> Bool -> IO (Int, Int, Int)
 checkDead conn limit olderThan includeDead = do
   now <- floor <$> getPOSIXTime
@@ -34,27 +44,45 @@ checkDead conn limit olderThan includeDead = do
       sem <- newQSem 16
       results <- mapConcurrently (checkOne manager sem) rows
       let checked = length results
-          dead = length (filter not results)
-          alive = checked - dead
-          now' = now
+          dead = length (filter (== LinkDead) results)
+          alive = length (filter (== LinkAlive) results)
       withImmediateTransaction conn $
-        mapM_ (\((bid, _), alive') ->
-                  execute conn "UPDATE bookmarks SET is_dead = ?, last_checked_at = ? WHERE id = ?" ((if alive' then 0 else 1) :: Int, now', bid))
-              (zip rows results)
+        mapM_ (recordResult conn now) (zip rows results)
       pure (checked, dead, alive)
 
-checkOne :: Manager -> QSem -> (Int, Text) -> IO Bool
-checkOne manager sem (_, url) = do
-  waitQSem sem
-  result <- try (do
-    req <- parseRequest (T.unpack url)
-    resp <- httpLbs req {method = "HEAD", responseTimeout = responseTimeoutMicro (8 * 1000000), redirectCount = 5, requestHeaders = [("User-Agent", "eza dead-link-checker")]} manager
-    let code = statusCode (responseStatus resp)
-    if code >= 400 && code `elem` [403, 405]
-      then do
-        req2 <- parseRequest (T.unpack url)
-        resp2 <- httpLbs req2 {method = "GET", redirectCount = 5, responseTimeout = responseTimeoutMicro (8 * 1000000), requestHeaders = [("User-Agent", "eza dead-link-checker"), ("Range", "bytes=0-0")]} manager
-        pure (statusCode (responseStatus resp2) < 400)
-      else pure (code < 400)) :: IO (Either SomeException Bool)
-  signalQSem sem
-  pure (either (const False) id result)
+recordResult :: Connection -> Int -> ((Int, Text), LinkState) -> IO ()
+recordResult conn now ((bid, _), state) = case state of
+  LinkAlive -> setDead 0
+  LinkDead -> setDead 1
+  LinkUnknown -> execute conn "UPDATE bookmarks SET last_checked_at = ? WHERE id = ?" (now, bid)
+  where
+    setDead dead =
+      execute
+        conn
+        "UPDATE bookmarks SET is_dead = ?, last_checked_at = ? WHERE id = ?"
+        ((dead :: Int), now, bid)
+
+checkOne :: Manager -> QSem -> (Int, Text) -> IO LinkState
+checkOne manager sem (_, url) =
+  bracket_ (waitQSem sem) (signalQSem sem) $ do
+    let base = anyOptions manager 8000 (64 * 1024) False
+    headResult <- fetchUrl (base {foMethod = "HEAD"}) url
+    case headResult of
+      Right _ -> pure LinkAlive
+      Left (FetchHttp code)
+        | code `elem` [403, 405] -> do
+            getResult <- fetchUrl (base {foMethod = "GET"}) url
+            pure (classify getResult)
+        | code >= 500 -> pure LinkUnknown
+        | code `elem` [408, 425, 429] -> pure LinkUnknown
+        | code >= 400 -> pure LinkDead
+        | otherwise -> pure LinkUnknown
+      Left _ -> pure LinkUnknown
+  where
+    classify result = case result of
+      Right _ -> LinkAlive
+      Left (FetchHttp code)
+        | code >= 500 -> LinkUnknown
+        | code `elem` [408, 425, 429] -> LinkUnknown
+        | code >= 400 -> LinkDead
+      Left _ -> LinkUnknown

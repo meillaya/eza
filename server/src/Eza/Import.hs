@@ -19,9 +19,8 @@ module Eza.Import
   , decodeHtml
   ) where
 
-import Control.Monad (foldM, forM, forM_)
+import Control.Monad (foldM, forM)
 import Data.Char (isAlphaNum, isDigit, isSpace)
-import Data.Foldable (foldl')
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, fromMaybe, mapMaybe)
 import Data.Set (Set)
@@ -38,7 +37,7 @@ import Text.HTML.TagSoup
 import Text.Read (readMaybe)
 
 import Eza.Types (ImportReport (..))
-import Eza.Url (hostOf, isHttpUrl)
+import Eza.Url (hostOf, isHttpUrl, normalizeUrl)
 
 data TagMode = TagLeaf | TagDeepest | TagPath | TagNone
   deriving (Show, Eq)
@@ -56,6 +55,7 @@ defaultImportOptions = ImportOptions TagLeaf True False
 data ImportItem = ImportItem
   { iiUrl :: Text
   , iiTitle :: Text
+  , iiDescription :: Text
   , iiDomain :: Text
   , iiTags :: [Text]
   , iiCreatedAt :: Int
@@ -121,6 +121,8 @@ data PState = PState
   , psTitle :: Text
   , psAnchorTags :: [Text]
   , psCreated :: Maybe Int
+  , psDd :: Maybe Text
+  , psDdApplies :: Bool
   , psItems :: [ImportItem]
   , psSkipped :: Set Text
   , psFound :: Int
@@ -159,6 +161,8 @@ initialState =
     , psTitle = ""
     , psAnchorTags = []
     , psCreated = Nothing
+    , psDd = Nothing
+    , psDdApplies = False
     , psItems = []
     , psSkipped = Set.empty
     , psFound = 0
@@ -170,25 +174,35 @@ stepTag :: ImportOptions -> PState -> Tag Text -> PState
 stepTag opts st = \case
   TagOpen name attrs
     | lname name == "h3" ->
-        st {psInH3 = True, psH3Text = "", psH3Info = Just (folderInfo attrs)}
+        (finishDd st)
+          { psInH3 = True
+          , psH3Text = ""
+          , psH3Info = Just (folderInfo attrs)
+          , psDdApplies = False
+          }
     | lname name == "dl" ->
-        st
+        (finishDd st)
           { psStack = fromMaybe Nothing (psPending st) : psStack st
           , psPending = Nothing
+          , psDdApplies = False
           }
+    | lname name == "dd" -> st {psDd = Just ""}
+    | lname name == "dt" -> finishDd st
     | lname name == "a", not (psInA st) ->
-        st
+        (finishDd st)
           { psInA = True
           , psHref = fromMaybe "" (lookupAttr "href" attrs)
           , psTitle = ""
           , psAnchorTags = parseTagsAttr (fromMaybe "" (lookupAttr "tags" attrs))
           , psCreated = parseAddDate (fromMaybe "" (lookupAttr "add_date" attrs))
+          , psDdApplies = False
           }
   TagClose name
+    | lname name == "dd" -> finishDd st
     | lname name == "h3" ->
         let info0 = fromMaybe (FolderInfo "" False False) (psH3Info st)
             info = info0 {fiName = T.strip (psH3Text st)}
-            (tag, skipped) = folderTag opts info
+            (tag, skipped) = folderTag opts info (length (psStack st))
             skippedSet =
               if skipped
                 then Set.insert (normalizeName (fiName info)) (psSkipped st)
@@ -199,17 +213,19 @@ stepTag opts st = \case
               , psH3Text = ""
               , psPending = Just tag
               , psSkipped = skippedSet
+              , psDdApplies = False
               }
     | lname name == "dl" ->
-        st {psStack = drop 1 (psStack st)}
+        (finishDd st) {psStack = drop 1 (psStack st)}
     | lname name == "a", psInA st ->
-        let href = T.strip (psHref st)
+        let rawHref = T.strip (psHref st)
+            href = normalizeImportedUrl rawHref
             title = cleanTitle (psTitle st)
             http = isHttpUrl href
             stackTags = folderStackTags (ioTagMode opts) (psStack st)
             tags = dedupeText (stackTags <> psAnchorTags st)
             created = fromMaybe 0 (psCreated st)
-            item = ImportItem href title (hostOf href) tags created
+            item = ImportItem href title "" (hostOf href) tags created
             st' =
               st
                 { psInA = False
@@ -217,6 +233,7 @@ stepTag opts st = \case
                 , psTitle = ""
                 , psAnchorTags = []
                 , psCreated = Nothing
+                , psDdApplies = http
                 , psFound = psFound st + 1
                 }
          in if not http
@@ -229,6 +246,7 @@ stepTag opts st = \case
   TagText txt
     | psInA st -> st {psTitle = psTitle st <> txt}
     | psInH3 st -> st {psH3Text = psH3Text st <> txt}
+    | Just current <- psDd st, psDdApplies st -> st {psDd = Just (current <> txt)}
   _ -> st
   where
     lname = T.toLower
@@ -244,8 +262,11 @@ folderInfo attrs =
 lowerBool :: Text -> Bool
 lowerBool v = T.toLower (T.strip v) == "true"
 
-folderTag :: ImportOptions -> FolderInfo -> (Maybe Text, Bool)
-folderTag opts info
+-- | Map a folder to its tag.  @depth@ is 1 for a folder directly under the
+-- export root.  Wrapper folders such as @imported@ are only noise at the
+-- root: deeper folders with the same name are real user folders.
+folderTag :: ImportOptions -> FolderInfo -> Int -> (Maybe Text, Bool)
+folderTag opts info depth
   | fiToolbar info = (Just "toolbar", False)
   | fiUnfiled info = (Just "unfiled", False)
   | otherwise =
@@ -253,21 +274,50 @@ folderTag opts info
        in if T.null n
             then (Nothing, False)
             else
-              if ioSkinNoise opts && isNoiseFolder n
+              if ioSkinNoise opts && isNoiseFolderAtDepth depth n
                 then (Nothing, True)
                 else (Just n, False)
 
+isNoiseFolderAtDepth :: Int -> Text -> Bool
+isNoiseFolderAtDepth depth name = isNoiseFolder name || (depth <= 1 && Set.member name rootNoiseFolders)
+
+-- | Finish a pending @<DD>@ description and attach it to the most recent
+-- link.  Folder descriptions are ignored so a folder never inherits the
+-- description of the bookmark before it.
+finishDd :: PState -> PState
+finishDd st = case psDd st of
+  Nothing -> st
+  Just raw ->
+    let st' = st {psDd = Nothing}
+        description = cleanTitle raw
+     in if psDdApplies st && not (T.null description)
+          then st' {psItems = applyDescription description (psItems st'), psDdApplies = False}
+          else st' {psDdApplies = False}
+
+applyDescription :: Text -> [ImportItem] -> [ImportItem]
+applyDescription description items = case items of
+  [] -> []
+  (item : rest)
+    | T.null (iiDescription item) -> item {iiDescription = description} : rest
+    | otherwise -> items
+
+-- | Normalize imported URLs so the dedupe key matches manual saves and a
+-- second run (or a re-save) conflicts with existing rows.
+normalizeImportedUrl :: Text -> Text
+normalizeImportedUrl raw =
+  let normalized = normalizeUrl raw
+   in if isHttpUrl normalized && not (T.null normalized) then normalized else raw
+
 folderStackTags :: TagMode -> [Maybe Text] -> [Text]
 folderStackTags mode stack =
-  let meaningful = catMaybes stack
+  let meaningful = reverse (catMaybes stack)
    in case mode of
         TagNone -> []
-        TagLeaf -> meaningful
-        TagDeepest -> maybe [] (: []) (lastMaybe meaningful)
-        TagPath ->
-          let build [] = []
-              build xs = T.intercalate "/" xs : build (init xs)
-           in reverse (build meaningful)
+        TagLeaf -> maybe [] (: []) (lastMaybe meaningful)
+        TagDeepest -> case meaningful of
+          [] -> []
+          parts -> [T.intercalate "/" parts]
+        TagPath -> meaningful
 
 lastMaybe :: [a] -> Maybe a
 lastMaybe [] = Nothing
@@ -326,6 +376,16 @@ noiseFolders =
     , "bookmarks bar"
     ]
 
+-- | Wrapper folders that only count as noise at the top level of an export.
+-- Deeper folders with these names are real user folders and stay as tags.
+rootNoiseFolders :: Set Text
+rootNoiseFolders =
+  Set.fromList
+    [ "imported"
+    , "tabs"
+    , "imported sessions"
+    ]
+
 isSymbolish :: Char -> Bool
 isSymbolish c = isDigit c || isSpace c || c `elem` ("-/:._" :: String)
 
@@ -377,6 +437,7 @@ dedupe items =
               Just
                 old
                   { iiTitle = if T.null (iiTitle old) then iiTitle item else iiTitle old
+                  , iiDescription = if T.null (iiDescription old) then iiDescription item else iiDescription old
                   , iiTags = dedupeText (iiTags old <> iiTags item)
                   , iiCreatedAt = minNonZero (iiCreatedAt old) (iiCreatedAt item)
                   }
@@ -413,8 +474,8 @@ importParsed conn opts parsed = do
             let isRead = if ioMarkRead opts then (1 :: Int) else 0
             execute
               conn
-              "INSERT INTO bookmarks (url,title,domain,source,created_at,added_at,updated_at,is_read) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(url) DO NOTHING"
-              (iiUrl item, iiTitle item, iiDomain item, "netscape" :: Text, iiCreatedAt item, now, now, isRead)
+              "INSERT INTO bookmarks (url,title,description,domain,source,created_at,added_at,updated_at,is_read) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(url) DO NOTHING"
+              (iiUrl item, iiTitle item, iiDescription item, iiDomain item, "netscape" :: Text, iiCreatedAt item, now, now, isRead)
             changed <- changes conn
             bid <-
               if changed > 0

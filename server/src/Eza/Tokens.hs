@@ -111,14 +111,28 @@ authenticateToken conn raw = do
 tokenAllows :: Token -> Text -> [Text] -> Bool
 tokenAllows token method path =
   let scopes = map T.toLower (tokenScopes token)
-      captureRoute = method == "POST" && path == ["api", "v1", "quick-save"]
-      readOnly = method == "GET"
       allowed values = any (\value -> elem value scopes) values
-   in if captureRoute
+      captureWrite =
+        method == "POST"
+          && path `elem`
+            [ ["api", "v1", "quick-save"]
+            , ["api", "v1", "clip"]
+            , ["api", "v1", "clip", "preview"]
+            ]
+      captureRead =
+        method == "GET"
+          && ( path == ["api", "v1", "whoami"]
+                 || prefix ["api", "v1", "clip-templates"] path
+             )
+   in if captureWrite
         then allowed ["capture", "write"]
-        else if readOnly
-          then allowed ["read", "write", "capture"]
-          else allowed ["write"]
+        else if captureRead
+          then allowed ["capture", "write", "read"]
+          else if method == "GET"
+            then allowed ["read", "write"]
+            else allowed ["write"]
+  where
+    prefix pre path = take (length pre) path == pre
 
 splitScopes :: Text -> [Text]
 splitScopes = filter (not . T.null) . map T.strip . T.splitOn ","

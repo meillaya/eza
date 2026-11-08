@@ -1,0 +1,205 @@
+# eza clipper (Chromium MV3 extension)
+
+Save the current page, or just the selected text, to your eza library. The
+clipper extracts the readable article and its metadata in the browser, then
+`POST`s a typed clip payload to `/api/v1/clip` with a capture token.
+
+There is no build step to try it: load `extension/` unpacked. A build step
+copies that same tree into `dist/` and optionally adds a bundled Defuddle
+extractor for higher-quality extraction.
+
+## Install (load unpacked)
+
+1. Open `chrome://extensions` and turn on **Developer mode**.
+2. Click **Load unpacked** and choose:
+   - `extension/` for the no-dependency build (built-in DOM extractor), or
+   - `extension/dist/` after `npm install && npm run build:defuddle` for the
+     Defuddle-backed build.
+3. Pin the extension so the toolbar button stays visible.
+
+The extension needs Chromium/Chrome 116 or newer. It is Manifest V3, has no
+remote code, and makes no network request except to the eza server you
+configure.
+
+### Optional Defuddle bundle
+
+```bash
+cd extension
+npm install
+npm run build:defuddle   # copies to dist/ and bundles vendor/defuddle-page.js
+npm test                 # manifest, version pins, syntax, security checks
+```
+
+With the bundle, the clipper runs Defuddle (`0.19.6`) in the page's main world
+on a cloned document. Without it, the built-in extractor handles the page. The
+popup notes when it fell back. Pages whose CSP blocks main-world scripts also
+fall back automatically.
+
+## Configure
+
+1. In eza, open **Account → Tokens**, create a token named e.g. `Browser
+   clipper`, and tick the **capture** scope. Copy the raw token once; the
+   server never shows it again.
+2. Open the extension's **Options** page.
+3. Enter the server address (`https://eza.example.com`; a missing scheme
+   becomes `https://`). Click **Grant access** so Chrome asks for permission
+   to contact just that origin.
+4. Paste the capture token and press **Save**.
+5. Press **Test connection**. It calls `GET /api/v1/whoami` and shows the
+   account name and token scopes. A 404 means the server build does not expose
+   the capture API yet.
+
+The token is stored in `chrome.storage.local` for this profile only. The
+options page never renders a stored token back into the page; leaving the field
+empty keeps the existing token. The token is sent only in the
+`Authorization: Bearer` header, never in a URL, never to a content script, and
+never logged.
+
+Only the capture token is needed. No cookies are used; requests are sent with
+`credentials: 'omit'` and an `Idempotency-Key` per save.
+
+## Use
+
+- **Popup**: click the toolbar button, edit the title, add comma-separated
+  tags, choose a template, and save. The popup shows success (new bookmark or
+  attached to an existing one), an idempotent "already saved" state, and the
+  server's error message for failures.
+- **Context menu**: right-click → **Save to eza**, or select text and use
+  **Save selection to eza**.
+- **Keyboard**: `Ctrl+Shift+Y` saves the page, `Ctrl+Shift+U` saves the
+  selection (`Command` on macOS). Rebind at `chrome://extensions/shortcuts`.
+  Context-menu and keyboard saves show a toolbar badge: `OK` on success, `!`
+  on failure.
+
+Selection saves send the full page content plus `selection`; the server
+template decides how the selected passage appears (the built-in default appends
+it after the body).
+
+## Server contract
+
+The extension expects these routes (see `server/src/Eza/Clip.hs` for the typed
+payload, errors, and schema):
+
+```
+GET  /api/v1/whoami                 connection test: {username, scopes, token_name}
+GET  /api/v1/clip-templates         {templates:[ClipTemplate], builtin:ClipTemplate}
+POST /api/v1/clip                   SaveClipResult; 200 on idempotent replay
+POST /api/v1/clip/preview           rendered note without saving (optional here)
+```
+
+It sends:
+
+```http
+POST /api/v1/clip
+Authorization: Bearer eza_pat_...
+Idempotency-Key: <uuid>
+Content-Type: application/json
+X-Eza-Client: eza-clipper/0.1.0
+```
+
+```json
+{
+  "url": "https://example.com/article",
+  "title": "The Quiet Ledger",
+  "content_markdown": "# …",
+  "content_text": "…",
+  "content_html": "<article>…</article>",
+  "selection": "selected passage",
+  "tags": ["reading"],
+  "template_id": 3,
+  "source": "extension",
+  "client": "eza-clipper/0.1.0",
+  "captured_at": 1762549200,
+  "metadata": {
+    "author": "…", "site": "…", "published": "2024-03-01T10:00:00Z",
+    "description": "…", "language": "en",
+    "image": "https://…", "favicon": "https://…",
+    "canonical_url": "https://…",
+    "extractor": "defuddle", "extractor_version": "0.19.6",
+    "word_count": 118, "parse_time_ms": 84
+  }
+}
+```
+
+A retry of the same save reuses the same `Idempotency-Key`, so the server can
+answer `200` with `replayed: true` instead of inserting a duplicate. A `409
+idempotency_conflict` means the key was reused for a different payload; the
+popup surfaces that as an error.
+
+Because extension requests carry `Origin: chrome-extension://<id>`, the server
+must allow extension origins for bearer-token requests (or the token request
+will fail with 403). A bearer token has no ambient cookie authority, so
+allowing `chrome-extension://…` on that path does not weaken CSRF protection.
+The options page test connection will show the 403 if this is missing.
+
+## Permissions
+
+| Permission | Why |
+| --- | --- |
+| `activeTab` | Read the page only when the user clicks the button, uses the menu, or presses the shortcut. |
+| `scripting` | Inject the extractor into that tab. |
+| `storage` | Keep the server address, token, and default template in this profile. |
+| `contextMenus` | The right-click **Save** entries. |
+| `commands` | The two keyboard shortcuts. |
+| `optional_host_permissions` (`http(s)://*/*`) | Ask for access to the one configured server origin at runtime; no static host permission. |
+
+There are no content scripts and no `<all_urls>` permission.
+
+## Security notes
+
+- The capture token is stored once and only read by the background worker and
+  the options page. It is passed to the API module in memory.
+- Extraction clones the DOM and never mutates the page. The Defuddle path runs
+  with `useAsync: false` and a rejecting `fetch`, so no extractor can call a
+  third-party API.
+- The popup and options pages never log anything; errors are shown as text.
+- Server responses are treated as untrusted: only known fields are read, and
+  error text is displayed as text (`textContent`), never as HTML.
+
+## Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| "no access to …" | Options → **Grant access**, then save again. |
+| 401 | Token was revoked or mistyped. Create a new capture token and save it. |
+| 403 | Token lacks the `capture` scope, or the server does not allow `chrome-extension://` origins for bearer requests. |
+| 404 on test | The server build predates the clip API; update eza. |
+| "This page cannot be clipped" | Chrome internal pages (`chrome://`, Web Store) cannot be read by extensions. |
+| Defuddle note in popup | The optional bundle is absent or the page CSP blocked it; the built-in extractor was used. |
+
+## Development
+
+```
+extension/
+  manifest.json        MV3 manifest
+  background.js        service worker: menus, commands, extraction, save
+  popup.html/popup.js  the toolbar popup
+  options.html/options.js
+  ui.css               shared styling for both pages
+  src/config.js        storage, URL normalization, host permission
+  src/api.js           fetch wrapper, error mapping, idempotency keys
+  src/extract.js       self-contained in-page DOM extractor (fallback)
+  src/defuddle-page.js entry for the optional Defuddle bundle
+  src/version.js       client and pinned Defuddle versions
+  build.mjs            copy/bundle build
+  test/check.mjs       manifest + syntax + security checks (no dependencies)
+```
+
+`npm test` needs no browser. To check the extraction paths in a browser
+against the extractor fixture:
+
+```bash
+cd extension
+npm run build:defuddle
+# load dist/ unpacked, open sidecar/test/fixtures/article.html over http(s),
+# click the toolbar button, confirm the Title/Template/Save flow.
+```
+
+`node --check` covers every JavaScript file through `npm test`.
+
+## License
+
+Apache-2.0 for this extension, the same license as eza. Bundled Defuddle
+(`defuddle` 0.19.6) is MIT licensed; its license text is included by the
+bundler in `dist/vendor/defuddle-page.js` only when you build with
+`--with-defuddle`.

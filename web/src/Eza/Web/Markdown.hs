@@ -138,7 +138,12 @@ heading level title = case level of
 
 -- ------------------------------------------------------------------ inline --
 
--- | Inline markdown scanner: bold, italic, inline code, links, wikilinks.
+{- | Inline markdown scanner: bold, italic, inline code, links, wikilinks.
+
+The scanner always consumes at least one character.  A @[@ that starts a
+wikilink or link which never terminates would otherwise leave the plain
+span empty and the renderer would recurse on the same input forever.
+-}
 inline :: Text -> [View context props model action]
 inline input
     | T.null input = []
@@ -149,6 +154,7 @@ inline input
     | Just ('[', _) <- T.uncons input
     , Just (label, href, rest) <- linkAt input =
         linkView label href : inline rest
+    | T.null chunk = text (mstr (T.take 1 input)) : inline (T.drop 1 input)
     | otherwise = text (mstr chunk) : inline rest'
   where
     (chunk, rest') = T.span plainChar input
@@ -204,11 +210,22 @@ linkAt t = case T.stripPrefix "[" t of
                             then Nothing
                             else Just (label, href, T.drop 1 afterHref)
 
+{- | A link is rendered only for an http(s) destination.  Anything else
+(@javascript:@, @data:@, a relative path) falls back to its label as plain
+text, so a note preview cannot smuggle an executable or off-site URL in.
+-}
 linkView :: Text -> Text -> View context props model action
-linkView label href =
-    H.a_
-        [HP.href_ (mstr href), HP.rel_ "noopener noreferrer", HP.target_ "_blank"]
-        (inline label)
+linkView label href
+    | isHttpHref href =
+        H.a_
+            [HP.href_ (mstr href), HP.rel_ "noopener noreferrer", HP.target_ "_blank"]
+            (inline label)
+    | otherwise = H.span_ [] (inline label)
+
+isHttpHref :: Text -> Bool
+isHttpHref href =
+    let lowered = T.toLower (T.strip href)
+     in "https://" `T.isPrefixOf` lowered || "http://" `T.isPrefixOf` lowered
 
 {- | Keep the shared wikilink parser in the dependency graph: it documents the
 grammar this renderer implements for note previews.

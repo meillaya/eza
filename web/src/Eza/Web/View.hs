@@ -10,7 +10,7 @@ and 'formatProseDate'; the rows and counts come from 'Eza.Web.Model'.
 -}
 module Eza.Web.View (viewModel) where
 
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Miso
@@ -18,14 +18,16 @@ import qualified Miso.CSS as C
 import qualified Miso.Html as H
 import qualified Miso.Html.Event as HE
 import qualified Miso.Html.Property as HP
+import qualified Miso.JSON as MJ
 import Text.Read (readMaybe)
 
 import Eza.SearchQuery (SearchQuery (..), parseSearchQuery)
-import Eza.Types (BookmarkSummary (..), LibraryStats (..), TagStat (..))
+import Eza.Types (BookmarkSummary (..), LibraryStats (..), SavedSearch (..), TagStat (..))
 import Eza.Web.Accessions (accessionsPage)
 import Eza.Web.Detail (detailPage)
 import Eza.Web.Model
 import Eza.Web.Panels (accountPage, aiTagsPage, dedupPage, graphPage, maintenancePage, tagsPage)
+import Eza.Web.Types (ShareView (..))
 import Eza.Web.Widgets (disabledAttr, formatCount)
 
 -- ------------------------------------------------------------------ shell --
@@ -43,6 +45,7 @@ viewModel m =
             ++ statusBanners m
             ++ [routeBody m]
             ++ [mobileNav m, toastsView m, importInput]
+            ++ savedSearchShareDialog m
             ++ [addDialog m | mAddOpen m]
             ++ [paletteView m | mPaletteOpen m]
             ++ [guardDialog m | mGuardOpen m]
@@ -199,7 +202,11 @@ metaRight m
 countGroup :: Model -> [View () () Model Action]
 countGroup m =
     [ H.span_
-        [HP.class_ "ledg-countgroup"]
+        [ HP.class_ "ledg-countgroup"
+        , HP.role_ "status"
+        , HP.aria_ "live" "polite"
+        , HP.data_ "testid" "result-count-live"
+        ]
         ( if hasActiveFilters m
             then
                 [ H.span_ [HP.class_ "result-count"] [text (formatCount (mTotal m))]
@@ -388,25 +395,31 @@ isInbox m = mRoute m == Inbox
 notFoundPage :: View () () Model Action
 notFoundPage =
     H.div_
-        [HP.class_ "empty"]
+        [HP.class_ "detail-scroll"]
         [ H.div_
-            [HP.class_ "empty-note"]
-            [ H.span_ [HP.class_ "empty-kicker sc"] [text "404"]
-            , H.h2_ [HP.class_ "empty-title"] [text "That page is not in the catalogue."]
-            , H.p_
-                [HP.class_ "empty-body"]
-                [text "The address does not match a record, a year or a section. The ledger is still here, and the catalogue behind it is unchanged."]
-            , H.p_
-                [HP.class_ "empty-try"]
-                [ H.a_
-                    [HP.class_ "try-link", HP.href_ "/", HE.onClickPrevent (Navigate Index)]
-                    [text "back to the ledger"]
+            [HP.class_ "detail"]
+            [ H.div_
+                [HP.class_ "empty"]
+                [ H.div_
+                    [HP.class_ "empty-note"]
+                    [ H.span_ [HP.class_ "empty-kicker sc"] [text "404"]
+                    , H.h2_ [HP.class_ "empty-title"] [text "That page is not in the catalogue."]
+                    , H.p_
+                        [HP.class_ "empty-body"]
+                        [text "The address does not match a record, a year or a section. The ledger is still here, and the catalogue behind it is unchanged."]
+                    , H.p_
+                        [HP.class_ "empty-try"]
+                        [ H.a_
+                            [HP.class_ "try-link", HP.href_ "/", HE.onClickPrevent (Navigate Index)]
+                            [text "back to the ledger"]
+                        ]
+                    ]
+                , H.div_ [HP.class_ "empty-lines", HP.aria_ "hidden" "true"] (replicate 4 (H.i_ [] []))
+                , H.div_
+                    [HP.class_ "empty-end meta"]
+                    [H.span_ [] [text "no such route"], H.span_ [] [text "eza"]]
                 ]
             ]
-        , H.div_ [HP.class_ "empty-lines", HP.aria_ "hidden" "true"] (replicate 4 (H.i_ [] []))
-        , H.div_
-            [HP.class_ "empty-end meta"]
-            [H.span_ [] [text "no such route"], H.span_ [] [text "eza"]]
         ]
 
 -- ---------------------------------------------------------------- ledger ---
@@ -496,7 +509,7 @@ railView m =
                     , HP.href_ "/accessions"
                     , HE.onClickPrevent (Navigate Accessions)
                     ]
-                    [text "all four thousand sources"]
+                    [text "all sources"]
               ]
         )
     , railBlock
@@ -511,6 +524,7 @@ railView m =
                     [text ("all " <> tagCount <> " tags")]
               ]
         )
+    , savedSearchesBlock m
     , H.div_
         [HP.class_ "rail-block"]
         [ railHead "Status" "live counts"
@@ -549,6 +563,56 @@ railView m =
         H.div_
             [HP.class_ "rail-head"]
             [H.h2_ [HP.class_ "rail-title"] [text title], H.span_ [HP.class_ "rail-n"] [text right]]
+
+savedSearchesBlock :: Model -> View () () Model Action
+savedSearchesBlock m =
+    H.div_
+        [HP.class_ "rail-block"]
+        [ railHead "Saved searches" (formatCount (length (mSaved m)))
+        , if null (mSaved m)
+            then H.p_ [HP.class_ "rail-empty meta"] [text "no saved searches yet"]
+            else H.ul_ [HP.class_ "facet-list"] (map savedRow (mSaved m))
+        , H.button_
+            [ HP.class_ "facet-all"
+            , HP.type_ "button"
+            , HE.onClick SavedSearchSave
+            ]
+            [text "save this search"]
+        ]
+  where
+    railHead title right =
+        H.div_
+            [HP.class_ "rail-head"]
+            [H.h2_ [HP.class_ "rail-title"] [text title], H.span_ [HP.class_ "rail-n"] [text right]]
+    savedRow saved =
+        H.li_
+            [HP.class_ "facet"]
+            [ H.button_
+                [ HP.class_ "facet-name"
+                , HP.type_ "button"
+                , HP.title_ "Apply this saved search"
+                , HE.onClick (SavedSearchApply saved)
+                ]
+                [text (ms (ssName saved))]
+            , H.button_
+                [ HP.class_ "facet-share"
+                , HP.type_ "button"
+                , HP.data_ "testid" "saved-search-share"
+                , HP.title_ "Share this saved search"
+                , HP.aria_ "label" ("Share saved search " <> ms (ssName saved))
+                , HE.onClick (SavedSearchShareOpen saved)
+                ]
+                [text "↗"]
+            , H.button_
+                [ HP.class_ "tagpill-remove"
+                , HP.type_ "button"
+                , HP.data_ "testid" "saved-search-delete"
+                , HP.title_ "Delete this saved search"
+                , HP.aria_ "label" ("Delete saved search " <> ms (ssName saved))
+                , HE.onClick (SavedSearchDelete (ssId saved))
+                ]
+                [text "×"]
+            ]
 
 sourceRow :: Model -> (Text, Int) -> View () () Model Action
 sourceRow m (domain, count) =
@@ -679,9 +743,34 @@ ledgerBody m
     | null (mItems m) = [freshEmpty]
     | otherwise =
         invalidHint m
+            ++ staleError m
             ++ [selectionBar m | selectedCount m > 0]
             ++ (columnHead m : entriesView m)
             ++ [ledgerFoot m]
+
+{- | Rows on screen but the refresh failed: keep the ledger and say the page
+is stale, rather than printing the previous list as if it were current.
+-}
+staleError :: Model -> [View () () Model Action]
+staleError m = case mError m of
+    Nothing -> []
+    Just message ->
+        [ H.div_
+            [HP.class_ "offline-banner", HP.role_ "alert"]
+            [ H.span_ [HP.class_ "offline-banner-mark", HP.aria_ "hidden" "true"] []
+            , H.span_
+                [HP.class_ "offline-banner-text"]
+                [ text "The list could not be refreshed. "
+                , text message
+                ]
+            , H.span_
+                [HP.class_ "offline-banner-actions"]
+                [ H.button_
+                    [HP.class_ "ledg-foot-act", HP.type_ "button", HE.onClick SearchCommit]
+                    [text "retry"]
+                ]
+            ]
+        ]
 
 entriesView :: Model -> [View () () Model Action]
 entriesView m = map entryView (ledgerEntries m)
@@ -744,12 +833,14 @@ rowView m bookmark =
             )
             [ H.span_
                 cNoAttrs
-                [ H.span_
-                    ( HP.class_ "ledg-acc"
-                        : [HE.onClickWithOptions stopPropagation (Navigate (Bookmark (bsId bookmark)))]
-                    )
-                    [text (accessionNo (bsId bookmark))]
-                ]
+                ( selectionTick m bookmark
+                    ++ [ H.span_
+                            ( HP.class_ "ledg-acc"
+                                : [HE.onClickWithOptions stopPropagation (Navigate (Bookmark (bsId bookmark)))]
+                            )
+                            [text (accessionNo (bsId bookmark))]
+                       ]
+                )
             , H.span_
                 [ HP.class_ "c-title"
                 , HP.data_ "testid" "ledger-row-title"
@@ -764,30 +855,12 @@ rowView m bookmark =
             , H.span_ [HP.class_ "c-filed meta"] [text (formatFiled (bsCreatedAt bookmark))]
             , H.span_ [HP.class_ "c-tags meta"] (tagsCell m (bsTags bookmark))
             ]
-        , H.input_
-            [ HP.class_ "ledg-tick ledger-row-select"
-            , HP.type_ "checkbox"
-            , HP.data_ "testid" "ledger-row-select"
-            , HP.aria_ "label" ("Select " <> msText (bsTitle bookmark))
-            , HP.checked_ (isSelected m (bsId bookmark))
-            , C.styleInline_ tickStyle
-            , HE.onClick (SelectToggled (bsId bookmark) False)
-            ]
         ]
   where
     cNoAttrs =
         [ HP.class_ "c-no mono"
         , C.styleInline_ (if mWidth m < 768 then "padding-left:18px" else "")
         ]
-    tickStyle
-        | isSelected m (bsId bookmark) =
-            tickBase <> "background:var(--accent);border-color:var(--accent)"
-        | otherwise = tickBase
-    tickBase =
-        "position:absolute;left:0;-webkit-appearance:none;appearance:none;"
-            <> "width:9px;height:9px;margin:0;border:1px solid var(--rule);"
-            <> "border-radius:var(--radius);cursor:pointer;"
-            <> if mWidth m < 768 then "top:22px;display:inline-block" else "top:50%;transform:translateY(-50%);display:inline-block"
     readWord
         | bsIsDead bookmark = "dead link"
         | bsIsRead bookmark = "read"
@@ -804,6 +877,37 @@ rowLabel bookmark = accessionNo (bsId bookmark) <> ", " <> msText (bsTitle bookm
 
 rowDomId :: Int -> MisoString
 rowDomId bid = "ledger-row-" <> ms (show bid)
+
+{- | The row's selection control: a real checkbox inside the accession cell,
+with a 44px tap target. The CSS only shows it in bulk mode. Shift-click
+extends the selection from the last anchor.
+-}
+selectionTick :: Model -> BookmarkSummary -> [View () () Model Action]
+selectionTick m bookmark =
+    [ H.label_
+        [HP.class_ "ledg-tickbox"]
+        [ H.input_
+            [ HP.class_ "ledg-tick ledger-row-select"
+            , HP.type_ "checkbox"
+            , HP.data_ "testid" "ledger-row-select"
+            , HP.aria_ "label" ("Select " <> msText (bsTitle bookmark))
+            , HP.checked_ (isSelected m (bsId bookmark))
+            , shiftSelect (bsId bookmark)
+            ]
+        ]
+    ]
+
+{- | A click handler that carries the shift modifier. @on@ with the shared
+empty decoder would always send False, leaving range selection unreachable.
+-}
+shiftSelect :: Int -> Attribute Model Action
+shiftSelect bookmarkId =
+    onWithOptions
+        BUBBLE
+        stopPropagation
+        "click"
+        (at [] (MJ.withObject "click" (\mouseEvent -> mouseEvent MJ..: "shiftKey")))
+        (\shift _ _ -> SelectToggled bookmarkId shift)
 
 {- | Whole tags only: two on the wide sheet, three in the mobile block rows,
 followed by a mono count of the rest. The budget leaves room for the +n.
@@ -1156,8 +1260,15 @@ ledgerFoot m =
     footActions model
         | isInbox model =
             [ H.button_
-                [HP.class_ "ledg-foot-act", HP.type_ "button", HE.onClick MarkAllAbove]
-                [text "mark all above read"]
+                ( [ HP.class_ "ledg-foot-act"
+                  , HP.type_ "button"
+                  , HP.aria_ "label" (markAllLabel model)
+                  , HP.title_ "Marks only the loaded unread records, after a second click to confirm."
+                  , HE.onClick MarkAllAbove
+                  ]
+                    ++ disabledAttr (null loadedUnread || mBulkBusy model)
+                )
+                [text (if mConfirmMarkAll model then "click again to confirm" else "mark loaded unread read")]
             ]
         | selectedCount model > 0 = []
         | otherwise =
@@ -1168,6 +1279,15 @@ ledgerFoot m =
                 [HP.class_ "ledg-foot-act", HP.type_ "button", HE.onClick SelectAllMatchingStart]
                 [text "select all matching"]
             ]
+    loadedUnread = [bookmark | bookmark <- mItems m, not (bsIsRead bookmark)]
+    markAllLabel model =
+        ms
+            ( "Mark "
+                <> formatCount (length [bookmark | bookmark <- mItems model, not (bsIsRead bookmark)])
+                <> " loaded unread record"
+                <> (if length [bookmark | bookmark <- mItems model, not (bsIsRead bookmark)] == 1 then "" else "s")
+                <> " read"
+            )
     libraryNote model = case mStats model of
         Just s ->
             formatCount (lsDays s)
@@ -1222,21 +1342,39 @@ savePage m =
         [ H.div_
             [HP.class_ "save-spread"]
             [ H.form_
-                [HP.class_ "save-sheet", HE.onSubmit AddSubmit]
+                [HP.class_ "save-sheet", HP.aria_ "label" "File a record", HE.onSubmit AddSubmit]
                 [ H.div_
                     [HP.class_ "save-head"]
                     [ H.h2_ [HP.class_ "save-title"] [text "File a record"]
                     , H.p_
                         [HP.class_ "save-lede"]
-                        [text "Prefilled from the page you were reading. Adjust the title or tags before filing; the address is kept exactly as it arrived."]
+                        [text "Prefilled from the page you were reading. Adjust the title, tags or note before filing; the address is kept exactly as it arrived."]
                     ]
                 , H.div_
                     [HP.class_ "save-fields"]
-                    [ saveField "address" "save-url" "url" (mAddUrl m) AddUrlInput False
-                    , saveField "title" "save-title" "text" (mAddTitle m) AddTitleInput True
-                    , saveField "tags" "save-tags" "text" (mAddTags m) AddTagsInput False
-                    ]
+                    ( [ saveField "address" "save-url" "url" (mAddUrl m) AddUrlInput False
+                      , saveField "title" "save-title" "text" (mAddTitle m) AddTitleInput True
+                      , saveField "tags" "save-tags" "text" (mAddTags m) AddTagsInput False
+                      , H.p_
+                            [HP.class_ "save-hint"]
+                            [text "A new name creates a new tag in the catalogue."]
+                      , H.div_
+                            [HP.class_ "save-field"]
+                            [ H.label_ [HP.class_ "save-label", HP.for_ "save-note"] [text "note"]
+                            , H.textarea_
+                                [ HP.id_ "save-note"
+                                , HP.class_ "save-input save-input--note"
+                                , HP.rows_ "3"
+                                , HP.value_ (mAddNote m)
+                                , HP.placeholder_ "optional"
+                                , HP.aria_ "label" "Note"
+                                , HE.onInput AddNoteInput
+                                ]
+                            ]
+                      ]
+                    )
                 , duplicateNote m
+                , saveErrorMessage m
                 , H.div_
                     [HP.class_ "save-actions"]
                     [ H.a_
@@ -1255,14 +1393,23 @@ savePage m =
                     [HP.class_ "save-status meta"]
                     [ text
                         ( if mAddBusy m
-                            then "filing: one write, no network call"
-                            else "duplicates are checked when you file"
+                            then "filing: the record is written first, then the note"
+                            else "the address is checked against the library when you file"
                         )
                     ]
                 ]
-            , saveNotes
+            , saveNotes m
             ]
         ]
+
+{- | The validation or server error behind the form.  A duplicate has its own
+notice, so only unrelated failures appear here.
+-}
+saveErrorMessage :: Model -> View () () Model Action
+saveErrorMessage m = case (duplicateId m, mAddError m) of
+    (Nothing, Just message) ->
+        H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]
+    _ -> H.span_ [] []
 
 duplicateNote :: Model -> View () () Model Action
 duplicateNote m = case duplicateId m of
@@ -1300,8 +1447,8 @@ saveField label domId inputType value onInput wide =
             ]
         ]
 
-saveNotes :: View () () Model Action
-saveNotes =
+saveNotes :: Model -> View () () Model Action
+saveNotes m =
     H.aside_
         [HP.class_ "save-notes", HP.aria_ "label" "What filing does"]
         [ H.h2_ [HP.class_ "save-notes-title sc"] [text "What filing does"]
@@ -1312,14 +1459,22 @@ saveNotes =
                 [ ("accession", "one number, reserved at filing")
                 , ("duplicates", "checked against normalised addresses")
                 , ("tags", "literal; a new name makes a new tag")
-                , ("writes", "one transaction, no network call")
+                , ("writes", "the record first, then the note when one is supplied")
                 ]
             )
         , H.p_
             [HP.class_ "save-note"]
             [text "The quick save path is the same write the bookmarklet and the installed share target use. Filing stores the address; fetching and extraction are separate jobs."]
-        , H.p_ [HP.class_ "save-colophon meta"] [text "eza · filed since 2022"]
+        , H.p_ [HP.class_ "save-colophon meta"] [text (saveColophon m)]
         ]
+
+-- | The colophon only names years the library actually reports.
+saveColophon :: Model -> MisoString
+saveColophon m = case mStats m of
+    Just stats
+        | not (T.null (T.strip (lsFirstDay stats))) ->
+            "eza · " <> yearOfDay (lsFirstDay stats) <> " to " <> yearOfDay (lsLastDay stats)
+    _ -> "eza"
 
 isNothingMaybe :: Maybe a -> Bool
 isNothingMaybe Nothing = True
@@ -1348,6 +1503,8 @@ paletteView m =
                         , HP.class_ "slip-input"
                         , HP.type_ "text"
                         , HP.placeholder_ "a command, a query, an accession"
+                        , HP.aria_ "label" "Search commands and records"
+                        , HP.autofocus_ True
                         , HP.value_ (mPaletteQ m)
                         , HP.autocomplete_ "off"
                         , HP.spellcheck_ False
@@ -1411,6 +1568,177 @@ toastKindClass = \case
     ToastOk -> "toast--ok"
     ToastError -> "toast--err"
     ToastInfo -> "toast--info"
+
+-- ------------------------------------------------------ saved share slip ---
+
+{- | The share slip for a saved search. It keeps the record share look and the
+same @POST /api/v1/share-links@ contract with @scope: "saved_search"@; the
+public page and its Atom feed serve the saved query rather than a record.
+-}
+savedSearchShareDialog :: Model -> [View () () Model Action]
+savedSearchShareDialog m = case mSavedShare m of
+    Nothing -> []
+    Just saved ->
+        [ H.div_
+            [HP.class_ "overlay is-open", HE.onClick SavedSearchShareClose]
+            [ H.div_
+                [ HP.class_ "dshare-slip"
+                , HP.data_ "testid" "dialog-saved-share"
+                , HP.role_ "dialog"
+                , HP.aria_ "modal" "true"
+                , HP.aria_ "label" "Share a saved search"
+                , HE.onClickWithOptions stopPropagation Noop
+                ]
+                ( [ H.div_
+                        [HP.class_ "dshare-head"]
+                        [ H.h2_
+                            [HP.class_ "dshare-title"]
+                            [text "Share a saved search"]
+                        , H.button_
+                            [ HP.class_ "dshare-x"
+                            , HP.type_ "button"
+                            , HP.aria_ "label" "Close"
+                            , HP.title_ "Close"
+                            , HE.onClick SavedSearchShareClose
+                            ]
+                            [text "×"]
+                        ]
+                  , H.p_
+                        [HP.class_ "dshare-copy"]
+                        [ text
+                            ( ms
+                                ( "A read-only page of “"
+                                    <> ssName saved
+                                    <> "” and an Atom feed at the same address. The link is unguessable and can be revoked here."
+                                )
+                            )
+                        ]
+                  ]
+                    ++ savedSearchShareLinkRow m
+                    ++ [ savedSearchShareFields m
+                       , savedSearchShareLinks m saved
+                       , H.div_
+                            [HP.class_ "dshare-foot"]
+                            [ H.p_
+                                [HP.class_ "dshare-note"]
+                                [text "The recipient does not need an account, and this does not make the library public."]
+                            , H.button_
+                                [HP.class_ "btn", HP.type_ "button", HE.onClick SavedSearchShareClose]
+                                [text "done"]
+                            ]
+                       ]
+                )
+            ]
+        ]
+
+savedSearchShareLinkRow :: Model -> [View () () Model Action]
+savedSearchShareLinkRow m = case mShareUrl m of
+    Just url ->
+        [ H.div_
+            [HP.class_ "dshare-linkrow", HP.data_ "testid" "saved-share-reveal"]
+            [ H.a_
+                [ HP.class_ "dshare-link"
+                , HP.data_ "testid" "saved-share-url"
+                , HP.href_ (ms url)
+                , HP.target_ "_blank"
+                , HP.rel_ "noopener noreferrer"
+                ]
+                [text (ms url)]
+            , H.button_
+                [ HP.class_ "btn"
+                , HP.data_ "testid" "saved-share-copy"
+                , HP.type_ "button"
+                , HE.onClick (ShareCopy url)
+                ]
+                [text "copy link"]
+            ]
+        ]
+    Nothing ->
+        [ H.div_
+            [HP.class_ "dshare-linkrow"]
+            [ H.span_ [HP.class_ "dshare-link"] [text "no link created yet"]
+            , H.button_
+                ( [ HP.class_ "btn btn--strong"
+                  , HP.data_ "testid" "saved-share-create"
+                  , HP.type_ "button"
+                  , HE.onClick SavedSearchShareCreate
+                  ]
+                    ++ disabledAttr (mShareBusy m)
+                )
+                [text (if mShareBusy m then "creating..." else "create the link")]
+            ]
+        ]
+
+savedSearchShareFields :: Model -> View () () Model Action
+savedSearchShareFields m =
+    H.div_
+        [HP.class_ "dshare-fields"]
+        [ H.div_
+            [HP.class_ "field dshare-expiry-field"]
+            [ H.label_
+                [HP.class_ "field-label", HP.for_ "saved-share-expiry"]
+                [text "expires"]
+            , H.select_
+                [ HP.id_ "saved-share-expiry"
+                , HP.class_ "select"
+                , HP.autofocus_ True
+                , HE.onChange
+                    ( \raw ->
+                        ShareExpirySelected
+                            (fromMaybe 30 (readMaybe (fromMisoString raw :: String)))
+                    )
+                ]
+                (map (savedShareExpiryOption (mShareExpiryDays m)) savedShareExpiryChoices)
+            ]
+        ]
+
+-- | Expiry choices offered for a share link, in days.
+savedShareExpiryChoices :: [Int]
+savedShareExpiryChoices = [1, 7, 30, 90, 365]
+
+savedShareExpiryOption :: Int -> Int -> View () () Model Action
+savedShareExpiryOption current days =
+    H.option_
+        [HP.value_ (ms (show days)), HP.selected_ (current == days)]
+        [text (ms (labelFor days))]
+  where
+    labelFor 1 = "in 1 day" :: MisoString
+    labelFor value = ms ("in " <> show value <> " days")
+
+savedSearchShareLinks :: Model -> SavedSearch -> View () () Model Action
+savedSearchShareLinks m saved
+    | Just message <- mSharesError m =
+        H.p_ [HP.class_ "dshare-note"] [text "existing links could not be read: ", text message]
+    | null activeLinks = H.span_ [] []
+    | otherwise =
+        H.div_
+            [HP.class_ "record-sec"]
+            [ H.div_
+                [HP.class_ "record-sec-head"]
+                [H.h3_ [HP.class_ "record-sec-title sc"] [text "Existing links"]]
+            , H.div_ [HP.class_ "record-tags"] (map linkRow activeLinks)
+            ]
+  where
+    activeLinks =
+        [ share
+        | share <- mShares m
+        , svScope share == "saved_search"
+        , svTargetId share == ssId saved
+        , isNothing (svRevokedAt share)
+        ]
+    linkRow share =
+        H.span_
+            [HP.class_ "record-tags", HP.data_ "testid" "saved-share-row"]
+            [ H.span_ [HP.class_ "mono"] [text (ms (svPrefix share))]
+            , H.span_ [HP.class_ "status--warn"] [text "expires ", text (formatFiled (svExpiresAt share))]
+            , H.button_
+                [ HP.class_ "btn btn--sm"
+                , HP.data_ "testid" "saved-share-revoke"
+                , HP.type_ "button"
+                , HE.onClick (ShareRevoke (svId share))
+                ]
+                [text "revoke"]
+            ]
 
 addDialog :: Model -> View () () Model Action
 addDialog m =
@@ -1491,14 +1819,16 @@ addField label domId inputType value onInput extraClass =
         [HP.class_ ("field" <> extraClass)]
         [ H.label_ [HP.class_ "field-label", HP.for_ domId] [text label]
         , H.input_
-            [ HP.id_ domId
-            , HP.class_ "input"
-            , HP.type_ inputType
-            , HP.value_ value
-            , HP.autocomplete_ "off"
-            , HP.spellcheck_ False
-            , HE.onInput onInput
-            ]
+            ( [ HP.id_ domId
+              , HP.class_ "input"
+              , HP.type_ inputType
+              , HP.value_ value
+              , HP.autocomplete_ "off"
+              , HP.spellcheck_ False
+              , HE.onInput onInput
+              ]
+                ++ [HP.autofocus_ True | domId == "add-url"]
+            )
         ]
 
 duplicateBlock :: Model -> View () () Model Action

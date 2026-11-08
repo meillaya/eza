@@ -1,0 +1,22 @@
+{
+  "name": "eza-defuddle-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Server-side page extraction worker for eza. Reads JSON lines on stdin and writes JSON lines on stdout. Makes no network calls.",
+  "license": "Apache-2.0",
+  "author": "eza",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/main.mjs",
+    "test": "node test/smoke.mjs",
+    "check": "node --check src/main.mjs && node --check src/worker.mjs && node --check src/html-text.mjs && node --check test/smoke.mjs"
+  },
+  "dependencies": {
+    "defuddle": "0.19.6",
+    "linkedom": "0.18.15",
+    "turndown": "7.2.5"
+  }
+}

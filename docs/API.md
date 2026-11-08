@@ -14,6 +14,12 @@ login, and recovery are separate routes. All JSON is UTF-8.
   management routes require a browser session.
 - An unauthenticated API request returns 401.
 - An HTML request without a session redirects to `/login`.
+- The public auth POSTs check the request `Origin`: a browser must send an
+  origin that matches `PUBLIC_ORIGIN` or an `EZA_ALLOWED_ORIGINS` extra, and a
+  `Sec-Fetch-Site: cross-site` request is rejected. A missing `Origin` is
+  accepted only for non-browser clients.
+- Public auth POSTs accept at most `EZA_AUTH_BODY_LIMIT_BYTES` bytes of JSON
+  (8192 by default) and return 413 above it.
 - Errors use `{"error":{"code":"...","message":"..."}}`.
 - Query parameters are optional unless the entry says otherwise.
 
@@ -25,36 +31,87 @@ login, and recovery are separate routes. All JSON is UTF-8.
 | 201 | Row created |
 | 204 | Request completed with no body |
 | 400 | Validation error |
-| 401 | No session |
-| 403 | CSRF failure or a route outside the recovery scope |
+| 401 | No session, a failed username/password login, or an expired pending two-factor sign-in |
+| 403 | CSRF, origin, session-scope, or recovery-scope failure; retired passkey ceremony |
 | 404 | Row or route missing |
-| 409 | URL or tag conflict |
-| 410 | Share link revoked or expired |
+| 409 | URL, tag, or last-credential conflict; two-factor precondition |
+| 410 | Share link revoked or expired; passkey setup retired |
 | 413 | Request body too large |
-| 429 | Rate limit |
+| 429 | Rate limited; read `Retry-After` |
 | 500 | Internal error |
 
 ## Auth
 
+The instance has one account: one username and one Argon2id password hash in
+`app_state`. A passkey registered on the account is an optional second factor.
+Passkeys that predate schema v6 are legacy credentials: they sign in only while
+the database has no password. Recovery clears both the password and the
+passkeys.
+
 ```
+POST   /api/auth/login
+POST   /api/auth/passkey/options
+POST   /api/auth/passkey/verify
 POST   /api/auth/options
 POST   /api/auth/verify
 POST   /api/auth/logout
-POST   /api/setup/options
-POST   /api/setup/verify
+POST   /api/setup/password
 POST   /api/recovery/redeem
 ```
 
-`POST /api/auth/options` returns WebAuthn request options for a registered
-credential. `POST /api/auth/verify` takes the assertion and sets the session
-and CSRF cookies. `POST /api/auth/logout` clears both cookies.
+`POST /api/auth/login` takes `{"username":"...","password":"..."}`. A failed
+login returns a generic 401. After `EZA_LOGIN_MAX_ATTEMPTS` failures the
+account locks for `EZA_LOGIN_LOCKOUT_SECONDS` and the endpoint returns 429 with
+`Retry-After`; the counters live in `app_state` and survive a restart.
 
-`POST /api/setup/options` and `POST /api/setup/verify` create the first
-passkey and return the ten recovery codes. The setup routes refuse to run after
-a passkey exists unless a recovery session is active.
+A success returns `{"requires_2fa":false,"redirect":"/"}` and sets the session
+and CSRF cookies. Session lifetime is `EZA_SESSION_TTL_SECONDS`.
 
-`POST /api/recovery/redeem` takes `{"code":"..."}` and starts a recovery
-session. The session may call only `/setup*` and `/api/setup/*`.
+When passkey two-factor is on and at least one passkey is registered, the
+password alone returns `{"requires_2fa":true}`: the server creates no normal
+session and sets only a short-lived HttpOnly `eza_pending` cookie, five
+minutes. The browser finishes the sign-in with two requests that both read
+that cookie:
+
+1. `POST /api/auth/passkey/options` returns WebAuthn assertion options whose
+   challenge is scoped to the second factor.
+2. `POST /api/auth/passkey/verify` takes the assertion and returns
+   `{"requires_2fa":false,"redirect":"/"}` with the session and CSRF cookies;
+   the pending session is deleted. A missing or expired pending cookie returns
+   401 `pending_required`.
+
+The pending cookie is not a session for any other route. It cannot call
+`/api/v1` or any page behind the session guard; only the two passkey requests
+above use it.
+
+`POST /api/setup/password` takes `{"username":"...","password":"...","confirm":"..."}`
+and is available on a fresh database and during a recovery setup. It creates
+the account, marks the database claimed, replaces the recovery codes with ten
+new ones, returns `{"codes":[...],"redirect":"/"}`, and signs the browser in.
+It leaves passkey two-factor off. `POST /api/setup/options` and
+`/api/setup/verify` are retired and return 410.
+
+`POST /api/auth/options` and `POST /api/auth/verify` are the legacy passkey
+ceremony. They work only while the database has passkeys and no password, and
+return 403 once a password exists or a recovery session is active. A successful
+assertion sets the session and CSRF cookies.
+
+`POST /api/auth/logout` clears the session, CSRF, and pending cookies.
+
+`POST /api/recovery/redeem` takes `{"code":"..."}`. It is rate limited by
+client host. Redemption spends the code, deletes every passkey, clears the
+password and the two-factor flag, revokes every other session, and starts a
+ten-minute recovery session. The session may call only `POST
+/api/setup/password`, `POST /api/auth/logout`, and `GET /api/v1/account`;
+completing the setup writes a new password and rotates the remaining codes
+out.
+
+The password pages are `GET /login`, `GET /setup`, and `GET /recover`.
+`GET /login` renders the password form, the legacy passkey form, or redirects
+to `/setup` on a fresh database. `GET /setup` renders the claim form, or the
+recovery form with the stored username while a recovery session is active.
+`GET /account/add-passkey` is the passkey registration page for a signed-in
+session.
 
 ## Library
 
@@ -220,6 +277,7 @@ GET    /api/v1/tokens
 POST   /api/v1/tokens
 DELETE /api/v1/tokens/{id}
 GET    /api/v1/account
+POST   /api/v1/account/2fa
 POST   /api/v1/account/passkeys/options
 POST   /api/v1/account/passkeys/verify
 PATCH  /api/v1/account/passkeys/{id}
@@ -228,13 +286,75 @@ POST   /api/v1/account/recovery/regenerate
 ```
 
 `GET /api/v1/account` returns
-`{"credentials":[CredentialInfo],"recovery_codes_remaining":N,"sessions":[SessionInfo]}`.
-`SessionInfo` carries timestamps and a `current` flag for the requesting
-session. Session ids and hashes are never exposed.
+`{"username":Text,"has_password":Bool,"require_passkey":Bool,"account_configured":Bool,"credentials":[CredentialInfo],"recovery_codes_remaining":N,"sessions":[SessionInfo]}`.
+The first four fields describe the single account; `require_passkey` reports
+whether optional passkey two-factor is on. `SessionInfo` carries timestamps and
+a `current` flag for the requesting session. Session ids and hashes are never
+exposed, and pending two-factor sessions never appear in the list.
+
+`POST /api/v1/account/2fa` takes
+`{"required":Bool,"current_password":Text}` and returns the same account
+document as `GET /api/v1/account`. Enabling needs the correct current password
+and at least one registered passkey, otherwise the endpoint returns 409 with
+`passkey_required`. Disabling needs the current password. Changing the password
+does not change the two-factor flag; recovery does clear it.
+
+`POST /api/v1/account/password` takes
+`{"current_password":Text?,"new_password":Text,"confirm":Text}`. The current
+password is required once one exists; a legacy passkey session may set the
+first password without it. The new password is at least ten characters, other
+browser sessions are revoked, and the response is `{"ok":true}`.
+
+`POST /api/v1/account/username` takes
+`{"current_password":Text?,"username":Text}` and renames the account.
+`POST /api/v1/account/sessions/revoke-others` revokes every session except the
+requesting one and returns `{"revoked":N}`.
+
+A signed-in session can register a passkey at any time.
+`POST /api/v1/account/passkeys/options` returns registration options and
+`POST /api/v1/account/passkeys/verify` stores the credential; both require a
+browser session. An existing credential can be renamed or deleted.
+`DELETE /api/v1/account/passkeys/{id}` may remove every passkey while
+two-factor is off. With two-factor on it refuses to remove the last one with
+409 `last_credential`; turn two-factor off first. A legacy passkey-only
+account also refuses to remove its last credential.
+
 `POST /api/v1/account/recovery/regenerate` invalidates the unused codes and
 returns ten new codes. `POST /api/v1/tokens` takes
 `{"name","scopes":["read","write","capture"]}` and returns the raw token once
 plus its metadata. Tokens are stored by hash and revoke immediately.
+
+## Browser clipper
+
+```
+GET    /api/v1/whoami
+POST   /api/v1/clip
+POST   /api/v1/clip/preview
+GET    /api/v1/clip-templates
+GET    /api/v1/clip-templates/{id}
+POST   /api/v1/clip-templates
+PATCH  /api/v1/clip-templates/{id}
+DELETE /api/v1/clip-templates/{id}
+```
+
+`POST /api/v1/clip` accepts a clip from the browser extension with
+`Authorization: Bearer` (scope `capture` or `write`) and an optional
+`Idempotency-Key`. The body is a `ClipRequest`; only `url` is required. It
+returns a `SaveClipResult` with `capture_id`, `bookmark_id`,
+`bookmark_created`, `replayed`, rendered `markdown`, tags, template id/name,
+and `needs_enrichment`. A replay with the same key and request hash returns
+200 with `replayed:true`; the same key with a different payload is 409
+`idempotency_conflict`. `POST /api/v1/clip/preview` renders the template
+without writing. `GET /api/v1/whoami` returns the authenticated username
+(cookie session) or token name/scopes (bearer). Capture tokens may only read
+templates and call whoami/clip; template writes need a browser session.
+
+The clipper CORS preflight runs before the auth guard. Allowed origins come
+from `EZA_CLIP_ORIGINS`, the public origin/allowed origins, and
+`chrome-extension://`, `moz-extension://`, or `safari-web-extension://`
+origins. The clip body limit is 8 MiB; content field limits are enforced by
+`validateClip`. See [clipper.md](clipper.md) for the extension, sidecar, and
+template model.
 
 ## DTOs
 

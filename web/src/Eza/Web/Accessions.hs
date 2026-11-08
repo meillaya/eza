@@ -34,7 +34,9 @@ accessionsPage m =
                 [HP.class_ "acc"]
                 ( case mStats m of
                     Nothing -> notLoaded
-                    Just stats -> indexView stats
+                    Just stats
+                        | lsTotal stats <= 0 -> emptyIndex
+                        | otherwise -> indexView stats
                 )
             ]
         ]
@@ -69,6 +71,43 @@ notLoaded =
         , H.p_
             [HP.class_ "empty-end meta"]
             [H.span_ [] [text "figures not loaded"], H.span_ [] [text "the catalogue is still opening"]]
+        ]
+    ]
+
+{- | A library with no records yet: the index has real zeroes but nothing to
+set, so it says that instead of printing an empty chart that looks like a
+result.
+-}
+emptyIndex :: [View () () Model Action]
+emptyIndex =
+    [ H.header_
+        [HP.class_ "acc-head"]
+        [ H.div_
+            [HP.class_ "acc-head-left"]
+            [ H.h1_ [HP.class_ "acc-title"] [text "Accessions by year"]
+            , H.p_
+                [HP.class_ "acc-lede"]
+                [text "The whole library, set as an index: every year it grew, every source it came from, and every day it was used."]
+            ]
+        , H.dl_
+            [HP.class_ "acc-figures"]
+            [ figure "entries" "0"
+            , figure "sources" "0"
+            , figure "filing days" "0"
+            ]
+        ]
+    , ruleLine
+    , H.div_
+        [HP.class_ "empty"]
+        [ H.p_ [HP.class_ "empty-kicker meta"] [text "no entries"]
+        , H.h2_ [HP.class_ "empty-title display"] [text "The index has nothing to set yet."]
+        , H.p_
+            [HP.class_ "empty-body"]
+            [text "This library holds no records, so no year has filing days to print. File a record or import a bookmarks file and the index fills itself from the database."]
+        , H.div_ [HP.class_ "empty-lines", HP.aria_ "hidden" "true"] (replicate 4 (H.i_ [] []))
+        , H.p_
+            [HP.class_ "empty-end meta"]
+            [H.span_ [] [text "0 entries"], H.span_ [] [text "the catalogue is ready"]]
         ]
     ]
 

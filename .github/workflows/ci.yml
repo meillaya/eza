@@ -21,7 +21,15 @@ jobs:
         run: nix profile install nixpkgs#devenv
       - name: Haskell tests
         run: devenv shell -- cabal test all
+      - name: Haskell tests (full import fixture)
+        run: EZA_IMPORT_FIXTURE=$PWD/bookmarks_14_08_2026.html devenv shell -- cabal test all
       - name: Build server
         run: devenv shell -- cabal build all
       - name: Build Miso client
         run: devenv shell -- bash scripts/build-web.sh
+      - name: Sidecar checks
+        run: cd sidecar && npm ci && npm test
+      - name: Extension checks
+        run: cd extension && npm ci && npm test
+      - name: Browser suite
+        run: devenv shell -- bash scripts/e2e.sh
