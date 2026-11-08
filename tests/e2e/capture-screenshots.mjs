@@ -1,9 +1,9 @@
 // Capture the screenshots used by the README and docs/UI.md.
 //
 // The app is the real server plus the built WASM client: no mockups. The
-// script claims a scratch instance (virtual WebAuthn authenticator), then
-// seeds the library from the Netscape export in the repo root with a
-// multipart POST to /api/v1/import. Set EZA_SEED_IMPORT to a different
+// script creates the scratch password account, then seeds the library from
+// the Netscape export in the repo root with a multipart POST to
+// /api/v1/import. Set EZA_SEED_IMPORT to a different
 // export path, or EZA_SEED_IMPORT=0 to fall back to the 14-bookmark demo seed.
 //
 // The detail shot uses the real enrichment output. A legacy fallback can seed
@@ -27,7 +27,7 @@ const IMPORT_ENABLED = !["0", "false", "no"].includes(String(process.env.EZA_SEE
 const READER_PATH = process.env.EZA_READER_HTML || "tests/e2e/fixtures/reader.html";
 const DB_PATH = process.env.EZA_DB || ".eza-scratch/eza.db";
 const SEED_READER = ["1", "true", "yes"].includes(String(process.env.EZA_SEED_READER || "").toLowerCase());
-const FEATURE_ID = Number(process.env.EZA_FEATURE_ID || 8987);
+const FEATURE_ID = Number(process.env.EZA_FEATURE_ID || 7);
 const VIEWPORT = { width: 1440, height: 900 };
 const DPR = 2;
 
@@ -61,7 +61,6 @@ const SEL = {
   readerMark: '[data-testid="reader-mark"]',
   highlightRow: '[data-testid="highlight-row"]',
   sharePage: '[data-testid="share-page"]',
-  passkeyLogin: "#passkey-login",
   passwordLogin: "#password-login",
 };
 
@@ -142,9 +141,9 @@ async function settle(milliseconds = 400) {
   await page.evaluate(() => document.fonts.ready);
 }
 
-async function shot(name) {
+async function shot(name, clip) {
   await settle();
-  await page.screenshot({ path: join(OUT, name + ".png") });
+  await page.screenshot({ path: join(OUT, name + ".png"), ...(clip ? { clip } : {}) });
   console.log("captured " + join(OUT, name + ".png"));
 }
 
@@ -283,9 +282,10 @@ async function cleanExtractedText(detail) {
   return text.length > 800 && paragraphs.length >= 3 && !JUNK.test(text.slice(0, 3000));
 }
 
-// The ledger shots show the whole imported library by default. EZA_SHOT_QUERY
-// can narrow them to a query when a representative slice is wanted.
-const LIBRARY_QUERY = process.env.EZA_SHOT_QUERY || "";
+// The ledger shots use the literature shelf by default: a full-library
+// screenshot can surface private or explicit records that have no place in the
+// public README. EZA_SHOT_QUERY can still narrow or widen the slice.
+const LIBRARY_QUERY = process.env.EZA_SHOT_QUERY || "tag:literature";
 
 async function showLedger() {
   await page.goto(BASE + "/", { waitUntil: "domcontentloaded" });
@@ -444,7 +444,13 @@ try {
   // accessions.png: the printed index route.
   await page.goto(BASE + "/accessions", { waitUntil: "domcontentloaded" });
   await page.waitForSelector(SEL.accessions, { timeout: 30000 });
-  await shot("accessions");
+  // Keep the public index shot above the ranked-source list: that list can
+  // contain private saves that have no place in a public repository.
+  const filing = await page.locator(".accessions .mc").boundingBox();
+  const accessionsHeight = filing
+    ? Math.max(560, Math.min(900, Math.floor(filing.y + filing.height + 24)))
+    : 700;
+  await shot("accessions", { x: 0, y: 0, width: VIEWPORT.width, height: accessionsHeight });
 
   // palette.png: the command palette over the same ledger.
   await showLedger();
