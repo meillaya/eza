@@ -658,11 +658,10 @@ dedupPage :: Model -> View () () Model Action
 dedupPage m =
     pageWith
         "Duplicates"
-        "The same page, saved more than once. Two tests run over the whole library: the normalised URL (the protocol, a leading www. and trailing slashes do not make a different source), then, for records the URL test does not catch, the same normalised title on the same source. The same-URL groups can be merged in one confirmed pass; title matches are a review list, because different pages can share a title."
+        "The same page saved more than once. Same-URL groups are safe to merge in one confirmed pass; same-title matches are a review list, because different pages can share a title."
         (dedupFigures m)
         [ "exact counts, paged groups"
-        , "merge all writes one undo snapshot"
-        , "undo lives in maintenance"
+        , "one undo snapshot"
         ]
         ( dedupBody m
             ++ [dedupMergeDialog m | isJust (mDedupConfirm m)]
@@ -700,7 +699,7 @@ dedupBody m
         [ emptyPanel
             "0 groups"
             "No duplicates."
-            "Every saved URL is unique after normalisation, and no two records on one source share a title. The test runs over the whole library: strip the protocol, a leading www. and trailing slashes, then compare."
+            "No record shares a canonical URL, and no two records on one source share a normalised title."
             []
             "0 groups"
             "0 records to merge"
@@ -738,16 +737,11 @@ mergeAllBanner report =
                 ( ms
                     ( "Merged "
                         <> show (dmGroups report)
-                        <> (if dmGroups report == 1 then " URL duplicate group into one record." else " URL duplicate groups into one record each.")
-                        <> " "
+                        <> (if dmGroups report == 1 then " group" else " groups")
+                        <> " · "
                         <> show (dmRecords report)
-                        <> " records in all, "
-                        <> show (dmAffected report)
-                        <> " affected. Undo snapshot #"
-                        <> show (dmSnapshotId report)
-                        <> " ("
-                        <> show (dmElapsedMs report)
-                        <> " ms)."
+                        <> (if dmRecords report == 1 then " record" else " records")
+                        <> ". One undo snapshot covers it."
                     )
                 )
             ]
@@ -772,9 +766,9 @@ singleMergeBanner merged keeper =
                 ( ms
                     ( "Merged "
                         <> show merged
-                        <> (if merged == 1 then " duplicate record into " else " duplicate records into ")
+                        <> (if merged == 1 then " duplicate into " else " duplicates into ")
                         <> fromMisoString (accno keeper)
-                        <> ". The snapshot is the most recent undo record."
+                        <> ". Undo lives in Maintenance."
                     )
                 )
             ]
@@ -798,7 +792,7 @@ dedupUrlSection m =
         ( [ secHead "Same URL" countLine
           , H.p_
                 [HP.class_ "dd-lede meta"]
-                [text "One page under different addresses: the protocol, a leading www. and a trailing slash do not make a different source. Merge all keeps the oldest record in each group, upgrades the keeper to https when a copy has it, unions tags and notes, and writes one undo snapshot. Title matches are never touched."]
+                [text "Same page, different address. Merging keeps the oldest record, upgrades it to https when a copy has it, unions tags and notes, and writes one undo snapshot."]
           , H.div_
                 [HP.class_ "dd-toolbar"]
                 [ H.button_
@@ -816,7 +810,7 @@ dedupUrlSection m =
                     then
                         [ H.p_
                             [HP.class_ "dd-note meta"]
-                            [text "No same-URL duplicates left. The title matches below are a review list."]
+                            [text "No same-URL duplicates left."]
                         | urlGroups > 0
                         ]
                     else
@@ -860,13 +854,13 @@ dedupTitleSection m =
         ( [ secHead "Same title, review only" countLine
           , H.p_
                 [HP.class_ "dd-lede meta"]
-                [text "These records share a normalised title on one source, but they may be different pages. Nothing here is merged in bulk: open the group, check the addresses, and merge only the groups that are truly the same."]
+                [text "Same title on one source, possibly different pages. Review each group; nothing here is merged in bulk."]
           ]
             ++ ( if null (mDedupTitleGroups m)
                     then
                         [ H.p_
                             [HP.class_ "dd-note meta"]
-                            [text "No same-title groups left. The URL duplicates above are safe to merge."]
+                            [text "No same-title groups left."]
                         | titleGroups > 0
                         ]
                     else
@@ -1768,7 +1762,7 @@ maintenancePage :: Model -> View () () Model Action
 maintenancePage m =
     pageWith
         "Maintenance"
-        "The condition of the archive: the dead-link sweep, the prune candidates and the undo record. Nothing changes without a snapshot written first."
+        "The dead-link sweep, prune candidates and undo record."
         (maintenanceFigures m)
         (maintenanceProvenance m)
         [ sweepSection m
@@ -1824,7 +1818,7 @@ sweepSection m =
     (stateLabel, stateClass) = sweepState m
     sweepNote
         | mMaintBusy m = "The sweep is running. Results are written to the library when it finishes."
-        | mCheckedCount m == Nothing = "No dead-link check has ever been recorded for this library. This is the never-run state, not a clean bill of health: the zero is the absence of a result."
+        | mCheckedCount m == Nothing = "No dead-link check has run yet."
         | otherwise = "The last sweep checked saved links and flagged the dead ones. Dead records stay in the ledger, marked, until you prune or delete them."
 
 pruneSection :: Model -> View () () Model Action
@@ -1960,18 +1954,9 @@ accountPage m =
                     [ H.h1_ [HP.class_ "account-title display"] [text "Account"]
                     , H.p_
                         [HP.class_ "account-lede"]
-                        [text "Who may enter the catalogue, and what leaves it. Everything here is stored in the same SQLite file as the entries."]
+                        [text "Sessions, tokens, imports and the settings that are not per record."]
                     ]
-                , H.button_
-                    [ HP.class_ "account-signout"
-                    , HP.type_ "button"
-                    , HP.data_ "testid" "account-sign-out"
-                    , HP.title_ "End this browser's session"
-                    , HE.onClick LogoutRequest
-                    ]
-                    [text "sign out"]
                 ]
-            , ruleLine
             , H.div_
                 [HP.class_ "account-body"]
                 [ accountIndex m
@@ -1986,9 +1971,6 @@ accountIndex m =
         [HP.class_ "account-index", HP.aria_ "label" "Account sections"]
         [ H.h2_ [HP.class_ "account-index-title sc"] [text "Contents"]
         , H.ul_ [HP.class_ "account-nav"] (map (navItem m) tabs)
-        , H.p_
-            [HP.class_ "account-index-note meta"]
-            [text "Sections marked with a figure hold one or more records."]
         ]
   where
     tabs =
@@ -3182,17 +3164,15 @@ aboutPanel m =
     accountPanel
         "about"
         "About"
-        "this library"
+        ""
         [ H.p_
             [HP.class_ "account-lede"]
-            [text "eza is a self-hosted bookmark library for one person, written in Haskell and served from a single SQLite file. No account with us, no sync, no telemetry."]
+            [text "A self-hosted catalogue for one person: one Haskell process, one SQLite file, a WebAssembly client. No sync, no telemetry."]
         , H.dl_ [HP.class_ "account-about-list"] (map aboutRow (aboutFigures m))
-        , H.p_
-            [HP.class_ "account-note meta"]
-            ( case mStats m of
-                Nothing -> [text "The figures are not loaded yet."]
-                Just _ -> [text "The figures above are read from the library's own database at load."]
-            )
+        , H.p_ [HP.class_ "about-sub"] [text "source"]
+        , H.ul_ [HP.class_ "about-links"] (map aboutLink (aboutSourceLinks m))
+        , H.p_ [HP.class_ "about-sub"] [text "built with"]
+        , H.ul_ [HP.class_ "about-links"] (map aboutLink aboutStack)
         ]
 
 aboutFigures :: Model -> [(MisoString, MisoString)]
@@ -3204,7 +3184,6 @@ aboutFigures m = case mStats m of
         , ("filing days", "not yet")
         , ("first accession", "not yet")
         , ("last accession", "not yet")
-        , ("license", "Apache 2.0")
         ]
     Just stats ->
         [ ("entries", num (lsTotal stats))
@@ -3213,12 +3192,44 @@ aboutFigures m = case mStats m of
         , ("filing days", num (lsDays stats))
         , ("first accession", isoStamp (lsFirstDay stats))
         , ("last accession", isoStamp (lsLastDay stats))
-        , ("license", "Apache 2.0")
         ]
 
 aboutRow :: (MisoString, MisoString) -> View () () Model Action
 aboutRow (label, value) =
     H.div_ [] [H.dt_ [] [text label], H.dd_ [HP.class_ "mono"] [text value]]
+
+aboutSourceLinks :: Model -> [(MisoString, MisoString, MisoString)]
+aboutSourceLinks m =
+    [ ("repository", "github.com/meillaya/eza", "https://github.com/meillaya/eza")
+    , ("version " <> mVersion m, "releases", "https://github.com/meillaya/eza/releases")
+    , ("license", "Apache-2.0", "https://github.com/meillaya/eza/blob/main/LICENSE")
+    , ("third-party notices", "dependencies, typefaces and their licenses", "https://github.com/meillaya/eza/blob/main/THIRD-PARTY-NOTICES.md")
+    ]
+
+aboutStack :: [(MisoString, MisoString, MisoString)]
+aboutStack =
+    [ ("Haskell / GHC", "server", "https://www.haskell.org/ghc/")
+    , ("Warp / WAI", "HTTP server", "https://hackage.haskell.org/package/warp")
+    , ("SQLite + FTS5", "storage and search", "https://sqlite.org/")
+    , ("sqlite-simple", "database access", "https://hackage.haskell.org/package/sqlite-simple")
+    , ("WebAuthn", "passkeys", "https://hackage.haskell.org/package/webauthn")
+    , ("Aeson", "JSON", "https://hackage.haskell.org/package/aeson")
+    , ("Miso", "client, compiled to WebAssembly", "https://haskell-miso.org/")
+    , ("Fraunces, Newsreader, IBM Plex Mono", "typefaces, SIL Open Font License 1.1", "https://github.com/meillaya/eza/blob/main/THIRD-PARTY-NOTICES.md#fonts")
+    ]
+
+aboutLink :: (MisoString, MisoString, MisoString) -> View () () Model Action
+aboutLink (label, host, href) =
+    H.li_
+        []
+        [ H.a_
+            [ HP.class_ "about-link"
+            , HP.href_ href
+            , HP.target_ "_blank"
+            , HP.rel_ "noopener noreferrer"
+            ]
+            [text label, H.span_ [HP.class_ "about-link-host"] [text host]]
+        ]
 
 -- ================================================================ helpers ===
 

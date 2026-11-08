@@ -162,6 +162,16 @@ try {
     await page.goto(BASE + "/tags/ai", { waitUntil: "domcontentloaded" });
   }
   await page.waitForSelector(SEL.aiBanner, { timeout: 20000 });
+  await page
+    .waitForFunction(
+      (selector) => {
+        const node = document.querySelector(selector);
+        return Boolean(node && /(not configured|configured|none)/i.test(node.textContent || ""));
+      },
+      SEL.aiBanner,
+      { timeout: 20000 }
+    )
+    .catch(() => {});
   const bannerText = (await page.locator(SEL.aiBanner).innerText()).replace(/\n+/g, " ");
   check(
     "ai status banner shows the provider state",

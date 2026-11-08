@@ -13,10 +13,10 @@ import Control.Exception (IOException, throwIO, try)
 import Control.Monad (forM_, void)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
-import Data.Char (toLower)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
+import Data.Char (toLower)
 import Data.List (isInfixOf, isPrefixOf)
 import Data.Maybe (fromMaybe)
 import Data.Pool (Pool, defaultPoolConfig, newPool, withResource)
@@ -55,14 +55,14 @@ import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateH
 import Eza.Import (defaultImportOptions, importParsed, parseNetscape)
 import Eza.Jobs (resetRunningJobs)
 import Eza.JsonExport (exportJson, importJson)
-import Eza.Pages (addPasskeyPage, loginPage, passkeyLoginPage, recoverySetupPage, recoverPage, setupPage)
+import Eza.Pages (addPasskeyPage, loginPage, passkeyLoginPage, recoverPage, recoverySetupPage, setupPage)
+import Eza.Password (validatePassword, validateUsername)
+import qualified Eza.Password as Password
 import Eza.Rules (Rule (..), createRule, deleteRule, listRules, matchingBookmarks, updateRule)
 import Eza.SavedSearches (createSavedSearch, deleteSavedSearch, listSavedSearches)
 import Eza.Shares (ShareRecord (..), ShareState (..), ShareUnavailable (..), createShare, listShares, resolveShareState, revokeShare, shareBookmarkPage, shareSearchFeed, shareSearchPage, shareUnavailablePage)
 import Eza.Snapshot (captureSnapshot)
 import Eza.Tags (consolidationCandidates, deleteTag, deleteTagWithLinks, mergeTags, renameTag)
-import Eza.Password (validatePassword, validateUsername)
-import qualified Eza.Password as Password
 import Eza.Tokens (Token (..), authenticateToken, createToken, listTokens, revokeToken, tokenAllows)
 import Eza.Types
 import Eza.Undo (undoLast)
@@ -102,11 +102,12 @@ runServer cfg conn = do
                 exitFailure
             | otherwise -> throwIO err
 
--- | Compress dynamic text responses (JSON, HTML) above 512 bytes. Static files
--- are served from precompressed sidecars by 'sendFile'; @GzipIgnore@ keeps the
--- middleware off the responseFile path so that work is not repeated.
+{- | Compress dynamic text responses (JSON, HTML) above 512 bytes. Static files
+are served from precompressed sidecars by 'sendFile'; @GzipIgnore@ keeps the
+middleware off the responseFile path so that work is not repeated.
+-}
 gzipSettings :: GzipSettings
-gzipSettings = defaultGzipSettings {gzipFiles = GzipIgnore, gzipSizeThreshold = 512}
+gzipSettings = defaultGzipSettings{gzipFiles = GzipIgnore, gzipSizeThreshold = 512}
 
 -- | Security headers applied to every response (API, HTML, assets).
 securityMiddleware :: Config -> Middleware
@@ -139,17 +140,19 @@ isSnapshotRequest r = case pathInfo r of
     ["api", "v1", "bookmarks", _, "snapshot"] -> requestMethod r == "GET"
     _ -> False
 
--- | The single writer plus a small pool of query-only readers. Reads (GET and
--- HEAD) run on the pool so a large merge, import or export does not stall
--- browsing; every mutation still goes through the one writer connection.
+{- | The single writer plus a small pool of query-only readers. Reads (GET and
+HEAD) run on the pool so a large merge, import or export does not stall
+browsing; every mutation still goes through the one writer connection.
+-}
 data ServerDb = ServerDb
     { sdbWrite :: MVar Connection
     , sdbRead :: Pool Connection
     }
 
--- | A pooled read-only connection. WAL lets these run alongside the writer;
--- @query_only@ turns an accidental write from a GET route into a loud error
--- instead of a lock.
+{- | A pooled read-only connection. WAL lets these run alongside the writer;
+@query_only@ turns an accidental write from a GET route into a loud error
+instead of a lock.
+-}
 openReadConnection :: FilePath -> IO Connection
 openReadConnection path = do
     conn <- Sqlite.open path
@@ -406,19 +409,19 @@ passwordSetupHandler cfg conn req respond =
                                 if claimed && not recoverySession
                                     then respond (jsonError status403 "recovery_session_required" "a recovery session is required to finish recovery setup")
                                     else case validateUsername rawUsername of
-                                Left message -> respond (jsonError status400 "invalid_username" message)
-                                Right username -> case validatePassword password of
-                                    Left message -> respond (jsonError status400 "weak_password" message)
-                                    Right () -> do
-                                        passwordHash <- Password.hashPassword (cfgArgon2 cfg) password
-                                        codes <- Auth.completeSetup conn username passwordHash
-                                        sess <- Auth.createSession conn "normal" (cfgSessionTtlSeconds cfg)
-                                        respond
-                                            ( withAuthCookies
-                                                cfg
-                                                sess
-                                                (jsonResponse status200 (object ["codes" .= codes, "redirect" .= ("/" :: Text)]))
-                                            )
+                                        Left message -> respond (jsonError status400 "invalid_username" message)
+                                        Right username -> case validatePassword password of
+                                            Left message -> respond (jsonError status400 "weak_password" message)
+                                            Right () -> do
+                                                passwordHash <- Password.hashPassword (cfgArgon2 cfg) password
+                                                codes <- Auth.completeSetup conn username passwordHash
+                                                sess <- Auth.createSession conn "normal" (cfgSessionTtlSeconds cfg)
+                                                respond
+                                                    ( withAuthCookies
+                                                        cfg
+                                                        sess
+                                                        (jsonResponse status200 (object ["codes" .= codes, "redirect" .= ("/" :: Text)]))
+                                                    )
 
 parseSetupBody :: Value -> Either Text (Text, Text)
 parseSetupBody value = case parseMaybeObj value of
@@ -971,7 +974,6 @@ authedRoute cfg _db req respond ctx conn =
 -- Auth guard
 -- ---------------------------------------------------------------------------
 
-
 -- ---------------------------------------------------------------------------
 -- Browser clipper
 -- ---------------------------------------------------------------------------
@@ -985,7 +987,8 @@ isClipPath path = case path of
 
 isExtensionOrigin :: Text -> Bool
 isExtensionOrigin origin =
-    any (`T.isPrefixOf` T.toLower origin)
+    any
+        (`T.isPrefixOf` T.toLower origin)
         [ "chrome-extension://"
         , "moz-extension://"
         , "safari-web-extension://"
@@ -1045,7 +1048,7 @@ clipSaveHandler cfg conn req respond = do
             Left err -> respond (withCors cfg req (jsonError status400 "bad_request" (T.pack err)))
             Right request -> do
                 let headerKey = fmap TE.decodeUtf8 (lookup "Idempotency-Key" (requestHeaders req))
-                    request' = request {clIdempotencyKey = headerKey `orElse` clIdempotencyKey request}
+                    request' = request{clIdempotencyKey = headerKey `orElse` clIdempotencyKey request}
                 result <- saveClip conn request'
                 case result of
                     Left err -> respond (clipErrorResponse cfg req err)
@@ -1078,7 +1081,9 @@ whoAmI cfg conn req ctx respond =
         BearerToken token -> do
             account <- Auth.loadAccount conn
             respond
-                ( withCors cfg req
+                ( withCors
+                    cfg
+                    req
                     ( jsonResponse
                         status200
                         ( object
@@ -1092,7 +1097,9 @@ whoAmI cfg conn req ctx respond =
         CookieSession _ -> do
             account <- Auth.loadAccount conn
             respond
-                ( withCors cfg req
+                ( withCors
+                    cfg
+                    req
                     ( jsonResponse
                         status200
                         ( object
@@ -1131,7 +1138,7 @@ templateUpdateHandler conn templateId req respond = do
         Right raw -> case eitherDecode raw of
             Left err -> respond (jsonError status400 "bad_request" (T.pack err))
             Right template -> do
-                result <- updateTemplate conn template {ctId = templateId}
+                result <- updateTemplate conn template{ctId = templateId}
                 case result of
                     Left err -> respond (templateErrorResponse err)
                     Right updated -> respond (jsonResponse status200 updated)
@@ -1156,9 +1163,10 @@ withAuthed cfg db req respond action = do
             | requestMethod req `elem` ["GET", "HEAD"] -> withReadDb db (action ctx)
             | otherwise -> withDb db (action ctx)
 
--- | Resolve the bearer token or session and apply the scope/CSRF/origin
--- checks. Runs on the writer connection because session lookup may touch
--- @last_seen_at@; the handler itself runs on the read pool for GET/HEAD.
+{- | Resolve the bearer token or session and apply the scope/CSRF/origin
+checks. Runs on the writer connection because session lookup may touch
+@last_seen_at@; the handler itself runs on the read pool for GET/HEAD.
+-}
 authenticateRequest :: Config -> Connection -> Request -> IO (Either Response AuthContext)
 authenticateRequest cfg conn req =
     case bearerToken req of
@@ -1353,17 +1361,18 @@ faviconHandler conn req domain respond = do
         Just favicon -> do
             let etag = TE.encodeUtf8 (fvEtag favicon)
             case lookup hIfNoneMatch (requestHeaders req) of
-                Just raw | raw == etag ->
-                    respond
-                        ( responseLBS
-                            status304
-                            [ (hContentType, TE.encodeUtf8 (fvMime favicon))
-                            , (hETag, etag)
-                            , (hCacheControl, "private, max-age=604800, immutable")
-                            , ("Vary", "Cookie")
-                            ]
-                            ""
-                        )
+                Just raw
+                    | raw == etag ->
+                        respond
+                            ( responseLBS
+                                status304
+                                [ (hContentType, TE.encodeUtf8 (fvMime favicon))
+                                , (hETag, etag)
+                                , (hCacheControl, "private, max-age=604800, immutable")
+                                , ("Vary", "Cookie")
+                                ]
+                                ""
+                            )
                 _ ->
                     respond
                         ( responseLBS
@@ -1822,12 +1831,21 @@ copy after a rebuild. @no-store@ is reserved for the client shell.
 -}
 sendFile :: Request -> BS.ByteString -> [(HeaderName, BS.ByteString)] -> FilePath -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 sendFile req cachePolicy headers path respond = do
+    sourceModified <- getModificationTime path
     gzipExists <- doesFileExist (path <> ".gz")
-    let useGzip = gzipExists && acceptsGzip req
+    gzipModified <- if gzipExists then Just <$> getModificationTime (path <> ".gz") else pure Nothing
+    let
+        -- A sidecar older than the source would serve stale bytes (the usual
+        -- case while editing an asset without running the web build). Treat it
+        -- as absent instead of trusting the extension.
+        gzipFresh = case gzipModified of
+            Just modified -> modified >= sourceModified
+            Nothing -> False
+        useGzip = gzipFresh && acceptsGzip req
         servedPath = if useGzip then path <> ".gz" else path
         compressionHeaders =
             [ (hVary, "Accept-Encoding")
-            | gzipExists
+            | gzipFresh
             ]
                 <> [ (hContentEncoding, "gzip")
                    | useGzip
@@ -1842,9 +1860,10 @@ sendFile req cachePolicy headers path respond = do
         then respond (responseLBS status304 allHeaders "")
         else respond (responseFile status200 allHeaders servedPath Nothing)
 
--- | Whether the request's @Accept-Encoding@ allows gzip. Header values are
--- tokens; browsers send lowercase, so a lowercase-insensitive containment
--- check is enough here.
+{- | Whether the request's @Accept-Encoding@ allows gzip. Header values are
+tokens; browsers send lowercase, so a lowercase-insensitive containment
+check is enough here.
+-}
 acceptsGzip :: Request -> Bool
 acceptsGzip req =
     case lookup hAcceptEncoding (requestHeaders req) of

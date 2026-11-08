@@ -123,6 +123,26 @@ checks every screen and theme. Status is never carried by colour alone: the word
 accompanies the mark. Landmarks are used for the masthead, sections, ledger,
 rail, record and dialogs. `prefers-reduced-motion` disables every transition.
 
+## Quiet surfaces
+
+Rules are the exception, not the default. Ledger rows, rail blocks, section
+heads, panel blocks, account panels and the duplicate groups separate by
+spacing, type and hover state; the year headings carry the ledger's structure.
+The masthead rule, the year rules, the row hairlines and the explicit `.rule`
+dividers are hidden. Dialogs keep their outline because they float above the
+page, and form fields keep their borders because those carry state.
+
+The style lives at the end of `static/eza.css` under `QUIET CATALOGUE`.
+When adding a surface, reach for spacing or a type change before adding a
+border. The palette shows labels only; its hints stay as tooltips.
+
+## About
+
+The About panel is the one place that names the software behind the library:
+the repository, the release page, the Apache-2.0 license, the third-party
+notices and the main libraries and typefaces, each an external link. The
+notices file at the repository root is the canonical list, including the
+dependency versions and the SIL Open Font License files under `static/fonts/`.
 ## Voice
 
 Dry, first person, specific. Numbers are exact and grouped: 8,988 entries, 4,283

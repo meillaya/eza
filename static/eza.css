@@ -356,9 +356,9 @@ html[data-theme="dark"] .chip--neg{border-color:var(--chip-neg-rule)}
 .facet .name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .facet-all{display:inline-block;margin-top:6px;font-family:var(--mono);font-size:12px;line-height:18px;color:var(--muted);text-decoration:none;border-bottom:1px solid var(--rule)}
 .facet-all:hover{color:var(--accent);border-color:var(--accent)}
-.tag-grid{display:grid;grid-template-columns:1fr 1fr;column-gap:18px;row-gap:1px;margin:0;padding:0;list-style:none}
+.tag-grid{display:grid;grid-template-columns:1fr;row-gap:1px;margin:0;padding:0;list-style:none}
 .tag-grid a{display:flex;align-items:baseline;justify-content:space-between;gap:6px;padding:1px 0;font-family:var(--mono);font-size:12px;line-height:18px;color:var(--ink);text-decoration:none;min-width:0}
-.tag-grid .tn{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tag-grid .tn{white-space:nowrap;overflow:visible;text-overflow:clip}
 .tag-grid .n{color:var(--muted)}
 .tag-grid a:hover .tn,.tag-grid a[data-active="true"] .tn{color:var(--accent);border-bottom:1px solid var(--accent)}
 .status-list{list-style:none;margin:0;padding:0}
@@ -378,7 +378,17 @@ html[data-theme="dark"] .spark i{opacity:.72}
    LEDGER
    ============================================================ */
 .ledger-wrap{position:relative;min-height:0;min-width:0}
-.ledger{height:100%;overflow-y:auto;padding:8px 0 40px;scrollbar-width:thin;scrollbar-color:var(--rule) transparent}
+.ledger{
+  height:100%;overflow-y:auto;padding:8px 0 40px;
+  scrollbar-width:thin;scrollbar-color:var(--rule) transparent;
+  /* The rows are a managed virtual window with exact-height spacers. Browser
+     scroll anchoring adjusts scrollTop whenever that window is swapped, which
+     feeds a scroll -> render -> anchor loop: the ledger keeps scrolling on its
+     own and keeps paging. Disable anchoring for the whole ledger subtree, not
+     just the scroller, because the anchors are the row descendants. */
+  overflow-anchor:none;
+}
+.ledger,.ledger *{overflow-anchor:none}
 .ledger::-webkit-scrollbar{width:8px}
 .ledger::-webkit-scrollbar-thumb{background:var(--rule)}
 .ledger::-webkit-scrollbar-track{background:transparent}
@@ -4201,3 +4211,74 @@ main.auth, main.share { min-height: 100vh; display: flex; flex-direction: column
 .dd-lede { margin: 0 0 12px; max-width: 760px; }
 .dd-toolbar { padding: 0 0 14px; }
 .dd-more { padding: 12px 0 0; }
+
+
+/* ============================================================
+   QUIET CATALOGUE
+   A rule is not the default way to separate two things. Hierarchy comes from
+   type, spacing, hover and the year headings; rows, rail blocks, section
+   heads and panel blocks below keep their air but lose the lines.
+   ============================================================ */
+.rule,.mast-rule,.year-rule{display:none}
+.sections{border-bottom:0}
+.sections a{border-bottom:0;padding-bottom:11px}
+.sections a[aria-current="page"]{color:var(--ink);border-bottom:0;font-weight:600}
+.rail-head{border-bottom:0;padding-bottom:0}
+.facet .lead,.tag-grid .lead,.see-row .lead,.nf-lead,.account-report-row .lead{display:none}
+.facet a{justify-content:space-between}
+.facet a[data-active="true"] .name,
+.tag-grid a:hover .tn,
+.tag-grid a[data-active="true"] .tn{border-bottom:0}
+.facet-all{border-bottom:0}
+.spark{border-bottom:0}
+.lh{border-bottom:0;padding-bottom:10px}
+.row{border-bottom:0}
+.ledger-foot{border-top:0;padding-top:24px}
+.empty-lines i,.enrich-lines i,.nf-lines i,.boot-lines i{border-bottom:0}
+.empty-end,.boot-foot{border-top:0}
+.drawer{border-top:1px solid var(--rule-soft)}
+.drawer-url a,.action{border-bottom:0}
+.stamped .field,.stamped .field:first-child,.record .stamped .field,.record .stamped .field:first-child{border-top:0;padding:4px 0}
+.drawer-actions,.note-bar{border-top:0}
+.noteed-wrap{border-top:0;border-bottom:0}
+.record-head,.record-sec,.record-mini,.record-prov a{border:0}
+.record-see li + li{border-top:0}
+.slip{border-top:1px solid var(--ink)}
+.slip-head,.slip-foot,.slip-row{border:0}
+.dialog__head,.dialog__foot{border:0}
+.dshare-head,.dshare-foot{border:0}
+.account-nav li{border:0}
+.account-index-title{border-bottom:0;padding-bottom:0}
+.account-record,.account-record:first-child{border:0}
+.account-fields div,.account-confirm,.account-rec-row,.account-reveal,.account-form,.account-dryrun,.account-dryrun-list,.account-dry-row,.account-report,.account-report-list,.account-report-row,.account-capture-block,.account-install,.account-install div,.account-about-list,.account-about-list div,.account-error{border:0}
+.account-signout{border-bottom:0}
+.account-about-list{margin:2px 0 6px}
+.account-about-list div{padding:4px 0}
+.account-panel-head .rule{display:none}
+.dd-sec + .dd-sec{border-top:0;margin-top:40px}
+.dd-groups,.dd-group,.dd-rows,.dd-row{border:0}
+.dd-row{padding:4px 0}
+.dd-dialog-list{border-top:0}
+.dd-dialog-row{border-bottom:0;padding:4px 0}
+.dd-note-foot{border:0;padding-top:4px}
+.mt-sec{border-bottom:0;padding:8px 0 10px;margin-bottom:18px}
+.mt-table thead th,.mt-table td{border-bottom:0}
+.pnl-block{border-bottom:0;padding-bottom:8px;margin-bottom:24px}
+.pnl-sec-head,.pnl-foot{border:0}
+.tg-table thead th,.tg-table tbody tr,.tg-pairs li,.tg-focus{border:0}
+.ai-table thead th,.ai-table td,.ai-table tr{border:0}
+.g-strip,.g-key-row,.g-recs li,.g-strip-sec{border:0}
+.g-strip-act{padding-top:0}
+.m-nav{border-top:0}
+.offline-banner{border-bottom:0}
+.nf-row,.nf-slip-head,.nf-suggest-title,.nf-row-link{border:0}
+.sec-head{border-bottom:0;padding-bottom:0}
+.auth-facts div,.auth-facts,.auth-links{border:0}
+.about-links{margin:4px 0 18px;padding:0;list-style:none}
+.about-links li{padding:4px 0}
+.about-link{color:var(--ink);text-decoration:none;border-bottom:1px solid var(--rule-soft);padding-bottom:1px}
+.about-link:hover{color:var(--accent);border-color:var(--accent)}
+.about-link .about-link-host{color:var(--muted);font-family:var(--mono);font-size:11px;margin-left:8px}
+.about-sub{font-family:var(--mono);font-size:12px;line-height:18px;color:var(--muted);margin:18px 0 4px;letter-spacing:.02em}
+.pnl-sec-head{border-bottom:0;padding-bottom:2px;margin-bottom:6px}
+.ledg-sort{border-bottom:0}

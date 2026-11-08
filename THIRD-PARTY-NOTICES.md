@@ -1,0 +1,112 @@
+# Third-party notices
+
+eza itself is licensed under the Apache License 2.0 ([LICENSE](LICENSE)).
+This file lists the third-party software, fonts, and other assets that are
+distributed with, compiled into, or required at runtime by eza.
+
+The server is a Haskell program; its dependency tree is resolved by Cabal and
+recorded in `cabal.project.freeze` when a release is cut. The versions below
+are the ones in the development environment used for this release. The client
+is written in Haskell with Miso and compiled to WebAssembly with GHC's
+WebAssembly backend.
+
+## Haskell libraries (server and client)
+
+| Package | Version | License | Link |
+|---|---|---|---|
+| GHC (compiler and runtime) | 9.10.3 | BSD-3-Clause | <https://www.haskell.org/ghc/> |
+| base | 4.20.2.0 | BSD-3-Clause | <https://hackage.haskell.org/package/base> |
+| aeson | 2.3.2.0 | BSD-3-Clause | <https://hackage.haskell.org/package/aeson> |
+| async | 2.2.6 | BSD-3-Clause | <https://hackage.haskell.org/package/async> |
+| base64-bytestring | 1.2.1.0 | BSD-3-Clause | <https://hackage.haskell.org/package/base64-bytestring> |
+| bytestring | 0.12.2.0 | BSD-3-Clause | <https://hackage.haskell.org/package/bytestring> |
+| containers | 0.7 | BSD-3-Clause | <https://hackage.haskell.org/package/containers> |
+| cookie | 0.5.1 | MIT | <https://hackage.haskell.org/package/cookie> |
+| crypton | 1.1.5 | BSD-3-Clause | <https://hackage.haskell.org/package/crypton> |
+| direct-sqlite | 2.3.29 | BSD-3-Clause | <https://hackage.haskell.org/package/direct-sqlite> |
+| directory | 1.3.8.5 | BSD-3-Clause | <https://hackage.haskell.org/package/directory> |
+| fast-logger | 3.2.9 | BSD-3-Clause | <https://hackage.haskell.org/package/fast-logger> |
+| file-embed | 0.0.16.0 | BSD-2-Clause | <https://hackage.haskell.org/package/file-embed> |
+| filepath | 1.5.4.0 | BSD-3-Clause | <https://hackage.haskell.org/package/filepath> |
+| http-client | 0.7.19 | MIT | <https://hackage.haskell.org/package/http-client> |
+| http-client-tls | 0.4.0 | MIT | <https://hackage.haskell.org/package/http-client-tls> |
+| http-types | 0.12.6 | BSD-3-Clause | <https://hackage.haskell.org/package/http-types> |
+| miso | 1.14.0.0 | BSD-3-Clause | <https://hackage.haskell.org/package/miso> |
+| network | 3.2.12.0 | BSD-3-Clause | <https://hackage.haskell.org/package/network> |
+| network-uri | 2.6.4.2 | BSD-3-Clause | <https://hackage.haskell.org/package/network-uri> |
+| optparse-applicative | 0.19.0.0 | BSD-3-Clause | <https://hackage.haskell.org/package/optparse-applicative> |
+| process | 1.6.26.1 | BSD-3-Clause | <https://hackage.haskell.org/package/process> |
+| resource-pool | 0.5.1.0 | BSD-3-Clause | <https://hackage.haskell.org/package/resource-pool> |
+| sqlite-simple | 0.4.19.0 | BSD-3-Clause | <https://hackage.haskell.org/package/sqlite-simple> |
+| stm | 2.5.3.1 | BSD-3-Clause | <https://hackage.haskell.org/package/stm> |
+| tagsoup | 0.14.8 | BSD-3-Clause | <https://hackage.haskell.org/package/tagsoup> |
+| temporary | 1.3 | BSD-3-Clause | <https://hackage.haskell.org/package/temporary> |
+| text | 2.1.3 | BSD-2-Clause | <https://hackage.haskell.org/package/text> |
+| time | 1.12.2 | BSD-2-Clause | <https://hackage.haskell.org/package/time> |
+| time-hourglass | 0.3.0 | BSD-3-Clause | <https://hackage.haskell.org/package/time-hourglass> |
+| unordered-containers | 0.2.21 | BSD-3-Clause | <https://hackage.haskell.org/package/unordered-containers> |
+| validation | 1.2.2 | BSD-3-Clause | <https://hackage.haskell.org/package/validation> |
+| wai | 3.2.5 | MIT | <https://hackage.haskell.org/package/wai> |
+| wai-extra | 3.1.18 | MIT | <https://hackage.haskell.org/package/wai-extra> |
+| warp | 3.4.21 | MIT | <https://hackage.haskell.org/package/warp> |
+| webauthn | 0.12.0.0 | Apache-2.0 | <https://hackage.haskell.org/package/webauthn> |
+
+Test-only dependencies (not shipped in the deployed server): hspec
+(MIT), QuickCheck (BSD-3-Clause).
+
+The WebAssembly client uses Miso 1.14.0.0 with the GHC 9.14 WebAssembly
+backend, plus the same `base`, `aeson`, `bytestring`, `containers` and `text`
+packages listed above.
+
+## SQLite
+
+The server links SQLite through `direct-sqlite` and uses its FTS5 extension.
+SQLite is in the public domain: <https://sqlite.org/copyright.html>.
+
+## Fonts
+
+The interface uses three typefaces, all distributed under the SIL Open Font
+License 1.1. The license files are in `static/fonts/`:
+
+| Typeface | Files | License |
+|---|---|---|
+| Fraunces | `fraunces-300-900.woff2` | [OFL-Fraunces.txt](static/fonts/OFL-Fraunces.txt) |
+| Newsreader | `newsreader-300-800.woff2` | [OFL-Newsreader.txt](static/fonts/OFL-Newsreader.txt) |
+| IBM Plex Mono | `ibm-plex-mono-400.woff2`, `-500`, `-600` | [OFL-IBMPlexMono.txt](static/fonts/OFL-IBMPlexMono.txt) |
+
+## Vendored JavaScript
+
+`static/vendor/browser_wasi_shim/` is the
+[browser_wasi_shim](https://github.com/bjorn3/browser_wasi_shim) WebAssembly
+WASI shim, dual-licensed under Apache-2.0 and MIT; both license texts are
+included in that directory (`LICENSE-APACHE`, `LICENSE-MIT`).
+
+`static/app/ghc_wasm_jsffi.js` is generated by GHC's `post-link.mjs` for this
+program and is covered by the GHC license above.
+
+## Icons
+
+The application icons (`static/icons/`, `static/favicon.svg`,
+`static/favicon-fallback.svg`) are original artwork for this project and are
+covered by the repository license.
+
+## Optional external programs
+
+These are not distributed with eza; the deployment installs them separately and
+eza invokes them at runtime only when configured:
+
+- **monolith** — local page snapshots, MIT, <https://github.com/Y2Z/monolith>
+- **Node.js / Defuddle sidecar** — optional extraction bridge (`sidecar/`),
+  Node.js MIT; Defuddle and its dependencies are installed by `npm` from that
+  directory's lockfile, and their notices live with those packages.
+
+## Regenerating this list
+
+```bash
+cabal build all
+cabal-plan license-report exe:eza-bookmarks --via=hackage
+```
+
+For the WebAssembly client, run the same command with
+`--project-file=cabal.project.wasm` in the `wasm32-wasi` toolchain. Dependency
+versions change with the lockfile; update the table above when that happens.

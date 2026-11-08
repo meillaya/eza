@@ -191,5 +191,5 @@ an unsaved note asks for confirmation first.
 ---
 
 <div align="center">
-<sub>Apache-2.0 · Built with Haskell, Miso, SQLite, and Nix</sub>
+<sub>Apache-2.0 · Built with Haskell, Miso, SQLite, and Nix · <a href="THIRD-PARTY-NOTICES.md">Third-party notices</a></sub>
 </div>

@@ -87,7 +87,6 @@ mast m =
             ]
         , queryLine m
         , metaLine m
-        , H.div_ [HP.class_ "mast-rule", HP.aria_ "hidden" "true"] []
         ]
 
 provenance :: Model -> View () () Model Action
@@ -177,20 +176,7 @@ metaLeft m
             [HP.class_ "chips"]
             [H.span_ [HP.class_ "chip"] [H.span_ [HP.class_ "op"] [text "is:"], text "unread"]]
         ]
-    | otherwise = tryLinks
-
-tryLinks :: [View () () Model Action]
-tryLinks =
-    H.span_ [HP.class_ "try-label meta"] [text "try"]
-        : map tryLink ["tag:books", "is:unread", "link:Determinate"]
-  where
-    tryLink label =
-        H.button_
-            [ HP.class_ "try-link"
-            , HP.type_ "button"
-            , HE.onClick (SearchInput (msText label))
-            ]
-            [text (msText label)]
+    | otherwise = []
 
 metaRight :: Model -> [View () () Model Action]
 metaRight m
@@ -225,30 +211,20 @@ countGroup m =
             else
                 [ H.span_
                     [HP.class_ "meta"]
-                    [ text
-                        ( if mobile
-                            then formatCount (length (mItems m)) <> " of " <> formatCount libraryTotal
-                            else
-                                formatCount (length (mItems m))
-                                    <> " of "
-                                    <> formatCount libraryTotal
-                                    <> " entries shown"
-                        )
-                    ]
+                    [text (formatCount (length (mItems m)) <> " / " <> formatCount libraryTotal)]
                 ]
         )
     ]
   where
     libraryTotal = maybe (mTotal m) lsTotal (mStats m)
-    mobile = mWidth m < 768
 
 sortControl :: Model -> [View () () Model Action]
 sortControl m =
     [ H.button_
         ( [ HP.class_ "ledg-sort"
           , HP.type_ "button"
-          , HP.aria_ "label" "Change the sort order"
-          , HP.title_ "Change the sort order"
+          , HP.aria_ "label" "Change the sort order (newest first)"
+          , HP.title_ "Sort: filed, newest first"
           , HE.onClick (SortSelected (nextSort (mSort m)))
           ]
             ++ [C.styleInline_ compactControl | mobile]
@@ -263,11 +239,10 @@ nextSort "created" = "added"
 nextSort "added" = "opened"
 nextSort _ = "created"
 
--- | 44px hit area, hairline underline, no box: the phone meta line stays one line.
 compactControl :: MisoString
 compactControl =
     "min-height:44px;display:inline-flex;align-items:center;border:0;"
-        <> "border-bottom:1px solid var(--rule);padding:0 2px;white-space:nowrap"
+        <> "padding:0 2px;white-space:nowrap"
 
 shortSort :: Text -> MisoString
 shortSort "added" = "added"
@@ -275,9 +250,9 @@ shortSort "opened" = "opened"
 shortSort _ = "filed"
 
 sortText :: Text -> MisoString
-sortText "added" = "added, newest first"
-sortText "opened" = "opened, newest first"
-sortText _ = "filed, newest first"
+sortText "added" = "added"
+sortText "opened" = "opened"
+sortText _ = "filed"
 
 themeToggle :: Model -> View () () Model Action
 themeToggle m =
@@ -540,33 +515,22 @@ railView m =
                     [text ("all " <> tagCount <> " tags")]
               ]
         )
-    , savedSearchesBlock m
-    , H.div_
-        [HP.class_ "rail-block"]
-        [ railHead "Status" "live counts"
-        , H.ul_ [HP.class_ "status-list"] (statusRows m)
-        ]
-    , H.div_
-        [HP.class_ "rail-block"]
-        [ railHead "Filing days" "52 weeks"
-        , sparkline m
-        , H.p_
-            [HP.class_ "spark-cap"]
-            [H.span_ [] [text (filingCaption m)]]
-        , H.p_
-            [HP.class_ "spark-cap"]
-            [H.span_ [] [text (filingWindow m)]]
-        , H.p_
-            [HP.class_ "spark-cap"]
-            [H.span_ [] [text (filingTotals m)]]
-        , H.a_
-            [ HP.class_ "rail-accessions"
-            , HP.href_ "/accessions"
-            , HE.onClickPrevent (Navigate Accessions)
-            ]
-            [text "accessions by year", H.span_ [HP.class_ "arr", HP.aria_ "hidden" "true"] [text "↗"]]
-        ]
     ]
+        ++ [savedSearchesBlock m | not (null (mSaved m)) || hasActiveFilters m]
+        ++ [ H.div_
+                [HP.class_ "rail-block"]
+                [ railHead "Status" ""
+                , H.ul_ [HP.class_ "status-list"] (statusRows m)
+                ]
+           , H.div_
+                [HP.class_ "rail-block"]
+                [ railHead "Filing days" ""
+                , sparkline m
+                , H.p_
+                    [HP.class_ "spark-cap"]
+                    [H.span_ [] [text (filingTotals m)]]
+                ]
+           ]
   where
     sources = maybe [] lsTopSources (mStats m)
     sourceCount = maybe "–" (formatCount . lsSources) (mStats m)
@@ -585,9 +549,7 @@ savedSearchesBlock m =
     H.div_
         [HP.class_ "rail-block"]
         [ railHead "Saved searches" (formatCount (length (mSaved m)))
-        , if null (mSaved m)
-            then H.p_ [HP.class_ "rail-empty meta"] [text "no saved searches yet"]
-            else H.ul_ [HP.class_ "facet-list"] (map savedRow (mSaved m))
+        , H.ul_ [HP.class_ "facet-list"] (map savedRow (mSaved m))
         , H.button_
             [ HP.class_ "facet-all"
             , HP.type_ "button"
@@ -708,17 +670,6 @@ sparkline m =
                 )
             ]
             []
-
-filingCaption :: Model -> MisoString
-filingCaption m = case mStats m of
-    Nothing -> "filing days not loaded"
-    Just _ -> formatCount (sum (weeklyFiling m)) <> " of 364 days filed"
-
--- | The 52-week window as a date range: 364 days ending on the last filing day.
-filingWindow :: Model -> MisoString
-filingWindow m = case mStats m >>= \s -> dayNumber (lsLastDay s) of
-    Nothing -> "the last 52 weeks"
-    Just end -> formatFiled ((end - 363) * 86400) <> " - " <> formatFiled (end * 86400)
 
 -- | The archive totals behind the window: filing days since the first save.
 filingTotals :: Model -> MisoString
@@ -1300,7 +1251,6 @@ ledgerFoot m =
         [HP.class_ "ledger-foot meta"]
         [ H.span_ [] [text (footCount m)]
         , H.span_ [HP.class_ "ledg-foot-actions"] (footActions m)
-        , H.span_ [] [text (libraryNote m)]
         ]
   where
     footCount model
@@ -1311,9 +1261,8 @@ ledgerFoot m =
                 <> formatCount (mTotal model)
         | otherwise =
             formatCount (length (mItems model))
-                <> " of "
+                <> " / "
                 <> formatCount (maybe (length (mItems model)) lsTotal (mStats model))
-                <> " entries shown"
     footActions model
         | isInbox model =
             [ H.button_
@@ -1345,14 +1294,6 @@ ledgerFoot m =
                 <> (if length [bookmark | bookmark <- mItems model, not (bsIsRead bookmark)] == 1 then "" else "s")
                 <> " read"
             )
-    libraryNote model = case mStats model of
-        Just s ->
-            formatCount (lsDays s)
-                <> " filing days, "
-                <> yearOfDay (lsFirstDay s)
-                <> "-"
-                <> yearOfDay (lsLastDay s)
-        Nothing -> "filing days not loaded"
 
 -- ----------------------------------------------------------- mobile nav ---
 
@@ -1587,7 +1528,6 @@ paletteView m =
                     [ H.span_ [] [H.kbd_ [] [text "↑"], text " ", H.kbd_ [] [text "↓"], text " move"]
                     , H.span_ [] [H.kbd_ [] [text "↵"], text " run"]
                     , H.span_ [] [H.kbd_ [] [text "esc"], text " close"]
-                    , H.span_ [HP.class_ "slip-foot-right"] [text "eza"]
                     ]
                 ]
             ]
@@ -1599,10 +1539,10 @@ paletteRow m index (label, hint, _) =
         [ HP.class_ ("slip-row" <> if index == mPaletteSel m then " is-sel" else "")
         , HP.type_ "button"
         , HP.data_ "testid" "palette-row"
+        , HP.title_ hint
         , HE.onClick (PaletteChoose index)
         ]
         [ H.span_ [HP.class_ "sr-title"] [text label]
-        , H.span_ [HP.class_ "sr-right meta"] [text hint]
         ]
 
 toastsView :: Model -> View () () Model Action
