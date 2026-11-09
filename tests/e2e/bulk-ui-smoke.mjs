@@ -66,6 +66,18 @@ try {
   });
   check("ledger foot selection actions are visually separated", footGap !== null && footGap >= 8, "gap=" + footGap);
 
+  // The row selection control must be reachable on hover: it used to overflow
+  // the accession column and render clipped off the left edge of the page
+  // until a selection already existed.
+  await page.locator(SEL.row).first().hover();
+  await page.waitForTimeout(250);
+  const tickBox = await page.locator(SEL.rowSelect).first().boundingBox();
+  check(
+    "row selection control is fully in frame on hover",
+    tickBox !== null && tickBox.x >= 0 && tickBox.width >= 10 && tickBox.height >= 10,
+    JSON.stringify(tickBox)
+  );
+
   // Single selection.
   await selectRow(ids[0]);
   await waitSelection(1);

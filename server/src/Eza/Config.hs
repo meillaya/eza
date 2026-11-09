@@ -56,6 +56,7 @@ data Config = Config
     , cfgFetchTimeoutMs :: Int
     , cfgFaviconMaxBytes :: Int
     , cfgFaviconTtlDays :: Int
+    , cfgFaviconBackfill :: Bool
     , cfgShareTtlDays :: Int
     , cfgAiProvider :: String
     , cfgOllamaBaseUrl :: String
@@ -120,6 +121,7 @@ loadConfig = do
     fetchTimeout <- readIntEnv "EZA_FETCH_TIMEOUT_MS" 8000
     faviconMax <- readIntEnv "EZA_FAVICON_MAX_BYTES" 65536
     faviconTtl <- readIntEnv "EZA_FAVICON_TTL_DAYS" 90
+    faviconBackfill <- readBoolEnv "EZA_FAVICON_BACKFILL" True
     shareTtl <- readIntEnv "EZA_SHARE_TTL_DAYS" 7
     aiProvider <- fromMaybe "none" <$> lookupEnv "EZA_AI_PROVIDER"
     ollamaUrl <- fromMaybe "http://127.0.0.1:11434" <$> lookupEnv "EZA_OLLAMA_BASE_URL"
@@ -165,6 +167,7 @@ loadConfig = do
             , cfgFetchTimeoutMs = max 1000 fetchTimeout
             , cfgFaviconMaxBytes = max 4096 faviconMax
             , cfgFaviconTtlDays = max 1 faviconTtl
+            , cfgFaviconBackfill = faviconBackfill
             , cfgShareTtlDays = max 1 shareTtl
             , cfgAiProvider = aiProvider
             , cfgOllamaBaseUrl = ollamaUrl

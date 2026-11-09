@@ -28,7 +28,7 @@ import qualified DedupSpec
 import qualified Eza.Auth as Auth
 import Eza.Bookmarks
 import Eza.Db (openDb, queryScalar, schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaVersion, targetSchemaVersion)
-import Eza.Favicon (parseDataIcon, parseIconLinks, sniffImage)
+import Eza.Favicon (Favicon (..), getFavicon, parseDataIcon, parseIconLinks, putFavicon, recordFaviconFailure, sniffImage)
 import Eza.Graph (GraphLayoutPayload (..), emptyLayoutCache, globalGraph, graphLayoutPayload, graphRevision, layoutPresetFromText, layoutPresetText, lookupCachedLayout, storeCachedLayout)
 import Eza.GraphLayout (LayoutPreset (..))
 import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateHighlight)
@@ -78,6 +78,15 @@ main = hspec $ do
                     sniffImage bytes `shouldBe` Just "image/png"
         it "rejects an SVG body" $ do
             sniffImage (BS.pack [0x3c, 0x73, 0x76, 0x67]) `shouldBe` Nothing
+        it "does not serve a failure placeholder as an icon" $
+            withSystemTempDirectory "eza-favicon" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                _ <- putFavicon conn "example.test" "https://example.test/favicon.ico" "image/png" (BS.pack [0x89, 0x50, 0x4E, 0x47])
+                stored <- getFavicon conn "example.test"
+                pure (fmap fvMime stored) `shouldReturn` Just "image/png"
+                recordFaviconFailure conn "broken.test" "no icon"
+                getFavicon conn "broken.test" `shouldReturn` Nothing
+                close conn
 
     describe "schema migration" $ do
         it "backs up a v1 database and migrates it to the current version without losing rows" $

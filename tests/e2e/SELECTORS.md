@@ -42,7 +42,9 @@ server-rendered pages keep are used directly. Shared selectors live in
 | `[data-testid="dialog-add"]`, `#add-url`, `#add-title`, `#add-tags` | file-a-record dialog |
 | `#save-url`, `#save-title`, `#save-tags` | quick-save page fields |
 
-Selection bar actions are text buttons: `select page`, `select all matching`,
+Each ledger row has a tick control in the accession column; it is revealed on
+row hover or keyboard focus, and the column reserves its width so it never
+clips at the left edge of the page. Selection bar actions are text buttons: `select page`, `select all matching`,
 `add tag`, `remove tag`, `mark read`, `mark unread`, `delete`, `clear`; the
 first two stay available after a first pick so a selection can be extended to
 the whole filtered result set. The ledger foot shows `select page` and

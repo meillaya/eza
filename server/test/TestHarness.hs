@@ -155,6 +155,7 @@ testConfig dir =
         , cfgFetchTimeoutMs = 1000
         , cfgFaviconMaxBytes = 4096
         , cfgFaviconTtlDays = 1
+        , cfgFaviconBackfill = False
         , cfgShareTtlDays = 7
         , cfgAiProvider = "none"
         , cfgOllamaBaseUrl = "http://127.0.0.1:11434"

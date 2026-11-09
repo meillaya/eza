@@ -174,10 +174,13 @@ DELETE /api/v1/bookmarks/{id}
 | `limit` | 60 | Page size, capped at 200 |
 
 `q` accepts the operators `tag:name`, `is:unread`, `is:dead`,
-`link:target`, `-term`, `year:YYYY`, and `day:YYYY-MM-DD`. Date filters use
-UTC and match the original save date (`created_at`); rows with no save date
-(`created_at` = 0) never match. A filter ANDs with the other operators and the
-`tags`, `is_read`, and `is_dead` columns, and `year_counts` reflects it.
+`link:target`, `-term`, `year:YYYY`, and `day:YYYY-MM-DD`. Free-text terms
+match the FTS index and, as a fallback, source tag names, so `rust` can return
+records filed under the `rust` tag even when no indexed field contains the
+word; FTS hits rank first. Date filters use UTC and match the original save
+date (`created_at`); rows with no save date (`created_at` = 0) never match. A
+filter ANDs with the other operators and the `tags`, `is_read`, and
+`is_dead` columns, and `year_counts` reflects it.
 
 The route returns a `SearchPage`. `POST /api/v1/bookmarks` takes
 `{"url","title","tags"}` and returns 201 `{"id":N}`. It returns 409 when the
@@ -192,6 +195,13 @@ The route accepts a capture or write token.
 `add_tags`, `remove_tags`, `mark_read`, `mark_unread`, or `delete`. It
 accepts at most 10,000 ids, writes an undo snapshot first, and returns
 `{"updated","snapshot_id"}`. Delete requires `"confirm":true`.
+
+`GET /api/v1/favicons/{domain}` serves the cached icon bytes for one source
+domain. Icons are stored per domain, not per bookmark: the background
+`EZA_FAVICON_BACKFILL` loop fills one icon for a domain and applies it to every
+record on that domain with one update, so a site with hundreds of links costs
+one request. A domain with no cached icon redirects to the static fallback;
+checksum-busted `?v=` links are used by the ledger rows.
 
 `GET /api/v1/bookmarks/{id}` returns a `BookmarkDetail`, including
 `enrich_state`, `enrich_error`, and `reading_time_minutes`. `PATCH` accepts

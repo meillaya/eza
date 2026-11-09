@@ -81,7 +81,9 @@ sticky selection bar then shows the count and the bulk actions, and keeps
 `select page` and `select all matching` available so a selection can be
 extended after the first pick. With nothing selected, the ledger foot offers
 the same two controls as separate text buttons. A selection is capped at
-10,000 records, and the bar is dismissed with `clear` or `Esc`.
+10,000 records, and the bar is dismissed with `clear` or `Esc`. Each source
+cell shows a cached 16px favicon when the domain has one and a printed
+monogram otherwise; the icon is one cached asset per domain, not per row.
 
 Each account has one Argon2id password hash and its own private library
 database. The first claim creates the admin account and shows ten recovery

@@ -42,6 +42,8 @@ services:
       EZA_FETCH_TIMEOUT_MS: ${EZA_FETCH_TIMEOUT_MS:-8000}
       EZA_FAVICON_MAX_BYTES: ${EZA_FAVICON_MAX_BYTES:-65536}
       EZA_FAVICON_TTL_DAYS: ${EZA_FAVICON_TTL_DAYS:-90}
+      # One cached icon per source domain, fetched in the background; 0 disables.
+      EZA_FAVICON_BACKFILL: ${EZA_FAVICON_BACKFILL:-1}
       EZA_SHARE_TTL_DAYS: ${EZA_SHARE_TTL_DAYS:-7}
       # Body-size and snapshot caps (bytes) plus backup retention.
       EZA_MAX_BODY_BYTES: ${EZA_MAX_BODY_BYTES:-8388608}

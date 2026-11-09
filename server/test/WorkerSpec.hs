@@ -12,6 +12,7 @@ module WorkerSpec (spec) where
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
 import Control.Monad (when)
+import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import Database.SQLite.Simple (Only (..), Query (..))
 import qualified Database.SQLite.Simple as Sqlite
@@ -25,7 +26,8 @@ import Eza.Config (Config (..))
 import Eza.Control (ControlUser (..))
 import qualified Eza.Control as Control
 import qualified Eza.Db as Db
-import Eza.Enrich (enqueueEnrichment)
+import Eza.Enrich (backfillCachedFavicons, enqueueEnrichment)
+import Eza.Favicon (putFavicon)
 import Eza.Server (
     closeAppState,
     enableWorkers,
@@ -109,6 +111,24 @@ spec = describe "per-user workers" $ do
                 sessions <- Sqlite.query_ conn "SELECT COUNT(*) FROM sessions" :: IO [Only Int]
                 sessions `shouldBe` [Only 0]
             closeAppState state
+
+    it "fills every bookmark of a cached favicon domain without network" $
+        withWorkerConfig $ \cfg -> do
+            (alice, _) <- createAccounts cfg
+            bracket (Db.openDb (cuDbPath alice)) Sqlite.close $ \conn -> do
+                _ <- insertBookmark conn "https://example.test/one" "One" []
+                _ <- insertBookmark conn "https://example.test/two" "Two" []
+                _ <- putFavicon conn "example.test" "https://example.test/favicon.ico" "image/png" (BS.pack [0x89, 0x50, 0x4E, 0x47])
+                first <- backfillCachedFavicons conn
+                first `shouldBe` True
+                urls <-
+                    Sqlite.query_ conn "SELECT favicon_url FROM bookmarks ORDER BY id" ::
+                        IO [Only T.Text]
+                map (\(Only url) -> url) urls
+                    `shouldSatisfy` all ("/api/v1/favicons/example.test?v=" `T.isPrefixOf`)
+                -- A second pass has no row to fill, so it does no work.
+                second <- backfillCachedFavicons conn
+                second `shouldBe` False
 
 -- ---------------------------------------------------------------------------
 -- Helpers

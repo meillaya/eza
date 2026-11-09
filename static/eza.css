@@ -792,7 +792,7 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
    ============================================================ */
 
 .ledg-app {
-  --cols: 72px minmax(0, 1fr) 198px 82px 164px;
+  --cols: 116px minmax(0, 1fr) 198px 82px 164px;
 }
 .ledg-app .main { align-items: stretch; }
 
@@ -831,9 +831,13 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
 .ledg-app .row[aria-selected="true"] .c-no { color: var(--accent); }
 
 /* the selection control: a real checkbox in the accession cell, hidden until
-   bulk mode, with a 44px touch target around the 14px mark */
+   bulk mode, with a 44px touch target around the 14px mark. The space is
+   reserved even while hidden: the accession column must fit the tick plus the
+   number, otherwise the control overflows out of the ledger on the left edge
+   until a selection starts. */
 .ledg-tickbox {
-  display: none;
+  display: inline-flex;
+  visibility: hidden;
   align-items: center;
   justify-content: flex-end;
   width: 44px;
@@ -842,11 +846,11 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
   flex: none;
   cursor: pointer;
 }
-.ledg-app .ledger[data-bulk="true"] .row .ledg-tickbox { display: inline-flex; }
+.ledg-app .ledger[data-bulk="true"] .row .ledg-tickbox { visibility: visible; }
 .ledg-app .row:hover .ledg-tickbox,
-.ledg-app .row:focus-within .ledg-tickbox { display: inline-flex; }
+.ledg-app .row:focus-within .ledg-tickbox { visibility: visible; }
 @media (hover: none) {
-  .ledg-tickbox { display: inline-flex; }
+  .ledg-tickbox { visibility: visible; }
 }
 .ledg-tick {
   -webkit-appearance: none;
@@ -1382,7 +1386,7 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
    ============================================================ */
 
 @media (max-width: 1199px) {
-  .ledg-app { --cols: 64px minmax(0, 1fr) 172px 78px; --gap: 14px; }
+  .ledg-app { --cols: 108px minmax(0, 1fr) 172px 78px; --gap: 14px; }
   .ledg-app .main { grid-template-columns: 220px minmax(0, 1fr); gap: 28px; }
   .ledg-app .spark i { width: 2px; }
   .ledg-app .ledger[data-bulk="true"] { --cols: 108px minmax(0, 1fr) 172px 78px; }
@@ -1395,7 +1399,7 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
 
 /* just above the fold, tighten the source and tags columns before dropping tags */
 @media (min-width: 1200px) and (max-width: 1329px) {
-  .ledg-app { --cols: 72px minmax(0, 1fr) 156px 82px 148px; }
+  .ledg-app { --cols: 116px minmax(0, 1fr) 156px 82px 148px; }
   .ledg-app .ledger[data-bulk="true"] { --cols: 116px minmax(0, 1fr) 156px 82px 128px; }
 }
 
@@ -1418,7 +1422,7 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
   }
   .ledg-app .facet-strip::-webkit-scrollbar { display: none; }
   .ledg-app .fstrip-item { min-height: 40px; }
-  .ledg-app { --cols: 70px minmax(0, 1fr) 152px 78px; }
+  .ledg-app { --cols: 114px minmax(0, 1fr) 152px 78px; }
   .ledg-app .ledger[data-bulk="true"] { --cols: 114px minmax(0, 1fr) 152px 78px; }
   .srch-inner { max-width: none; }
   .save-spread { grid-template-columns: minmax(0, 1fr); gap: 36px; max-width: 720px; }

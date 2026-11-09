@@ -59,7 +59,7 @@ production`), so either keys or nothing works. See [secrets.md](secrets.md).
 `configmap.yaml` carries the non-secret runtime settings: `EZA_DATA_DIR`,
 `EZA_BIND`, `PUBLIC_ORIGIN`, `EZA_RP_ID`, `EZA_RP_NAME`, `EZA_LOG_LEVEL`,
 `EZA_ENRICH_WORKERS`, `EZA_FETCH_TIMEOUT_MS`, `EZA_FAVICON_MAX_BYTES`,
-`EZA_FAVICON_TTL_DAYS`, `EZA_SHARE_TTL_DAYS`, `EZA_ALLOW_PRIVATE_FETCH` (SSRF
+`EZA_FAVICON_TTL_DAYS`, `EZA_FAVICON_BACKFILL`, `EZA_SHARE_TTL_DAYS`, `EZA_ALLOW_PRIVATE_FETCH` (SSRF
 guard; keep `0`), `EZA_MAX_BODY_BYTES`, `EZA_IMPORT_MAX_BYTES`,
 `EZA_SNAPSHOT_MAX_BYTES`, `EZA_BACKUP_KEEP_DAYS`, and the AI settings
 `EZA_AI_PROVIDER` (`none` disables AI tagging), `EZA_OLLAMA_BASE_URL`, and

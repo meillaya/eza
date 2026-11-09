@@ -50,10 +50,13 @@ iconUrlFor domain contentHash
 
 getFavicon :: Connection -> Text -> IO (Maybe Favicon)
 getFavicon conn domain = do
+    -- Failure rows keep the domain parked and are not icons: a placeholder
+    -- byte must never be served as an image. The handler redirects to the
+    -- static fallback instead.
     rows <-
         query
             conn
-            "SELECT domain, mime, bytes, etag, source_url FROM favicons WHERE domain = ?"
+            "SELECT domain, mime, bytes, etag, source_url FROM favicons WHERE domain = ? AND fail_count = 0 AND length(bytes) > 1"
             (Only domain) ::
             IO [(Text, Text, ByteString, Text, Text)]
     pure $ case rows of

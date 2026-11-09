@@ -125,6 +125,9 @@ run_one() {
     "EZA_ALLOWED_ORIGINS=http://localhost:$port"
     "EZA_SNAPSHOT_DIR=$data/snapshots"
     "EZA_BACKUP_DIR=$data/backups"
+    # The browser suite stays offline: favicon backfill would otherwise issue
+    # external icon requests for the fixture domains.
+    "EZA_FAVICON_BACKFILL=0"
   )
 
   env "${env_prefix[@]}" "$BIN" init >/dev/null

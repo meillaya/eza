@@ -82,7 +82,7 @@ import qualified Eza.Control as Control
 import qualified Eza.Db as Db
 import Eza.DeadLinks (checkDead)
 import Eza.Dedup (DedupQuery (..), dedupCandidates, mergeBookmarks, mergeUrlDuplicatesAll)
-import Eza.Enrich (enqueueEnrichment, runEnrichWorkerFor)
+import Eza.Enrich (enqueueEnrichment, runEnrichWorkerFor, runFaviconWorkerFor)
 import Eza.Export (exportBookmarks)
 import Eza.Favicon (Favicon (..), getFavicon)
 import Eza.Graph (LayoutCache (..), emptyLayoutCache, globalGraph, graphLayoutPayload, graphRevision, layoutPresetFromText, lookupCachedLayout, storeCachedLayout)
@@ -671,7 +671,13 @@ spawnUserWorkers state slot = do
         forM [1 .. enrichCount] $ \_ ->
             async (runEnrichWorkerFor manager cfg databasePath (asEnrichSem state))
     webhookWorker <- async (runWebhookWorker webhookCfg)
-    pure (enrichWorkers <> [webhookWorker])
+    -- One favicon backfill loop per account: cached domains cost no network,
+    -- and each new domain costs one fetch no matter how many links it has.
+    faviconWorkers <-
+        if cfgFaviconBackfill cfg && enrichCount > 0
+            then (: []) <$> async (runFaviconWorkerFor manager cfg databasePath (asEnrichSem state))
+            else pure []
+    pure (enrichWorkers <> [webhookWorker] <> faviconWorkers)
 
 stillRunning :: Async () -> IO Bool
 stillRunning worker = isNothing <$> poll worker

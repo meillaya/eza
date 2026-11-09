@@ -60,10 +60,17 @@ back. An unclaimed legacy file is left alone. Otherwise the first
 `/setup` claims a fresh account under `users/<id>/`.
 
 Background work is per account. Opening an account database starts its
-enrichment claimers and webhook delivery worker (each database has its own
-outbox and cursor); `EZA_ENRICH_WORKERS` is a process-wide semaphore, and a
-disabled account's workers stop on the next supervisor tick. Expired sessions
-are swept when a database opens and once a day after.
+enrichment claimers, webhook delivery worker (each database has its own
+outbox and cursor), and one favicon backfill loop. The favicon loop works
+per source domain, not per bookmark: cached domains are applied with one
+`UPDATE bookmarks SET favicon_url = ... WHERE domain = ?`, and a domain with
+no cached icon costs at most a few conventional icon fetches, so a site with
+500 links costs one lookup. Domains with the most unfilled bookmarks go first,
+icon bodies are size-capped and sniffed, and three failures park a domain.
+`EZA_ENRICH_WORKERS` is a process-wide semaphore shared by both loops;
+`EZA_FAVICON_BACKFILL=0` disables the icon loop. A disabled account's workers
+stop on the next supervisor tick. Expired sessions are swept when a database
+opens and once a day after.
 
 ![Architecture: one process, one control database, one library per account](figures/architecture.png)
 

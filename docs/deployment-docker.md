@@ -99,6 +99,7 @@ WebAuthn passkeys require a **secure origin**, so plain
 | `EZA_FETCH_TIMEOUT_MS` | `8000` | Timeout per outbound fetch (server clamps below 1000). |
 | `EZA_FAVICON_MAX_BYTES` | `65536` | Maximum favicon download size. |
 | `EZA_FAVICON_TTL_DAYS` | `90` | Favicon cache lifetime. |
+| `EZA_FAVICON_BACKFILL` | `1` | Background per-domain favicon cache fill (one request per source, not per link); `0` disables it. |
 | `EZA_SHARE_TTL_DAYS` | `7` | Public share-link lifetime. |
 | `EZA_ALLOW_PRIVATE_FETCH` | `0` | Set `1` to allow fetching private/RFC1918 URLs (lifts the SSRF guard). |
 | `EZA_AI_PROVIDER` | `none` | AI tagging: `none`, `ollama`, `openai`, `openai-compatible`, `anthropic`. |

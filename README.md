@@ -35,6 +35,7 @@ server already computes.
 |---|---|
 | **Search** | `tag:`, `is:unread`, `is:dead`, `link:`, `year:`, `day:`, and `-term` operators over FTS5; free-text terms also match tag names. The date operators use the UTC filing date. Results order by bm25, then save date. |
 | **Ledger** | Year dividers, a provenance line, source and tag facets, a field drawer, bulk selection, and keyboard movement on `j` and `k`. |
+| **Icons** | One cached favicon per source domain, filled in the background with a single request per site (not per link) and served from SQLite; a printed monogram covers sites with no icon. |
 | **Record** | Extracted reading copy, highlights with notes, markdown notes with `[[wikilinks]]`, backlinks, and a sandboxed snapshot viewer. |
 | **Accessions** | The archive as an index: one mark per filing day, sources ranked with leader dots, and an honest long tail. A year, day or source opens the ledger filtered with `year:2025`, `day:2025-11-03`, or the source domain. |
 | **Graph** | The whole library on one canvas: records, tags, resolved wikilinks and tag memberships, with pan, zoom, fit, a hover preview, a text filter, and a tags toggle. |

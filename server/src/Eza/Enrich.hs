@@ -7,6 +7,9 @@ module Eza.Enrich (
     enqueueEnrichment,
     runEnrichWorker,
     runEnrichWorkerFor,
+    runFaviconWorkerFor,
+    backfillCachedFavicons,
+    backfillFaviconStep,
 ) where
 
 import Control.Concurrent (threadDelay)
@@ -22,6 +25,7 @@ import qualified Data.Text.Encoding.Error as TEE
 import Database.SQLite.Simple
 import Network.HTTP.Client (Manager)
 import Network.URI (URIAuth (..), parseURI, parseURIReference, relativeTo, uriAuthority, uriRegName, uriScheme)
+import System.IO (hPutStrLn, stderr)
 
 import Eza.Config (Config (..))
 import qualified Eza.Db as Db
@@ -167,7 +171,11 @@ fallbackCandidates url =
             case uriAuthority uri of
                 Nothing -> []
                 Just auth ->
-                    let origin = T.pack (dropTrailingColon (uriScheme uri)) <> "://" <> T.pack (uriRegName auth)
+                    let origin =
+                            T.pack (dropTrailingColon (uriScheme uri))
+                                <> "://"
+                                <> T.pack (uriRegName auth)
+                                <> T.pack (uriPort auth)
                      in [origin <> "/favicon.ico", origin <> "/favicon.png", origin <> "/apple-touch-icon.png"]
   where
     dropTrailingColon s = if not (null s) && last s == ':' then init s else s
@@ -226,3 +234,119 @@ runEnrichWorkerFor manager cfg databasePath sem = do
 
 newQSemFor :: Config -> IO QSem
 newQSemFor cfg = newQSem (max 1 (cfgEnrichWorkers cfg))
+
+-- ---------------------------------------------------------------------------
+-- Favicon backfill
+-- ---------------------------------------------------------------------------
+
+{- | Fill @bookmarks.favicon_url@ from an icon already cached for that domain.
+One SQL update covers every bookmark on the domain, so a site with 500 links
+costs one lookup and no network request. Returns 'True' when it changed rows.
+-}
+backfillCachedFavicons :: Connection -> IO Bool
+backfillCachedFavicons conn = do
+    rows <-
+        query
+            conn
+            "SELECT f.domain, f.content_hash FROM favicons f WHERE f.fail_count = 0 AND length(f.bytes) > 0 AND EXISTS (SELECT 1 FROM bookmarks b WHERE b.domain = f.domain AND b.favicon_url = '') ORDER BY f.domain LIMIT 1"
+            () ::
+            IO [(Text, Text)]
+    case rows of
+        [] -> pure False
+        ((domain, contentHash) : _) -> do
+            withImmediateTransaction conn $
+                execute
+                    conn
+                    "UPDATE bookmarks SET favicon_url = ? WHERE domain = ? AND favicon_url = ''"
+                    (iconUrlFor domain contentHash, domain)
+            pure True
+
+{- | Fetch one missing domain icon and apply it to every bookmark on that
+domain. The domain with the most unfilled bookmarks goes first, so the visible
+rows improve early. Domains with no icon at the usual paths are parked after
+three attempts. Returns 'True' when this step did something.
+-}
+backfillFaviconStep :: Manager -> Config -> Connection -> IO Bool
+backfillFaviconStep manager cfg conn = do
+    cached <- backfillCachedFavicons conn
+    if cached
+        then pure True
+        else backfillRemoteFavicon manager cfg conn
+
+backfillRemoteFavicon :: Manager -> Config -> Connection -> IO Bool
+backfillRemoteFavicon manager cfg conn = do
+    rows <-
+        query
+            conn
+            "SELECT b.domain FROM bookmarks b LEFT JOIN favicons f ON f.domain = b.domain WHERE b.domain <> '' AND b.favicon_url = '' AND (f.domain IS NULL OR (f.fail_count < 3 AND f.last_error <> '')) GROUP BY b.domain ORDER BY COUNT(*) DESC, b.domain LIMIT 1"
+            () ::
+            IO [Only Text]
+    case rows of
+        [] -> pure False
+        (Only domain : _) -> do
+            sample <- query conn "SELECT url FROM bookmarks WHERE domain = ? LIMIT 1" (Only domain) :: IO [Only Text]
+            case sample of
+                [] -> pure True
+                (Only sampleUrl : _) -> do
+                    fetched <- fetchDomainIcon manager cfg sampleUrl
+                    case fetched of
+                        Nothing -> do
+                            recordFaviconFailure conn domain "no icon at the usual paths"
+                            pure True
+                        Just (mime, bytes, source) -> do
+                            hashText <- putFavicon conn domain source mime bytes
+                            withImmediateTransaction conn $
+                                execute
+                                    conn
+                                    "UPDATE bookmarks SET favicon_url = ? WHERE domain = ?"
+                                    (iconUrlFor domain hashText, domain)
+                            pure True
+
+{- | Try the conventional icon locations for a domain. Both schemes are tried:
+a bookmark saved from an https page may still be the only row for a host that
+only serves icons over http. The body is sniffed, so an HTML 404 page is not
+stored as an icon.
+-}
+fetchDomainIcon :: Manager -> Config -> Text -> IO (Maybe (Text, ByteString, Text))
+fetchDomainIcon manager cfg sampleUrl =
+    case dedupe (concatMap fallbackCandidates (schemeVariants sampleUrl)) of
+        [] -> pure Nothing
+        candidates -> tryCandidates candidates
+  where
+    options = iconFetchOptions manager cfg
+    tryCandidates [] = pure Nothing
+    tryCandidates (url : rest) = do
+        result <- fetchUrl options url
+        case result of
+            Left _ -> tryCandidates rest
+            Right page ->
+                case sniffImage (fpBody page) of
+                    Nothing -> tryCandidates rest
+                    Just mime -> pure (Just (mime, fpBody page, url))
+
+    schemeVariants url
+        | "https://" `T.isPrefixOf` url = [url, "http://" <> T.drop 8 url]
+        | "http://" `T.isPrefixOf` url = [url, "https://" <> T.drop 7 url]
+        | otherwise = [url]
+
+{- | One favicon backfill loop for one account database. It serves cached icons
+with no network first, then fetches at most one missing domain per iteration
+(the shared enrichment semaphore bounds outbound work across accounts). A
+domain that yields a fresh icon still costs a single fetch regardless of how
+many bookmarks use it.
+-}
+runFaviconWorkerFor :: Manager -> Config -> FilePath -> QSem -> IO ()
+runFaviconWorkerFor manager cfg databasePath sem = do
+    conn <- Db.openDb databasePath
+    forever $ do
+        outcome <-
+            bracket_ (waitQSem sem) (signalQSem sem) $
+                try (backfillFaviconStep manager cfg conn) ::
+                IO (Either SomeException Bool)
+        case outcome of
+            Left err -> hPutStrLn stderr ("eza: favicon worker: " <> show err)
+            Right _ -> pure ()
+        threadDelay $
+            case outcome of
+                Right True -> 250 * 1000
+                _ -> 2 * 1000 * 1000
