@@ -24,7 +24,7 @@ module Eza.Types (
     DedupMergeAllReport (..),
 ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON, genericToJSON, object, withObject, (.:), (.:?), (.!=), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON, genericToJSON, object, withObject, (.!=), (.:), (.:?), (.=))
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
@@ -192,6 +192,7 @@ data GraphTag = GraphTag
 -- | Compact wire encoding: @[name,count]@.
 instance ToJSON GraphTag where
     toJSON tag = toJSON (gtName tag, gtCount tag)
+
 instance FromJSON GraphTag where
     parseJSON value = do
         (name, count) <- parseJSON value
@@ -224,6 +225,7 @@ instance ToJSON GraphRecord where
             , grIsDead record
             , grTags record
             )
+
 instance FromJSON GraphRecord where
     parseJSON value = do
         (recordId, title, domain, createdAt, isRead, isDead, tags) <- parseJSON value
@@ -239,6 +241,7 @@ data GraphLink = GraphLink
 -- | Compact wire encoding: @[source,target]@.
 instance ToJSON GraphLink where
     toJSON link = toJSON (glSource link, glTarget link)
+
 instance FromJSON GraphLink where
     parseJSON value = do
         (source, target) <- parseJSON value
@@ -253,8 +256,9 @@ data GraphData = GraphData
     , gdRecords :: [GraphRecord]
     , gdLinks :: [GraphLink]
     , gdRevision :: Text
-    -- ^ Cheap aggregate fingerprint of the library. Clients only compare it;
-    -- they never parse it.
+    {- ^ Cheap aggregate fingerprint of the library. Clients only compare it;
+    they never parse it.
+    -}
     }
     deriving stock (Show, Eq)
 
@@ -342,8 +346,9 @@ instance ToJSON DedupGroup where
 instance FromJSON DedupGroup where
     parseJSON = genericParseJSON (jsonOptions "dg")
 
--- | Whole-library duplicate totals: exact counts for the duplicates view and
--- its "merge all" confirmation.
+{- | Whole-library duplicate totals: exact counts for the duplicates view and
+its "merge all" confirmation.
+-}
 data DedupCounts = DedupCounts
     { dcUrlGroups :: Int
     , dcUrlRecords :: Int
@@ -357,8 +362,9 @@ instance ToJSON DedupCounts where
 instance FromJSON DedupCounts where
     parseJSON = genericParseJSON (jsonOptions "dc")
 
--- | One page of duplicate candidates, split into safe same-URL groups and
--- advisory same-title groups, plus exact totals for the whole library.
+{- | One page of duplicate candidates, split into safe same-URL groups and
+advisory same-title groups, plus exact totals for the whole library.
+-}
 data DedupReport = DedupReport
     { drCounts :: DedupCounts
     , drUrlGroups :: [DedupGroup]

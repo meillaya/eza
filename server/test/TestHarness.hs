@@ -1,4 +1,3 @@
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- | A real eza server on a temporary data directory for the server test
@@ -147,7 +146,9 @@ testConfig dir =
         , cfgStaticDir = Nothing
         , cfgSnapshotDir = dir </> "snapshots"
         , cfgBackupDir = dir </> "backups"
+        , cfgBackupKeepDays = 14
         , cfgMonolith = "monolith"
+        , cfgSnapshotMaxBytes = 50 * 1024 * 1024
         , cfgLogLevel = "error"
         , cfgAllowPrivateFetch = False
         , cfgEnrichWorkers = 0
@@ -164,6 +165,8 @@ testConfig dir =
         , cfgLoginMaxAttempts = 100
         , cfgLoginLockoutSeconds = 900
         , cfgAuthBodyLimitBytes = 8192
+        , cfgMaxBodyBytes = 8 * 1024 * 1024
+        , cfgImportMaxBytes = 32 * 1024 * 1024
         }
 
 testAuthConfig :: Config -> Auth.AuthConfig

@@ -8,7 +8,6 @@ module CoreViewSpec (coreViewSpec) where
 import Data.Aeson (decode, encode, object, (.=))
 import qualified Data.IntMap.Strict as IM
 import qualified Data.Map.Strict as M
-import Data.Text (Text)
 import qualified Data.Text as T
 import Test.Hspec
 
@@ -17,8 +16,8 @@ import Eza.GraphMatch
 import Eza.SearchQuery (parseSearchQuery)
 import Eza.Time (daysFromCivil, utcDay, utcYear, utcYearDay)
 import Eza.TokenPrefix
-import Eza.User
 import Eza.Types (GraphData (..), GraphRecord (..), GraphTag (..))
+import Eza.User
 import Eza.View
 import Eza.Webhook
 

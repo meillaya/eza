@@ -39,6 +39,7 @@ module Eza.Web.Model (
 
 import Data.Aeson (Value)
 import qualified Data.ByteString as BS
+import Data.Char (isDigit)
 import qualified Data.IntSet as IS
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe)
@@ -48,7 +49,7 @@ import Data.Text.Encoding (decodeUtf8')
 import Text.Read (readMaybe)
 
 import Eza.Boot (BootPayload)
-import Eza.Web.Api (LayoutWire (..), WebhookTest (..))
+import Eza.GraphMatch (ColorAssignment)
 import Eza.Types (
     Backlink,
     BookmarkDetail,
@@ -65,6 +66,14 @@ import Eza.Types (
     SearchPage,
     TagStat,
  )
+import Eza.User (UserCreateResult, UserRole (..), UserView (..))
+import Eza.View (
+    ColorGroup (..),
+    LabelMode (..),
+    View (..),
+    ViewKind (..),
+ )
+import Eza.Web.Api (LayoutWire (..), WebhookTest (..))
 import Eza.Web.Graph (
     GraphDrag,
     GraphLayout,
@@ -74,15 +83,7 @@ import Eza.Web.Graph (
     emptyMatches,
     initialGraphView,
  )
-import Eza.GraphMatch (ColorAssignment)
-import Eza.User (UserCreateResult, UserRole (..), UserView (..))
 import Eza.Webhook (DeliveryView, EventType, Webhook (..))
-import Eza.View (
-    ColorGroup (..),
-    LabelMode (..),
-    View (..),
-    ViewKind (..),
- )
 
 import Eza.Web.Types (AccountInfo, AiStatus, ApiError, ConsolGroup, ReaderSelection, Rule (..), SessionInfo, ShareView, TagSuggestion, TokenView)
 import Miso hiding (View)
@@ -194,7 +195,7 @@ percentDecode raw =
     decode (c : rest) = utf8 (fromEnum c) ++ decode rest
 
     hexValue c
-        | c >= '0' && c <= '9' = Just (fromEnum c - fromEnum '0')
+        | isDigit c = Just (fromEnum c - fromEnum '0')
         | c >= 'a' && c <= 'f' = Just (fromEnum c - fromEnum 'a' + 10)
         | c >= 'A' && c <= 'F' = Just (fromEnum c - fromEnum 'A' + 10)
         | otherwise = Nothing
@@ -249,8 +250,9 @@ routeOfUri uri =
         Right r -> r
         Left _ -> NotFound
 
--- | The layout the plate is showing: the local neighbourhood when local mode
--- is on, otherwise the whole-library layout.
+{- | The layout the plate is showing: the local neighbourhood when local mode
+is on, otherwise the whole-library layout.
+-}
 activeGraphLayout :: Model -> Maybe GraphLayout
 activeGraphLayout m
     | mGraphLocal m = mGraphLocalLayout m

@@ -17,34 +17,34 @@ nodes sit; it is never drawn as an edge.
 the client's historical layout exactly. 'Compact' and 'Airy' only scale the tag
 force spread and the record anchor radius, so every preset is deterministic.
 -}
-module Eza.GraphLayout
-    ( -- * Node keys
-      tagKeyOf
-    , isTagKey
-    , tagIndexOf
-    , recordKeyOf
+module Eza.GraphLayout (
+    -- * Node keys
+    tagKeyOf,
+    isTagKey,
+    tagIndexOf,
+    recordKeyOf,
 
-      -- * Options and presets
-    , LayoutOptions (..)
-    , LayoutPreset (..)
-    , defaultLayoutOptions
-    , presetOptions
+    -- * Options and presets
+    LayoutOptions (..),
+    LayoutPreset (..),
+    defaultLayoutOptions,
+    presetOptions,
 
-      -- * Server positions
-    , LayoutPositions (..)
-    , layoutPositions
+    -- * Server positions
+    LayoutPositions (..),
+    layoutPositions,
 
-      -- * Layout
-    , GraphLayout (..)
-    , buildLayout
-    , buildLayoutWith
-    , hydrateLayout
-    , layoutWorldSpan
-    ) where
+    -- * Layout
+    GraphLayout (..),
+    buildLayout,
+    buildLayoutWith,
+    hydrateLayout,
+    layoutWorldSpan,
+) where
 
-import Data.List (sortOn)
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet as IS
+import Data.List (sortOn)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
@@ -63,8 +63,9 @@ isTagKey key = key < 0
 tagIndexOf :: Int -> Int
 tagIndexOf key = negate key - 1
 
--- | The node key for a record id. Record ids are always positive, so the
--- identity function is the key; the name documents the intent.
+{- | The node key for a record id. Record ids are always positive, so the
+identity function is the key; the name documents the intent.
+-}
 recordKeyOf :: Int -> Int
 recordKeyOf = id
 
@@ -75,18 +76,21 @@ a tag force spread of 1 and a record anchor radius of 1.
 -}
 data LayoutOptions = LayoutOptions
     { loTagSpread :: Double
-    -- ^ Multiplier on the tag phyllotaxis radius, attraction target and
-    -- repulsion range.
+    {- ^ Multiplier on the tag phyllotaxis radius, attraction target and
+    repulsion range.
+    -}
     , loAnchorRadius :: Double
-    -- ^ Multiplier on the per-tag-combination sunflower radius and the
-    -- untagged record grid.
+    {- ^ Multiplier on the per-tag-combination sunflower radius and the
+    untagged record grid.
+    -}
     , loRelaxIterations :: Int
     -- ^ Grid relaxation passes. The current layout uses three.
     }
     deriving (Eq, Show)
 
--- | Named option sets. 'Standard' is the current layout; 'Compact' and 'Airy'
--- scale it down and up. Ordering by world span is compact < standard < airy.
+{- | Named option sets. 'Standard' is the current layout; 'Compact' and 'Airy'
+scale it down and up. Ordering by world span is compact < standard < airy.
+-}
 data LayoutPreset = Compact | Standard | Airy
     deriving (Eq, Show)
 
@@ -112,8 +116,9 @@ data LayoutPositions = LayoutPositions
     }
     deriving (Eq, Show)
 
--- | Project a built layout back to the position payload, for hydration tests
--- and for shipping positions to another client.
+{- | Project a built layout back to the position payload, for hydration tests
+and for shipping positions to another client.
+-}
 layoutPositions :: GraphLayout -> LayoutPositions
 layoutPositions layout =
     LayoutPositions
@@ -324,13 +329,15 @@ assembleLayout generation graph positions boundsOverride = GraphLayout{..}
             ]
     radii = IM.unionWith const tagRadii recordRadii
     labelTags =
-        map fst
+        map
+            fst
             ( sortOn
                 (\(key, (_, count)) -> (negate count, key))
                 (IM.toList tagData)
             )
     labelRecords =
-        map fst
+        map
+            fst
             ( sortOn
                 ( \(key, record) ->
                     (negate (degree key), negate (grCreatedAt record), key)
@@ -413,7 +420,9 @@ forceTags options count pairs =
                             / distance
                     stepX = dx / distance * pull
                     stepY = dy / distance * pull
-                 in IM.insert a (x1 + stepX, y1 + stepY)
+                 in IM.insert
+                        a
+                        (x1 + stepX, y1 + stepY)
                         (IM.insert b (x2 - stepX, y2 - stepY) position)
             _ -> position
     repulse position =
@@ -433,7 +442,9 @@ forceTags options count pairs =
                                 let push_ = 0.02 * spread * (limit - distance)
                                     stepX = dx / distance * push_
                                     stepY = dy / distance * push_
-                                 in IM.insert a (x1 - stepX, y1 - stepY)
+                                 in IM.insert
+                                        a
+                                        (x1 - stepX, y1 - stepY)
                                         (IM.insert b (x2 + stepX, y2 + stepY) current)
                 _ -> current
     phyllotaxis index =
@@ -542,8 +553,9 @@ anchorRecords options tagPositions recordTags recordMap wikiEdges =
             untagged
     placed = withLinks
 
--- | Push overlapping records apart on a coarse grid. Only records move, so the
--- tag clusters keep the shape the force pass gave them.
+{- | Push overlapping records apart on a coarse grid. Only records move, so the
+tag clusters keep the shape the force pass gave them.
+-}
 relaxRecords :: Int -> IM.IntMap (Double, Double) -> IM.IntMap (Double, Double)
 relaxRecords iterations start = foldl' (\position _ -> relaxStep position) start [1 .. iterations]
 
@@ -588,8 +600,9 @@ meanPoint points =
         (sumX, sumY) = foldl' (\(x, y) (px, py) -> (x + px, y + py)) (0, 0) points
      in Just (sumX / total, sumY / total)
 
--- | Bounds of the raw node positions, used to size nodes before the padded
--- bounds are known.
+{- | Bounds of the raw node positions, used to size nodes before the padded
+bounds are known.
+-}
 positionBounds :: IM.IntMap (Double, Double) -> (Double, Double, Double, Double)
 positionBounds positions
     | IM.null positions = (0, 0, 1, 1)

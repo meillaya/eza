@@ -13,12 +13,12 @@ thousands of bookmarks, and an import.completed event kind is not part of the
 approved v1 catalog); clips emit clip.created and the bookmark side of a clip
 is not re-emitted as bookmark.created/updated.
 -}
-module Eza.Events
-    ( recordEvent
-    , bookmarkEventData
-    , bookmarkEventDataMany
-    , clipEventData
-    ) where
+module Eza.Events (
+    recordEvent,
+    bookmarkEventData,
+    bookmarkEventDataMany,
+    clipEventData,
+) where
 
 import Control.Monad (forM)
 import Data.Aeson (Value, encode, object, (.=))
@@ -41,9 +41,10 @@ recordEvent conn eventType payload = do
         "INSERT INTO event_log (kind, payload_json, created_at) VALUES (?,?,?)"
         (eventTypeText eventType, TE.decodeUtf8 (LBS.toStrict (encode payload)), now)
 
--- | The data object for a bookmark event: the fields a webhook consumer
--- needs to identify the record without a second request. Nothing when the row
--- is already gone (a delete calls this before removing it).
+{- | The data object for a bookmark event: the fields a webhook consumer
+needs to identify the record without a second request. Nothing when the row
+is already gone (a delete calls this before removing it).
+-}
 bookmarkEventData :: Connection -> Int -> IO (Maybe Value)
 bookmarkEventData conn bid = do
     rows <-
@@ -81,7 +82,8 @@ bookmarkEventDataMany conn ids = do
     chunks = chunksOf idChunkSize (nub ids)
     fetchRows =
         concat
-            <$> forM chunks
+            <$> forM
+                chunks
                 ( \chunk ->
                     query
                         conn
@@ -91,7 +93,8 @@ bookmarkEventDataMany conn ids = do
                 )
     fetchTags =
         concat
-            <$> forM chunks
+            <$> forM
+                chunks
                 ( \chunk ->
                     query
                         conn

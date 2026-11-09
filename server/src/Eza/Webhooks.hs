@@ -13,27 +13,27 @@ the subscription so a dead receiver cannot be retried forever.
 The worker takes an explicit database path and HTTP manager, so M3 can start
 one worker per user database without touching this module.
 -}
-module Eza.Webhooks
-    ( WebhookError (..)
-    , webhookErrorStatus
-    , webhookErrorCode
-    , webhookErrorMessage
-    , listWebhooks
-    , getWebhook
-    , createWebhook
-    , updateWebhook
-    , deleteWebhook
-    , listDeliveries
-    , testWebhook
-    , WebhookWorkerConfig (..)
-    , defaultWebhookWorkerConfig
-    , runWebhookWorker
-    , dispatchNewEvents
-    , processPendingDeliveries
-    , resetDeliveringDeliveries
-    , purgeExpired
-    , signWebhook
-    ) where
+module Eza.Webhooks (
+    WebhookError (..),
+    webhookErrorStatus,
+    webhookErrorCode,
+    webhookErrorMessage,
+    listWebhooks,
+    getWebhook,
+    createWebhook,
+    updateWebhook,
+    deleteWebhook,
+    listDeliveries,
+    testWebhook,
+    WebhookWorkerConfig (..),
+    defaultWebhookWorkerConfig,
+    runWebhookWorker,
+    dispatchNewEvents,
+    processPendingDeliveries,
+    resetDeliveringDeliveries,
+    purgeExpired,
+    signWebhook,
+) where
 
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_, void, when)
@@ -262,8 +262,9 @@ deleteWebhook conn webhookId = do
 encodeEventsJson :: [EventType] -> Text
 encodeEventsJson events = TE.decodeUtf8 (LBS.toStrict (encode (map eventTypeText (nub events))))
 
--- | @POST /api/v1/webhooks/<id>/test@: post one synthetic bookmark.updated
--- envelope to the subscription and record the result like a real delivery.
+{- | @POST /api/v1/webhooks/<id>/test@: post one synthetic bookmark.updated
+envelope to the subscription and record the result like a real delivery.
+-}
 testWebhook :: WebhookWorkerConfig -> Connection -> Int -> IO (Either WebhookError (Bool, Maybe Int, Text))
 testWebhook cfg conn webhookId = do
     row <- getWebhookRow conn webhookId
@@ -407,9 +408,10 @@ dispatchNewEvents conn =
             Nothing -> False
             Just events -> kindText `elem` events
 
--- | Attempt every delivery that is due, up to a bounded batch. Returns the
--- number of attempts made. Tests call this directly; the worker calls it once
--- per poll.
+{- | Attempt every delivery that is due, up to a bounded batch. Returns the
+number of attempts made. Tests call this directly; the worker calls it once
+per poll.
+-}
 processPendingDeliveries :: WebhookWorkerConfig -> Connection -> IO Int
 processPendingDeliveries cfg conn = go 0
   where
@@ -554,8 +556,9 @@ recordDeliveryRetry conn deliveryId availableAt message =
         "UPDATE webhook_deliveries SET state = 'queued', available_at = ?, last_error = ? WHERE id = ?"
         (availableAt, truncateError message, deliveryId)
 
--- | Delete deliveries and events older than the 30 day retention window. The
--- delivery history survives the event rows (event_id has no foreign key).
+{- | Delete deliveries and events older than the 30 day retention window. The
+delivery history survives the event rows (event_id has no foreign key).
+-}
 purgeExpired :: Connection -> IO ()
 purgeExpired conn = do
     now <- nowEpoch

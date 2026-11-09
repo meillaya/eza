@@ -109,7 +109,6 @@ mustUser action = do
         Right user -> pure user
         Left err -> expectationFailure ("expected a created user, got " <> show err) >> error "unreachable"
 
-
 isJustUser :: Maybe ControlUser -> Bool
 isJustUser (Just _) = True
 isJustUser Nothing = False

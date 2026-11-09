@@ -3,9 +3,9 @@ module Main (main) where
 import Control.Exception (bracket)
 import Data.Aeson (Value (..), decode, encode, object, toJSON)
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Foldable (toList)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
+import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Database.SQLite.Simple (close)
@@ -19,24 +19,18 @@ import Test.Hspec
 import qualified AdminSpec
 import qualified AuthzSpec
 import qualified BackupSpec
-import qualified ClipSpec
 import qualified CliSpec
+import qualified ClipSpec
 import qualified ControlSpec
 import qualified CoreViewSpec
-import qualified ViewContractSpec
 import qualified DataIntegritySpec
 import qualified DedupSpec
-import qualified GraphLayoutSpec
-import qualified IsolationSpec
-import qualified PerfSpec
-import qualified ViewServerSpec
-import qualified WebhookSpec
-import qualified WorkerSpec
 import qualified Eza.Auth as Auth
 import Eza.Bookmarks
 import Eza.Db (openDb, queryScalar, schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaVersion, targetSchemaVersion)
 import Eza.Favicon (parseDataIcon, parseIconLinks, sniffImage)
 import Eza.Graph (GraphLayoutPayload (..), emptyLayoutCache, globalGraph, graphLayoutPayload, graphRevision, layoutPresetFromText, layoutPresetText, lookupCachedLayout, storeCachedLayout)
+import Eza.GraphLayout (LayoutPreset (..))
 import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateHighlight)
 import Eza.Import
 import Eza.JsonExport (JsonImportReport (..), exportJson, importJson)
@@ -44,9 +38,15 @@ import qualified Eza.Password as Password
 import Eza.Rules (Rule (..), createRule, listRules, matchingBookmarks)
 import Eza.SearchQuery
 import Eza.Shares (ShareRecord (..), ShareState (..), ShareUnavailable (..), createShare, resolveShare, resolveShareState, revokeShare, shareUnavailablePage)
-import Eza.GraphLayout (LayoutPreset (..))
 import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), GraphData (..), GraphLink (..), GraphRecord (..), GraphTag (..), Highlight (..), ImportReport (..), LibraryStats (..), SearchPage (..))
 import Eza.Url (dedupeKey, dedupeLookupUrls, normalizeUrl)
+import qualified GraphLayoutSpec
+import qualified IsolationSpec
+import qualified PerfSpec
+import qualified ViewContractSpec
+import qualified ViewServerSpec
+import qualified WebhookSpec
+import qualified WorkerSpec
 
 main :: IO ()
 main = hspec $ do
@@ -540,9 +540,11 @@ main = hspec $ do
                     let (minX, minY, maxX, maxY) = glpBounds payload
                      in max (maxX - minX) (maxY - minY)
                 spans = map (spanOf . (`graphLayoutPayload` graph)) [Compact, Standard, Airy]
-            spans `shouldSatisfy` (\values -> case values of
-                [compactSpan, standardSpan, airySpan] -> compactSpan < standardSpan && standardSpan < airySpan
-                _ -> False)
+            spans
+                `shouldSatisfy` ( \values -> case values of
+                                    [compactSpan, standardSpan, airySpan] -> compactSpan < standardSpan && standardSpan < airySpan
+                                    _ -> False
+                                )
 
         it "caches one payload per revision and preset" $ do
             let graph =
@@ -937,8 +939,9 @@ seedPasswordAccount conn params = do
     stored <- Password.hashPassword params "correct horse battery"
     Auth.setAccountPassword conn "owner" stored
 
--- | A passkey row with a fixed credential id. WebAuthn assertions cannot be
--- fabricated in a test, so the auth tests work at the database and Auth level.
+{- | A passkey row with a fixed credential id. WebAuthn assertions cannot be
+fabricated in a test, so the auth tests work at the database and Auth level.
+-}
 insertTestCredential :: Sqlite.Connection -> BS.ByteString -> IO ()
 insertTestCredential conn credentialId = do
     Sqlite.execute
@@ -975,8 +978,9 @@ bookmarkTagNames conn bid = do
             IO [Sqlite.Only Text]
     pure [name | Sqlite.Only name <- rows]
 
--- | Raw bookmark insert with a chosen original save date and read flag, for
--- the date-filter and graph tests.
+{- | Raw bookmark insert with a chosen original save date and read flag, for
+the date-filter and graph tests.
+-}
 insertFiledBookmark :: Sqlite.Connection -> Text -> Text -> Text -> Int -> Int -> IO Int
 insertFiledBookmark conn url title domain createdAt isRead = do
     Sqlite.execute
@@ -995,8 +999,9 @@ attachTag conn bid name = do
             Sqlite.execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?,?)" (bid, tid)
         [] -> pure ()
 
--- | A resolved wikilink row; unresolved targets stay NULL and are not part of
--- the graph payload.
+{- | A resolved wikilink row; unresolved targets stay NULL and are not part of
+the graph payload.
+-}
 insertLink :: Sqlite.Connection -> Int -> Int -> IO ()
 insertLink conn source target =
     Sqlite.execute

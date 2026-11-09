@@ -15,23 +15,23 @@ Default rules:
 * deleting the current default promotes the lowest-id remaining view of that
   kind, and re-seeds the default graph view when the kind has no views left.
 -}
-module Eza.Views
-    ( ViewError (..)
-    , viewErrorStatus
-    , viewErrorCode
-    , viewErrorMessage
-    , ViewPatch (..)
-    , seedDefaultViews
-    , listViews
-    , getView
-    , createView
-    , updateView
-    , deleteView
-    ) where
+module Eza.Views (
+    ViewError (..),
+    viewErrorStatus,
+    viewErrorCode,
+    viewErrorMessage,
+    ViewPatch (..),
+    seedDefaultViews,
+    listViews,
+    getView,
+    createView,
+    updateView,
+    deleteView,
+) where
 
 import Control.Monad (when)
-import qualified Data.Aeson as Aeson
 import Data.Aeson (FromJSON (..), Value, withObject, (.:?))
+import qualified Data.Aeson as Aeson
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -69,8 +69,9 @@ viewErrorMessage err = case err of
 
 -- ---------------------------------------------------------------- patches ---
 
--- | A PATCH body. The definition arrives as a raw value because it can only be
--- decoded once the stored view's kind is known.
+{- | A PATCH body. The definition arrives as a raw value because it can only be
+decoded once the stored view's kind is known.
+-}
 data ViewPatch = ViewPatch
     { vpName :: Maybe Text
     , vpSlug :: Maybe Text
@@ -164,9 +165,10 @@ firstViewOfRow rows = case rows of
 
 -- ----------------------------------------------------------------- seeding ---
 
--- | Seed the default graph view when the database has no default graph view.
--- Idempotent and safe to call on every open, which is what @Eza.Db.openDb@
--- does after migrating.
+{- | Seed the default graph view when the database has no default graph view.
+Idempotent and safe to call on every open, which is what @Eza.Db.openDb@
+does after migrating.
+-}
 seedDefaultViews :: Connection -> IO ()
 seedDefaultViews conn =
     withImmediateTransaction conn $ do
@@ -222,8 +224,9 @@ countViews conn = do
     rows <- query_ conn "SELECT COUNT(*) FROM views" :: IO [Only Int]
     pure (case rows of [Only n] -> n; _ -> 0)
 
--- | A slug that no other view row uses. The numeric suffix is what makes two
--- views with the same name distinguishable.
+{- | A slug that no other view row uses. The numeric suffix is what makes two
+views with the same name distinguishable.
+-}
 uniqueSlug :: Connection -> Text -> Maybe Int -> IO Text
 uniqueSlug conn base excludeId = go 1
   where

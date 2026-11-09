@@ -13,8 +13,8 @@ module Eza.Web.View (viewModel) where
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Miso
 import Eza.View (ViewKind (..))
+import Miso
 import qualified Miso.CSS as C
 import qualified Miso.Html as H
 import qualified Miso.Html.Event as HE

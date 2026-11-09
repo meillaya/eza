@@ -12,16 +12,16 @@ its tag names, no excluded term appears there, every @tag:@ filter names one of
 its tags, the flags agree, and the filed date agrees. Malformed operators are
 dropped by the parser, matching the ledger's behaviour.
 -}
-module Eza.GraphMatch
-    ( RecordContext (..)
-    , TagContext (..)
-    , recordContext
-    , matchesRecord
-    , matchesTag
-    , matchesQueryRecord
-    , ColorAssignment (..)
-    , assignGroupColors
-    ) where
+module Eza.GraphMatch (
+    RecordContext (..),
+    TagContext (..),
+    recordContext,
+    matchesRecord,
+    matchesTag,
+    matchesQueryRecord,
+    ColorAssignment (..),
+    assignGroupColors,
+) where
 
 import qualified Data.IntMap.Strict as IM
 import qualified Data.Map.Strict as M
@@ -112,9 +112,10 @@ matchesRecord query context =
 matchesQueryRecord :: SearchQuery -> GraphData -> GraphRecord -> Bool
 matchesQueryRecord query graph = matchesRecord query . recordContext graph
 
--- | A tag matches a query's text and @tag:@ parts. Boolean, link and date
--- filters cannot describe a tag, so a query that uses them does not colour
--- tag nodes.
+{- | A tag matches a query's text and @tag:@ parts. Boolean, link and date
+filters cannot describe a tag, so a query that uses them does not colour
+tag nodes.
+-}
 matchesTag :: SearchQuery -> TagContext -> Bool
 matchesTag query context =
     null (sqLinkTargets query)
@@ -132,12 +133,12 @@ matchesTag query context =
     tagFilterMatches =
         all (\tag -> T.toLower (T.strip tag) == name) (sqTags query)
 
-
 -- ------------------------------------------------------------- colouring ---
 
--- | The result of applying ordered colour groups to a graph. Record colours
--- are keyed by bookmark id; tag colours are keyed by tag name. A node with no
--- entry keeps the theme's default colour.
+{- | The result of applying ordered colour groups to a graph. Record colours
+are keyed by bookmark id; tag colours are keyed by tag name. A node with no
+entry keeps the theme's default colour.
+-}
 data ColorAssignment = ColorAssignment
     { caRecordColors :: IM.IntMap Text
     , caTagColors :: M.Map Text Text

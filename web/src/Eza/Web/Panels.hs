@@ -25,13 +25,7 @@ import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
 
-import Miso
-import qualified Miso.Canvas as Canvas
-import qualified Miso.CSS as C
-import qualified Miso.Html as H
-import qualified Miso.Html.Event as HE
-import qualified Miso.Html.Property as HP
-import Miso.JSON (withObject, (.:))
+import Eza.GraphMatch (ColorAssignment (..))
 import Eza.Types (
     BookmarkSummary (..),
     DedupCounts (..),
@@ -43,10 +37,8 @@ import Eza.Types (
     SavedSearch (..),
     TagStat (..),
  )
-import Eza.GraphMatch (ColorAssignment (..))
-import qualified Eza.View as EV
 import Eza.User (UserRole (..), UserView (..), userRoleText)
-import Eza.Webhook (DeliveryView (..), Webhook (..), allEventTypes, eventTypeText, maxWebhooks)
+import qualified Eza.View as EV
 import Eza.Web.Api (WebhookTest (..))
 import Eza.Web.Graph (
     GraphDraw (..),
@@ -74,6 +66,14 @@ import Eza.Web.Types (
     TagSuggestion (..),
     TokenView (..),
  )
+import Eza.Webhook (DeliveryView (..), Webhook (..), allEventTypes, eventTypeText, maxWebhooks)
+import Miso
+import qualified Miso.CSS as C
+import qualified Miso.Canvas as Canvas
+import qualified Miso.Html as H
+import qualified Miso.Html.Event as HE
+import qualified Miso.Html.Property as HP
+import Miso.JSON (withObject, (.:))
 
 -- ================================================================ helpers ===
 
@@ -357,41 +357,41 @@ graphToolbar m =
         , H.div_
             [HP.class_ "g-settings", testId "graph-settings"]
             [ H.div_
-            [HP.class_ "g-control g-scope"]
-            ( [ controlLabel "scope"
-              , H.div_
-                    [HP.class_ "g-seg", HP.role_ "group", HP.aria_ "label" "Graph scope"]
-                    [ segmentButton "whole" "graph-scope-whole" (not (mGraphLocal m)) (if mGraphLocal m then GraphScopeToggled else Noop)
-                    , segmentButton "local" "graph-local-toggle" (mGraphLocal m) GraphScopeToggled
-                    ]
-              ]
-                ++ [ H.span_
-                        [HP.class_ "g-root-name mono", testId "graph-root"]
-                        [text (graphRootName m)]
-                   | mGraphLocal m
-                   ]
-            )
-        , H.div_
-            [HP.class_ "g-control g-depth"]
-            ( [ controlLabel "depth"
-              , H.div_
-                    [HP.class_ "g-seg", testId "graph-local-depth", HP.role_ "group", HP.aria_ "label" "Local graph depth"]
-                    [ segmentButton (ms (show depth)) ("graph-depth-" <> ms (show depth)) (mGraphLocalDepth m == depth) (GraphLocalDepthSelected depth)
-                    | depth <- [1, 2, 3]
-                    ]
-              ]
-                ++ [H.span_ [HP.class_ "g-root-hint meta"] [text "hops"] | mGraphLocal m]
-            )
-        , H.div_
-            [HP.class_ "g-control g-preset"]
-            [ controlLabel "layout"
+                [HP.class_ "g-control g-scope"]
+                ( [ controlLabel "scope"
+                  , H.div_
+                        [HP.class_ "g-seg", HP.role_ "group", HP.aria_ "label" "Graph scope"]
+                        [ segmentButton "whole" "graph-scope-whole" (not (mGraphLocal m)) (if mGraphLocal m then GraphScopeToggled else Noop)
+                        , segmentButton "local" "graph-local-toggle" (mGraphLocal m) GraphScopeToggled
+                        ]
+                  ]
+                    ++ [ H.span_
+                            [HP.class_ "g-root-name mono", testId "graph-root"]
+                            [text (graphRootName m)]
+                       | mGraphLocal m
+                       ]
+                )
             , H.div_
-                [HP.class_ "g-seg", testId "graph-preset", HP.role_ "group", HP.aria_ "label" "Layout preset"]
-                [ segmentButton "compact" "graph-preset-compact" (mGraphPreset m == Compact) (GraphPresetSelected Compact)
-                , segmentButton "standard" "graph-preset-standard" (mGraphPreset m == Standard) (GraphPresetSelected Standard)
-                , segmentButton "airy" "graph-preset-airy" (mGraphPreset m == Airy) (GraphPresetSelected Airy)
+                [HP.class_ "g-control g-depth"]
+                ( [ controlLabel "depth"
+                  , H.div_
+                        [HP.class_ "g-seg", testId "graph-local-depth", HP.role_ "group", HP.aria_ "label" "Local graph depth"]
+                        [ segmentButton (ms (show depth)) ("graph-depth-" <> ms (show depth)) (mGraphLocalDepth m == depth) (GraphLocalDepthSelected depth)
+                        | depth <- [1, 2, 3]
+                        ]
+                  ]
+                    ++ [H.span_ [HP.class_ "g-root-hint meta"] [text "hops"] | mGraphLocal m]
+                )
+            , H.div_
+                [HP.class_ "g-control g-preset"]
+                [ controlLabel "layout"
+                , H.div_
+                    [HP.class_ "g-seg", testId "graph-preset", HP.role_ "group", HP.aria_ "label" "Layout preset"]
+                    [ segmentButton "compact" "graph-preset-compact" (mGraphPreset m == Compact) (GraphPresetSelected Compact)
+                    , segmentButton "standard" "graph-preset-standard" (mGraphPreset m == Standard) (GraphPresetSelected Standard)
+                    , segmentButton "airy" "graph-preset-airy" (mGraphPreset m == Airy) (GraphPresetSelected Airy)
+                    ]
                 ]
-            ]
             ]
         , H.div_
             [HP.class_ "g-control g-view-actions"]
@@ -484,7 +484,7 @@ graphGrid m layout =
                 [graphCanvas m layout]
             , H.p_
                 [HP.class_ "g-plate-hint meta"]
-                [ text (graphHint m) ]
+                [text (graphHint m)]
             , graphStatus m layout
             , graphResults m layout
             ]
@@ -579,8 +579,9 @@ graphStatus m layout =
             [text (num (graphLabelCount m layout) <> " labels")]
         ]
 
--- | How many labels the current view and label mode draw. The readout uses the
--- same pure plan as the painter, so it counts what is on screen.
+{- | How many labels the current view and label mode draw. The readout uses the
+same pure plan as the painter, so it counts what is on screen.
+-}
 graphLabelCount :: Model -> GraphLayout -> Int
 graphLabelCount m layout =
     labelCount layout (mGraphView m) (mGraphTagsShown m) (mGraphLabelMode m)
@@ -688,9 +689,10 @@ graphAside m layout =
         , graphLegend m
         ]
 
--- | The hover preview card. It shows the hovered node while there is one and
--- falls back to the focused or selected node; an idle line explains the plate
--- when neither exists.
+{- | The hover preview card. It shows the hovered node while there is one and
+falls back to the focused or selected node; an idle line explains the plate
+when neither exists.
+-}
 graphPreview :: Model -> GraphLayout -> View () () Model Action
 graphPreview m layout =
     H.div_
@@ -716,7 +718,8 @@ graphPreview m layout =
             [ controlLabel (if grIsRead record then "read" else "unread")
             , H.span_ [HP.class_ "meta mono"] [text (ms (grDomain record))]
             ]
-        , H.h2_ [HP.class_ "g-preview-title"]
+        , H.h2_
+            [HP.class_ "g-preview-title"]
             [ H.a_
                 [HP.href_ (bookmarkPath (grId record)), HE.onClickPrevent (Navigate (Bookmark (grId record)))]
                 [text (ms (grTitle record))]
@@ -777,7 +780,8 @@ recordLinks layout recordKey =
 sharedRecords :: GraphLayout -> Int -> Int
 sharedRecords layout recordKey =
     IS.size
-        ( IS.delete recordKey
+        ( IS.delete
+            recordKey
             ( IS.unions
                 ( [IS.singleton recordKey]
                     ++ [ IS.fromList members
@@ -834,8 +838,9 @@ graphZoomPercent m =
 
 -- ------------------------------------------------------------ graph views ---
 
--- | The cache identity of the active graph view: id, update stamp and the
--- live color groups. Any group edit or saved-view change invalidates the plate.
+{- | The cache identity of the active graph view: id, update stamp and the
+live color groups. Any group edit or saved-view change invalidates the plate.
+-}
 graphViewCacheKey :: Model -> MisoString
 graphViewCacheKey m =
     ms
@@ -848,8 +853,9 @@ graphViewCacheKey m =
             )
         )
 
--- | The color legend: one row per group with a swatch, the matched record
--- count and a live enable toggle.
+{- | The color legend: one row per group with a swatch, the matched record
+count and a live enable toggle.
+-}
 graphLegend :: Model -> View () () Model Action
 graphLegend m =
     H.div_
@@ -889,44 +895,45 @@ indexMaybe index values = case drop index values of
     (value : _) -> value
     [] -> error "indexMaybe: index out of range"
 
--- | The color-group settings editor: add, edit (name/query/#rrggbb), enable,
--- remove, with live preview against the current graph.
+{- | The color-group settings editor: add, edit (name/query/#rrggbb), enable,
+remove, with live preview against the current graph.
+-}
 graphGroupEditor :: Model -> View () () Model Action
 graphGroupEditor m =
     H.div_
         [HP.class_ "g-group-editor", testId "graph-group-editor"]
         ( [ H.div_
-            [HP.class_ "g-group-head"]
-            [ controlLabel "color groups"
-            , H.span_ [HP.class_ "meta"] [text (num (length drafts) <> " of " <> num EV.maxColorGroups)]
-            , H.button_
-                ( [ HP.class_ "btn btn--sm"
-                  , HP.type_ "button"
-                  , testId "graph-group-add"
-                  , HE.onClick ViewGroupAdd
-                  ]
-                    ++ attrDisabled (length drafts >= EV.maxColorGroups)
-                )
-                [text "add group"]
-            , H.button_
-                [ HP.class_ "btn btn--sm"
-                , HP.type_ "button"
-                , testId "view-groups-save"
-                , HE.onClick ViewGroupsSave
+                [HP.class_ "g-group-head"]
+                [ controlLabel "color groups"
+                , H.span_ [HP.class_ "meta"] [text (num (length drafts) <> " of " <> num EV.maxColorGroups)]
+                , H.button_
+                    ( [ HP.class_ "btn btn--sm"
+                      , HP.type_ "button"
+                      , testId "graph-group-add"
+                      , HE.onClick ViewGroupAdd
+                      ]
+                        ++ attrDisabled (length drafts >= EV.maxColorGroups)
+                    )
+                    [text "add group"]
+                , H.button_
+                    [ HP.class_ "btn btn--sm"
+                    , HP.type_ "button"
+                    , testId "view-groups-save"
+                    , HE.onClick ViewGroupsSave
+                    ]
+                    [text "save view"]
+                , H.button_
+                    [ HP.class_ "btn btn--sm"
+                    , HP.type_ "button"
+                    , testId "view-groups-cancel"
+                    , HE.onClick ViewGroupsCancel
+                    ]
+                    [text "cancel"]
+                , H.span_
+                    [HP.class_ "g-group-dirty meta"]
+                    [text (if mGraphGroupDirty m then "unsaved changes" else "saved")]
                 ]
-                [text "save view"]
-            , H.button_
-                [ HP.class_ "btn btn--sm"
-                , HP.type_ "button"
-                , testId "view-groups-cancel"
-                , HE.onClick ViewGroupsCancel
-                ]
-                [text "cancel"]
-            , H.span_
-                [HP.class_ "g-group-dirty meta"]
-                [text (if mGraphGroupDirty m then "unsaved changes" else "saved")]
-            ]
-        ]
+          ]
             ++ [ H.span_
                     [HP.class_ "add-error", testId "graph-group-limit", HP.role_ "status"]
                     [text "at most 24 color groups"]
@@ -1049,24 +1056,25 @@ viewRow m view =
                 [text (ms (T.unpack (EV.vName view)))]
             , H.p_
                 [HP.class_ "view-row-meta meta"]
-                ( [H.span_ [HP.class_ "view-kind"] [text (ms (T.unpack (EV.viewKindText (EV.vKind view))))]
+                ( [ H.span_ [HP.class_ "view-kind"] [text (ms (T.unpack (EV.viewKindText (EV.vKind view))))]
                   , H.span_ [HP.class_ "view-slug mono"] [text (ms (T.unpack (EV.vSlug view)))]
                   ]
                     ++ [H.span_ [HP.class_ "view-default-badge", testId "view-default-badge"] [text "default"] | EV.vIsDefault view]
                 )
             , case vuRename (mViewUi m) of
-                Just (slug, name) | slug == EV.vSlug view ->
-                    H.div_
-                        [HP.class_ "view-rename"]
-                        [ H.input_
-                            [ HP.class_ "input"
-                            , HP.type_ "text"
-                            , HP.value_ name
-                            , HE.onInput ViewRenameInput
+                Just (slug, name)
+                    | slug == EV.vSlug view ->
+                        H.div_
+                            [HP.class_ "view-rename"]
+                            [ H.input_
+                                [ HP.class_ "input"
+                                , HP.type_ "text"
+                                , HP.value_ name
+                                , HE.onInput ViewRenameInput
+                                ]
+                            , H.button_ [HP.class_ "btn btn--sm", HP.type_ "button", HE.onClick ViewRenameSubmit] [text "rename"]
+                            , H.button_ [HP.class_ "btn btn--sm", HP.type_ "button", HE.onClick ViewRenameCancel] [text "cancel"]
                             ]
-                        , H.button_ [HP.class_ "btn btn--sm", HP.type_ "button", HE.onClick ViewRenameSubmit] [text "rename"]
-                        , H.button_ [HP.class_ "btn btn--sm", HP.type_ "button", HE.onClick ViewRenameCancel] [text "cancel"]
-                        ]
                 _ -> H.span_ [] []
             ]
         , H.div_
@@ -1094,8 +1102,9 @@ viewRow m view =
 
 -- ---------------------------------------------------------- view dialogs ---
 
--- | The save-as / create, import and export dialogs. Rendered by the shell so
--- the graph page and the ledger can both open them.
+{- | The save-as / create, import and export dialogs. Rendered by the shell so
+the graph page and the ledger can both open them.
+-}
 viewDialogs :: Model -> [View () () Model Action]
 viewDialogs m =
     [viewSaveDialog m | vuSaveOpen (mViewUi m)]
@@ -2895,7 +2904,7 @@ credentialRecord m credential =
                 [HP.class_ "account-record-meta meta"]
                 ( [ text (ms ("created " <> fromMisoString' (formatFiled (crCreatedAt credential))))
                   , metaSep
-                  , text (ms ("last used " <> maybe "never" fromMisoString' (formatFiled <$> crLastUsedAt credential)))
+                  , text (ms ("last used " <> maybe "never" (fromMisoString' . formatFiled) (crLastUsedAt credential)))
                   ]
                     ++ [metaSep | crBackupEligible credential]
                     ++ [text "synced backup" | crBackupEligible credential]
@@ -3165,14 +3174,15 @@ webhookRecord webhook =
 webhookTestNote :: Model -> Int -> [View () () Model Action]
 webhookTestNote m webhookId =
     case mWebhookTest m of
-        Just (id_, result) | id_ == webhookId ->
-            [ H.p_
-                [HP.class_ "account-record-meta meta webhook-test-result", HP.role_ "status"]
-                ( [text (if wtOk result then "test delivered" else "test failed")]
-                    ++ [text (ms (" · HTTP " <> maybe "no response" (T.pack . show) (wtStatus result)))]
-                    ++ [text (ms (" · " <> T.unpack (wtError result))) | not (T.null (wtError result))]
-                )
-            ]
+        Just (id_, result)
+            | id_ == webhookId ->
+                [ H.p_
+                    [HP.class_ "account-record-meta meta webhook-test-result", HP.role_ "status"]
+                    ( [text (if wtOk result then "test delivered" else "test failed")]
+                        ++ [text (ms (" · HTTP " <> maybe "no response" (T.pack . show) (wtStatus result)))]
+                        ++ [text (ms (" · " <> T.unpack (wtError result))) | not (T.null (wtError result))]
+                    )
+                ]
         _ -> []
 
 deliveriesView :: Model -> [View () () Model Action]
@@ -3398,7 +3408,6 @@ userRow m user =
                       , testId (if isUserEnabledLocal user then "user-disable" else "user-enable")
                       , HE.onClick (UserToggleEnabled user)
                       ]
-                        ++ []
                     )
                     [text (if isUserEnabledLocal user then "disable" else "enable")]
                 , H.button_

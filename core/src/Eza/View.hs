@@ -9,54 +9,54 @@ client renders only the known fields, and unknown schema versions or kinds are
 rejected. Everything here is pure so the server, the WASM client, and the tests
 share one definition.
 -}
-module Eza.View
-    ( -- * Kinds and enums
-      ViewKind (..)
-    , viewKindText
-    , parseViewKind
-    , LabelMode (..)
-    , labelModeText
-    , parseLabelMode
-    , LedgerSort (..)
-    , ledgerSortText
-    , parseLedgerSort
+module Eza.View (
+    -- * Kinds and enums
+    ViewKind (..),
+    viewKindText,
+    parseViewKind,
+    LabelMode (..),
+    labelModeText,
+    parseLabelMode,
+    LedgerSort (..),
+    ledgerSortText,
+    parseLedgerSort,
 
-      -- * Definitions
-    , ColorGroup (..)
-    , GraphViewDefinition (..)
-    , LedgerViewDefinition (..)
-    , ViewDefinition (..)
-    , View (..)
-    , ViewInput (..)
+    -- * Definitions
+    ColorGroup (..),
+    GraphViewDefinition (..),
+    LedgerViewDefinition (..),
+    ViewDefinition (..),
+    View (..),
+    ViewInput (..),
 
-      -- * Defaults and helpers
-    , defaultGraphViewDefinition
-    , defaultLedgerViewDefinition
-    , slugify
-    , validateViewName
-    , validateQueryText
-    , validateColor
-    , validateViewDefinition
-    , validateViewDraft
-    , decodeViewDefinition
-    , encodeViewDefinition
-    , definitionByteLimit
-    , maxColorGroups
-    , maxViewName
-    , maxQueryLength
-    , maxViewsPerUser
-    , viewDefinitionKind
-    ) where
+    -- * Defaults and helpers
+    defaultGraphViewDefinition,
+    defaultLedgerViewDefinition,
+    slugify,
+    validateViewName,
+    validateQueryText,
+    validateColor,
+    validateViewDefinition,
+    validateViewDraft,
+    decodeViewDefinition,
+    encodeViewDefinition,
+    definitionByteLimit,
+    maxColorGroups,
+    maxViewName,
+    maxQueryLength,
+    maxViewsPerUser,
+    viewDefinitionKind,
+) where
 
+import Control.Monad (when)
 import Data.Aeson
 import Data.Aeson.Types (Parser)
-import Control.Monad (when)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum, isAsciiLower, isDigit, toLower)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as LBS
 import GHC.Generics (Generic)
 
 import Eza.GraphLayout (LayoutPreset (..))
@@ -317,8 +317,9 @@ maxViewsPerUser = 64
 definitionByteLimit :: Int
 definitionByteLimit = 65536
 
--- | A URL slug derived from a display name. The server appends a numeric
--- suffix when the slug is already used by the same user.
+{- | A URL slug derived from a display name. The server appends a numeric
+suffix when the slug is already used by the same user.
+-}
 slugify :: Text -> Text
 slugify raw =
     let lowered = T.toLower raw
@@ -425,7 +426,7 @@ decodeViewDefinition kind value = case kind of
     GraphKind -> GraphDefinition <$> decodeValue value
     LedgerKind -> LedgerDefinition <$> decodeValue value
   where
-    decodeValue :: FromJSON a => Value -> Either Text a
+    decodeValue :: (FromJSON a) => Value -> Either Text a
     decodeValue raw = case fromJSON raw of
         Error message -> Left (T.pack message)
         Success parsed -> Right parsed

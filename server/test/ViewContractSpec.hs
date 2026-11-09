@@ -9,7 +9,7 @@ accepts, and that every counterexample is rejected by the same validators.
 module ViewContractSpec (viewContractSpec) where
 
 import Control.Monad (filterM, forM_)
-import Data.Aeson (FromJSON, Result (..), Value, decodeStrict', fromJSON)
+import Data.Aeson (Result (..), Value, decodeStrict', fromJSON)
 import qualified Data.ByteString as BS
 import System.Directory (doesDirectoryExist, getCurrentDirectory)
 import System.FilePath ((</>))
@@ -46,9 +46,10 @@ viewContractSpec = do
         mapM_ badView ["unknown-kind.json", "bad-schema.json", "bad-color.json", "too-many-groups.json"]
         value <- readJson (root </> "spec" </> "bad" </> "webhook-unknown-event.json")
         (fromJSON value :: Result WebhookInput) `shouldSatisfy` isError
-        (case fromJSON value :: Result WebhookInput of
-            Error _ -> Nothing
-            Success input -> either (const Nothing) (const (Just input)) (validateWebhookInput input))
+        ( case fromJSON value :: Result WebhookInput of
+                Error _ -> Nothing
+                Success input -> either (const Nothing) (const (Just input)) (validateWebhookInput input)
+            )
             `shouldBe` Nothing
 
     it "parses the JSON Schema files as JSON" $ do

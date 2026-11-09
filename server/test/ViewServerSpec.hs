@@ -152,13 +152,15 @@ spec = do
                 blankName <- createView conn (ViewInput "  " GraphKind (GraphDefinition defaultGraphViewDefinition) Nothing)
                 blankName `shouldSatisfy` isInvalid
                 linkQuery <-
-                    createView conn
+                    createView
+                        conn
                         (ViewInput "Link view" GraphKind (GraphDefinition defaultGraphViewDefinition{gvdQuery = "link:target"}) Nothing)
                 linkQuery `shouldSatisfy` isInvalid
                 deep <- createView conn (ViewInput "Deep" GraphKind (GraphDefinition defaultGraphViewDefinition{gvdLocalDepth = Just 4}) Nothing)
                 deep `shouldSatisfy` isInvalid
                 badSlug <-
-                    createView conn
+                    createView
+                        conn
                         (ViewInput "Bad slug" GraphKind (GraphDefinition defaultGraphViewDefinition) (Just "Bad Slug"))
                 badSlug `shouldSatisfy` isInvalid
                 blankRename <- updateView conn "graph" (ViewPatch (Just "") Nothing Nothing Nothing)

@@ -17,8 +17,9 @@ import Test.QuickCheck
 
 import Eza.Authz
 
--- | One representative request for every documented route. Dynamic segments
--- use a sample value; the classifications must not depend on the value.
+{- | One representative request for every documented route. Dynamic segments
+use a sample value; the classifications must not depend on the value.
+-}
 documentedRoutes :: [(Text, [Text])]
 documentedRoutes =
     publicRoutes
@@ -91,8 +92,8 @@ sessionRoutes =
     , ("POST", ["api", "v1", "webhooks", "1", "test"])
     , ("GET", ["api", "v1", "webhooks", "1", "deliveries"])
     , ("POST", ["api", "auth", "logout"])
-    -- The authenticated SPA shell for every non-API page.
-    , ("GET", ["graph"])
+    , -- The authenticated SPA shell for every non-API page.
+      ("GET", ["graph"])
     , ("GET", ["views", "wide"])
     , ("GET", ["bookmark", "1"])
     , ("GET", ["inbox"])
@@ -246,14 +247,14 @@ authzSpec = describe "Eza.Authz" $ do
         routeClass "Post" ["api", "v1", "bookmarks"] `shouldBe` TokenClass
 
 shouldSatisfyNamed :: (Show a) => (Text, [Text]) -> a -> (a -> Bool) -> Expectation
-shouldSatisfyNamed label actual predicate
+shouldSatisfyNamed topic actual predicate
     | predicate actual = pure ()
-    | otherwise = expectationFailure (show label <> ": " <> show actual)
+    | otherwise = expectationFailure (show topic <> ": " <> show actual)
 
 shouldBeNamed :: (Show a, Eq a) => (Text, [Text]) -> a -> a -> Expectation
-shouldBeNamed label actual expected
+shouldBeNamed topic actual expected
     | actual == expected = pure ()
-    | otherwise = expectationFailure (show label <> ": " <> show actual <> " /= " <> show expected)
+    | otherwise = expectationFailure (show topic <> ": " <> show actual <> " /= " <> show expected)
 
 arbitraryRequest :: Gen (Text, [Text])
 arbitraryRequest = do

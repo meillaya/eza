@@ -1,13 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Optional bridge to the Node/Defuddle extraction sidecar.
---
--- The sidecar is a small JSON-lines process (see @sidecar/README.md@). The
--- server keeps the Haskell extractor as the default and calls the sidecar only
--- when @EZA_DEFUDDLE_CMD@ is configured, so a bare binary still works.
-module Eza.Sidecar
-  ( sidecarExtract
-  ) where
+{- | Optional bridge to the Node/Defuddle extraction sidecar.
+
+The sidecar is a small JSON-lines process (see @sidecar/README.md@). The
+server keeps the Haskell extractor as the default and calls the sidecar only
+when @EZA_DEFUDDLE_CMD@ is configured, so a bare binary still works.
+-}
+module Eza.Sidecar (
+    sidecarExtract,
+) where
 
 import Control.Exception (SomeException, try)
 import Data.Aeson
@@ -23,44 +24,46 @@ import System.Timeout (timeout)
 import Eza.Extract (Extracted (..))
 
 data SidecarResult = SidecarResult
-  { srTitle :: Text
-  , srAuthor :: Text
-  , srPublished :: Text
-  , srSite :: Text
-  , srDescription :: Text
-  , srLanguage :: Text
-  , srImage :: Text
-  , srCanonical :: Text
-  , srContentText :: Text
-  , srContentMarkdown :: Text
-  }
-  deriving (Show, Eq)
+    { srTitle :: Text
+    , srAuthor :: Text
+    , srPublished :: Text
+    , srSite :: Text
+    , srDescription :: Text
+    , srLanguage :: Text
+    , srImage :: Text
+    , srCanonical :: Text
+    , srContentText :: Text
+    , srContentMarkdown :: Text
+    }
+    deriving (Show, Eq)
 
 instance FromJSON SidecarResult where
-  parseJSON = withObject "sidecar" $ \o ->
-    SidecarResult
-      <$> o .:? "title" .!= ""
-      <*> o .:? "author" .!= ""
-      <*> o .:? "published" .!= ""
-      <*> o .:? "site" .!= ""
-      <*> o .:? "description" .!= ""
-      <*> o .:? "language" .!= ""
-      <*> o .:? "image" .!= ""
-      <*> o .:? "canonical_url" .!= ""
-      <*> o .:? "content_text" .!= ""
-      <*> o .:? "content_markdown" .!= ""
+    parseJSON = withObject "sidecar" $ \o ->
+        SidecarResult
+            <$> o .:? "title" .!= ""
+            <*> o .:? "author" .!= ""
+            <*> o .:? "published" .!= ""
+            <*> o .:? "site" .!= ""
+            <*> o .:? "description" .!= ""
+            <*> o .:? "language" .!= ""
+            <*> o .:? "image" .!= ""
+            <*> o .:? "canonical_url" .!= ""
+            <*> o .:? "content_text" .!= ""
+            <*> o .:? "content_markdown" .!= ""
 
--- | Run one extraction. The command is executed through @sh -c@ and receives
--- one JSON request line on stdin. Any failure (missing command, timeout,
--- malformed response, empty body) returns @Left@ so callers can fall back to
--- the in-process extractor.
+{- | Run one extraction. The command is executed through @sh -c@ and receives
+one JSON request line on stdin. Any failure (missing command, timeout,
+malformed response, empty body) returns @Left@ so callers can fall back to
+the in-process extractor.
+-}
 sidecarExtract :: Text -> Text -> Text -> IO (Either Text Extracted)
 sidecarExtract command url html = do
     let request = encode (object ["id" .= (1 :: Int), "url" .= url, "html" .= html])
     outcome <-
-        timeout 20000
-            ( try (readProcessWithExitCode "sh" ["-c", T.unpack command] (LBS8.unpack request <> "\n"))
-                :: IO (Either SomeException (ExitCode, String, String))
+        timeout
+            20000
+            ( try (readProcessWithExitCode "sh" ["-c", T.unpack command] (LBS8.unpack request <> "\n")) ::
+                IO (Either SomeException (ExitCode, String, String))
             )
     pure $ case outcome of
         Nothing -> Left "sidecar timed out"

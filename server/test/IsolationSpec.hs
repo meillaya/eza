@@ -1,4 +1,3 @@
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- | Multi-user isolation tests for the M3a control plane: tokens, sessions,
@@ -358,8 +357,8 @@ spec = describe "M3a multi-user isolation" $ do
             boot <- httpRequest server "GET" "/api/v1/boot" (cookieHeaders session csrf) Nothing
             boot `shouldHaveStatus` 200
 
-    it "repairs the placeholder owner name from an earlier migration" $
-        withTestServerConfig
+    it "repairs the placeholder owner name from an earlier migration"
+        $ withTestServerConfig
             ( \cfg -> do
                 legacy <- Db.openDb (cfgDbPath cfg)
                 stored <- Password.hashPassword (cfgArgon2 cfg) "legacy password"

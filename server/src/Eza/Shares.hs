@@ -418,7 +418,9 @@ countText = T.pack . reverse . go . reverse . show
 
 escape :: Text -> Text
 escape value =
-    T.replace "\"" "&quot;"
+    T.replace
+        "\""
+        "&quot;"
         (T.replace ">" "&gt;" (T.replace "<" "&lt;" (T.replace "&" "&amp;" value)))
 
 xmlEscape :: Text -> Text

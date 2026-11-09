@@ -7,14 +7,14 @@ The control database stores identity and role; a user's own database stores
 the credentials and all library data. These types deliberately expose no
 filesystem path and no credential material.
 -}
-module Eza.User
-    ( UserRole (..)
-    , userRoleText
-    , parseUserRole
-    , UserView (..)
-    , UserCreateInput (..)
-    , UserCreateResult (..)
-    ) where
+module Eza.User (
+    UserRole (..),
+    userRoleText,
+    parseUserRole,
+    UserView (..),
+    UserCreateInput (..),
+    UserCreateResult (..),
+) where
 
 import Data.Aeson
 import Data.Text (Text)
@@ -74,8 +74,9 @@ instance FromJSON UserView where
             <*> o .:? "disabled_at"
             <*> o .:? "last_login_at"
 
--- | The admin form. The password is validated and hashed on the server and
--- never logged or stored in the control database.
+{- | The admin form. The password is validated and hashed on the server and
+never logged or stored in the control database.
+-}
 data UserCreateInput = UserCreateInput
     { uciUsername :: Text
     , uciPassword :: Text

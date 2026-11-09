@@ -1,14 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | UTC civil dates from POSIX seconds, shared by the graph view matcher and
--- tests. The library's @created_at@ values are UTC; the minimum Int spans
--- 1970 to well past this century, but the conversion is total for any Int.
-module Eza.Time
-    ( utcYear
-    , utcDay
-    , utcYearDay
-    , daysFromCivil
-    ) where
+{- | UTC civil dates from POSIX seconds, shared by the graph view matcher and
+tests. The library's @created_at@ values are UTC; the minimum Int spans
+1970 to well past this century, but the conversion is total for any Int.
+-}
+module Eza.Time (
+    utcYear,
+    utcDay,
+    utcYearDay,
+    daysFromCivil,
+) where
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -34,15 +35,17 @@ utcYearDay seconds =
 posixDays :: Int -> Integer
 posixDays seconds = floorDiv (toInteger seconds) 86400
 
--- | Floor division for negative POSIX values, so dates before 1970 stay
--- monotonic.
+{- | Floor division for negative POSIX values, so dates before 1970 stay
+monotonic.
+-}
 floorDiv :: Integer -> Integer -> Integer
 floorDiv a b = (a - modulo) `div` b
   where
     modulo = ((a `mod` b) + b) `mod` b
 
--- | Howard Hinnant's civil-from-days algorithm. Days are counted from
--- 1970-01-01; the result is total and monotonic.
+{- | Howard Hinnant's civil-from-days algorithm. Days are counted from
+1970-01-01; the result is total and monotonic.
+-}
 civilFromDays :: Integer -> (Integer, Int, Int)
 civilFromDays days =
     let z = days + 719468

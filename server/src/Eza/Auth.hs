@@ -1,6 +1,6 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE GADTs #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -214,9 +214,10 @@ data Account = Account
 emptyAccount :: Account
 emptyAccount = Account "" "" Nothing False 0 Nothing Nothing Nothing
 
--- | In-memory attempt counter for public endpoints without a database row
--- (recovery redemption). A restart clears it, which is fine for a one-shot
--- code exchange.
+{- | In-memory attempt counter for public endpoints without a database row
+(recovery redemption). A restart clears it, which is fine for a one-shot
+code exchange.
+-}
 data RateLimiter = RateLimiter
     { rlAttempts :: MVar (Map.Map Text [Int])
     , rlMaxAttempts :: Int
@@ -228,8 +229,9 @@ sessionCookieName = "eza_session"
 csrfCookieName = "eza_csrf"
 pendingCookieName = "eza_pending"
 
--- | How long a browser may sit between the password and the passkey of a
--- two-factor sign-in. The pending session is useless on every other route.
+{- | How long a browser may sit between the password and the passkey of a
+two-factor sign-in. The pending session is useless on every other route.
+-}
 pendingSessionTtlSeconds :: Int
 pendingSessionTtlSeconds = 300
 
@@ -934,8 +936,9 @@ deleteSessionHash conn sessionHash =
     withImmediateTransaction conn $
         execute conn "DELETE FROM sessions WHERE id = ?" (Only sessionHash)
 
--- | Revoke every session except the one making the request. Returns how many
--- were revoked.
+{- | Revoke every session except the one making the request. Returns how many
+were revoked.
+-}
 deleteOtherSessions :: Connection -> Session -> IO Int
 deleteOtherSessions conn current =
     withImmediateTransaction conn $ do
@@ -1004,9 +1007,10 @@ redeemRecoveryCode conn code = do
 -- Account views
 -- ---------------------------------------------------------------------------
 
--- | Every live normal or recovery session, oldest first, with the requesting
--- session marked. Pending two-factor sessions are invisible here: they are an
--- unfinished sign-in, not something the account page can list or revoke.
+{- | Every live normal or recovery session, oldest first, with the requesting
+session marked. Pending two-factor sessions are invisible here: they are an
+unfinished sign-in, not something the account page can list or revoke.
+-}
 listSessions :: Connection -> Maybe Session -> IO [SessionView]
 listSessions conn current = do
     now <- epoch

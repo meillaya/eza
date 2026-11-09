@@ -8,9 +8,9 @@ This lives outside "Eza.Types" because it includes 'View' values and
 "Eza.Types"; putting it in "Eza.Types" would close an import cycle. The wire
 shape is unchanged: the same object keys as before, plus @views@.
 -}
-module Eza.Boot
-    ( BootPayload (..)
-    ) where
+module Eza.Boot (
+    BootPayload (..),
+) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON, genericToJSON)
 import Data.Text (Text)

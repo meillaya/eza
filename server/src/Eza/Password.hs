@@ -11,17 +11,17 @@ The parameters live in 'Eza.Config' so a deployment can raise or lower the
 cost. Salts come from 'Crypto.Random', and comparisons go through
 'Data.ByteArray.constEq' so a wrong password and a wrong tag cost the same.
 -}
-module Eza.Password
-    ( PasswordParams (..)
-    , defaultPasswordParams
-    , validateUsername
-    , validatePassword
-    , hashPassword
-    , verifyPassword
-    , dummyVerify
-    , needsRehash
-    , constantTimeEq
-    ) where
+module Eza.Password (
+    PasswordParams (..),
+    defaultPasswordParams,
+    validateUsername,
+    validatePassword,
+    hashPassword,
+    verifyPassword,
+    dummyVerify,
+    needsRehash,
+    constantTimeEq,
+) where
 
 import Crypto.Error (CryptoFailable (..))
 import qualified Crypto.KDF.Argon2 as Argon2
@@ -66,8 +66,9 @@ validatePassword password
     | T.length password > 128 = Left "password must be at most 128 characters"
     | otherwise = Right ()
 
--- | Hash a password with a fresh salt. The returned PHC string is the only
--- thing stored; the plaintext never reaches the database or a log.
+{- | Hash a password with a fresh salt. The returned PHC string is the only
+thing stored; the plaintext never reaches the database or a log.
+-}
 hashPassword :: PasswordParams -> Text -> IO Text
 hashPassword pp password = do
     salt <- (getRandomBytes 16 :: IO BS.ByteString)
@@ -111,8 +112,9 @@ dummyVerify pp password = do
         CryptoFailed _ -> pure ()
         CryptoPassed tag -> tag `seq` pure ()
 
--- | True when a stored hash should be replaced with one using the current
--- parameters (including a malformed hash, which always needs replacing).
+{- | True when a stored hash should be replaced with one using the current
+parameters (including a malformed hash, which always needs replacing).
+-}
 needsRehash :: PasswordParams -> Text -> Bool
 needsRehash pp stored = case parseHash stored of
     Nothing -> True

@@ -2972,7 +2972,7 @@ serveAsset cfg rest req respond = case cfgStaticDir cfg of
         if any (== "..") rest
             then respond (jsonError status400 "bad_request" "invalid asset path")
             else do
-                let rel = foldr (</>) "" (map T.unpack rest)
+                let rel = foldr ((</>) . T.unpack) "" rest
                     path = root </> rel
                 exists <- doesFileExist path
                 if exists

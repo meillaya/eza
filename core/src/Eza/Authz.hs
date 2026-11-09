@@ -1,36 +1,37 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | The single, pure authorization matrix for the HTTP surface.
---
--- Today the route table in "Eza.Server" and the scope checks in "Eza.Tokens"
--- and "Eza.Auth" decide access with separate pattern matches. This module
--- mirrors those decisions in one place, so the matrix can be exercised
--- exhaustively in tests and later become the server's source of truth (M3).
---
--- The rule is deny by default:
---
---   * a known public ceremony, asset, or share route is 'PublicClass' or
---     'ShareClass';
---   * a route that must run on a browser session is 'SessionClass' (or
---     'AdminClass' for the planned user-administration routes);
---   * every other @/api/v1@ route is 'TokenClass' and accepts a bearer token
---     or a normal session, subject to the token scope rules below;
---   * an unknown method/path is 'DeniedClass' and must never reach a handler.
-module Eza.Authz
-    ( RouteClass (..)
-    , Capability (..)
-    , Scope (..)
-    , Role (..)
-    , routeClass
-    , isPublicRoute
-    , requiredCapability
-    , tokenAllows
-    , sessionRoleAllows
-    , recoverySessionAllows
-    , scopeFromText
-    , scopeText
-    ) where
+{- | The single, pure authorization matrix for the HTTP surface.
+
+Today the route table in "Eza.Server" and the scope checks in "Eza.Tokens"
+and "Eza.Auth" decide access with separate pattern matches. This module
+mirrors those decisions in one place, so the matrix can be exercised
+exhaustively in tests and later become the server's source of truth (M3).
+
+The rule is deny by default:
+
+  * a known public ceremony, asset, or share route is 'PublicClass' or
+    'ShareClass';
+  * a route that must run on a browser session is 'SessionClass' (or
+    'AdminClass' for the planned user-administration routes);
+  * every other @/api/v1@ route is 'TokenClass' and accepts a bearer token
+    or a normal session, subject to the token scope rules below;
+  * an unknown method/path is 'DeniedClass' and must never reach a handler.
+-}
+module Eza.Authz (
+    RouteClass (..),
+    Capability (..),
+    Scope (..),
+    Role (..),
+    routeClass,
+    isPublicRoute,
+    requiredCapability,
+    tokenAllows,
+    sessionRoleAllows,
+    recoverySessionAllows,
+    scopeFromText,
+    scopeText,
+) where
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -62,8 +63,9 @@ data Scope
     | ScopeCapture
     deriving (Show, Eq, Enum, Bounded)
 
--- | Browser-session roles. The member role has every authorisation the old
--- single-account installation had; the admin role adds user administration.
+{- | Browser-session roles. The member role has every authorisation the old
+single-account installation had; the admin role adds user administration.
+-}
 data Role
     = RoleAdmin
     | RoleMember
@@ -71,8 +73,9 @@ data Role
 
 -- ---------------------------------------------------------------- routing ---
 
--- | Classify a method and split path. The result is deliberately total: an
--- unrecognised route is 'DeniedClass' rather than an accidental allow.
+{- | Classify a method and split path. The result is deliberately total: an
+unrecognised route is 'DeniedClass' rather than an accidental allow.
+-}
 routeClass :: Text -> [Text] -> RouteClass
 routeClass method path
     | isPublicRoute method path = PublicClass
@@ -119,8 +122,9 @@ isAdminRoute method path =
             ("api" : "v1" : "admin" : _) -> True
             _ -> False
 
--- | Routes that only a browser session may use. Bearer tokens are rejected
--- even when they carry the @write@ scope.
+{- | Routes that only a browser session may use. Bearer tokens are rejected
+even when they carry the @write@ scope.
+-}
 isSessionRoute :: Text -> [Text] -> Bool
 isSessionRoute method path =
     ( upper method `elem` ["GET", "POST", "PATCH", "DELETE"]
@@ -142,9 +146,10 @@ isSessionRoute method path =
                 && "assets" `notElem` path
            )
 
--- | Every other authenticated JSON route. The current server's auth guard
--- rejects unknown @/api@ paths with 401 before they can 404, so treating the
--- whole namespace as token-or-session is consistent with the guard.
+{- | Every other authenticated JSON route. The current server's auth guard
+rejects unknown @/api@ paths with 401 before they can 404, so treating the
+whole namespace as token-or-session is consistent with the guard.
+-}
 isTokenRoute :: Text -> [Text] -> Bool
 isTokenRoute method path =
     upper method `elem` ["GET", "HEAD", "POST", "PATCH", "DELETE"]
@@ -164,8 +169,9 @@ upper = T.toUpper
 
 -- ----------------------------------------------------------- capabilities ---
 
--- | What a session/token route needs from its principal. Public, share and
--- denied routes need nothing from either.
+{- | What a session/token route needs from its principal. Public, share and
+denied routes need nothing from either.
+-}
 requiredCapability :: Text -> [Text] -> Maybe Capability
 requiredCapability method path = case routeClass method path of
     SessionClass -> Just CapSession
@@ -179,9 +185,10 @@ requiredCapability method path = case routeClass method path of
 
 -- ------------------------------------------------------------- token rules ---
 
--- | Mirror of "Eza.Tokens.tokenAllows": capture tokens reach the clip routes
--- and their reads; read/write tokens reach ordinary reads and writes; a
--- session-only or admin route never accepts a bearer token.
+{- | Mirror of "Eza.Tokens.tokenAllows": capture tokens reach the clip routes
+and their reads; read/write tokens reach ordinary reads and writes; a
+session-only or admin route never accepts a bearer token.
+-}
 tokenAllows :: [Scope] -> Text -> [Text] -> Bool
 tokenAllows scopes method path
     | routeClass method path /= TokenClass = False
@@ -213,8 +220,9 @@ prefix pre candidate = take (length pre) candidate == pre
 
 -- ----------------------------------------------------------- session rules ---
 
--- | A normal browser session. The member role matches the old single-account
--- behaviour; admin routes need the admin role.
+{- | A normal browser session. The member role matches the old single-account
+behaviour; admin routes need the admin role.
+-}
 sessionRoleAllows :: Role -> Text -> [Text] -> Bool
 sessionRoleAllows role method path = case routeClass method path of
     AdminClass -> role == RoleAdmin
@@ -224,8 +232,9 @@ sessionRoleAllows role method path = case routeClass method path of
     ShareClass -> True
     DeniedClass -> False
 
--- | A recovery session: only finish the password setup, sign out, and read
--- the account/boot state that the recovery page needs.
+{- | A recovery session: only finish the password setup, sign out, and read
+the account/boot state that the recovery page needs.
+-}
 recoverySessionAllows :: Text -> [Text] -> Bool
 recoverySessionAllows method path = case (upper method, path) of
     ("POST", ["api", "setup", "password"]) -> True

@@ -102,9 +102,9 @@ module Eza.Web.Api (
 
 import Data.Aeson (FromJSON, ToJSON, Value (..), object, toJSON, withObject, (.!=), (.:), (.:?), (.=))
 import qualified Data.Aeson as A
-import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
+import Data.Aeson.Types (Parser, parseEither)
 import Data.Char (chr, isAlphaNum, ord)
 import Data.List (stripPrefix)
 import qualified Data.Map.Strict as M
@@ -117,9 +117,6 @@ import qualified Miso.JSON as MJ
 
 import Eza.Boot (BootPayload)
 import Eza.GraphLayout (LayoutPositions (..), LayoutPreset (..))
-import qualified Eza.View as EV
-import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..), UserView (..))
-import Eza.Webhook (DeliveryView, Webhook, WebhookInput (..))
 import Eza.Types (
     Backlink (..),
     Backlinks (..),
@@ -134,6 +131,9 @@ import Eza.Types (
     SearchPage,
     TagStat,
  )
+import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..), UserView (..))
+import qualified Eza.View as EV
+import Eza.Webhook (DeliveryView, Webhook, WebhookInput (..))
 
 import Eza.Web.Types (
     AccountInfo,
@@ -729,8 +729,9 @@ patchAdminUser userId enabled role onOk onErr =
         (\value -> either onErr onOk (decode value))
         onErr
 
--- | Break-glass temporary password. The server clears the target's 2FA flag
--- and revokes that user's sessions.
+{- | Break-glass temporary password. The server clears the target's 2FA flag
+and revokes that user's sessions.
+-}
 resetAdminPassword ::
     Int ->
     Text ->

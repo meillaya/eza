@@ -24,23 +24,22 @@ import Miso.Router (toURI)
 import Eza.Boot (BootPayload (..))
 import qualified Eza.GraphMatch as GM
 import Eza.SearchQuery (parseSearchQuery)
-import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..), UserView (..))
-import Eza.Webhook (Webhook (..), WebhookInput (..))
-import qualified Eza.View as EV
 import Eza.Types (
     BookmarkDetail (..),
-    GraphData (..),
-    GraphRecord (..),
     BookmarkSummary (..),
     DedupCounts (..),
     DedupGroup (..),
     DedupMergeAllReport (..),
     DedupReport (..),
+    GraphData (..),
+    GraphRecord (..),
     Highlight (..),
     ImportReport,
     SavedSearch (..),
     SearchPage (..),
  )
+import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..), UserView (..))
+import qualified Eza.View as EV
 import Eza.Web.Api
 import Eza.Web.Graph
 import Eza.Web.Model
@@ -52,6 +51,7 @@ import Eza.Web.Types (
     TokenView (..),
     fieldInt,
  )
+import Eza.Webhook (Webhook (..), WebhookInput (..))
 
 {- | Component subscriptions: URL changes (back/forward), window scroll for
 the virtualized grid, and window resize for the column count.
@@ -513,6 +513,7 @@ readOrigin = do
 {- | The fragment of the current URL, used to make the account tabs addressable:
 @/account#sessions@ opens the sessions panel directly.
 -}
+
 {- | Record the selected account tab in the fragment without a history entry,
 so the back button still leaves the page rather than walking the tabs.
 -}
@@ -703,7 +704,8 @@ updateModel = \case
             )
         m <- get
         let content = gridTop + ledgerContentHeight m
-        when (mHasMore m && not (mLoading m) && not (mLoadingMore m) && scrollY + height + 600 >= content) $
+        when
+            (mHasMore m && not (mLoading m) && not (mLoadingMore m) && scrollY + height + 600 >= content)
             loadMore
     KeyPressed key -> do
         m <- get
@@ -3428,8 +3430,9 @@ graphZoom factor = do
                 )
             scheduleGraphSettle
 
--- | A pointer that went down and up without moving is a click: a record
--- selects, a tag opens the ledger filtered by @tag:@, and empty plate clears.
+{- | A pointer that went down and up without moving is a click: a record
+selects, a tag opens the ledger filtered by @tag:@, and empty plate clears.
+-}
 graphClick :: Model -> Double -> Double -> Effect () () Model Action
 graphClick m x y =
     case activeGraphLayout m of
@@ -3444,10 +3447,11 @@ graphClick m x y =
                 | otherwise ->
                     updateModel (Navigate (Bookmark key))
 
--- | Focus the plate once it has painted, so the keyboard shortcuts work
--- immediately after a visit. @preventScroll@ keeps the panel from jumping to
--- the canvas on a phone, where focus() would otherwise scroll the title and the
--- filter line out of view.
+{- | Focus the plate once it has painted, so the keyboard shortcuts work
+immediately after a visit. @preventScroll@ keeps the panel from jumping to
+the canvas on a phone, where focus() would otherwise scroll the title and the
+filter line out of view.
+-}
 focusGraphPlate :: Model -> Effect () () Model Action
 focusGraphPlate m =
     when
@@ -3470,8 +3474,9 @@ focusWithoutScroll domId = do
         _ <- (element # ("focus" :: MisoString)) [options]
         pure ()
 
--- | A hit on a tag node only counts while the tag layer is shown; otherwise a
--- click could open a ledger for a node the reader cannot see.
+{- | A hit on a tag node only counts while the tag layer is shown; otherwise a
+click could open a ledger for a node the reader cannot see.
+-}
 visibleHit :: Model -> Maybe Int -> Maybe Int
 visibleHit _ Nothing = Nothing
 visibleHit m (Just key)
@@ -3536,8 +3541,9 @@ defaultGraphView views =
             (view : _) -> Just view
             [] -> Nothing
 
--- | Apply a graph view definition to the graph state. Color maps are rebuilt
--- from the graph data by 'recomputeGraphColors'.
+{- | Apply a graph view definition to the graph state. Color maps are rebuilt
+from the graph data by 'recomputeGraphColors'.
+-}
 applyGraphView :: EV.View -> Model -> Model
 applyGraphView view m = case EV.vDefinition view of
     EV.GraphDefinition definition ->
@@ -3607,8 +3613,9 @@ upsertView :: EV.View -> [EV.View] -> [EV.View]
 upsertView view views =
     view : [existing | existing <- views, EV.vSlug existing /= EV.vSlug view]
 
--- | Open a saved view: graph views switch the graph route to the definition,
--- ledger views load the ledger with the saved query and sort.
+{- | Open a saved view: graph views switch the graph route to the definition,
+ledger views load the ledger with the saved query and sort.
+-}
 openSavedView :: Text -> Effect () () Model Action
 openSavedView slug = do
     m <- get
@@ -3694,8 +3701,9 @@ upsertWebhook :: Webhook -> [Webhook] -> [Webhook]
 upsertWebhook webhook webhooks =
     webhook : [existing | existing <- webhooks, whId existing /= whId webhook]
 
--- | Load the graph route. Whole mode keeps the cached view; local mode
--- rebuilds the neighbourhood and fits it before the first paint.
+{- | Load the graph route. Whole mode keeps the cached view; local mode
+rebuilds the neighbourhood and fits it before the first paint.
+-}
 enterGraphRoute :: Bool -> Maybe Int -> Int -> Effect () () Model Action
 enterGraphRoute localMode root depth = do
     m <- get
@@ -3783,8 +3791,9 @@ applyGraphScope m =
             , mGraphMatches = emptyMatches
             }
 
--- | Fit the plate to the active layout. Used when the scope, root, depth or
--- preset changes; not on interaction frames.
+{- | Fit the plate to the active layout. Used when the scope, root, depth or
+preset changes; not on interaction frames.
+-}
 fitActiveView :: Model -> Model
 fitActiveView m =
     case activeGraphLayout m of
@@ -3836,8 +3845,9 @@ scheduleGraphDetailStep epoch phase =
         _ <- jsgf "requestAnimationFrame" callback
         pure ()
 
--- | Escape clears an active filter first, then the selection. The filter is
--- the more specific state, so it goes first.
+{- | Escape clears an active filter first, then the selection. The filter is
+the more specific state, so it goes first.
+-}
 graphEscape :: Model -> Effect () () Model Action
 graphEscape m
     | not (T.null (T.strip (fromMisoString (mGraphFilter m)))) = do
@@ -3845,9 +3855,10 @@ graphEscape m
         updateModel GraphFilterSettled
     | otherwise = updateModel GraphClearSelection
 
--- | Pan the graph from the global keyboard bridge. The canvas is a tab stop,
--- but the shortcuts run from any non-editable focus on the graph route, so the
--- panel does not need to keep DOM focus on the canvas to be keyboard driven.
+{- | Pan the graph from the global keyboard bridge. The canvas is a tab stop,
+but the shortcuts run from any non-editable focus on the graph route, so the
+panel does not need to keep DOM focus on the canvas to be keyboard driven.
+-}
 graphPan :: Double -> Double -> Bool -> Effect () () Model Action
 graphPan deltaX deltaY accelerated = do
     m <- get
@@ -3873,8 +3884,9 @@ graphOpenSelected m =
         Just key | not (isTagKey key) -> updateModel (Navigate (Bookmark key))
         _ -> pure ()
 
--- | Read the canvas box after a render. The element only exists once the graph
--- layout has painted, so a few short retries cover the first frame.
+{- | Read the canvas box after a render. The element only exists once the graph
+layout has painted, so a few short retries cover the first frame.
+-}
 measureGraphCanvas :: (Double -> Double -> Double -> Action) -> Effect () () Model Action
 measureGraphCanvas onMeasured = withSink $ \sink -> measureWith sink 0
   where
@@ -3895,4 +3907,5 @@ measureGraphCanvas onMeasured = withSink $ \sink -> measureWith sink 0
     retry :: Sink Action -> Int -> IO ()
     retry sink attempt =
         when (attempt < 4) $
-            void $ jsgf "setTimeout" (asyncCallback (measureWith sink (attempt + 1)), 80 :: Int)
+            void $
+                jsgf "setTimeout" (asyncCallback (measureWith sink (attempt + 1)), 80 :: Int)

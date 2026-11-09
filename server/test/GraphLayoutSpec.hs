@@ -6,8 +6,8 @@ the same layout the client built locally).
 -}
 module GraphLayoutSpec (spec) where
 
-import Data.List (nub, sort)
 import qualified Data.IntMap.Strict as IM
+import Data.List (nub, sort)
 import Test.Hspec
 
 import Eza.GraphLayout

@@ -18,62 +18,62 @@ only blit that bitmap. A filter paints the bitmap and then an accent overlay,
 so typing never repaints the base. At three times the fit scale the painter
 switches to a vector subset for crisp lines and text.
 -}
-module Eza.Web.Graph
-    ( -- * Layout from eza-core
-      module Eza.GraphLayout
+module Eza.Web.Graph (
+    -- * Layout from eza-core
+    module Eza.GraphLayout,
 
-      -- * Viewport
-    , GraphView (..)
-    , initialGraphView
-    , fitView
-    , focusView
-    , resizeView
-    , zoomViewAt
-    , zoomViewCenter
-    , panView
-    , worldToScreen
-    , screenToWorld
-    , nodeAt
-    , nodeRadius
-    , nodeLabel
-    , neighbourhood
+    -- * Viewport
+    GraphView (..),
+    initialGraphView,
+    fitView,
+    focusView,
+    resizeView,
+    zoomViewAt,
+    zoomViewCenter,
+    panView,
+    worldToScreen,
+    screenToWorld,
+    nodeAt,
+    nodeRadius,
+    nodeLabel,
+    neighbourhood,
 
-      -- * Local graph
-    , localLayout
+    -- * Local graph
+    localLayout,
 
-      -- * Labels
-    , LabelPolicy (..)
-    , labelPolicy
-    , labelCount
+    -- * Labels
+    LabelPolicy (..),
+    labelPolicy,
+    labelCount,
 
-      -- * Matching
-    , GraphMatches (..)
-    , emptyMatches
-    , matchGraph
+    -- * Matching
+    GraphMatches (..),
+    emptyMatches,
+    matchGraph,
 
-      -- * Dragging
-    , GraphDrag (..)
+    -- * Dragging
+    GraphDrag (..),
 
-      -- * Painting
-    , GraphDraw (..)
-    , drawGraph
-    , detailChunkCount
-    ) where
+    -- * Painting
+    GraphDraw (..),
+    drawGraph,
+    detailChunkCount,
+) where
 
 import Control.Monad (foldM, forM_, unless, when)
 import Control.Monad.Reader (runReaderT)
-import Data.List (sortOn)
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet as IS
+import Data.List (sortOn)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 
 import Miso
+import Miso.CSS.Color (Color, hex, rgba)
 import Miso.Canvas (Canvas)
 import qualified Miso.Canvas as Canvas
-import Miso.CSS.Color (Color, hex, rgba)
 
 import Eza.GraphLayout
 import Eza.Types (GraphRecord (..))
@@ -81,9 +81,10 @@ import Eza.View (LabelMode (..))
 
 -- --------------------------------------------------------------- viewport ---
 
--- | The visible transform: CSS pixels per world unit, plus the pan offset.
--- 'gvFit' is the scale at which the whole graph fits the plate; the zoom
--- readout and the vector threshold are relative to it.
+{- | The visible transform: CSS pixels per world unit, plus the pan offset.
+'gvFit' is the scale at which the whole graph fits the plate; the zoom
+readout and the vector threshold are relative to it.
+-}
 data GraphView = GraphView
     { gvWidth :: Double
     , gvHeight :: Double
@@ -136,8 +137,9 @@ resizeView layout width height dpr old =
 clamp :: Double -> Double -> Double -> Double
 clamp low high value = max low (min high value)
 
--- | Zoom around a point in plate coordinates, keeping the world point under the
--- pointer fixed.
+{- | Zoom around a point in plate coordinates, keeping the world point under the
+pointer fixed.
+-}
 zoomViewAt :: GraphLayout -> GraphView -> (Double, Double) -> Double -> GraphView
 zoomViewAt _ view (cursorX, cursorY) factor =
     view{gvScale = scale, gvPan = pan}
@@ -165,8 +167,9 @@ screenToWorld view (x, y) =
     , (y - snd (gvPan view)) / max 1e-9 (gvScale view)
     )
 
--- | The node under a plate coordinate, if any. Records and tags both count;
--- the nearest node within its screen-space hit radius wins.
+{- | The node under a plate coordinate, if any. Records and tags both count;
+the nearest node within its screen-space hit radius wins.
+-}
 nodeAt :: GraphLayout -> GraphView -> (Double, Double) -> Maybe Int
 nodeAt layout view (screenX, screenY) =
     snd
@@ -203,8 +206,9 @@ neighbourhood layout key = IM.fromList [(neighbour, ()) | neighbour <- neighbour
 
 -- --------------------------------------------------------------- matching ---
 
--- | The filter result. The record set, tag set and top ids are filled by one
--- scan over the records; nothing is sorted per frame.
+{- | The filter result. The record set, tag set and top ids are filled by one
+scan over the records; nothing is sorted per frame.
+-}
 data GraphMatches = GraphMatches
     { gmActive :: Bool
     , gmIds :: IS.IntSet
@@ -217,8 +221,9 @@ data GraphMatches = GraphMatches
 emptyMatches :: GraphMatches
 emptyMatches = GraphMatches False IS.empty [] 0 IS.empty
 
--- | Match records by title, domain, or tag name. Tokens are ANDed and lowered
--- once. The top list keeps the eight best records for the results panel.
+{- | Match records by title, domain, or tag name. Tokens are ANDed and lowered
+once. The top list keeps the eight best records for the results panel.
+-}
 matchGraph :: Text -> GraphLayout -> GraphMatches
 matchGraph rawQuery layout
     | null tokens = emptyMatches
@@ -265,8 +270,9 @@ matchGraph rawQuery layout
 
 -- ---------------------------------------------------------------- drawing ---
 
--- | One line of drag state. 'gdStart' is where the pointer went down, 'gdLast'
--- the last move; the flag tells a click from a pan.
+{- | One line of drag state. 'gdStart' is where the pointer went down, 'gdLast'
+the last move; the flag tells a click from a pan.
+-}
 data GraphDrag = GraphDrag
     { gdStart :: (Double, Double)
     , gdLast :: (Double, Double)
@@ -363,9 +369,10 @@ cacheKeyFor layout palette tagsShown viewKey =
         <> ":"
         <> viewKey
 
--- | Paint one frame. Two caches keep motion cheap and still crisp at rest:
--- the world bitmap is blitted while the view moves, and after a pause a
--- screen-resolution detail plate is rastered once and drawn 1:1.
+{- | Paint one frame. Two caches keep motion cheap and still crisp at rest:
+the world bitmap is blitted while the view moves, and after a pause a
+screen-resolution detail plate is rastered once and drawn 1:1.
+-}
 drawGraph :: GraphDraw -> Canvas ()
 drawGraph GraphDraw{..} = do
     let palette = paletteFor drDark
@@ -413,8 +420,9 @@ drawGraph GraphDraw{..} = do
     unless (gmActive drMatches) (drawLabels palette drLayout view drTagsShown drLabelMode)
     drawEmphasis palette drLayout view drHover drSelected drFocus
 
--- | Blit the cached whole-library bitmap, building it on first use. This is
--- the only path that runs while the reader drags or zooms.
+{- | Blit the cached whole-library bitmap, building it on first use. This is
+the only path that runs while the reader drags or zooms.
+-}
 drawWorldBase :: Palette -> GraphLayout -> GraphView -> Bool -> MisoString -> IM.IntMap Text -> M.Map Text Text -> Canvas ()
 drawWorldBase palette layout view tagsShown viewKey recordColors tagColors = do
     cached <- liftIO (loadBaseCache (cacheKeyFor layout palette tagsShown viewKey))
@@ -476,8 +484,9 @@ loadDetailCache wanted = do
                     height <- fromJSValUnchecked =<< cached ! ("height" :: MisoString)
                     pure (Just (DetailCache canvas key width height))
 
--- | How many animation frames one settle plate takes. The visible primitives
--- are split into ranges, so no single frame runs a long task.
+{- | How many animation frames one settle plate takes. The visible primitives
+are split into ranges, so no single frame runs a long task.
+-}
 detailChunkCount :: GraphLayout -> Int
 detailChunkCount layout =
     let total =
@@ -516,8 +525,9 @@ detailChunkPlan layout chunks phase = DetailChunk linkRange memberRange recordRa
     recordRange = slice (linkN + memberN) recordN
     tagRange = slice (linkN + memberN + recordN) tagN
 
--- | Raster the visible graph at the plate's own resolution. The synchronous
--- fallback uses every chunk in one go; the settle path draws one per frame.
+{- | Raster the visible graph at the plate's own resolution. The synchronous
+fallback uses every chunk in one go; the settle path draws one per frame.
+-}
 buildDetailCache :: Palette -> GraphLayout -> GraphView -> Bool -> MisoString -> IM.IntMap Text -> M.Map Text Text -> IO (Maybe DetailCache)
 buildDetailCache palette layout view tagsShown viewKey recordColors tagColors = do
     cached <- ensureDetailCanvas (detailKeyFor layout palette tagsShown viewKey view) view
@@ -583,16 +593,18 @@ ensureDetailCanvas wanted view = do
             setField window' detailGlobal holder
             pure (Just (canvas, ctx2d, dpr, True))
 
--- | The detail canvas stores device pixels; draw it into CSS pixels. The
--- context is already scaled by dpr, so the destination is the plate size.
+{- | The detail canvas stores device pixels; draw it into CSS pixels. The
+context is already scaled by dpr, so the destination is the plate size.
+-}
 blitDetail :: GraphView -> DetailCache -> Canvas ()
 blitDetail view DetailCache{..} =
     Canvas.drawImage'
         (Image dcCanvas, 0, 0, gvWidth view, gvHeight view)
 
--- | One slice of the settle plate: visible nodes and edges only, at screen
--- resolution, with no labels or interaction emphasis. The first chunk clears
--- the canvas; the rest append.
+{- | One slice of the settle plate: visible nodes and edges only, at screen
+resolution, with no labels or interaction emphasis. The first chunk clears
+the canvas; the rest append.
+-}
 drawDetailChunk :: Palette -> GraphLayout -> GraphView -> Bool -> IM.IntMap Text -> M.Map Text Text -> Int -> Int -> Canvas ()
 drawDetailChunk palette layout view tagsShown recordColors tagColors chunks phase = do
     when (phase <= 1) $ do
@@ -730,8 +742,9 @@ loadBaseCache wanted = do
                                 }
                         )
 
--- | Paint the whole static picture once. The long side is capped at 1536
--- device pixels so the cache stays around 16 MB.
+{- | Paint the whole static picture once. The long side is capped at 1536
+device pixels so the cache stays around 16 MB.
+-}
 buildBaseCache :: Palette -> GraphLayout -> Bool -> MisoString -> IM.IntMap Text -> M.Map Text Text -> IO (Maybe BaseCache)
 buildBaseCache palette layout tagsShown viewKey recordColors tagColors = do
     document <- jsg ("document" :: MisoString)
@@ -859,8 +872,9 @@ drawBaseTags palette layout xform tagColors = do
 colorOfHex :: Text -> Color
 colorOfHex raw = hex (ms (T.unpack (T.dropWhile (== '#') raw)))
 
--- | Group colored node keys by their color, skipping nodes the layout does not
--- draw. Built once per base/detail paint, never per interaction frame.
+{- | Group colored node keys by their color, skipping nodes the layout does not
+draw. Built once per base/detail paint, never per interaction frame.
+-}
 groupColorsByKey :: IM.IntMap (Double, Double) -> IM.IntMap Text -> M.Map Text [Int]
 groupColorsByKey positions colorMap =
     IM.foldlWithKey' step M.empty colorMap
@@ -882,8 +896,9 @@ tagColorKeys layout colorByName =
                 Nothing -> acc
             Nothing -> acc
 
--- | Node keys in the same order as 'glRecordPoints' / 'glTagPoints' (ascending
--- node key, subset-filtered).
+{- | Node keys in the same order as 'glRecordPoints' / 'glTagPoints' (ascending
+node key, subset-filtered).
+-}
 pointKeys :: GraphLayout -> Bool -> [Int]
 pointKeys layout wantTags =
     [ key
@@ -898,9 +913,10 @@ addCircle xform x y radius = do
     Canvas.moveTo (px + pxRadius, py)
     Canvas.arc (px, py, max 0.4 pxRadius, 0, 2 * pi)
 
--- | A rough rectangle used for label collision. Text width is estimated from
--- the monospace glyph count; measuring every label would cost an FFI roundtrip
--- per frame.
+{- | A rough rectangle used for label collision. Text width is estimated from
+the monospace glyph count; measuring every label would cost an FFI roundtrip
+per frame.
+-}
 data LabelBox = LabelBox Double Double Double Double
 
 collides :: LabelBox -> [LabelBox] -> Bool
@@ -919,8 +935,9 @@ labelFont size = ms ("500 " <> show (round (max 6 size) :: Int) <> "px 'IBM Plex
 labelText :: Text -> MisoString
 labelText = ms . T.unpack
 
--- | Label budgets for one zoom level. Tags are drawn first; the record budget
--- takes whatever remains of the total cap.
+{- | Label budgets for one zoom level. Tags are drawn first; the record budget
+takes whatever remains of the total cap.
+-}
 data LabelPolicy = LabelPolicy
     { lpTagLimit :: Int
     , lpRecordLimit :: Int
@@ -983,22 +1000,23 @@ labelItems layout view tagsShown mode = take labelTotalCap (tagItems ++ recordIt
       where
         step (boxes, items) key =
             case (IM.lookup key (glPos layout), nodeLabel layout key) of
-                (Just point, Just label) | not (T.null label) && visible point ->
-                    let (px, py) = worldToScreen view point
-                        radius = nodeRadius layout key * gvScale view
-                        labelValue = T.take 26 label
-                        textWidth = fromIntegral (T.length labelValue) * size * 0.62
-                        baseline = py + radius + size * 1.15
-                        box =
-                            LabelBox
-                                (px - textWidth / 2)
-                                (baseline - size)
-                                (px + textWidth / 2)
-                                (baseline + size * 0.45)
-                        item = LabelItem labelValue isTag px baseline size
-                     in if collides box boxes
-                            then (boxes, items)
-                            else (box : boxes, item : items)
+                (Just point, Just label)
+                    | not (T.null label) && visible point ->
+                        let (px, py) = worldToScreen view point
+                            radius = nodeRadius layout key * gvScale view
+                            labelValue = T.take 26 label
+                            textWidth = fromIntegral (T.length labelValue) * size * 0.62
+                            baseline = py + radius + size * 1.15
+                            box =
+                                LabelBox
+                                    (px - textWidth / 2)
+                                    (baseline - size)
+                                    (px + textWidth / 2)
+                                    (baseline + size * 0.45)
+                            item = LabelItem labelValue isTag px baseline size
+                         in if collides box boxes
+                                then (boxes, items)
+                                else (box : boxes, item : items)
                 _ -> (boxes, items)
 
 -- | How many labels the current view and mode draw.
@@ -1088,8 +1106,9 @@ localLayout layout root depth
             , glRecordCount = length recordKeys
             }
 
--- | The label layer: a screen-space pass on every frame so labels stay at the
--- same readable size whether the graph is at overview or zoomed.
+{- | The label layer: a screen-space pass on every frame so labels stay at the
+same readable size whether the graph is at overview or zoomed.
+-}
 drawLabels :: Palette -> GraphLayout -> GraphView -> Bool -> LabelMode -> Canvas ()
 drawLabels palette layout view tagsShown mode = do
     let ratio = gvScale view / max 1e-9 (gvFit view)
@@ -1219,7 +1238,8 @@ drawMatchLabels palette layout view matchIds = do
     let (minX, minY, maxX, maxY) = visibleWorld view
         visible (x, y) = pointWithin minX minY maxX maxY (x, y)
         candidates =
-            take 60
+            take
+                60
                 [ recordKey
                 | recordKey <- glRecordOrder layout
                 , IS.member recordKey matchIds
@@ -1230,8 +1250,9 @@ drawMatchLabels palette layout view matchIds = do
     _ <- drawScreenLabels palette layout view visible False 11 60 candidates []
     pure ()
 
--- | Hover, selection and focus rings. They are cheap screen-space strokes and
--- never enter the base bitmap.
+{- | Hover, selection and focus rings. They are cheap screen-space strokes and
+never enter the base bitmap.
+-}
 drawEmphasis :: Palette -> GraphLayout -> GraphView -> Maybe Int -> Maybe Int -> Maybe Int -> Canvas ()
 drawEmphasis palette layout view hover selected focusKey = do
     forM_ hover (ring (pMuted palette) 4)

@@ -272,18 +272,20 @@ buildFilter q parsed tags =
         maybe
             []
             ( \year ->
-                [ ( "b.created_at > 0 AND CAST(strftime('%Y', b.created_at, 'unixepoch') AS INTEGER) = :year"
-                  , [":year" := year]
-                  )
+                [
+                    ( "b.created_at > 0 AND CAST(strftime('%Y', b.created_at, 'unixepoch') AS INTEGER) = :year"
+                    , [":year" := year]
+                    )
                 ]
             )
             (sqYear parsed)
             <> maybe
                 []
                 ( \day ->
-                    [ ( "b.created_at > 0 AND date(b.created_at, 'unixepoch') = :day"
-                      , [":day" := day]
-                      )
+                    [
+                        ( "b.created_at > 0 AND date(b.created_at, 'unixepoch') = :day"
+                        , [":day" := day]
+                        )
                     ]
                 )
                 (sqDay parsed)

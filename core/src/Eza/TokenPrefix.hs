@@ -12,25 +12,26 @@ accepted only through the explicit single-user fallback.
 The functions here are pure and total so the parser can be shared by the
 server, the CLI, and the tests.
 -}
-module Eza.TokenPrefix
-    ( UserId
-    , sessionPrefix
-    , apiTokenPrefix
-    , sharePrefix
-    , parseSessionUserId
-    , parseShareUserId
-    , parseApiTokenUserId
-    , splitUserPrefix
-    , withUserPrefix
-    ) where
+module Eza.TokenPrefix (
+    UserId,
+    sessionPrefix,
+    apiTokenPrefix,
+    sharePrefix,
+    parseSessionUserId,
+    parseShareUserId,
+    parseApiTokenUserId,
+    splitUserPrefix,
+    withUserPrefix,
+) where
 
 import Data.Char (isDigit)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 
--- | The control database's account id. Kept as a plain 'Int' so the core
--- module does not depend on server types.
+{- | The control database's account id. Kept as a plain 'Int' so the core
+module does not depend on server types.
+-}
 type UserId = Int
 
 sessionPrefix :: Text
@@ -58,9 +59,10 @@ parseShareUserId = parseSessionUserId
 parseApiTokenUserId :: Text -> Maybe UserId
 parseApiTokenUserId raw = fst <$> (parseUserIdAndRest =<< T.stripPrefix apiTokenPrefix raw)
 
--- | Split @u<id>_<random>@ into the id and the remainder (including the raw
--- random material). The marker is required, digits only, and the random part
--- must be non-empty; otherwise legacy handling applies.
+{- | Split @u<id>_<random>@ into the id and the remainder (including the raw
+random material). The marker is required, digits only, and the random part
+must be non-empty; otherwise legacy handling applies.
+-}
 splitUserPrefix :: Text -> Maybe (UserId, Text)
 splitUserPrefix raw = parseUserIdAndRest =<< T.stripPrefix sessionPrefix raw
 

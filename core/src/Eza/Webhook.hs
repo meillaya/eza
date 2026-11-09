@@ -8,23 +8,23 @@ same transaction as the write, a per-library worker delivers them with HMAC
 signing and retries, and a disabled subscription has no effect. The types here
 are shared by the server, the client, and the JSON Schema contract.
 -}
-module Eza.Webhook
-    ( -- * Events
-      EventType (..)
-    , eventTypeText
-    , parseEventType
-    , allEventTypes
-    , EventEnvelope (..)
+module Eza.Webhook (
+    -- * Events
+    EventType (..),
+    eventTypeText,
+    parseEventType,
+    allEventTypes,
+    EventEnvelope (..),
 
-      -- * Subscriptions
-    , Webhook (..)
-    , WebhookInput (..)
-    , DeliveryView (..)
-    , maxWebhooks
-    , maxWebhookName
-    , maxWebhookUrl
-    , validateWebhookInput
-    ) where
+    -- * Subscriptions
+    Webhook (..),
+    WebhookInput (..),
+    DeliveryView (..),
+    maxWebhooks,
+    maxWebhookName,
+    maxWebhookUrl,
+    validateWebhookInput,
+) where
 
 import Data.Aeson
 import Data.Aeson.Types (Parser)
@@ -32,7 +32,6 @@ import Data.Char (isSpace)
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
-
 
 -- ----------------------------------------------------------------- events ---
 
@@ -61,8 +60,9 @@ parseEventType raw = case T.toLower (T.strip raw) of
 allEventTypes :: [EventType]
 allEventTypes = [minBound .. maxBound]
 
--- | The signed delivery body. @occurred_at@ is POSIX seconds; the client can
--- render it as a UTC day without trusting the sender's clock format.
+{- | The signed delivery body. @occurred_at@ is POSIX seconds; the client can
+render it as a UTC day without trusting the sender's clock format.
+-}
 data EventEnvelope = EventEnvelope
     { eeId :: Text
     , eeType :: EventType
@@ -102,8 +102,9 @@ maxWebhookName = 80
 maxWebhookUrl :: Int
 maxWebhookUrl = 2048
 
--- | One stored subscription. The secret is never part of the list payload;
--- the reveal-once value belongs to the create response only.
+{- | One stored subscription. The secret is never part of the list payload;
+the reveal-once value belongs to the create response only.
+-}
 data Webhook = Webhook
     { whId :: Int
     , whName :: Text
