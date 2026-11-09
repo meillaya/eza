@@ -314,6 +314,10 @@ nix build path:.#eza-web-local      # path flake: includes gitignored static/app
 # services.eza.webAssets = inputs.eza.packages.${system}.eza-web-local;
 ```
 
+Set `services.eza.staticDir` to serve a bundle built outside Nix instead. When
+it is set the unit reads that directory and does not reference `webAssets`, so
+the pinned release artifact stays out of the system closure.
+
 See [deployment-docker.md](deployment-docker.md#web-assets) for the CI
 workflow and asset layout.
 

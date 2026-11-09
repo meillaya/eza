@@ -3,8 +3,14 @@
 // The app is the real server plus the built WASM client: no mockups. The
 // script creates the scratch password account, then seeds the library from
 // the Netscape export in the repo root with a multipart POST to
-// /api/v1/import. Set EZA_SEED_IMPORT to a different
-// export path, or EZA_SEED_IMPORT=0 to fall back to the 14-bookmark demo seed.
+// /api/v1/import. Set EZA_SEED_IMPORT to a different export path, or
+// EZA_SEED_IMPORT=0 to keep the library already on the server (the 14-bookmark
+// demo seed is used only when that library is empty).
+//
+// Every screen is captured twice, light then dark, through the shell's real
+// theme control, so the committed set is eight light/dark pairs. The
+// accessions pair is cropped above the ranked-source list so private sources
+// stay out of the public image.
 //
 // The detail shot uses the real enrichment output. A legacy fallback can seed
 // a fixture directly into SQLite, but it is off by default: set
@@ -14,6 +20,9 @@
 // Run from the repo root in the dev shell, against a scratch server:
 //   EZA_BASE=http://localhost:8100 EZA_DB=.eza-scratch/eza.db \
 //     node tests/e2e/capture-screenshots.mjs
+//
+// Set CHROME_PATH when the installed Playwright browser differs from the one
+// the playwright package expects.
 import { chromium } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -30,6 +39,7 @@ const SEED_READER = ["1", "true", "yes"].includes(String(process.env.EZA_SEED_RE
 const FEATURE_ID = Number(process.env.EZA_FEATURE_ID || 8226);
 const VIEWPORT = { width: 1440, height: 900 };
 const DPR = 2;
+const CHROME = process.env.CHROME_PATH || "";
 
 // The original demo library, kept as the fallback when the export is absent.
 const DEMO_BOOKMARKS = [
@@ -56,17 +66,21 @@ const SEL = {
   accessions: '[data-testid="accessions"]',
   palette: '[data-testid="palette"]',
   paletteInput: "#palette-input",
-  themeToggle: '[data-testid="theme-toggle"]',
   readerText: "#reader-text",
   readerMark: '[data-testid="reader-mark"]',
   highlightRow: '[data-testid="highlight-row"]',
   sharePage: '[data-testid="share-page"]',
+  graph: '[data-testid="graph"]',
+  views: '[data-testid="views-page"]',
   passwordLogin: "#password-login",
 };
 
 mkdirSync(OUT, { recursive: true });
 
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({
+  headless: true,
+  ...(CHROME ? { executablePath: CHROME } : {}),
+});
 const context = await browser.newContext({
   viewport: VIEWPORT,
   deviceScaleFactor: DPR,
@@ -136,15 +150,56 @@ async function getJson(path) {
   return pageFetch(path, "GET");
 }
 
-async function settle(milliseconds = 400) {
-  await page.waitForTimeout(milliseconds);
-  await page.evaluate(() => document.fonts.ready);
+async function settle(target = page, milliseconds = 400) {
+  await target.waitForTimeout(milliseconds);
+  await target.evaluate(() => document.fonts.ready);
 }
 
-async function shot(name, clip) {
-  await settle();
-  await page.screenshot({ path: join(OUT, name + ".png"), ...(clip ? { clip } : {}) });
+// Switch the theme with the shell's own theme control. On app screens that is
+// the nav theme button, so the Miso model, the night/paper label and the CSS
+// all move together; the server-rendered share and login pages have no shell,
+// so they get the same theme through window.EzaTheme.set. The CSS state is
+// always confirmed through window.EzaTheme.get/set, never by overriding styles.
+async function setTheme(mode, target = page) {
+  const current = await target.evaluate(() => (window.EzaTheme ? window.EzaTheme.get() : "light"));
+  const hasControl = await target.evaluate(() =>
+    Boolean(document.querySelector('[data-testid="theme-toggle"]'))
+  );
+  if (current !== mode) {
+    if (hasControl) {
+      await target.evaluate(() => document.querySelector('[data-testid="theme-toggle"]').click());
+      await target.waitForFunction(
+        (value) => {
+          const control = document.querySelector('[data-testid="theme-toggle"]');
+          return Boolean(control && control.textContent.includes(value === "dark" ? "paper" : "night"));
+        },
+        mode,
+        { timeout: 10000 }
+      );
+    }
+    await target.evaluate((value) => window.EzaTheme.set(value), mode);
+    await target.waitForFunction(
+      (value) => document.documentElement.getAttribute("data-theme") === value,
+      mode,
+      { timeout: 10000 }
+    );
+  }
+  await settle(target, 250);
+}
+
+async function shotOn(target, name, clip) {
+  await settle(target);
+  await target.screenshot({ path: join(OUT, name + ".png"), ...(clip ? { clip } : {}) });
   console.log("captured " + join(OUT, name + ".png"));
+}
+
+// Every committed screenshot is a light/dark pair with the -dark suffix.
+async function shotPair(name, clip, target = page) {
+  await setTheme("light", target);
+  await shotOn(target, name, clip);
+  await setTheme("dark", target);
+  await shotOn(target, name + "-dark", clip);
+  await setTheme("light", target);
 }
 
 async function enterLibrary() {
@@ -298,7 +353,7 @@ async function showLedger() {
         () => {
           const count = document.querySelector(".ledg-countgroup");
           const rows = document.querySelectorAll('[data-testid="ledger-row"]').length;
-          return Boolean(count && /in all/.test(count.textContent) && rows > 0);
+          return Boolean(count && /\d[\d,]* of [\d,]+/.test(count.textContent || "") && rows > 0);
         },
         null,
         { timeout: 20000 }
@@ -367,7 +422,7 @@ async function prepareFeature() {
   const detail = await ensureReaderText();
   if (!detail?.extracted_text) {
     console.log("no readable text for record " + FEATURE_ID + "; using the record as stored");
-    return;
+    return null;
   }
 
   // A real wikilink to another record, so the note renders like the design.
@@ -403,6 +458,7 @@ async function prepareFeature() {
       console.log("highlight", i + 1, response.status, range.quote.slice(0, 48) + "...");
     }
   }
+  return linked?.id ?? null;
 }
 
 try {
@@ -421,12 +477,14 @@ try {
     console.log("using the library already on the server (" + before + " entries)");
   }
 
-  // library.png: the ledger with a representative real query.
+  // library.png + library-dark.png: the ledger with a representative real
+  // query, the masthead counting the whole library.
   await showLedger();
-  await shot("library");
+  await shotPair("library");
 
-  // detail.png: the record with the reading spread, its note and its marks.
-  await prepareFeature();
+  // detail.png + detail-dark.png: the record with the reading spread, its
+  // note and its marks.
+  const graphFocus = await prepareFeature();
   await page.goto(BASE + "/bookmark/" + FEATURE_ID, { waitUntil: "domcontentloaded" });
   await page.waitForSelector(SEL.appShell, { timeout: 30000 });
   await page.waitForSelector(SEL.record, { timeout: 30000 });
@@ -438,9 +496,9 @@ try {
       { timeout: 20000 }
     )
     .catch(() => {});
-  await shot("detail");
+  await shotPair("detail");
 
-  // accessions.png: the printed index route.
+  // accessions.png + accessions-dark.png: the printed index route.
   await page.goto(BASE + "/accessions", { waitUntil: "domcontentloaded" });
   await page.waitForSelector(SEL.accessions, { timeout: 30000 });
   // Keep the public index shot above the ranked-source list: that list can
@@ -449,25 +507,39 @@ try {
   const accessionsHeight = filing
     ? Math.max(560, Math.min(900, Math.floor(filing.y + filing.height + 24)))
     : 700;
-  await shot("accessions", { x: 0, y: 0, width: VIEWPORT.width, height: accessionsHeight });
+  await shotPair("accessions", { x: 0, y: 0, width: VIEWPORT.width, height: accessionsHeight });
 
-  // palette.png: the command palette over the same ledger.
+  // palette.png + palette-dark.png: the command palette over the same ledger.
   await showLedger();
   await page.evaluate(() => document.activeElement && document.activeElement.blur());
   await page.keyboard.press("Shift+K");
   await page.waitForSelector(SEL.paletteInput, { timeout: 10000 });
   await page.waitForSelector(SEL.palette, { timeout: 10000 });
-  await shot("palette");
+  await shotPair("palette");
   await page.keyboard.press("Escape");
+  await settle();
 
-  // dark.png: the reading-room theme, switched with the real control.
-  await page.locator(SEL.themeToggle).click();
-  await page.waitForFunction(() => document.documentElement.getAttribute("data-theme") === "dark", null, { timeout: 10000 });
-  await shot("dark");
+  // graph.png + graph-dark.png: the wikilink graph around the record the note
+  // links to, so the detail and graph shots tell one story.
+  const graphRoute = graphFocus
+    ? "/graph?focus=" + graphFocus + "&depth=2&local=1"
+    : "/graph";
+  await page.goto(BASE + graphRoute, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector(SEL.appShell, { timeout: 30000 });
+  await page.waitForSelector(SEL.graph, { timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(4200);
+  await shotPair("graph");
 
-  // share.png: a server-rendered read-only share page for the featured record.
-  // The share page is rendered by the server but inherits the stored theme;
-  // return to paper so the public page is shown in the default theme.
+  // views.png + views-dark.png: the declared views page.
+  await page.goto(BASE + "/views", { waitUntil: "domcontentloaded" });
+  await page.waitForSelector(SEL.appShell, { timeout: 30000 });
+  await page.waitForSelector(SEL.views, { timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(1000);
+  await shotPair("views");
+
+  // share.png + share-dark.png: a server-rendered read-only share page for the
+  // featured record. The page is rendered by the server but the theme is
+  // applied by the shell's theme bootstrap, so the pair stays comparable.
   await page.evaluate(() => {
     try {
       window.localStorage.setItem("eza-theme", "light");
@@ -485,9 +557,10 @@ try {
   if (!shareUrl) throw new Error("could not create a share link: " + JSON.stringify(share).slice(0, 200));
   await page.goto(shareUrl, { waitUntil: "domcontentloaded" });
   await page.waitForSelector(SEL.sharePage, { timeout: 30000 });
-  await shot("share");
+  await shotPair("share");
 
-  // login.png: the sign-in card, in a context with no session cookie.
+  // login.png + login-dark.png: the sign-in card, in a context with no
+  // session cookie.
   const anonymous = await browser.newContext({
     viewport: VIEWPORT,
     deviceScaleFactor: DPR,
@@ -497,10 +570,7 @@ try {
   const loginPage = await anonymous.newPage();
   await loginPage.goto(BASE + "/login", { waitUntil: "domcontentloaded" });
   await loginPage.waitForSelector(SEL.passwordLogin, { timeout: 30000 });
-  await loginPage.evaluate(() => document.fonts.ready);
-  await loginPage.waitForTimeout(400);
-  await loginPage.screenshot({ path: join(OUT, "login.png") });
-  console.log("captured " + join(OUT, "login.png"));
+  await shotPair("login", undefined, loginPage);
   await anonymous.close();
 
   if (pageErrors.length) {
@@ -508,7 +578,7 @@ try {
     for (const error of pageErrors.slice(0, 8)) console.log("  " + error);
     process.exitCode = 1;
   } else {
-    console.log("captured 7 screenshots in " + OUT);
+    console.log("captured the light/dark screenshot set in " + OUT);
   }
 } finally {
   await browser.close();

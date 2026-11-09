@@ -1,9 +1,9 @@
 # Figures
 
 The figures explain the architecture, the import result, the search path, and
-the deployment shape. Each scene is a hand-authored Excalidraw JSON file.
-`generate.py` writes the scenes with a fixed palette and a fixed set of
-elements, so a change to a box or label produces the same scene on every run.
+the deployment shape. `generate.py` writes each Excalidraw scene from a
+hand-authored definition, with a fixed palette and a fixed set of elements, so
+a change to a box or label produces the same scene on every run.
 
 Render the set:
 
@@ -32,3 +32,19 @@ before committing a scene change.
 The PNGs are generated artifacts. Commit the scene and the PNG together so the
 README and the architecture page render on GitHub without an Excalidraw
 install.
+
+## Wordmark
+
+`wordmark-light.svg` and `wordmark-dark.svg` are the README header. The letters
+are Fraunces at weight 600 and a 144 optical size, the same shapes the
+interface sets, so the header does not depend on the fonts of the reader's
+browser. Regenerate the pair after a font or colour change:
+
+```bash
+python3 docs/figures/wordmark.py
+```
+
+The script reads the bundled variable font and writes both SVGs next to each
+other. The README loads them with a `prefers-color-scheme` picture so the header
+follows the page theme.
+

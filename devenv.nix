@@ -23,9 +23,10 @@ in
     pkgs.sqlite
     pkgs.curl
     pkgs.jq
-    # python3 with Draft 2020-12 JSON-Schema validation (pulled in as
-    # python3Packages.jsonschema) for scripts/check-specs.sh.
-    (pkgs.python3.withPackages (ps: [ ps.jsonschema ]))
+    # python3 with Draft 2020-12 JSON-Schema validation for
+    # scripts/check-specs.sh, plus fontTools and brotli for the README wordmark
+    # generator in docs/figures.
+    (pkgs.python3.withPackages (ps: [ ps.jsonschema ps.fonttools ps.brotli ]))
     pkgs.fourmolu
     pkgs.hlint
     # TLA+ model checker (tlc) for the spec/ checks.

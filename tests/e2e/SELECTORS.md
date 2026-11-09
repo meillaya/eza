@@ -169,8 +169,12 @@ it starts from an empty control database and claims the first account through
 
 ## Capture
 
-`capture-screenshots.mjs` claims the instance with a virtual WebAuthn
-authenticator, POSTs `bookmarks_14_08_2026.html` as multipart form data to
-`/api/v1/import`, and writes `library.png`, `detail.png`, `accessions.png`,
-`palette.png`, `dark.png`, `share.png` and `login.png` at 1440x900 dpr 2 into
-`docs/screenshots/`. See [docs/screenshots/README.md](../../docs/screenshots/README.md).
+`capture-screenshots.mjs` claims the instance through the setup form when it is
+empty, or signs in with `EZA_TEST_USER` and `EZA_TEST_PASSWORD`, registers a
+virtual WebAuthn authenticator, POSTs
+`bookmarks_14_08_2026.html` as multipart form data to `/api/v1/import`, and
+writes eight light and dark pairs into `docs/screenshots/`: `library`, `detail`,
+`accessions`, `palette`, `graph`, `views`, `share` and `login`, each as
+`NAME.png` and `NAME-dark.png` at 1440 pixels wide and dpr 2 (all 1440x900
+except the cropped accessions pair). See
+[docs/screenshots/README.md](../../docs/screenshots/README.md).

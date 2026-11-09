@@ -188,11 +188,11 @@ in
       type = types.str;
       default = "/var/lib/eza";
       description = ''
-        Directory holding `eza.db` plus the `snapshots/` and `backups/`
-        subdirectories (EZA_DATA_DIR). The default is managed by systemd as
-        StateDirectory=eza and owned by the fixed `eza` non-root user. A path
-        outside /var/lib is created with tmpfiles and granted via
-        ReadWritePaths instead.
+        Directory holding `control.db`, the `users/<id>/eza.db` library files
+        and the `snapshots/` and `backups/` subdirectories (EZA_DATA_DIR). The
+        default is managed by systemd as StateDirectory=eza and owned by the
+        fixed `eza` non-root user. A path outside /var/lib is created with
+        tmpfiles and granted via ReadWritePaths instead.
       '';
     };
 
@@ -535,10 +535,9 @@ in
         wantedBy = [ "multi-user.target" ];
         wants = [ "network-online.target" ];
         after = [ "network-online.target" ];
-        restartTriggers = [
-          cfg.package
-          cfg.webAssets
-        ];
+        restartTriggers =
+          [ cfg.package ]
+          ++ optional (cfg.staticDir == null) cfg.webAssets;
 
         serviceConfig = mkMerge [
           stateDirConfig
