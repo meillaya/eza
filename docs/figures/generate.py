@@ -153,21 +153,23 @@ def _scene(elements):
 
 
 def architecture():
-    elements = [_title("One process, one database")]
+    elements = [_title("One process, one control database, one library per account")]
     elements += _box("Browser: Miso WASM", 60, 150, 300, 110, "blue")
     elements += _box("Static WASM assets", 60, 340, 300, 100, "gray")
     elements += _box("Warp and WAI", 470, 150, 300, 110, "purple")
-    elements += _box("Auth and CSRF", 470, 340, 300, 100, "red")
+    elements += _box("Passwords, passkeys, CSRF", 470, 340, 300, 100, "red")
     elements += _box("JSON API routes", 470, 520, 300, 100, "purple")
-    elements += _box("SQLite WAL + FTS5", 880, 520, 300, 100, "teal")
-    elements += _box("Backups and snapshots", 880, 340, 300, 100, "gray")
+    elements += _box("Control database", 880, 150, 300, 100, "teal")
+    elements += _box("Library SQLite WAL + FTS5", 880, 340, 300, 100, "teal")
+    elements += _box("Background workers", 880, 520, 300, 100, "orange")
     elements += _arrow(360, 205, 470, 205, "HTTP JSON")
     elements += _arrow(360, 390, 470, 260, "assets")
     elements += _arrow(620, 260, 620, 340, "guard")
     elements += _arrow(620, 440, 620, 520, "session")
-    elements += _arrow(770, 570, 880, 570, "SQL")
-    elements += _arrow(1030, 520, 1030, 440, "snapshot")
-    elements += _note("The browser talks to Warp; Warp reads and writes one SQLite file. CLI commands open the same file.")
+    elements += _arrow(770, 390, 880, 200, "accounts")
+    elements += _arrow(770, 570, 880, 390, "SQL")
+    elements += _arrow(1030, 440, 1030, 520, "jobs")
+    elements += _note("Warp resolves the account in the control database, then opens its library. Each library starts enrichment, webhook and favicon workers.")
     return _scene(elements)
 
 

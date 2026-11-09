@@ -27,7 +27,7 @@ const IMPORT_ENABLED = !["0", "false", "no"].includes(String(process.env.EZA_SEE
 const READER_PATH = process.env.EZA_READER_HTML || "tests/e2e/fixtures/reader.html";
 const DB_PATH = process.env.EZA_DB || ".eza-scratch/eza.db";
 const SEED_READER = ["1", "true", "yes"].includes(String(process.env.EZA_SEED_READER || "").toLowerCase());
-const FEATURE_ID = Number(process.env.EZA_FEATURE_ID || 7);
+const FEATURE_ID = Number(process.env.EZA_FEATURE_ID || 8226);
 const VIEWPORT = { width: 1440, height: 900 };
 const DPR = 2;
 

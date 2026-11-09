@@ -38,24 +38,28 @@ not appear in the public image:
    SQLite file:
 
    ```
-   EZA_BASE=http://localhost:8100 EZA_DB=.eza-scratch-shots/eza.db \
-   EZA_SHOT_QUERY="tag:literature" \
+   EZA_BASE=http://localhost:8100 EZA_DB=.eza-scratch-shots/users/1/eza.db \
+   EZA_SHOT_QUERY="tag:literature" EZA_FEATURE_ID=8226 \
+   EZA_SEED_IMPORT=/path/to/bookmarks_14_08_2026.html \
      node tests/e2e/capture-screenshots.mjs
    ```
 
    The committed ledger shots use `EZA_SHOT_QUERY="tag:literature"`: the
    newest rows in the real export are forum and video saves, so a query gives
    a representative slice while the masthead still counts 8,905 entries.
+   The export itself is private and is not checked in; point
+   `EZA_SEED_IMPORT` at it, or let the script fall back to the demo set.
 
 3. Look at the seven PNGs before committing them.
 
    `EZA_FEATURE_ID` selects the record used for the detail and share shots;
-   the default `7` is the structure-packing article in this export. Enrich it
+   the default `8226` is "McCaffery Collection at Spineless Books—Authorized"
+   in this export, a real literary essay with clean extracted text. Enrich it
    first if a fresh scratch database has no extracted text:
 
    ```
-   EZA_DATA_DIR=.eza-scratch-shots EZA_DB=.eza-scratch-shots/eza.db \
-     cabal run eza-bookmarks -- enrich --id 7
+   EZA_DATA_DIR=.eza-scratch-shots cabal run eza-bookmarks -- \
+     enrich --user e2e --id 8226
    ```
 
 ## What the script seeds
@@ -65,10 +69,10 @@ POSTs a local `bookmarks.html` export as multipart form data to
 `/api/v1/import`. When the export is missing it falls back to a 14-bookmark
 demo set.
 
-The detail shot uses record `EA-00007` ("The Lost Art of Structure Packing")
-and its real enrichment output. It waits for extraction, then adds a note and
-three highlights through the public API so the reading spread shows the
-design's marks. An explicit `EZA_SEED_READER=1` enables the old fixture-seeding escape
+The detail shot uses record `EA-08226` ("McCaffery Collection at Spineless
+Books—Authorized") and its real enrichment output. It waits for extraction,
+then adds a note and three highlights through the public API so the reading
+spread shows the design's marks. An explicit `EZA_SEED_READER=1` enables the old fixture-seeding escape
 hatch for a demo only; it is off by default and must not be used for the
 checked-in reference screenshots. `EZA_SHOT_QUERY` narrows the ledger shots to
 a query if a representative slice is wanted.
