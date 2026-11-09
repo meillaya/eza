@@ -1,6 +1,6 @@
 // Shared selectors and helpers for the Direction B end-to-end scripts.
 //
-// The production views are Miso markup built from design/b-catalogue. The
+// The production views are Miso markup built from the catalogue design. The
 // stable hooks are the data-testid names in SEL; ids that the server pages
 // keep (#search-input, auth ids) are used directly. If a view renames a hook,
 // update it here once instead of in every script.

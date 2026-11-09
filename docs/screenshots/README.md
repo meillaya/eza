@@ -66,11 +66,10 @@ image:
    the copied library, set a known password with `eza-bookmarks users
    reset-password <name> --password-stdin`, then run the script with
    `EZA_SEED_IMPORT=0` and `EZA_TEST_USER`/`EZA_TEST_PASSWORD` for that
-   account. The checked-in run used a small gitignored wrapper,
-   `.eza-scratch-design/readme-shots.mjs`, that pins those environment values
-   and then runs the tracked script, so the committed PNGs and the tracked
-   script describe the same procedure. The figures in the pictures are the
-   live library figures either way.
+   account. The checked-in run used the same tracked script with those
+   environment values, so the committed PNGs and the script describe the same
+   procedure. The figures in the pictures are the live library figures either
+   way.
 
    The committed ledger shots use `EZA_SHOT_QUERY="tag:literature"`: the
    newest rows are forum and video saves, so a query gives a representative

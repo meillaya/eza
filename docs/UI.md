@@ -225,8 +225,8 @@ focus and clears the graph filter line before the selection.
 Focus is a 2 px accent ring with a 2 px offset and is never removed. Dialogs
 trap focus and restore it on close, and the page behind a dialog is inert. Touch
 targets are at least 44 px on mobile. Contrast stays at or above 4.5:1 for body
-text and 3:1 for large text in both themes; the audit in the design package
-checks every screen and theme. Status is never carried by colour alone: the word
+text and 3:1 for large text in both themes; the contrast audit checks every
+screen and theme. Status is never carried by colour alone: the word
 accompanies the mark. Landmarks are used for the masthead, sections, ledger,
 rail, record and dialogs. `prefers-reduced-motion` disables every transition.
 The graph canvas is backed by an accessible results list of the top matching
