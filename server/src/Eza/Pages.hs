@@ -39,14 +39,11 @@ commonHead title =
         , "<link rel=\"icon\" href=\"/favicon.svg\">"
         , "<script src=\"/assets/theme.js\"></script>"
         , "<script src=\"/assets/auth.js\" defer></script>"
-        , "<style>"
-        , ".auth-card:has(#recovery:not([hidden])) .auth-create{display:none}"
-        , "</style>"
         , "</head>"
         ]
 
-authPage :: Text -> Text -> Text -> Text
-authPage pageName foot body =
+authPage :: Text -> Text -> Text
+authPage pageName body =
     T.unlines
         [ "<body class=\"auth-body\">"
         , "<main class=\"auth\" data-page=\"" <> pageName <> "\">"
@@ -54,20 +51,17 @@ authPage pageName foot body =
         , "    <div class=\"auth-card\">"
         , body
         , "    </div>"
-        , "    <p class=\"auth-foot meta\">" <> foot <> "</p>"
         , "  </div>"
         , "</main>"
         , "</body></html>"
         ]
 
-authBrand :: Text -> Text -> Text
-authBrand href imprint =
+authBrand :: Text -> Text
+authBrand href =
     T.unlines
         [ "      <div class=\"auth-brand\">"
         , "        <a class=\"auth-wordmark\" href=\"" <> href <> "\">eza</a>"
-        , "        <span class=\"auth-imprint meta\">" <> imprint <> "</span>"
         , "      </div>"
-        , "      <div class=\"auth-rule\" aria-hidden=\"true\"></div>"
         ]
 
 authTitle :: Text -> Text
@@ -76,14 +70,16 @@ authTitle title = "      <h1 class=\"auth-title display\">" <> title <> "</h1>"
 authSub :: Text -> Text
 authSub sub = "      <p class=\"auth-sub\">" <> sub <> "</p>"
 
-authNote :: Text -> Text
-authNote note = "      <p class=\"auth-note meta\">" <> note <> "</p>"
-
 authError :: Text
 authError = "      <p id=\"auth-error\" class=\"auth-error\" role=\"alert\"></p>"
 
-footSep :: Text
-footSep = "<span class=\"auth-foot-sep\" aria-hidden=\"true\"></span>"
+authLinks :: [(Text, Text)] -> Text
+authLinks links =
+    T.unlines
+        [ "      <div class=\"auth-links\">"
+        , T.concat ["        <a href=\"" <> href <> "\">" <> label <> "</a>" | (href, label) <- links]
+        , "      </div>"
+        ]
 
 field :: Text -> Text -> Text -> Text -> Text
 field inputId label inputType autocomplete =
@@ -109,12 +105,11 @@ recoveryCodesSection :: Text
 recoveryCodesSection =
     T.unlines
         [ "      <div id=\"recovery\" hidden>"
-        , authTitle "Recovery codes"
-        , authSub "Ten single-use codes. Keep them somewhere that is not this computer: they are the way back in if you forget the password."
+        , authTitle "Save these codes"
+        , authSub "Each code works once."
         , "        <pre id=\"codes\" class=\"auth-codes\" aria-label=\"Recovery codes\"></pre>"
-        , "        <div class=\"auth-code-actions\"><button id=\"copy-codes\" class=\"btn\" type=\"button\">copy all ten</button></div>"
-        , authNote "Each code can be used once. They are not shown again after this step."
-        , "        <button id=\"continue\" class=\"btn btn--strong auth-action\" type=\"button\">continue to the ledger</button>"
+        , "        <div class=\"auth-code-actions\"><button id=\"copy-codes\" class=\"btn\" type=\"button\">copy codes</button></div>"
+        , "        <button id=\"continue\" class=\"btn btn--strong auth-action\" type=\"button\">continue</button>"
         , "      </div>"
         ]
 
@@ -123,21 +118,16 @@ loginPage =
     commonHead "Sign in"
         <> authPage
             "login"
-            ("eza " <> footSep <> " a private catalogue " <> footSep <> " username and password")
             ( T.unlines
-                [ authBrand "/login" "private catalogue"
-                , "      <div class=\"auth-create\">"
+                [ authBrand "/login"
                 , authTitle "Sign in"
-                , authSub "Sign in with your account's username and password. Each account opens its own library."
                 , "      <form id=\"auth-form\" class=\"auth-form\" novalidate>"
                 , field "username" "username" "text" "username"
                 , field "password" "password" "password" "current-password"
                 , "        <button id=\"password-login\" class=\"btn btn--strong auth-action\" type=\"submit\">sign in</button>"
                 , "      </form>"
-                , authNote "When passkey two-factor is on, the next step asks for your passkey."
-                , "      </div>"
                 , authError
-                , "      <div class=\"auth-links\"><a href=\"/recover\">recover with a code</a></div>"
+                , authLinks [("/recover", "recover with a code")]
                 ]
             )
 
@@ -149,33 +139,30 @@ passkeyLoginPage =
     commonHead "Sign in"
         <> authPage
             "passkey-login"
-            ("eza " <> footSep <> " a private catalogue " <> footSep <> " legacy passkey")
             ( T.unlines
-                [ authBrand "/login" "private catalogue"
+                [ authBrand "/login"
                 , authTitle "Sign in"
-                , authSub "This library was claimed before passwords. Sign in with your passkey, then set a password from the account page."
+                , authSub "This library was claimed with a passkey. Sign in, then set a password from the account page."
                 , "      <button id=\"passkey-login\" class=\"btn btn--strong auth-action\" type=\"button\">sign in with your passkey</button>"
                 , authError
-                , "      <div class=\"auth-links\"><a href=\"/recover\">recover with a code</a></div>"
+                , authLinks [("/recover", "recover with a code")]
                 ]
             )
 
 setupPage :: Text
 setupPage =
-    commonHead "Claim the library"
+    commonHead "Claim this library"
         <> authPage
             "setup"
-            ("eza " <> footSep <> " a private catalogue " <> footSep <> " first claim")
             ( T.unlines
-                [ authBrand "/setup" "first claim"
+                [ authBrand "/setup"
                 , "      <div class=\"auth-create\">"
-                , authTitle "Claim the library"
-                , authSub "This copy of eza has not been claimed yet. Choose the admin username and password for the first account."
+                , authTitle "Claim this library"
+                , authSub "The first account is the admin; the password needs ten characters or more."
                 , "      <form id=\"auth-form\" class=\"auth-form\" novalidate>"
                 , field "username" "username" "text" "username"
                 , field "password" "password" "password" "new-password"
                 , field "confirm-password" "confirm password" "password" "new-password"
-                , authNote "At least ten characters. The password is stored as an Argon2id hash."
                 , "        <button id=\"password-setup\" class=\"btn btn--strong auth-action\" type=\"submit\">claim the library</button>"
                 , "      </form>"
                 , "      </div>"
@@ -192,12 +179,11 @@ recoverySetupPage username =
     commonHead "Choose a new password"
         <> authPage
             "recovery-setup"
-            ("eza " <> footSep <> " a private catalogue " <> footSep <> " recovery")
             ( T.unlines
-                [ authBrand "/setup" "recovery"
+                [ authBrand "/setup"
                 , "      <div class=\"auth-create\">"
                 , authTitle "Choose a new password"
-                , authSub "The recovery code was accepted. Set a new password for this library; the old codes stop working when you continue."
+                , authSub "Saving replaces the remaining codes; the password needs ten characters or more."
                 , "      <form id=\"auth-form\" class=\"auth-form\" novalidate>"
                 , "        <label class=\"auth-form-label meta\" for=\"username\">username</label>"
                 , "        <input id=\"username\" class=\"input auth-form-input\" type=\"text\" autocomplete=\"username\" spellcheck=\"false\" value=\""
@@ -205,7 +191,6 @@ recoverySetupPage username =
                     <> "\" required>"
                 , field "password" "new password" "password" "new-password"
                 , field "confirm-password" "confirm new password" "password" "new-password"
-                , authNote "At least ten characters. The password is stored as an Argon2id hash."
                 , "        <button id=\"password-setup\" class=\"btn btn--strong auth-action\" type=\"submit\">save the new password</button>"
                 , "      </form>"
                 , "      </div>"
@@ -219,11 +204,10 @@ recoverPage =
     commonHead "Recover access"
         <> authPage
             "recover"
-            ("eza " <> footSep <> " a private catalogue " <> footSep <> " recovery is local")
             ( T.unlines
-                [ authBrand "/recover" "recovery"
+                [ authBrand "/recover"
                 , authTitle "Recover access"
-                , authSub "Enter one of the ten single-use codes you saved when the library was claimed. The code is spent when it is used, and the old password and passkeys stop working."
+                , authSub "A code works once. The password and passkeys reset."
                 , "      <div class=\"auth-form\">"
                 , "        <label class=\"auth-form-label meta\" for=\"recover-username\">username</label>"
                 , "        <input id=\"recover-username\" class=\"input auth-form-input\" type=\"text\" autocomplete=\"username\" spellcheck=\"false\" autocapitalize=\"none\">"
@@ -234,7 +218,7 @@ recoverPage =
                 , "      </div>"
                 , "      <button id=\"redeem\" class=\"btn btn--strong auth-action\" type=\"button\">use the code</button>"
                 , authError
-                , "      <div class=\"auth-links\"><a href=\"/login\">back to sign in</a></div>"
+                , authLinks [("/login", "back to sign in")]
                 ]
             )
 
@@ -243,14 +227,12 @@ addPasskeyPage =
     commonHead "Add a passkey"
         <> authPage
             "add-passkey"
-            ("eza " <> footSep <> " a private catalogue " <> footSep <> " optional second factor")
             ( T.unlines
-                [ authBrand "/account" "another way in"
+                [ authBrand "/account"
                 , authTitle "Add a passkey"
-                , authSub "A passkey lets this device sign in. With passkey two-factor on it is also the second step after the password."
-                , authNote "The passkey prompt needs a secure origin: an https address or http://localhost."
+                , authSub "A passkey is an optional second factor on this account."
                 , "      <button id=\"passkey-add\" class=\"btn btn--strong auth-action\" type=\"button\">add this device</button>"
                 , authError
-                , "      <div class=\"auth-links\"><a href=\"/account\">back to account</a></div>"
+                , authLinks [("/account", "back to account")]
                 ]
             )

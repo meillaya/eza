@@ -90,21 +90,19 @@ function showError(message) {
   if (el) el.textContent = message;
 }
 
-// Passkey ceremonies need a secure origin. Browsers treat localhost and
-// 127.0.0.1 as secure, but WebAuthn also needs a hostname as the relying-party
-// ID: an IP literal in EZA_RP_ID is rejected before the browser prompt opens,
-// so say that plainly instead of surfacing "invalid domain".
+// Passkey ceremonies need a secure origin and a hostname as the WebAuthn
+// relying-party ID; an IP literal fails before the browser prompt opens.
 function passkeysUnavailable() {
   if (!window.isSecureContext) {
-    return "Passkeys need a secure origin. Open eza over https, or on http://localhost, then try again. A password or a recovery code works on any origin.";
+    return "Passkeys need a secure origin: https or http://localhost.";
   }
   if (!window.PublicKeyCredential || !navigator.credentials) {
-    return "This browser does not offer passkeys. Sign in with the password, or use a recovery code.";
+    return "This browser does not offer passkeys.";
   }
   const host = window.location.hostname;
   const isIpLiteral = /^[0-9]{1,3}(\.[0-9]{1,3}){3}$/.test(host) || host.startsWith("[");
   if (isIpLiteral) {
-    return "Passkeys need a hostname as the WebAuthn relying-party ID, not an IP address. Open eza on localhost or a domain behind https. A password signs in from any host; set one from the account page or with eza-bookmarks set-password.";
+    return "Passkeys need a hostname, not an IP address.";
   }
   return "";
 }
@@ -115,20 +113,19 @@ function blockIfPasskeysUnavailable() {
   return reason !== "";
 }
 
-// Two-factor sign-in cannot fall back to the password; only a recovery code
-// gets in without a passkey. Say that plainly, and never repeat a browser
-// "invalid domain" line as if the eza origin were broken.
+// Two-factor sign-in cannot fall back to the password; a recovery code is the
+// only other way in.
 function secondFactorUnavailable() {
   if (!window.isSecureContext) {
-    return "The passkey step needs a secure origin. Open eza over https, or on http://localhost, then try again. A recovery code works from any origin.";
+    return "The passkey step needs a secure origin: https or http://localhost.";
   }
   if (!window.PublicKeyCredential || !navigator.credentials) {
-    return "This browser does not offer passkeys. Open eza in a browser that supports them, or use a recovery code.";
+    return "This browser does not offer passkeys.";
   }
   const host = window.location.hostname;
   const isIpLiteral = /^[0-9]{1,3}(\.[0-9]{1,3}){3}$/.test(host) || host.startsWith("[");
   if (isIpLiteral) {
-    return "The passkey step needs a hostname as the WebAuthn relying-party ID, not an IP address. Open eza on localhost or a domain behind https, then try again. A recovery code works from any origin.";
+    return "The passkey step needs a hostname, not an IP address.";
   }
   return "";
 }
@@ -169,7 +166,7 @@ async function doPasswordLogin(event) {
 async function doPasskeySecondFactor() {
   const unavailable = secondFactorUnavailable();
   if (unavailable) {
-    showError("Passkey two-factor is on for this account, so the sign-in needs a passkey. " + unavailable);
+    showError("Passkey two-factor is on for this account. " + unavailable + " A recovery code still signs in.");
     return;
   }
   try {
@@ -183,21 +180,21 @@ async function doPasskeySecondFactor() {
 }
 
 function secondFactorMessage(error) {
-  if (!error) return "The passkey check did not finish. Enter the password again to retry.";
+  if (!error) return "The passkey check did not finish. Enter the password again.";
   if (error.code === "pending_required") {
-    return "The sign-in attempt expired. Enter the password again to retry.";
+    return "The sign-in attempt expired. Enter the password again.";
   }
   if (error.code === "2fa_not_required") {
     return "The account no longer asks for a passkey. Reload and sign in again.";
   }
   if (error.name === "NotAllowedError") {
-    return "The passkey prompt was dismissed or timed out. Enter the password again to retry.";
+    return "The passkey prompt was dismissed or timed out. Enter the password again.";
   }
   if (error.name === "InvalidStateError") {
-    return "This browser has no usable passkey for the account. Try another passkey, or use a recovery code.";
+    return "No usable passkey in this browser. Try another passkey, or a recovery code.";
   }
   if (error.name === "SecurityError") {
-    return "The browser refused the passkey step for this origin. Open eza on the hostname in EZA_RP_ID (not an IP address) and try again.";
+    return "The browser refused the passkey step for this origin. Open eza on the hostname you normally use.";
   }
   return error.message || String(error);
 }
