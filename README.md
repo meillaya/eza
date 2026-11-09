@@ -41,6 +41,7 @@ server already computes.
 | **Graph** | The whole library on one canvas: records, tags, resolved wikilinks and tag memberships, with pan, zoom, fit, a hover preview, a text filter, and a tags toggle. |
 | **Upkeep** | Duplicate groups, tag consolidation, dead-link sweeps, and prune, each with an undo snapshot. |
 | **Capture** | A Chromium MV3 clipper with Defuddle, a JSON-lines extraction sidecar, a bookmarklet, a PWA share target, quick-save and clip APIs, cached favicons, background extraction, and Netscape import. |
+| **Portability** | Netscape HTML and eza JSON import, and whole-library export as `bookmarks.html` or `eza-export.json` from Account > import / export. |
 | **Sharing** | Signed read-only pages for a record or a saved search, plus Atom feeds. |
 | **Access** | One private library per account with Argon2id password sign-in, login rate limiting, recovery codes, optional passkey second factors, admin and member roles, CSRF and origin checks, and hashed API tokens with read, write, and capture scopes. |
 | **Ownership** | A control database and one SQLite library per account in WAL mode, online backups, a Docker image, a NixOS module, and Kubernetes manifests. |

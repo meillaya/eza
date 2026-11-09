@@ -71,7 +71,7 @@ fixed optical size so every browser draws the same letterforms.
 | `/tags` | Tag table, case duplicates, near-duplicate pairs |
 | `/tags/ai` | Advisory tag suggestions, applied one bookmark at a time |
 | `/maintenance` | Dead-link sweep, prune candidates, undo |
-| `/account` | Username and role, password, optional passkey second factor, recovery, sessions, tokens, share links, webhooks, rules, import, capture; admins also get a users tab |
+| `/account` | Username and role, password, optional passkey second factor, recovery, sessions, tokens, share links, webhooks, rules, import / export, capture; admins also get a users tab |
 | `/save` | Quick save from the PWA share target or bookmarklet |
 | `/login`, `/setup`, `/recover`, `/account/add-passkey` | Username/password sign-in, optional passkey second factor, first claim, recovery reset |
 | `/s/:token` | Read-only share page for a bookmark or saved search |
@@ -259,15 +259,26 @@ routes that are already mounted keeps the live offset.
 `tests/e2e/navigation-smoke.mjs` covers the deep case (a 4,000px return that
 needs extra pages).
 
+## Import and export
+
+Account > import / export takes a Netscape HTML bookmarks file or a versioned
+eza JSON document and appears as a file control with a per-run report.
+The same panel carries the two download buttons: `bookmarks.html` is the
+Netscape export any browser can import, and `eza-export.json` is the
+versioned eza document with highlights, captures, saved searches, rules, views
+and clip templates. Both are served with an attachment disposition, so the browser
+session keeps the page and saves the file; the library never leaves the
+server unless the file is moved. CLI equivalents are
+`eza-bookmarks export` / `export --json`.
+
 ## About
 
 The About panel names the software behind the library (the repository, the
-release page, the Apache-2.0 license, third-party notices, and the main
-libraries and typefaces) and carries the data-ownership links: export the
-library as Netscape HTML (`bookmarks.html`) or as the versioned eza JSON
-document (`eza-export.json`). Both download through the browser session. The
-notices file at the repository root is the canonical list, including the
-dependency versions and the SIL Open Font License files under `static/fonts/`.
+release page, the Apache-2.0 license, third-party notices, the main libraries
+and typefaces) and shows the library figures. The data-ownership actions live
+on the import / export panel; About links to it. The notices file at the
+repository root is the canonical list, including the dependency versions and
+the SIL Open Font License files under `static/fonts/`.
 ## Voice
 
 Dry, first person, specific. Numbers are exact and grouped: 8,988 entries, 4,283

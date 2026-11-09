@@ -2551,7 +2551,7 @@ accountIndex m =
         , (AccountWebhooks, "webhooks", "webhooks", Just (length (mWebhooks m)))
         , (AccountShares, "share links", "shares", Just (length (activeShares m)))
         , (AccountRules, "rules", "rules", Just (length (mRules m)))
-        , (AccountImport, "import", "import", Nothing)
+        , (AccountImport, "import / export", "import", Nothing)
         , (AccountCapture, "capture", "capture", Nothing)
         , (AccountAppearance, "appearance", "appearance", Nothing)
         , (AccountAbout, "about", "about", Nothing)
@@ -4057,15 +4057,33 @@ ruleForm m =
 
 importPanel :: Model -> View () () Model Action
 importPanel m =
-    accountPanel "import" "Import" importNote $
+    accountPanel "import" "Import / export" importNote $
         [ H.p_
             [HP.class_ "account-lede"]
-            [text "Bookmarks arrive as a Netscape HTML export from any browser, or as an eza JSON export from another instance. Importing keeps the original save dates and turns folders into tags."]
+            [text "Bring records in from a browser export or another eza instance, or save the whole library to a file. Importing keeps the original save dates and turns folders into tags."]
         ]
             ++ [importIdle m | not (mImporting m)]
             ++ progress
             ++ report
+            ++ [exportBlock]
   where
+    exportBlock =
+        H.div_
+            [HP.class_ "account-form"]
+            [ H.h3_ [HP.class_ "account-h3 display"] [text "Export"]
+            , H.p_
+                [HP.class_ "account-note meta"]
+                [text "The whole library, as a Netscape HTML file any browser can import, or as the versioned eza JSON document. The browser downloads it from this server; nothing leaves the machine unless the file is moved."]
+            , H.div_
+                [HP.class_ "account-actions"]
+                [ H.a_
+                    [HP.class_ "btn btn--strong", HP.href_ "/api/v1/export"]
+                    [text "export bookmarks.html"]
+                , H.a_
+                    [HP.class_ "btn btn--ghost", HP.href_ "/api/v1/export?format=json"]
+                    [text "export eza.json"]
+                ]
+            ]
     importNote
         | mImporting m = "running"
         | otherwise = "no imports recorded in this session"
@@ -4290,14 +4308,14 @@ aboutPanel m =
             [HP.class_ "account-lede"]
             [text "A self-hosted catalogue for one person: one Haskell process, one SQLite file, a WebAssembly client. No sync, no telemetry."]
         , H.dl_ [HP.class_ "account-about-list"] (map aboutRow (aboutFigures m))
-        , H.p_ [HP.class_ "about-sub"] [text "your data"]
         , H.p_
             [HP.class_ "account-note meta"]
-            [text "The browser session downloads the file; nothing leaves the server."]
-        , H.ul_
-            [HP.class_ "about-links"]
-            [ aboutDownload "export html" "bookmarks.html" "/api/v1/export"
-            , aboutDownload "export json" "eza-export.json" "/api/v1/export?format=json"
+            [text "Library files are exported from the import / export panel."]
+        , H.div_
+            [HP.class_ "account-actions"]
+            [ H.button_
+                [HP.class_ "btn btn--sm", HP.type_ "button", HE.onClick (AccountTabSelected AccountImport)]
+                [text "open import / export"]
             ]
         , H.p_ [HP.class_ "about-sub"] [text "source"]
         , H.ul_ [HP.class_ "about-links"] (map aboutLink (aboutSourceLinks m))
@@ -4359,19 +4377,6 @@ aboutLink (label, host, href) =
             , HP.rel_ "noopener noreferrer"
             ]
             [text label, H.span_ [HP.class_ "about-link-host"] [text host]]
-        ]
-
-{- | A same-tab download link. The server sets
-@Content-Disposition: attachment@ on the export routes, so the browser keeps
-the session cookie and saves the file without leaving the page.
--}
-aboutDownload :: MisoString -> MisoString -> MisoString -> View () () Model Action
-aboutDownload label filename href =
-    H.li_
-        []
-        [ H.a_
-            [HP.class_ "about-link", HP.href_ href]
-            [text label, H.span_ [HP.class_ "about-link-host"] [text filename]]
         ]
 
 -- ================================================================ helpers ===

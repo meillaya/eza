@@ -109,6 +109,36 @@ try {
     await page.unroute("**/api/v1/bookmarks/" + bookmarkId);
   }
 
+  // ---------------------------------------------- account import / export ---
+  // The export buttons used to live only on About, where nobody looked; the
+  // import panel is now the single place for both directions.
+  await page.goto(BASE + "/account#import", { waitUntil: "domcontentloaded" });
+  await page.waitForSelector('[data-testid="account-panel-import"]', { timeout: 20000 });
+  const accountPanel = page.locator('[data-testid="account-panel-import"]');
+  const accountPanelText = await accountPanel.innerText();
+  const exportHrefs = await accountPanel
+    .locator('a[href^="/api/v1/export"]')
+    .evaluateAll((links) => links.map((link) => link.getAttribute("href")));
+  check("the account import panel is import / export", /Import \/ export/i.test(accountPanelText), accountPanelText.slice(0, 80));
+  check("the import panel exports HTML", exportHrefs.includes("/api/v1/export"), JSON.stringify(exportHrefs));
+  check("the import panel exports JSON", exportHrefs.includes("/api/v1/export?format=json"), JSON.stringify(exportHrefs));
+  const htmlDownload = page.waitForEvent("download", { timeout: 20000 }).catch(() => null);
+  await accountPanel.getByRole("link", { name: /export bookmarks\.html/i }).click();
+  const htmlFile = await htmlDownload;
+  check(
+    "the HTML export downloads as bookmarks.html",
+    Boolean(htmlFile) && htmlFile.suggestedFilename() === "bookmarks.html",
+    htmlFile ? htmlFile.suggestedFilename() : "no download"
+  );
+  const jsonDownload = page.waitForEvent("download", { timeout: 20000 }).catch(() => null);
+  await accountPanel.getByRole("link", { name: /export eza\.json/i }).click();
+  const jsonFile = await jsonDownload;
+  check(
+    "the JSON export downloads as eza-export.json",
+    Boolean(jsonFile) && /eza-export\.json$/.test(jsonFile.suggestedFilename()),
+    jsonFile ? jsonFile.suggestedFilename() : "no download"
+  );
+
   // ------------------------------------------------ empty query state ---
   // The empty ledger used to print decorative ruled lines and repeat its
   // summary ("nothing filed under this query", "0 entries") at the bottom.

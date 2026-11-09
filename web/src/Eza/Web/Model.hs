@@ -362,6 +362,7 @@ accountTabFromSlug raw =
         "shares" -> AccountShares
         "rules" -> AccountRules
         "import" -> AccountImport
+        "export" -> AccountImport
         "capture" -> AccountCapture
         "appearance" -> AccountAppearance
         "about" -> AccountAbout
