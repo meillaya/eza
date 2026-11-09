@@ -68,10 +68,6 @@ notLoaded =
         , H.p_
             [HP.class_ "empty-body"]
             [text "The archive figures arrive with the client's boot payload. Nothing is printed here until the library has answered."]
-        , H.div_ [HP.class_ "empty-lines", HP.aria_ "hidden" "true"] (replicate 4 (H.i_ [] []))
-        , H.p_
-            [HP.class_ "empty-end meta"]
-            [H.span_ [] [text "figures not loaded"], H.span_ [] [text "the catalogue is still opening"]]
         ]
     ]
 
@@ -105,10 +101,6 @@ emptyIndex =
         , H.p_
             [HP.class_ "empty-body"]
             [text "This library holds no records, so no year has filing days to print. File a record or import a bookmarks file and the index fills itself from the database."]
-        , H.div_ [HP.class_ "empty-lines", HP.aria_ "hidden" "true"] (replicate 4 (H.i_ [] []))
-        , H.p_
-            [HP.class_ "empty-end meta"]
-            [H.span_ [] [text "0 entries"], H.span_ [] [text "the catalogue is ready"]]
         ]
     ]
 

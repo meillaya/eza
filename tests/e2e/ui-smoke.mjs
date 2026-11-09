@@ -109,6 +109,19 @@ try {
     await page.unroute("**/api/v1/bookmarks/" + bookmarkId);
   }
 
+  // ------------------------------------------------ empty query state ---
+  // The empty ledger used to print decorative ruled lines and repeat its
+  // summary ("nothing filed under this query", "0 entries") at the bottom.
+  await page.goto(BASE + "/", { waitUntil: "domcontentloaded" });
+  await page.waitForSelector(SEL.search, { timeout: 20000 });
+  await page.fill(SEL.search, "definitely-no-such-term");
+  await page.waitForSelector(".empty-title", { timeout: 20000 });
+  await page.waitForTimeout(700);
+  const emptyText = await page.locator(".empty").innerText();
+  check("an empty query has no decorative rule lines", (await page.locator(".empty-lines").count()) === 0, "lines=" + (await page.locator(".empty-lines").count()));
+  check("an empty query does not repeat its summary at the bottom", (await page.locator(".empty-end").count()) === 0, "ends=" + (await page.locator(".empty-end").count()));
+  check("an empty query still explains itself", /Nothing is filed under this query/.test(emptyText), emptyText.slice(0, 80).replace(/\n+/g, " "));
+
   const unexpected = errors.filter((entry) => !/status of 500/.test(entry));
   check("no unexpected console errors", unexpected.length === 0, unexpected.slice(0, 3).join(" | ").slice(0, 300));
   if (failures) process.exitCode = 1;

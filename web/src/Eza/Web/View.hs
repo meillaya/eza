@@ -422,10 +422,6 @@ notFoundPage =
                             [text "back to the ledger"]
                         ]
                     ]
-                , H.div_ [HP.class_ "empty-lines", HP.aria_ "hidden" "true"] (replicate 4 (H.i_ [] []))
-                , H.div_
-                    [HP.class_ "empty-end meta"]
-                    [H.span_ [] [text "no such route"], H.span_ [] [text "eza"]]
                 ]
             ]
         ]
@@ -1148,10 +1144,6 @@ freshEmpty =
                     [text "import a bookmarks file"]
                 ]
             ]
-        , H.div_ [HP.class_ "empty-lines", HP.aria_ "hidden" "true"] (replicate 6 (H.i_ [] []))
-        , H.div_
-            [HP.class_ "empty-end meta"]
-            [H.span_ [] [text "nothing filed yet"], H.span_ [] [text "0 of 0 entries"]]
         ]
 
 filteredEmpty :: Model -> View () () Model Action
@@ -1190,10 +1182,6 @@ filteredEmpty m =
                        ]
                 )
             ]
-        , H.div_ [HP.class_ "empty-lines", HP.aria_ "hidden" "true"] (replicate 4 (H.i_ [] []))
-        , H.div_
-            [HP.class_ "empty-end meta"]
-            [H.span_ [] [text "nothing filed under this query"], H.span_ [] [text "0 entries"]]
         ]
   where
     tryLink label =
@@ -1222,10 +1210,6 @@ inboxEmpty _ =
                     [text "file a record"]
                 ]
             ]
-        , H.div_ [HP.class_ "empty-lines", HP.aria_ "hidden" "true"] (replicate 4 (H.i_ [] []))
-        , H.div_
-            [HP.class_ "empty-end meta"]
-            [H.span_ [] [text "nothing unread"], H.span_ [] [text "0 unread entries"]]
         ]
 
 errorState :: Model -> View () () Model Action
@@ -1253,10 +1237,6 @@ errorState m =
                     [text "open maintenance"]
                 ]
             ]
-        , H.div_ [HP.class_ "empty-lines", HP.aria_ "hidden" "true"] (replicate 4 (H.i_ [] []))
-        , H.div_
-            [HP.class_ "empty-end meta"]
-            [H.span_ [] [text "no entries loaded"], H.span_ [] [text "the catalogue is untouched"]]
         ]
 
 {- | The parser drops an unknown is: value and a year: or day: token whose

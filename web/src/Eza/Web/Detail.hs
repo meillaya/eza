@@ -50,9 +50,6 @@ loadingView =
         , H.p_
             [HP.class_ "empty-body"]
             [text "The record is being read from the server."]
-        , H.div_
-            [HP.class_ "empty-lines", HP.aria_ "hidden" "true"]
-            (replicate 4 (H.i_ [] []))
         ]
 
 failedView :: Model -> View () () Model Action
@@ -76,9 +73,6 @@ failedView m =
                 [text "back to the library"]
                 : retryButton m
             )
-        , H.div_
-            [HP.class_ "empty-lines", HP.aria_ "hidden" "true"]
-            (replicate 3 (H.i_ [] []))
         ]
 
 retryButton :: Model -> [View () () Model Action]

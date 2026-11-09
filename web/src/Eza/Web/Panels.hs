@@ -178,10 +178,8 @@ emptyPanel ::
     MisoString ->
     MisoString ->
     [View () () Model Action] ->
-    MisoString ->
-    MisoString ->
     View () () Model Action
-emptyPanel kicker title body extra endLeft endRight =
+emptyPanel kicker title body extra =
     H.div_
         [HP.class_ "empty"]
         ( [ H.p_ [HP.class_ "empty-kicker meta"] [text kicker]
@@ -189,11 +187,6 @@ emptyPanel kicker title body extra endLeft endRight =
           , H.p_ [HP.class_ "empty-body"] [text body]
           ]
             ++ extra
-            ++ [ H.div_ [HP.class_ "empty-lines", HP.aria_ "hidden" "true"] (replicate 4 (H.i_ [] []))
-               , H.p_
-                    [HP.class_ "empty-end meta"]
-                    [H.span_ [] [text endLeft], H.span_ [] [text endRight]]
-               ]
         )
 
 quietNote :: MisoString -> View () () Model Action
@@ -210,9 +203,6 @@ panelError kicker title maybeMessage =
         , H.h2_ [HP.class_ "empty-title display"] [text title]
         , H.p_ [HP.class_ "empty-body"] [text (fromMaybe "The server did not answer." maybeMessage)]
         , H.p_ [HP.class_ "empty-try"] [smallAction "try again" ReloadRoute]
-        , H.p_
-            [HP.class_ "empty-end meta"]
-            [H.span_ [] [text "the library is untouched"], H.span_ [] [text "retry"]]
         ]
 
 -- | The same for the account panels, at the smaller panel scale.
@@ -303,8 +293,6 @@ graphBody m
             "No neighbourhood to draw."
             "Select a record on the whole graph, then switch the scope back to local. Local mode keeps the root record and everything within the chosen depth."
             []
-            "local graph"
-            "select a record"
         ]
     | Just layout <- activeGraphLayout m
     , glRecordCount layout == 0
@@ -314,8 +302,6 @@ graphBody m
             "The library is empty."
             "The graph draws records and tags from the whole library. Save a record and it appears here."
             []
-            "0 records"
-            "nothing to draw"
         ]
     | Just layout <- activeGraphLayout m =
         ( [graphToolbar m]
@@ -1039,8 +1025,6 @@ viewsBody m =
                         "No views yet."
                         "Create a graph view from the graph settings, save the current ledger search with save as view, or import a view JSON document."
                         []
-                        "0 views"
-                        "nothing saved"
                     ]
                 else map (viewRow m) (mViews m)
            )
@@ -1288,8 +1272,6 @@ dedupBody m
             "No duplicates."
             "No record shares a canonical URL, and no two records on one source share a normalised title."
             []
-            "0 groups"
-            "0 records to merge"
         ]
     | otherwise =
         dedupAfterBanner m
