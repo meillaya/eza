@@ -331,12 +331,12 @@ spec = describe "M3a multi-user isolation" $ do
                     encoded `shouldSatisfy` BS.isInfixOf aliceB64
                     encoded `shouldSatisfy` (not . BS.isInfixOf bobB64)
 
-    it "registers an already-claimed legacy database as user 1 on startup"
+    it "registers an already-claimed legacy database under its own username"
         $ withTestServerConfig
             ( \cfg -> do
                 legacy <- Db.openDb (cfgDbPath cfg)
                 stored <- Password.hashPassword (cfgArgon2 cfg) "legacy password"
-                _ <- Auth.completeSetup legacy "owner" stored
+                _ <- Auth.completeSetup legacy "legacyuser" stored
                 Sqlite.close legacy
             )
         $ \server -> do
@@ -344,7 +344,7 @@ spec = describe "M3a multi-user isolation" $ do
             length users `shouldBe` 1
             case users of
                 (user : _) -> do
-                    Control.cuUsername user `shouldBe` "owner"
+                    Control.cuUsername user `shouldBe` "legacyuser"
                     Control.cuRole user `shouldBe` Control.RoleAdmin
                     Control.cuDbPath user `shouldBe` cfgDbPath (tsConfig server)
                     Control.cuCredentialHandle user `shouldSatisfy` isJust
@@ -353,10 +353,27 @@ spec = describe "M3a multi-user isolation" $ do
             exists `shouldBe` True
             freshDbExists <- doesFileExist (cfgUsersDir (tsConfig server) </> "1" </> "eza.db")
             freshDbExists `shouldBe` False
-            (session, csrf) <- loginAs server "owner" "legacy password"
+            (session, csrf) <- loginAs server "legacyuser" "legacy password"
             session `shouldSatisfy` T.isPrefixOf "u1_"
             boot <- httpRequest server "GET" "/api/v1/boot" (cookieHeaders session csrf) Nothing
             boot `shouldHaveStatus` 200
+
+    it "repairs the placeholder owner name from an earlier migration" $
+        withTestServerConfig
+            ( \cfg -> do
+                legacy <- Db.openDb (cfgDbPath cfg)
+                stored <- Password.hashPassword (cfgArgon2 cfg) "legacy password"
+                _ <- Auth.completeSetup legacy "meillaya" stored
+                Sqlite.close legacy
+                control <- Control.openControlDb (cfgControlDbPath cfg)
+                _ <- Control.createUser control "owner" (cfgDbPath cfg) Control.RoleAdmin Nothing
+                Sqlite.close control
+            )
+        $ \server -> do
+            users <- Control.listUsers (tsControl server)
+            map Control.cuUsername users `shouldBe` ["meillaya"]
+            (session, _csrf) <- loginAs server "meillaya" "legacy password"
+            session `shouldSatisfy` T.isPrefixOf "u1_"
 
     it "opens one slot per account and reuses it across reads and writes" $
         withTwoUsers $ \server _ _ -> do

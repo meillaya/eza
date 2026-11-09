@@ -297,7 +297,14 @@ bootstrapControl cfg control = do
     when (accounts == 0) $ do
         claimed <- legacyDatabaseClaimed cfg
         when claimed $ do
-            created <- Control.createUser control "owner" (cfgDbPath cfg) RoleAdmin Nothing
+            -- The legacy account's own username is authoritative. Using a
+            -- placeholder here made the migrated account impossible to log
+            -- into, because login resolves the control row by username.
+            legacyName <- legacyUsername cfg
+            let username = case fmap T.strip legacyName of
+                    Just name | not (T.null name) -> name
+                    _ -> "owner"
+            created <- Control.createUser control username (cfgDbPath cfg) RoleAdmin Nothing
             case created of
                 Left err ->
                     ioError (userError ("could not register the existing database at " <> cfgDbPath cfg <> ": " <> show err))
@@ -312,6 +319,63 @@ bootstrapControl cfg control = do
                             <> T.unpack (cuUsername user)
                             <> ", admin); the file was left in place"
                         )
+    -- Repair the placeholder name written by the first migration build, so an
+    -- installation that already ran it can log in again without hand-editing
+    -- the control database.
+    repairLegacyAccountName cfg control
+
+{- | The username stored in an existing user database, if it has the old or
+new app_state row. Missing files, the Python layout, and unclaimed databases
+return Nothing.
+-}
+legacyUsername :: Config -> IO (Maybe Text)
+legacyUsername cfg = usernameInDatabase (cfgDbPath cfg)
+
+usernameInDatabase :: FilePath -> IO (Maybe Text)
+usernameInDatabase path = do
+    exists <- doesFileExist path
+    if not exists
+        then pure Nothing
+        else do
+            result <-
+                try
+                    ( bracket (Sqlite.open path) Sqlite.close $ \conn -> do
+                        rows <- Sqlite.query_ conn "SELECT username FROM app_state WHERE id = 1" :: IO [Only Text]
+                        pure (case rows of [Only name] -> Just name; _ -> Nothing)
+                    ) ::
+                    IO (Either SomeException (Maybe Text))
+            pure (either (const Nothing) id result)
+
+{- | If a migration from before the username fix registered the legacy library
+as the placeholder @owner@, restore the name the database actually has. Runs
+on every start and is a no-op once the names agree.
+-}
+repairLegacyAccountName :: Config -> Connection -> IO ()
+repairLegacyAccountName _cfg control = do
+    users <- Control.listUsers control
+    forM_ users $ \user ->
+        when (T.strip (cuUsername user) == "owner") $ do
+            stored <- usernameInDatabase (cuDbPath user)
+            case fmap T.strip stored of
+                Just name
+                    | not (T.null name)
+                    , name /= cuUsername user -> do
+                        repaired <- Control.setUsername control (cuId user) name
+                        case repaired of
+                            Right () ->
+                                hPutStrLn
+                                    stderr
+                                    ( "eza: repaired the migrated account username from "
+                                        <> T.unpack name
+                                        <> " in the library database"
+                                    )
+                            Left err ->
+                                hPutStrLn
+                                    stderr
+                                    ( "eza: could not repair the migrated account username: "
+                                        <> show err
+                                    )
+                _ -> pure ()
 
 {- | True when the legacy single-user database exists and its @app_state@ says
 an account was claimed. A missing table (the old Python layout) or an
