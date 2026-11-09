@@ -54,7 +54,7 @@
     installButton = document.createElement("button");
     installButton.type = "button";
     installButton.className = "install-fab";
-    installButton.textContent = "Install the catalogue";
+    installButton.textContent = "Install eza";
     installButton.title = "Install eza as an app";
     installButton.addEventListener("click", function () {
       var promptEvent = deferredPrompt;

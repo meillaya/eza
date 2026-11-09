@@ -280,7 +280,6 @@ kbd {
 .prov{display:flex;align-items:baseline;gap:16px;margin:0}
 .prov-item{white-space:nowrap}
 .prov .n{color:var(--ink)}
-.prov-rule{width:1px;height:11px;background:var(--rule);align-self:center}
 .mast-rule{height:1px;background:var(--rule)}
 .query{display:flex;align-items:center;gap:14px;padding:8px 0 8px}
 .query-mark{font-family:var(--mono);font-size:20px;line-height:26px;color:var(--accent)}
@@ -1144,11 +1143,7 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
   padding: 0 var(--pad) 40px;
 }
 .save-spread {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
-  gap: 72px;
-  align-items: start;
-  max-width: 1120px;
+  max-width: 760px;
   margin: 0 auto;
   padding: 22px 0 0;
 }
@@ -1220,34 +1215,12 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
   min-height: 88px;
   resize: vertical;
 }
-.save-hint {
-  margin: 0;
-  font-family: var(--read);
-  font-style: italic;
-  font-size: 14px;
-  line-height: 20px;
-  color: var(--muted);
-}
-
 .save-warning {
   margin: 22px 0 0;
   padding: 14px 16px 15px;
   background: var(--paper);
   border: 1px solid var(--rule);
   border-left: 2px solid var(--accent);
-}
-.save-warning-kicker {
-  display: block;
-  margin: 0 0 5px;
-  font-family: var(--serif);
-  font-variant-caps: all-small-caps;
-  letter-spacing: .08em;
-  font-size: 13px;
-  line-height: 16px;
-  font-weight: 500;
-  color: var(--accent);
-  font-optical-sizing: none;
-  font-variation-settings: "opsz" 40;
 }
 .save-warning-body {
   margin: 0 0 9px;
@@ -1263,7 +1236,6 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-.save-warning-actions { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin: 0; }
 
 .save-actions {
   display: flex;
@@ -1271,67 +1243,7 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
   justify-content: flex-end;
   gap: 18px;
   margin-top: 28px;
-  padding-top: 16px;
-  border-top: 1px solid var(--rule);
 }
-.save-status {
-  margin: 10px 0 0;
-  min-height: 18px;
-  text-align: right;
-  color: var(--muted);
-}
-
-.save-notes { padding: 4px 0 0; }
-.save-notes-title {
-  margin: 0 0 10px;
-  font-size: 13px;
-  line-height: 16px;
-  font-weight: 500;
-  letter-spacing: .07em;
-  color: var(--muted);
-  border-bottom: 1px solid var(--rule);
-  padding-bottom: 6px;
-}
-.save-rules { margin: 0 0 20px; }
-.save-rule {
-  display: grid;
-  grid-template-columns: 92px minmax(0, 1fr);
-  gap: 12px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--rule-soft);
-}
-.save-rule dt {
-  font-family: var(--serif);
-  font-variant-caps: all-small-caps;
-  letter-spacing: .07em;
-  font-size: 13px;
-  line-height: 19px;
-  font-weight: 500;
-  color: var(--muted);
-  font-optical-sizing: none;
-  font-variation-settings: "opsz" 40;
-}
-.save-rule dd {
-  margin: 0;
-  font-family: var(--read);
-  font-size: 14px;
-  line-height: 20px;
-  color: var(--ink);
-}
-.save-note {
-  margin: 0 0 18px;
-  font-family: var(--read);
-  font-size: 15px;
-  line-height: 24px;
-  color: var(--muted);
-}
-.save-colophon {
-  margin: 0;
-  padding-top: 10px;
-  border-top: 1px solid var(--rule);
-  color: var(--muted);
-}
-
 /* ============================================================
    OVERLAY - delete records
    ============================================================ */
@@ -1381,7 +1293,6 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
   .ledg-app .main { grid-template-columns: 220px minmax(0, 1fr); gap: 28px; }
   .ledg-app .spark i { width: 2px; }
   .ledg-app .ledger[data-bulk="true"] { --cols: 108px minmax(0, 1fr) 172px 78px; }
-  .save-spread { gap: 48px; grid-template-columns: minmax(0, 1fr) 280px; }
   /* the tags column needs the wide sheet; below 1200 it lives in the field card */
   .ledg-app .row .c-tags,
   .ledg-app .lh > span:nth-child(5),
@@ -1416,8 +1327,7 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
   .ledg-app { --cols: 114px minmax(0, 1fr) 152px 78px; }
   .ledg-app .ledger[data-bulk="true"] { --cols: 114px minmax(0, 1fr) 152px 78px; }
   .srch-inner { max-width: none; }
-  .save-spread { grid-template-columns: minmax(0, 1fr); gap: 36px; max-width: 720px; }
-  .save-notes { border-top: 1px solid var(--rule); padding-top: 22px; }
+  .save-spread { max-width: 720px; }
   .save-title { font-size: 36px; line-height: 38px; }
 }
 
@@ -1574,7 +1484,7 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
   .ledg-save .wordmark { font-size: 30px; line-height: 32px; }
   .ledg-save .prov { display: none; }
   .save-scroll { padding: 0 var(--pad) 36px; }
-  .save-spread { padding: 14px 0 0; gap: 28px; }
+  .save-spread { padding: 14px 0 0; }
   .save-sheet { padding: 24px 20px 22px; border-left: 0; border-right: 0; }
   .save-title { font-size: 32px; line-height: 35px; }
   .save-lede { font-size: 16px; line-height: 25px; margin-bottom: 22px; }
@@ -1588,9 +1498,6 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
     margin-left: auto;
   }
   .ledg-save .btn { min-height: 44px; }
-  .save-warning-actions .try-link { min-height: 44px; display: inline-flex; align-items: center; }
-  .save-status { text-align: left; }
-  .save-rule { grid-template-columns: 96px minmax(0, 1fr); }
 }
 
 /* ---- print: the ledger is the page ---- */
@@ -4093,13 +4000,16 @@ main.auth, main.share { min-height: 100vh; display: flex; flex-direction: column
    ============================================================ */
 @media (max-width: 767px) {
   .sections {
-    flex-wrap: wrap;
-    overflow-x: visible;
-    -webkit-mask-image: none;
-    mask-image: none;
+    flex-wrap: nowrap;
+    overflow-x: auto;
     padding-bottom: 2px;
+    scrollbar-width: none;
   }
-  .sections a { padding: 7px 10px 6px; }
+  .sections::-webkit-scrollbar { display: none; }
+  .sections a { flex: none; padding: 7px 10px 6px; }
+  /* the palette input holds one line: give the placeholder the room it needs */
+  .slip-head { padding: 10px 14px; gap: 10px; }
+  .slip-input { font-size: 15px; }
   .account-nav {
     flex-wrap: wrap;
     overflow-x: visible;
@@ -4147,6 +4057,8 @@ main.auth, main.share { min-height: 100vh; display: flex; flex-direction: column
    action, and the remove cross. The block had no rules before, so the
    buttons fell back to the browser defaults. */
 .facet-list { list-style: none; margin: 0; padding: 0; }
+.rail-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; margin-top: 6px; }
+.rail-actions .facet-all { margin-top: 0; }
 .facet-list .facet { display: flex; align-items: baseline; gap: 6px; }
 .facet-name {
   flex: 1; min-width: 0; text-align: left; background: none; border: 0; padding: 2px 0;
@@ -4253,7 +4165,7 @@ main.auth, main.share { min-height: 100vh; display: flex; flex-direction: column
 }
 .sections-signout:hover { color: var(--accent); }
 
-.m-nav-a--signout { font-size: 11px; color: var(--muted); }
+.m-nav-a--signout { color: var(--muted); }
 
 .account-head {
   display: flex;

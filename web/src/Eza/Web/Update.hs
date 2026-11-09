@@ -112,7 +112,7 @@ handleApiError err = do
     case aeStatus err of
         Just 401 -> do
             putModel (\m -> m{mSignedOut = True})
-            notify "Session expired. Sign in again to continue." ToastError
+            notify "Session expired. Sign in again." ToastError
         Just 404 -> do
             putModel (\m -> m{mNotice = Just message})
             notify message ToastInfo
@@ -141,7 +141,7 @@ setDocumentTitle title = do
 
 documentTitle :: Route -> MisoString
 documentTitle route = case route of
-    Index -> "eza, the catalogue"
+    Index -> "eza"
     _ -> routeTitle route <> " · eza"
 
 {- | Read the whole library count again after a write, so the masthead and
@@ -659,7 +659,7 @@ updateModel = \case
     QuickSaveFailed err -> handleApiError err
     CopyBookmarklet bookmarklet
         | T.null (T.strip (fromMisoString bookmarklet)) ->
-            notify "Bookmarklet is unavailable until the app knows its origin." ToastInfo
+            notify "Bookmarklet unavailable." ToastInfo
         | otherwise -> withSink $ \sink -> do
             copiedValue <- jsgf "ezaCopy" (bookmarklet :: MisoString)
             copied <- fromMaybe False <$> (fromJSVal copiedValue :: IO (Maybe Bool))
@@ -2263,14 +2263,14 @@ updateModel = \case
                 if not (mConfirmPrune m)
                     then do
                         putModel (\x -> x{mConfirmPrune = True})
-                        notify "Prune is destructive (undo available). Click again to confirm." ToastInfo
+                        notify "Prune writes an undo snapshot. Click again to confirm." ToastInfo
                     else do
                         putModel (\x -> x{mMaintBusy = True, mConfirmPrune = False})
                         runPrune (mPruneSel m) PruneDone MaintFailed
     PruneCancel -> putModel (\m -> m{mConfirmPrune = False})
     PruneDone pruned -> do
         putModel (\m -> m{mMaintBusy = False})
-        notify (ms ("Pruned " <> show pruned <> " bookmark(s). Undo is available")) ToastOk
+        notify (ms ("Pruned " <> show pruned <> " record(s). Undo is available")) ToastOk
         fetchPruneCandidates PruneLoaded PruneFailed
         refreshTags
         refreshStats
@@ -2296,7 +2296,7 @@ updateModel = \case
                     , mDedupMergeAllReport = Nothing
                     }
             )
-        notify (ms ("Restored " <> show restored <> " bookmark(s)")) ToastOk
+        notify (ms ("Restored " <> show restored <> " record(s)")) ToastOk
         fetchPruneCandidates PruneLoaded PruneFailed
         dedupFirstPage DedupLoaded DedupFailed
         reloadList
@@ -2329,7 +2329,7 @@ updateModel = \case
     RecoveryRegenerate -> regenerateRecovery RecoveryLoaded AccountFailed
     RecoveryLoaded codes -> do
         putModel (\m -> m{mRecoveryCodes = codes})
-        notify "New recovery codes generated. Store them now." ToastOk
+        notify "New recovery codes. Store them now." ToastOk
     CredentialRenamed credentialId nickname -> do
         renameCredential credentialId (fromMisoString nickname) (ToastAdd "Passkey renamed" ToastOk) CredentialOpFailed
     CredentialDeleted credentialId -> deleteCredential credentialId (CredentialRemoved credentialId) CredentialOpFailed
@@ -2630,7 +2630,7 @@ updateModel = \case
                     , mTokenSecret = Just (raw, info)
                     }
             )
-        notify "Token created. Copy it now, it is shown only once." ToastOk
+        notify "Token created. Copy it now; it is shown once." ToastOk
     TokenCreateFailed err -> do
         putModel (\m -> m{mTokenBusy = False})
         handleApiError err
