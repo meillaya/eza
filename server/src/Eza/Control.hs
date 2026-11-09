@@ -22,6 +22,7 @@ module Eza.Control (
     userRoleText,
     parseUserRole,
     ControlError (..),
+    ControlWriteResult (..),
     openControlDb,
     initControlDb,
     controlSchemaVersion,
@@ -34,8 +35,10 @@ module Eza.Control (
     countEnabledAdmins,
     createUser,
     setUserDisabled,
+    setUserDisabledGuarded,
     setUserLastLogin,
     setUserRole,
+    setUserRoleGuarded,
     setUsername,
     updateUserDbPath,
     deleteUserRow,
@@ -47,7 +50,7 @@ import Control.Exception (SomeException, try)
 import Control.Monad (when)
 import Crypto.Random (getRandomBytes)
 import Data.ByteString (ByteString)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
@@ -58,6 +61,17 @@ import System.FilePath (takeDirectory)
 import Eza.User (UserRole (..), parseUserRole, userRoleText)
 
 -- -------------------------------------------------------------------- types ---
+
+{- | Outcome of a guarded account change. The last-enabled-admin rules are
+enforced by the same conditional UPDATE that writes the row, so an invariant
+check and its write cannot interleave with another process's write the way a
+separate count-then-update can.
+-}
+data ControlWriteResult
+    = ControlWriteOk
+    | ControlWriteMissing
+    | ControlWriteLastAdmin
+    deriving (Show, Eq)
 
 data ControlUser = ControlUser
     { cuId :: Int
@@ -256,6 +270,53 @@ setUserRole conn userId role = do
         execute conn "UPDATE users SET role = ? WHERE id = ?" (userRoleText role, userId)
         changed <- changes conn
         pure (changed > 0)
+
+{- | Enable or disable an account with the last-enabled-admin rule enforced by
+the same UPDATE. Returns 'ControlWriteLastAdmin' when the write was refused
+because it would leave no enabled admin, and 'ControlWriteMissing' when the id
+does not exist. Safe to call from the CLI and the server at the same time: the
+count is part of the statement, not a preceding read.
+-}
+setUserDisabledGuarded :: Connection -> Int -> Bool -> IO ControlWriteResult
+setUserDisabledGuarded conn userId disabled = do
+    if disabled
+        then do
+            now <- epoch
+            withImmediateTransaction conn $ do
+                execute
+                    conn
+                    "UPDATE users SET disabled_at = ? WHERE id = ? AND (disabled_at IS NOT NULL OR role <> 'admin' OR (SELECT COUNT(*) FROM users WHERE disabled_at IS NULL AND role = 'admin') > 1)"
+                    (Just now :: Maybe Int, userId)
+                result <- changes conn
+                if result > 0 then pure ControlWriteOk else classify conn userId
+        else withImmediateTransaction conn $ do
+            execute conn "UPDATE users SET disabled_at = NULL WHERE id = ?" (Only userId)
+            result <- changes conn
+            pure (if result > 0 then ControlWriteOk else ControlWriteMissing)
+
+{- | Change an account's role with the last-enabled-admin rule enforced in the
+same UPDATE. Promoting is always allowed; demoting or renaming the role of the
+last enabled admin is refused.
+-}
+setUserRoleGuarded :: Connection -> Int -> UserRole -> IO ControlWriteResult
+setUserRoleGuarded conn userId role =
+    withImmediateTransaction conn $ do
+        execute
+            conn
+            "UPDATE users SET role = ? WHERE id = ? AND (role = ? OR role <> 'admin' OR ? <> 'member' OR disabled_at IS NOT NULL OR (SELECT COUNT(*) FROM users WHERE disabled_at IS NULL AND role = 'admin') > 1)"
+            (userRoleText role, userId, userRoleText role, userRoleText role)
+        result <- changes conn
+        if result > 0 then pure ControlWriteOk else classify conn userId
+
+-- | Why a guarded account write changed no row.
+classify :: Connection -> Int -> IO ControlWriteResult
+classify conn userId = do
+    found <- lookupUserById conn userId
+    pure $ case found of
+        Nothing -> ControlWriteMissing
+        Just user
+            | cuRole user == RoleAdmin && isNothing (cuDisabledAt user) -> ControlWriteLastAdmin
+            | otherwise -> ControlWriteMissing
 
 setUserLastLogin :: Connection -> Int -> IO ()
 setUserLastLogin conn userId = do

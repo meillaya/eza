@@ -8,6 +8,7 @@ admin protection, and deletion are exercised end to end.
 module CliSpec (spec) where
 
 import Control.Exception (bracket, finally, try)
+import Control.Monad (forM_)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import qualified Database.SQLite.Simple as Sqlite
@@ -26,6 +27,7 @@ import Eza.Config (Config (..))
 import Eza.Control (ControlUser (..))
 import qualified Eza.Control as Control
 import qualified Eza.Db as Db
+import qualified Eza.Password as Password
 import Eza.User (UserRole (..))
 import TestHarness (testAuthConfig, testConfig)
 
@@ -155,6 +157,127 @@ spec = describe "CLI" $ do
             output `shouldSatisfy` T.isInfixOf "enabled"
             output `shouldSatisfy` T.isInfixOf "bob"
             output `shouldSatisfy` T.isInfixOf "disabled"
+
+    it "prints --help for every subcommand" $ do
+        forM_
+            [ ["serve", "--help"]
+            , ["import", "--help"]
+            , ["users", "add", "--help"]
+            , ["backup", "--help"]
+            , ["restore", "--help"]
+            ]
+            $ \args -> case parseCliArgs args of
+                Left (_, ExitSuccess) -> pure ()
+                Left (_, code) -> expectationFailure (show args <> " exited " <> show code)
+                Right _ -> expectationFailure (show args <> " parsed as a command instead of printing help")
+
+    it "reports a healthcheck failure as an exit code, not an exception" $
+        withCliConfig $ \cfg -> do
+            result <- try (runCli cfg (textSource "") Healthcheck) :: IO (Either ExitCode ())
+            case result of
+                Left (ExitFailure _) -> pure ()
+                Left ExitSuccess -> expectationFailure "a healthcheck with no server must fail"
+                Right () -> expectationFailure "a healthcheck with no server must fail"
+
+    it "refuses the legacy fallback unless the legacy database is a claimed eza database" $
+        withCliConfig $ \cfg -> do
+            expectCliFailure (runCli cfg (textSource "") (Stats Nothing))
+            -- An existing but unclaimed database is not enough.
+            bracket (Db.openDb (cfgDbPath cfg)) Sqlite.close (\_ -> pure ())
+            expectCliFailure (runCli cfg (textSource "") (Stats Nothing))
+            -- A claimed legacy database keeps the single-user workflow working.
+            bracket (Db.openDb (cfgDbPath cfg)) Sqlite.close $ \conn -> do
+                passwordHash <- Password.hashPassword (cfgArgon2 cfg) "legacy password"
+                _ <- Auth.completeSetup conn "legacy" passwordHash
+                pure ()
+            runOk cfg (Stats Nothing)
+
+    it "requires --yes before restoring a stamp" $
+        withCliConfig $ \cfg -> do
+            expectCliFailure
+                ( runCli
+                    cfg
+                    (textSource "")
+                    ( RestoreCmd
+                        RestoreOpts
+                            { rstStamp = cfgDataDir cfg </> "missing"
+                            , rstDryRun = False
+                            , rstYes = False
+                            , rstForce = False
+                            }
+                    )
+                )
+
+    it "backs up and restores through the command line" $
+        withCliConfig $ \cfg -> do
+            addCliUser cfg "alice" RoleAdmin
+            alice <- mustLookup cfg "alice"
+            bracket (Db.openDb (cuDbPath alice)) Sqlite.close $ \conn -> do
+                _ <- Bookmarks.insertBookmark conn "https://alice.example/cli" "Cli" []
+                pure ()
+            ((), backupOutput) <- captureOutput (runCli cfg (textSource "") (Backup Nothing))
+            case [T.drop 8 line | line <- T.lines backupOutput, "backup: " `T.isPrefixOf` line] of
+                (stamp : _) -> do
+                    ((), planOutput) <-
+                        captureOutput
+                            ( runCli
+                                cfg
+                                (textSource "")
+                                (RestoreCmd RestoreOpts{rstStamp = T.unpack stamp, rstDryRun = True, rstYes = False, rstForce = False})
+                            )
+                    planOutput `shouldSatisfy` T.isInfixOf "restore plan:"
+                    planOutput `shouldSatisfy` T.isInfixOf "dry run only"
+                    ((), restoreOutput) <-
+                        captureOutput
+                            ( runCli
+                                cfg
+                                (textSource "")
+                                (RestoreCmd RestoreOpts{rstStamp = T.unpack stamp, rstDryRun = False, rstYes = True, rstForce = False})
+                            )
+                    restoreOutput `shouldSatisfy` T.isInfixOf "restore: done"
+                    bracket (Db.openDb (cuDbPath alice)) Sqlite.close $ \conn ->
+                        (Sqlite.query_ conn "SELECT COUNT(*) FROM bookmarks" :: IO [Sqlite.Only Int])
+                            `shouldReturn` [Sqlite.Only 1]
+                [] -> expectationFailure "the backup output did not name the stamp"
+
+    it "fails verify when the FTS index drifted" $
+        withCliConfig $ \cfg -> do
+            addCliUser cfg "alice" RoleAdmin
+            alice <- mustLookup cfg "alice"
+            bracket (Db.openDb (cuDbPath alice)) Sqlite.close $ \conn -> do
+                _ <- Bookmarks.insertBookmark conn "https://alice.example/verify" "Verify" []
+                Sqlite.execute_
+                    conn
+                    "INSERT INTO bookmarks_fts(rowid,title,description,url,note_body,extracted_text) VALUES (999,'Ghost','','https://ghost','','')"
+            result <- try (runCli cfg (textSource "") (Verify (Just "alice"))) :: IO (Either ExitCode ())
+            case result of
+                Left (ExitFailure _) -> pure ()
+                Left ExitSuccess -> expectationFailure "verify must fail on a corrupt FTS index"
+                Right () -> expectationFailure "verify must fail on a corrupt FTS index"
+
+    it "rejects a set-password rename that collides and keeps the old login working" $
+        withCliConfig $ \cfg -> do
+            addCliUser cfg "alice" RoleAdmin
+            addCliUser cfg "bob" RoleMember
+            expectCliFailure
+                ( runCli
+                    cfg
+                    (textSource "renamed alice password")
+                    ( SetPasswordCmd
+                        SetPasswordOpts
+                            { spUsername = Just "bob"
+                            , spUser = Just "alice"
+                            , spResetSessions = False
+                            , spDisable2fa = False
+                            }
+                    )
+                )
+            alice <- mustLookup cfg "alice"
+            bracket (Db.openDb (cuDbPath alice)) Sqlite.close $ \conn -> do
+                account <- Auth.loadAccount conn
+                Auth.acctUsername account `shouldBe` "alice"
+                fresh <- Auth.verifyPasswordLogin conn (testAuthConfig cfg) "alice" (initialPassword "alice")
+                authStatus fresh `shouldBe` 200
 
 -- ---------------------------------------------------------------------------
 -- Helpers

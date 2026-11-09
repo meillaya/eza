@@ -203,6 +203,7 @@ module Eza.Clip (
     templatesPayload,
 
     -- * Schema
+    captureColumns,
     clipSchema,
 
     -- * Template API re-exports
@@ -1155,6 +1156,15 @@ templatesPayload conn = do
 -- ---------------------------------------------------------------------------
 -- Schema
 -- ---------------------------------------------------------------------------
+
+{- | Every column of @captures@ in schema order. "Eza.Undo" reuses this list
+for the v12 @undo_capture_rows@ side table, so a snapshot copies and restores
+the complete capture row; a schema change must update this list and the v12
+table together.
+-}
+captureColumns :: Text
+captureColumns =
+    "id,bookmark_id,url,canonical_url,title,author,site,description,published,language,image_url,favicon_url,content_markdown,rendered_markdown,content_text,content_html,selection,tags,template_id,template_name,source,client,idempotency_key,request_hash,extractor,extractor_version,metadata_json,word_count,parse_time_ms,captured_at,created_at"
 
 {- | Migration v8 statements for @captures@ and @clip_templates@. Append to
 "Eza.Db" as a new migration version; never edit a shipped migration.

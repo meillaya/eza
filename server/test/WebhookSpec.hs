@@ -15,7 +15,7 @@ import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -31,10 +31,12 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
-import Eza.Bookmarks (deleteBookmark, insertBookmark, updateBookmark)
+import Eza.Bookmarks (BulkAction (..), bulkUpdate, deleteBookmark, insertBookmark, updateBookmark)
 import Eza.Clip (ClipRequest (..), SaveClipResult (..), emptyClipMetadata, saveClip)
 import Eza.Db
+import Eza.Dedup (mergeBookmarks, mergeUrlDuplicatesAll)
 import Eza.Events (recordEvent)
+import Eza.Types (DedupMergeAllReport (..))
 import Eza.Webhook
 import Eza.Webhooks
 
@@ -131,6 +133,37 @@ spec = do
                     Left _ -> pure ()
                     Right () -> expectationFailure "the duplicate insert should fail"
                 length <$> eventKinds conn `shouldReturn` beforeCount
+
+        it "records bookmark.updated for bulk tag and mark-read writes" $
+            withTempDb $ \conn -> do
+                first <- rawBookmark conn "https://example.test/bulk-events-a" "Bulk A"
+                second <- rawBookmark conn "https://example.test/bulk-events-b" "Bulk B"
+                _ <- bulkUpdate conn (BulkAddTags ["bulk-tag"]) [first]
+                _ <- bulkUpdate conn (BulkMarkRead True) [second]
+                updatedIds <- eventBookmarkIds conn "bookmark.updated"
+                updatedIds `shouldBe` [first, second]
+
+        it "records deleted for absorbed rows and updated for the keeper on a merge" $
+            withTempDb $ \conn -> do
+                keeper <- rawBookmark conn "http://dup.test/page" "Keeper"
+                absorbed <- rawBookmark conn "https://dup.test/page" "Absorbed"
+                merged <- mergeBookmarks conn keeper [absorbed]
+                merged `shouldBe` 1
+                deletedIds <- eventBookmarkIds conn "bookmark.deleted"
+                updatedIds <- eventBookmarkIds conn "bookmark.updated"
+                deletedIds `shouldBe` [absorbed]
+                updatedIds `shouldBe` [keeper]
+
+        it "records deleted and updated rows for merge-all" $
+            withTempDb $ \conn -> do
+                keeper <- rawBookmark conn "http://dup-all.test/page" "Keeper"
+                absorbed <- rawBookmark conn "https://dup-all.test/page" "Absorbed"
+                report <- mergeUrlDuplicatesAll conn
+                dmGroups report `shouldBe` 1
+                deletedIds <- eventBookmarkIds conn "bookmark.deleted"
+                updatedIds <- eventBookmarkIds conn "bookmark.updated"
+                deletedIds `shouldBe` [absorbed]
+                updatedIds `shouldBe` [keeper]
 
         it "records clip.created once and not again on an idempotent replay" $
             withTempDb $ \conn -> do
@@ -282,8 +315,8 @@ spec = do
                         [] -> expectationFailure "expected one delivery"
                     length <$> listDeliveries conn (whId webhook) 20 `shouldReturn` 2
 
-    describe "migration v11" $ do
-        it "migrates a v10 database to v11 and preserves its rows" $
+    describe "migration v12" $ do
+        it "migrates a v11 database to v12 and preserves its rows" $
             withSystemTempDirectory "eza-webhook-migrate" $ \dir -> do
                 let path = dir </> "test.db"
                 bracket (Sqlite.open path) Sqlite.close $ \conn -> do
@@ -299,18 +332,21 @@ spec = do
                             <> schemaV8
                             <> schemaV9
                             <> schemaV10
+                            <> schemaV11
                         )
-                    Sqlite.execute_ conn "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://example.test/v10','V10','example.test',1,1,1)"
-                    Sqlite.execute_ conn "INSERT INTO views (slug,name,kind,definition_json,is_default,created_at,updated_at) VALUES ('v10','V10','graph','{}',1,1,1)"
-                    Sqlite.execute_ conn "PRAGMA user_version = 10"
+                    Sqlite.execute_ conn "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://example.test/v11','V11','example.test',1,1,1)"
+                    Sqlite.execute_ conn "INSERT INTO views (slug,name,kind,definition_json,is_default,created_at,updated_at) VALUES ('v11','V11','graph','{}',1,1,1)"
+                    Sqlite.execute_ conn "INSERT INTO captures (bookmark_id,url,captured_at,created_at) VALUES (1,'https://example.test/v11',1,1)"
+                    Sqlite.execute_ conn "PRAGMA user_version = 11"
                 migrated <- openDb path
                 version <- schemaVersion migrated
                 version `shouldBe` targetSchemaVersion
-                version `shouldBe` 11
+                version `shouldBe` 12
                 queryScalar migrated "SELECT COUNT(*) FROM bookmarks" `shouldReturn` (1 :: Int)
                 queryScalar migrated "SELECT COUNT(*) FROM views" `shouldReturn` (1 :: Int)
+                queryScalar migrated "SELECT COUNT(*) FROM captures" `shouldReturn` (1 :: Int)
                 tables <- tableNames migrated
-                mapM_ (\name -> name `elem` tables `shouldBe` True) ["event_log", "webhooks", "webhook_deliveries"]
+                mapM_ (\name -> name `elem` tables `shouldBe` True) ["event_log", "webhooks", "webhook_deliveries", "undo_capture_rows"]
                 queryScalar migrated "SELECT event_cursor FROM app_state WHERE id = 1" `shouldReturn` (0 :: Int)
                 Sqlite.close migrated
 
@@ -374,6 +410,33 @@ deliveryView conn webhookId = do
 makeDeliveriesDue :: Sqlite.Connection -> IO ()
 makeDeliveriesDue conn =
     Sqlite.execute_ conn "UPDATE webhook_deliveries SET available_at = 0 WHERE state = 'queued'"
+
+rawBookmark :: Sqlite.Connection -> Text -> Text -> IO Int
+rawBookmark conn url title = do
+    Sqlite.execute
+        conn
+        "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES (?,?,?,?,?,?)"
+        (url, title, ("example.test" :: Text), (1 :: Int), (1 :: Int), (1 :: Int))
+    fromIntegral <$> Sqlite.lastInsertRowId conn
+
+-- | The @data.id@ of every outbox event of one kind, in insertion order.
+eventBookmarkIds :: Sqlite.Connection -> Text -> IO [Int]
+eventBookmarkIds conn kind = do
+    rows <-
+        Sqlite.query
+            conn
+            "SELECT payload_json FROM event_log WHERE kind = ? ORDER BY id"
+            (Only kind) ::
+            IO [Only Text]
+    pure (mapMaybe payloadId [raw | Only raw <- rows])
+  where
+    payloadId raw = do
+        value <- either (const Nothing) Just (eitherDecodeStrict' (TE.encodeUtf8 raw)) :: Maybe Value
+        case value of
+            Object objectValue -> case KeyMap.lookup "id" objectValue of
+                Just (Number number) -> Just (round number)
+                _ -> Nothing
+            _ -> Nothing
 
 eventKinds :: Sqlite.Connection -> IO [Text]
 eventKinds conn = do

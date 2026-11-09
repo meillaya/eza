@@ -17,12 +17,12 @@ import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 import Eza.Bookmarks
-import Eza.Db (openDb, queryScalar, schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaVersion, targetSchemaVersion)
+import Eza.Db (ftsIntegrityCheck, openDb, queryScalar, schemaV1, schemaV10, schemaV11, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaV7, schemaV8, schemaV9, schemaVersion, targetSchemaVersion)
 import Eza.Dedup (mergeBookmarks)
 import Eza.Highlights (createHighlight, listHighlights)
 import Eza.Tags (deleteTag, deleteTagWithLinks, mergeTags, renameTag)
-import Eza.Types (BookmarkDetail (..), Highlight (..), SearchPage (..))
-import Eza.Undo (recordUndo, recordUndoIds, snapshotBookmarks, undoLast)
+import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), Highlight (..), SearchPage (..))
+import Eza.Undo (recordUndo, recordUndoIds, snapshotBookmarks, undoLast, undoLastDetailed)
 
 spec :: Spec
 spec = do
@@ -276,6 +276,143 @@ spec = do
                 bdTitle detail `shouldBe` "Legacy"
                 bdTags detail `shouldBe` ["legacy-tag"]
 
+    describe "schema v12" $ do
+        it "migrates v11 to v12 and mirrors every captures column in undo_capture_rows" $
+            withSystemTempDirectory "eza-v12-migrate" $ \dir -> do
+                let path = dir </> "test.db"
+                bracket (Sqlite.open path) Sqlite.close $ \conn -> do
+                    mapM_
+                        (Sqlite.execute_ conn)
+                        ( schemaV1
+                            <> schemaV2
+                            <> schemaV3
+                            <> schemaV4
+                            <> schemaV5
+                            <> schemaV6
+                            <> schemaV7
+                            <> schemaV8
+                            <> schemaV9
+                            <> schemaV10
+                            <> schemaV11
+                        )
+                    Sqlite.execute_ conn "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://example.test/v11','V11','example.test',1,1,1)"
+                    Sqlite.execute_ conn "INSERT INTO captures (bookmark_id,url,captured_at,created_at) VALUES (1,'https://example.test/v11',1,1)"
+                    Sqlite.execute_ conn "PRAGMA user_version = 11"
+                migrated <- openDb path
+                version <- schemaVersion migrated
+                version `shouldBe` 12
+                version `shouldBe` targetSchemaVersion
+                books <- queryScalar migrated "SELECT COUNT(*) FROM bookmarks"
+                books `shouldBe` 1
+                captureCount <- queryScalar migrated "SELECT COUNT(*) FROM captures"
+                captureCount `shouldBe` 1
+                tables <- tableNames migrated
+                ("undo_capture_rows" `elem` tables) `shouldBe` True
+                captureColumns <- columnNames migrated "captures"
+                undoCaptureColumns <- columnNames migrated "undo_capture_rows"
+                filter (/= "snapshot_id") undoCaptureColumns `shouldBe` captureColumns
+                close migrated
+
+    describe "capture undo" $ do
+        it "restores the captured page when a delete is undone" $
+            withDb $ \conn -> do
+                bid <- addBookmark conn "https://example.test/captured" "Captured"
+                addCapture conn bid "the captured html" "the captured text"
+                _ <- deleteBookmark conn bid
+                countRows conn "SELECT COUNT(*) FROM captures" `shouldReturn` 0
+                _ <- undoLast conn
+                captured <- captureRow conn bid
+                captured `shouldBe` (Just ("the captured html", "the captured text"))
+                -- The capture is still attached to its own bookmark, not lost.
+                orphaned <- countRows conn "SELECT COUNT(*) FROM captures WHERE bookmark_id <> ?"
+                orphaned `shouldBe` 0
+
+        it "restores the absorbed capture when a merge is undone" $
+            withDb $ \conn -> do
+                keep <- addBookmark conn "https://example.test/cap-keep" "Keep"
+                absorbed <- addBookmark conn "https://example.test/cap-absorbed" "Absorbed"
+                addCapture conn absorbed "absorbed html" "absorbed text"
+                merged <- mergeBookmarks conn keep [absorbed]
+                merged `shouldBe` 1
+                countRows conn "SELECT COUNT(*) FROM captures" `shouldReturn` 0
+                _ <- undoLast conn
+                captured <- captureRow conn absorbed
+                captured `shouldBe` (Just ("absorbed html", "absorbed text"))
+
+    describe "FTS after restores" $ do
+        it "does not leave phantom search terms after a merge undo" $
+            withDb $ \conn -> do
+                keep <- addBookmark conn "https://example.test/fts-keep" "Keeper"
+                absorbed <- addBookmark conn "https://example.test/fts-absorbed" "Absorbed"
+                setNote conn keep ""
+                setNote conn absorbed "phantomword"
+                _ <- mergeBookmarks conn keep [absorbed]
+                _ <- undoLast conn
+                keeperAfter <- requireBookmark conn keep
+                bdNoteBody keeperAfter `shouldBe` ""
+                -- Only the restored absorbed row may match the term; the
+                -- keeper's pre-merge note was empty.
+                page <- listBookmarks conn (defaultListQuery{lqQ = "phantomword"})
+                spTotal page `shouldBe` 1
+                map bsId (spItems page) `shouldBe` [absorbed]
+                check <- ftsIntegrityCheck conn
+                check `shouldSatisfy` isRight
+
+        it "keeps the index consistent through a bulk mark-read undo" $
+            withDb $ \conn -> do
+                first <- addBookmark conn "https://example.test/bulk-fts-a" "Uniqueterm A"
+                second <- addBookmark conn "https://example.test/bulk-fts-b" "Uniqueterm B"
+                result <- bulkUpdate conn (BulkMarkRead True) [first, second]
+                case result of
+                    Left err -> expectationFailure (T.unpack err)
+                    Right _ -> pure ()
+                _ <- undoLast conn
+                page <- listBookmarks conn (defaultListQuery{lqQ = "Uniqueterm"})
+                spTotal page `shouldBe` 2
+                check <- ftsIntegrityCheck conn
+                check `shouldSatisfy` isRight
+
+        it "reports a deliberately corrupted FTS index" $
+            withDb $ \conn -> do
+                _ <- addBookmark conn "https://example.test/corrupt" "Corrupt"
+                clean <- ftsIntegrityCheck conn
+                clean `shouldSatisfy` isRight
+                execute_
+                    conn
+                    "INSERT INTO bookmarks_fts(rowid,title,description,url,note_body,extracted_text) VALUES (999,'Ghost','','https://ghost','','')"
+                check <- ftsIntegrityCheck conn
+                check `shouldSatisfy` isLeft
+
+    describe "URL conflicts on restore" $ do
+        it "does not clobber a newer row that re-used the deleted URL" $
+            withDb $ \conn -> do
+                oldId <- addBookmark conn "https://example.test/reused" "Old title"
+                _ <- deleteBookmark conn oldId
+                newId <- addBookmark conn "https://example.test/reused" "New title"
+                newId `shouldSatisfy` (/= oldId)
+                (restored, skipped) <- undoLastDetailed conn
+                restored `shouldBe` 0
+                skipped `shouldBe` 1
+                survivor <- requireBookmark conn newId
+                bdTitle survivor `shouldBe` "New title"
+                countRows conn "SELECT COUNT(*) FROM bookmarks" `shouldReturn` 1
+                page <- listBookmarks conn (defaultListQuery{lqQ = "New title"})
+                spTotal page `shouldBe` 1
+
+    describe "bulk events and counters" $ do
+        it "snapshots mark-all-above so undo restores the read flags" $
+            withDb $ \conn -> do
+                first <- addBookmark conn "https://example.test/above-a" "Above A"
+                second <- addBookmark conn "https://example.test/above-b" "Above B"
+                execute conn "UPDATE bookmarks SET is_read = 0 WHERE id IN (?,?)" [first, second]
+                updated <- markAllAbove conn (Just first)
+                updated `shouldBe` 2
+                readFlags <- readFlagsFor conn [first, second]
+                readFlags `shouldBe` [1, 1]
+                _ <- undoLast conn
+                restoredFlags <- readFlagsFor conn [first, second]
+                restoredFlags `shouldBe` [0, 0]
+
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
@@ -316,6 +453,41 @@ hasLink :: Connection -> Int -> Int -> IO Bool
 hasLink conn source target = do
     rows <- query conn "SELECT 1 FROM links WHERE source_id = ? AND target_id = ?" (source, target) :: IO [Only Int]
     pure (not (null rows))
+
+addCapture :: Connection -> Int -> Text -> Text -> IO ()
+addCapture conn bid html text = do
+    execute
+        conn
+        "INSERT INTO captures (bookmark_id,url,content_html,content_text,captured_at,created_at) VALUES (?,?,?,?,?,?)"
+        (bid, ("https://example.test/captured" :: Text), html, text, (100 :: Int), (100 :: Int))
+
+captureRow :: Connection -> Int -> IO (Maybe (Text, Text))
+captureRow conn bid = do
+    rows <-
+        query
+            conn
+            "SELECT content_html,content_text FROM captures WHERE bookmark_id = ? ORDER BY id DESC LIMIT 1"
+            (Only bid) ::
+            IO [(Text, Text)]
+    pure (case rows of (row : _) -> Just row; [] -> Nothing)
+
+readFlagsFor :: Connection -> [Int] -> IO [Int]
+readFlagsFor conn ids =
+    map fromOnly
+        <$> ( query
+                conn
+                (Query ("SELECT is_read FROM bookmarks WHERE id IN (" <> T.intercalate "," (replicate (length ids) "?") <> ") ORDER BY id"))
+                ids ::
+                IO [Only Int]
+            )
+
+isLeft :: Either a b -> Bool
+isLeft (Left _) = True
+isLeft (Right _) = False
+
+isRight :: Either a b -> Bool
+isRight (Right _) = True
+isRight (Left _) = False
 
 countRows :: Connection -> Text -> IO Int
 countRows conn sql = do

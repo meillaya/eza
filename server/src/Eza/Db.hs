@@ -24,20 +24,26 @@ module Eza.Db (
     schemaV9,
     schemaV10,
     schemaV11,
+    schemaV12,
+    databaseClaimed,
+    ftsIntegrityCheck,
     DbError (..),
 ) where
 
 import Control.Exception (Exception, SomeException, bracket, throwIO, try)
 import Control.Monad (forM_, when)
+import Crypto.Random (getRandomBytes)
+import qualified Data.ByteString as BS
+import Data.Char (isAlphaNum)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
 import qualified Database.SQLite.Simple as Sqlite
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Environment (lookupEnv)
-import System.FilePath (takeDirectory, (</>))
+import System.FilePath (takeDirectory, takeFileName, (</>))
 
 import Eza.Clip (clipSchema)
 import Eza.Views (seedDefaultViews)
@@ -48,7 +54,7 @@ newtype DbError = DbError Text
 instance Exception DbError
 
 targetSchemaVersion :: Int
-targetSchemaVersion = 11
+targetSchemaVersion = 12
 
 {- | Open the database and bring the schema up to date. Every open also makes
 sure the default graph view exists, so a fresh or migrated database always
@@ -72,15 +78,21 @@ migrate dbPath conn = do
     version <- schemaVersion conn
     when (version > targetSchemaVersion) $
         throwIO (DbError ("database schema is newer than this binary: " <> T.pack (show version)))
-    when (version > 0) (ensureCompatible conn version)
+    ensureCompatible conn version
     when (version > 0 && version < targetSchemaVersion) (preMigrationBackup dbPath conn version)
     applyFrom conn version
 
 -- A v1-v6 database without app_state belongs to the old Python application.
+-- So does a never-stamped (user_version 0) Python database: its bookmarks
+-- table predates the added_at column the new schema requires.
 ensureCompatible :: Sqlite.Connection -> Int -> IO ()
 ensureCompatible conn version = do
     hasAppState <- tableExists conn "app_state"
-    when (not hasAppState && version >= 1 && version <= 6) $
+    hasBookmarks <- tableExists conn "bookmarks"
+    hasAddedAt <- if hasBookmarks then columnExists conn "bookmarks" "added_at" else pure True
+    let versionedPython = not hasAppState && version >= 1 && version <= 6
+        unstampedPython = version == 0 && hasBookmarks && not hasAddedAt
+    when (versionedPython || unstampedPython) $
         throwIO (DbError "legacy Python eza DB detected; the new app expects a fresh database (data/eza.db). Import the HTML export instead.")
 
 applyFrom :: Sqlite.Connection -> Int -> IO ()
@@ -102,13 +114,32 @@ applyFrom conn start = forM_ (filter ((> start) . fst) migrations) $ \(version, 
             Left err -> pure (Left (T.pack (show err)))
             Right () -> runStatements rest
 
+{- | Copy the database before a migration with @VACUUM INTO@ and verify the
+copy. The name carries the database file name and random bytes: every user
+database in one installation shares @EZA_BACKUP_DIR@, so a name that only had
+the version and the second would collide when two accounts migrate within the
+same second. @Eza.Backup.pruneBackups@ removes these files on the normal keep
+window.
+-}
 preMigrationBackup :: FilePath -> Sqlite.Connection -> Int -> IO ()
 preMigrationBackup dbPath conn fromVersion = do
     configured <- lookupEnv "EZA_BACKUP_DIR"
     let backupDir = fromMaybe (takeDirectory dbPath </> "backups") configured
     createDirectoryIfMissing True backupDir
     now <- floor <$> getPOSIXTime :: IO Integer
-    let target = backupDir </> ("pre-migration-v" <> show fromVersion <> "-" <> show now <> ".db")
+    suffix <- randomHex
+    let target =
+            backupDir
+                </> ( "pre-migration-v"
+                        <> show fromVersion
+                        <> "-"
+                        <> sanitizeName (takeFileName dbPath)
+                        <> "-"
+                        <> show now
+                        <> "-"
+                        <> suffix
+                        <> ".db"
+                    )
         escaped = T.replace "'" "''" (T.pack target)
     Sqlite.execute_ conn (Query ("VACUUM INTO '" <> escaped <> "'"))
     bracket (Sqlite.open target) Sqlite.close $ \backup -> do
@@ -116,6 +147,63 @@ preMigrationBackup dbPath conn fromVersion = do
         case rows of
             [Only "ok"] -> pure ()
             _ -> throwIO (DbError ("backup verification failed: " <> T.pack target))
+
+-- | A short random hex suffix for a file name.
+randomHex :: IO String
+randomHex = do
+    bytes <- getRandomBytes 6 :: IO BS.ByteString
+    pure (concatMap hexByte (BS.unpack bytes))
+  where
+    hexByte byte =
+        let (high, low) = (byte `div` 16, byte `mod` 16)
+         in [hexDigit high, hexDigit low]
+    hexDigit value
+        | value < 10 = toEnum (fromEnum '0' + fromIntegral value :: Int)
+        | otherwise = toEnum (fromEnum 'a' + fromIntegral (value - 10) :: Int)
+
+-- | Keep a file name safe for a backup directory entry.
+sanitizeName :: String -> String
+sanitizeName = map (\c -> if isAlphaNum c || c `elem` ("-._" :: String) then c else '_')
+
+{- | True when the database at the path is an eza database whose account was
+claimed (@app_state.setup_claimed = 1@). Missing, malformed, and non-eza files
+return False without creating or migrating anything; the CLI uses this to tell
+an unclaimed legacy file from a real account.
+-}
+databaseClaimed :: FilePath -> IO Bool
+databaseClaimed path = do
+    exists <- doesFileExist path
+    if not exists
+        then pure False
+        else do
+            result <-
+                try
+                    ( bracket (Sqlite.open path) Sqlite.close $ \conn -> do
+                        rows <- query_ conn "SELECT setup_claimed FROM app_state WHERE id = 1" :: IO [Only Int]
+                        pure (case rows of [Only n] -> n /= 0; _ -> False)
+                    ) ::
+                    IO (Either SomeException Bool)
+            pure (either (const False) id result)
+
+{- | Check the FTS5 index against the content table. The bare
+@integrity-check@ command validates the index structure; the second form with
+@rank = 1@ also re-reads the external content table and raises
+@database disk image is malformed@ when the index and @bookmarks@ have drifted
+apart (for example after a restore that bypassed the sync triggers). Returns
+the error text, or @Right ()@ when the index is consistent.
+-}
+ftsIntegrityCheck :: Sqlite.Connection -> IO (Either Text ())
+ftsIntegrityCheck conn = do
+    structure <-
+        try (Sqlite.execute_ conn "INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('integrity-check')") ::
+            IO (Either SomeException ())
+    case structure of
+        Left err -> pure (Left (T.pack (show err)))
+        Right () -> do
+            content <-
+                try (Sqlite.execute_ conn "INSERT INTO bookmarks_fts(bookmarks_fts, rank) VALUES('integrity-check', 1)") ::
+                    IO (Either SomeException ())
+            pure (either (Left . T.pack . show) Right content)
 
 schemaVersion :: Sqlite.Connection -> IO Int
 schemaVersion conn = do
@@ -137,6 +225,16 @@ tableExists conn name = do
     rows <- Sqlite.query conn "SELECT name FROM sqlite_master WHERE type='table' AND name=?" (Only (T.pack name)) :: IO [Only Text]
     pure (not (null rows))
 
+columnExists :: Sqlite.Connection -> String -> String -> IO Bool
+columnExists conn table column = do
+    rows <-
+        Sqlite.query
+            conn
+            "SELECT name FROM pragma_table_info(?) WHERE name = ?"
+            (T.pack table, T.pack column) ::
+            IO [Only Text]
+    pure (not (null rows))
+
 checkFts :: Sqlite.Connection -> IO ()
 checkFts conn = do
     options <- Sqlite.query_ conn "PRAGMA compile_options" :: IO [Only Text]
@@ -150,6 +248,7 @@ pragmas =
     [ "PRAGMA journal_mode = WAL"
     , "PRAGMA synchronous = NORMAL"
     , "PRAGMA foreign_keys = ON"
+    , "PRAGMA recursive_triggers = ON"
     , "PRAGMA busy_timeout = 5000"
     , "PRAGMA temp_store = MEMORY"
     , "PRAGMA mmap_size = 268435456"
@@ -157,7 +256,20 @@ pragmas =
     ]
 
 migrations :: [(Int, [Query])]
-migrations = [(1, schemaV1), (2, schemaV2), (3, schemaV3), (4, schemaV4), (5, schemaV5), (6, schemaV6), (7, schemaV7), (8, schemaV8), (9, schemaV9), (10, schemaV10), (11, schemaV11)]
+migrations =
+    [ (1, schemaV1)
+    , (2, schemaV2)
+    , (3, schemaV3)
+    , (4, schemaV4)
+    , (5, schemaV5)
+    , (6, schemaV6)
+    , (7, schemaV7)
+    , (8, schemaV8)
+    , (9, schemaV9)
+    , (10, schemaV10)
+    , (11, schemaV11)
+    , (12, schemaV12)
+    ]
 
 schemaV1 :: [Query]
 schemaV1 =
@@ -330,4 +442,20 @@ schemaV11 =
     , "CREATE TABLE IF NOT EXISTS webhook_deliveries (     id INTEGER PRIMARY KEY AUTOINCREMENT,     webhook_id INTEGER NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,     event_id INTEGER NOT NULL,     state TEXT NOT NULL DEFAULT 'queued',     attempts INTEGER NOT NULL DEFAULT 0,     available_at INTEGER NOT NULL,     last_error TEXT NOT NULL DEFAULT '',     created_at INTEGER NOT NULL,     UNIQUE(webhook_id, event_id)     )"
     , "CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_ready ON webhook_deliveries(state, available_at)"
     , "ALTER TABLE app_state ADD COLUMN event_cursor INTEGER NOT NULL DEFAULT 0"
+    ]
+
+{- | v12 makes undo lossless for browser-clipper captures.
+
+Schema v8 added @captures@ with @ON DELETE CASCADE@ from bookmarks, but the v7
+side snapshot only copied bookmarks, tags, highlights and wikilinks. Deleting,
+pruning or merging a bookmark therefore destroyed its capture history even
+though undo restored the bookmark row. @undo_capture_rows@ mirrors every
+column of @captures@ so a side snapshot restore can put the capture rows back
+in the same transaction. The primary key and the cascade from
+@undo_snapshots@ match the other @undo_*_rows@ tables, so discarding a snapshot
+removes its capture copies too.
+-}
+schemaV12 :: [Query]
+schemaV12 =
+    [ "CREATE TABLE IF NOT EXISTS undo_capture_rows (     snapshot_id INTEGER NOT NULL REFERENCES undo_snapshots(id) ON DELETE CASCADE,     id INTEGER NOT NULL,     bookmark_id INTEGER NOT NULL,     url TEXT NOT NULL DEFAULT '',     canonical_url TEXT NOT NULL DEFAULT '',     title TEXT NOT NULL DEFAULT '',     author TEXT NOT NULL DEFAULT '',     site TEXT NOT NULL DEFAULT '',     description TEXT NOT NULL DEFAULT '',     published TEXT NOT NULL DEFAULT '',     language TEXT NOT NULL DEFAULT '',     image_url TEXT NOT NULL DEFAULT '',     favicon_url TEXT NOT NULL DEFAULT '',     content_markdown TEXT NOT NULL DEFAULT '',     rendered_markdown TEXT NOT NULL DEFAULT '',     content_text TEXT NOT NULL DEFAULT '',     content_html TEXT NOT NULL DEFAULT '',     selection TEXT NOT NULL DEFAULT '',     tags TEXT NOT NULL DEFAULT '[]',     template_id INTEGER,     template_name TEXT NOT NULL DEFAULT '',     source TEXT NOT NULL DEFAULT '',     client TEXT NOT NULL DEFAULT '',     idempotency_key TEXT NOT NULL DEFAULT '',     request_hash TEXT NOT NULL DEFAULT '',     extractor TEXT NOT NULL DEFAULT '',     extractor_version TEXT NOT NULL DEFAULT '',     metadata_json TEXT NOT NULL DEFAULT '{}',     word_count INTEGER NOT NULL DEFAULT 0,     parse_time_ms INTEGER NOT NULL DEFAULT 0,     captured_at INTEGER NOT NULL,     created_at INTEGER NOT NULL,     PRIMARY KEY (snapshot_id, id)     )"
     ]

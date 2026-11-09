@@ -19,7 +19,7 @@ module Eza.Import (
     decodeHtml,
 ) where
 
-import Control.Monad (forM)
+import Control.Monad (forM, forM_)
 import Data.Aeson (encode)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -38,6 +38,7 @@ import Database.SQLite.Simple
 import Text.HTML.TagSoup
 import Text.Read (readMaybe)
 
+import Eza.Jobs (enqueueJob)
 import Eza.Types (ImportReport (..))
 import Eza.Url (dedupeKey, hostOf, isHttpUrl, normalizeUrl)
 
@@ -522,6 +523,11 @@ importParsed conn opts parsed = do
             tagIds <- tagIdMap conn
             [Only linksBefore] <- query_ conn "SELECT COUNT(*) FROM bookmark_tags" :: IO [Only Int]
             (nInserted, nRaced, insertedTargets) <- insertNewItems conn opts now (reverse (csNew classified))
+            -- Newly imported bookmarks get a background extraction job, so a
+            -- fresh import grows reading copies and metadata without the user
+            -- having to discover `enrich --all`. Matched rows keep whatever
+            -- state they already had.
+            forM_ insertedTargets $ \(bid, _tags) -> enqueueJob conn "enrich" bid
             let matchedTargets = [(bid, iiTags item) | (bid, item) <- csMatched classified]
                 targets = matchedTargets <> insertedTargets
                 pairs =

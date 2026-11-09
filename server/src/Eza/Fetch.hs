@@ -19,6 +19,10 @@ module Eza.Fetch (
     postJson,
     documentOptions,
     anyOptions,
+    assertPublicHost,
+    assertPublicHostPolicy,
+    publicV4,
+    publicV6,
 ) where
 
 import Control.Exception (SomeException, try)
@@ -110,42 +114,53 @@ postJson opts rawUrl extraHeaders body
                     case requestResult of
                         Left (err :: SomeException) -> pure (Left (FetchInvalidUrl (T.pack (show err))))
                         Right request -> do
-                            allowed <- assertPublicHost opts (TE.decodeUtf8 (host request))
+                            allowed <- checkHost (host request)
                             case allowed of
                                 Left err -> pure (Left err)
-                                Right () -> do
-                                    let baseHeaders =
-                                            [ (hContentType, "application/json")
-                                            , (hUserAgent, userAgent)
-                                            , (hAccept, "application/json")
-                                            ]
-                                        headers = baseHeaders <> filter (\(name, _) -> name `notElem` map fst baseHeaders) extraHeaders
-                                        prepared =
-                                            request
-                                                { method = "POST"
-                                                , redirectCount = 0
-                                                , responseTimeout = responseTimeoutMicro (foTimeoutMs opts * 1000)
-                                                , requestHeaders = headers
-                                                , requestBody = RequestBodyBS body
-                                                }
-                                    outcome <-
-                                        try
-                                            ( withResponse prepared (foManager opts) $ \response -> do
-                                                let code = statusCode (responseStatus response)
-                                                drainBody 0 (responseBody response)
-                                                pure code
-                                            )
-                                    pure $ case outcome of
-                                        Left (err :: HttpException) -> Left (FetchNetwork (T.pack (show err)))
-                                        Right code
-                                            | code >= 200 && code < 300 -> Right code
-                                            | code >= 300 && code < 400 -> Left FetchRedirect
-                                            | otherwise -> Left (FetchHttp code)
+                                Right () -> sendPost request
   where
     stripped = T.strip rawUrl
     schemeNotHttp rawScheme =
         let scheme = map toLower (takeWhile (/= ':') rawScheme)
          in scheme /= "http" && scheme /= "https"
+    {- Resolve once more right before the request is handed to the HTTP
+    manager. The manager resolves the name again when it opens the
+    connection, so this narrows the resolve-then-connect window; it cannot
+    close it without pinning the peer address.
+    -}
+    checkHost rawHost = do
+        first <- assertPublicHost opts (TE.decodeUtf8 rawHost)
+        case first of
+            Left err -> pure (Left err)
+            Right () -> assertPublicHost opts (TE.decodeUtf8 rawHost)
+    sendPost request = do
+        let baseHeaders =
+                [ (hContentType, "application/json")
+                , (hUserAgent, userAgent)
+                , (hAccept, "application/json")
+                ]
+            headers = baseHeaders <> filter (\(name, _) -> name `notElem` map fst baseHeaders) extraHeaders
+            prepared =
+                request
+                    { method = "POST"
+                    , redirectCount = 0
+                    , responseTimeout = responseTimeoutMicro (foTimeoutMs opts * 1000)
+                    , requestHeaders = headers
+                    , requestBody = RequestBodyBS body
+                    }
+        outcome <-
+            try
+                ( withResponse prepared (foManager opts) $ \response -> do
+                    let code = statusCode (responseStatus response)
+                    drainBody 0 (responseBody response)
+                    pure code
+                )
+        pure $ case outcome of
+            Left (err :: HttpException) -> Left (FetchNetwork (T.pack (show err)))
+            Right code
+                | code >= 200 && code < 300 -> Right code
+                | code >= 300 && code < 400 -> Left FetchRedirect
+                | otherwise -> Left (FetchHttp code)
     drainBody total reader
         | total >= foMaxBytes opts = pure ()
         | otherwise = do
@@ -173,56 +188,63 @@ fetchUrl opts rawUrl
                                 allowed <- assertPublicHost opts hostName
                                 case allowed of
                                     Left err -> pure (Left err)
+                                    {- Resolve once more immediately before the
+                                    request; see the note in 'postJson'.
+                                    -}
                                     Right () -> do
-                                        responseResult <-
-                                            try
-                                                ( httpLbs
-                                                    ( request
-                                                        { method = foMethod opts
-                                                        , redirectCount = 0
-                                                        , responseTimeout = responseTimeoutMicro (foTimeoutMs opts * 1000)
-                                                        , requestHeaders = mergeHeaders (requestHeaders request)
-                                                        }
-                                                    )
-                                                    (foManager opts)
-                                                )
-                                        case responseResult of
-                                            Left (err :: HttpException) -> pure (Left (FetchNetwork (T.pack (show err))))
-                                            Right response ->
-                                                let code = statusCode (responseStatus response)
-                                                    headers = responseHeaders response
-                                                 in if code >= 300 && code < 400
-                                                        then case lookup hLocation headers of
-                                                            Nothing -> pure (Left (FetchHttp code))
-                                                            Just location -> case resolve url (TE.decodeUtf8 location) of
-                                                                Nothing -> pure (Left (FetchInvalidUrl (TE.decodeUtf8 location)))
-                                                                Just next -> go (hops + 1) next
-                                                        else
-                                                            if code >= 400
-                                                                then pure (Left (FetchHttp code))
-                                                                else do
-                                                                    let fullBody = LBS.toStrict (LBS.take (fromIntegral (foMaxBytes opts) + 1) (responseBody response))
-                                                                        truncated = BS.length fullBody > foMaxBytes opts
-                                                                        body = BS.take (foMaxBytes opts) fullBody
-                                                                        rawContentType = maybe "" TE.decodeUtf8 (lookup hContentType headers)
-                                                                        (contentType, headerCharset) = parseContentType rawContentType
-                                                                    if foDocument opts && BS.null body
-                                                                        then pure (Left FetchEmpty)
-                                                                        else
-                                                                            if foDocument opts && not (supportedContentType contentType)
-                                                                                then pure (Left (FetchUnsupported contentType))
+                                        recheck <- assertPublicHost opts hostName
+                                        case recheck of
+                                            Left err -> pure (Left err)
+                                            Right () -> do
+                                                responseResult <-
+                                                    try
+                                                        ( httpLbs
+                                                            ( request
+                                                                { method = foMethod opts
+                                                                , redirectCount = 0
+                                                                , responseTimeout = responseTimeoutMicro (foTimeoutMs opts * 1000)
+                                                                , requestHeaders = mergeHeaders (requestHeaders request)
+                                                                }
+                                                            )
+                                                            (foManager opts)
+                                                        )
+                                                case responseResult of
+                                                    Left (err :: HttpException) -> pure (Left (FetchNetwork (T.pack (show err))))
+                                                    Right response ->
+                                                        let code = statusCode (responseStatus response)
+                                                            headers = responseHeaders response
+                                                         in if code >= 300 && code < 400
+                                                                then case lookup hLocation headers of
+                                                                    Nothing -> pure (Left (FetchHttp code))
+                                                                    Just location -> case resolve url (TE.decodeUtf8 location) of
+                                                                        Nothing -> pure (Left (FetchInvalidUrl (TE.decodeUtf8 location)))
+                                                                        Just next -> go (hops + 1) next
+                                                                else
+                                                                    if code >= 400
+                                                                        then pure (Left (FetchHttp code))
+                                                                        else do
+                                                                            let fullBody = LBS.toStrict (LBS.take (fromIntegral (foMaxBytes opts) + 1) (responseBody response))
+                                                                                truncated = BS.length fullBody > foMaxBytes opts
+                                                                                body = BS.take (foMaxBytes opts) fullBody
+                                                                                rawContentType = maybe "" TE.decodeUtf8 (lookup hContentType headers)
+                                                                                (contentType, headerCharset) = parseContentType rawContentType
+                                                                            if foDocument opts && BS.null body
+                                                                                then pure (Left FetchEmpty)
                                                                                 else
-                                                                                    pure
-                                                                                        ( Right
-                                                                                            FetchPage
-                                                                                                { fpFinalUrl = url
-                                                                                                , fpStatus = code
-                                                                                                , fpContentType = contentType
-                                                                                                , fpCharset = detectCharset body headerCharset
-                                                                                                , fpBody = body
-                                                                                                , fpTruncated = truncated
-                                                                                                }
-                                                                                        )
+                                                                                    if foDocument opts && not (supportedContentType contentType)
+                                                                                        then pure (Left (FetchUnsupported contentType))
+                                                                                        else
+                                                                                            pure
+                                                                                                ( Right
+                                                                                                    FetchPage
+                                                                                                        { fpFinalUrl = url
+                                                                                                        , fpStatus = code
+                                                                                                        , fpContentType = contentType
+                                                                                                        , fpCharset = detectCharset body headerCharset
+                                                                                                        , fpBody = body
+                                                                                                        , fpTruncated = truncated
+                                                                                                        }
+                                                                                                )
                   where
                     scheme = map toLower (takeWhile (/= ':') (uriScheme uri))
 
@@ -317,9 +339,14 @@ orElse Nothing fallback = fallback
 -- Private-network guard
 -- ---------------------------------------------------------------------------
 
-assertPublicHost :: FetchOptions -> Text -> IO (Either FetchError ())
-assertPublicHost opts host
-    | foAllowPrivate opts = pure (Right ())
+{- | The public-host policy shared by every egress path. Resolves the host and
+rejects loopback, private, link-local, CGNAT, documentation, and multicast
+addresses unless the caller opted in. Exposed so callers that spawn their
+own network client (the snapshot tool) can enforce the same policy.
+-}
+assertPublicHostPolicy :: Bool -> Text -> IO (Either FetchError ())
+assertPublicHostPolicy allowPrivate host
+    | allowPrivate = pure (Right ())
     | T.null host = pure (Left (FetchInvalidUrl host))
     | otherwise = do
         result <- try (getAddrInfo (Just defaultHints{addrSocketType = Stream}) (Just (T.unpack host)) Nothing)
@@ -330,6 +357,9 @@ assertPublicHost opts host
                 pure $ case find (isPrivateAddress . addrAddress) addresses of
                     Just _ -> Left (FetchBlocked ("refusing private address for " <> host))
                     Nothing -> Right ()
+
+assertPublicHost :: FetchOptions -> Text -> IO (Either FetchError ())
+assertPublicHost opts = assertPublicHostPolicy (foAllowPrivate opts)
 
 isPrivateAddress :: SockAddr -> Bool
 isPrivateAddress address = case address of
@@ -346,6 +376,10 @@ byteSwap32 value =
         .|. (value .&. 0x00ff0000) `shiftR` 8
         .|. (value .&. 0xff000000) `shiftR` 24
 
+{- | Whether an IPv4 address (in host order) may be reached. 100.64.0.0/10 is
+counted as private: it is the carrier-grade NAT range, used by Tailscale and
+some carriers, and is not a public destination.
+-}
 publicV4 :: Word32 -> Bool
 publicV4 address =
     not
@@ -355,6 +389,7 @@ publicV4 address =
             || address .&. 0xffff0000 == 0xa9fe0000
             || address .&. 0xfff00000 == 0xac100000
             || address .&. 0xffff0000 == 0xc0a80000
+            || address .&. 0xffc00000 == 0x64400000
             || address .&. 0xffff0000 == 0xc6120000
             || address .&. 0xffffff00 == 0xc0000000
             || address .&. 0xffffff00 == 0xc0000200

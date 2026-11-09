@@ -17,17 +17,19 @@ module Eza.Cli (
     ImportOpts (..),
     EnrichOpts (..),
     SetPasswordOpts (..),
+    RestoreOpts (..),
     CheckDeadOpts (..),
     DedupeOpts (..),
     PasswordSource (..),
     cliParserInfo,
+    parseCliArgs,
     runCli,
     readHidden,
 ) where
 
 import Control.Exception (IOException, SomeException, bracket, onException, try)
-import Control.Monad (forM, unless)
-import Data.Aeson (encode, object, (.=))
+import Control.Monad (forM, unless, when)
+import Data.Aeson (eitherDecodeStrict', encode, object, (.=))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.Text (Text)
@@ -38,12 +40,13 @@ import Network.HTTP.Client (httpLbs, parseRequest, responseStatus)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types.Status (statusCode)
 import Options.Applicative
-import System.Exit (exitFailure, exitSuccess)
+import qualified Options.Applicative as OA
+import System.Exit (ExitCode (..), exitFailure, exitSuccess)
 import System.IO (hFlush, hGetEcho, hPutStr, hPutStrLn, hSetEcho, stderr, stdin)
 
 import qualified Eza.Admin as Admin
 import qualified Eza.Auth as Auth
-import Eza.Backup (BackupReport (..), BackupTarget (..), runBackup)
+import Eza.Backup (BackupReport (..), BackupTarget (..), RestoreOptions (..), RestoreReport (..), runBackup, runRestore)
 import Eza.Bench (runBench)
 import Eza.Bookmarks
 import Eza.Config
@@ -54,7 +57,7 @@ import Eza.Dedup (DedupQuery (..), dedupCandidates, defaultDedupQuery, mergeUrlD
 import Eza.Enrich (enrichBookmark)
 import Eza.Export (exportBookmarks)
 import Eza.Import
-import Eza.JsonExport (exportJson)
+import Eza.JsonExport (exportJson, importJson)
 import qualified Eza.Password as Password
 import Eza.Server (runServer)
 import Eza.Types (DedupReport (..), ImportReport (..), TagStat (..))
@@ -63,6 +66,14 @@ import Eza.User (UserRole (..), userRoleText)
 -- ---------------------------------------------------------------------------
 -- Commands
 -- ---------------------------------------------------------------------------
+
+data RestoreOpts = RestoreOpts
+    { rstStamp :: FilePath
+    , rstDryRun :: Bool
+    , rstYes :: Bool
+    , rstForce :: Bool
+    }
+    deriving (Show, Eq)
 
 data CliCommand
     = Serve
@@ -74,6 +85,7 @@ data CliCommand
     | Verify (Maybe Text)
     | RepairDomains (Maybe Text)
     | Backup (Maybe Text)
+    | RestoreCmd RestoreOpts
     | CheckDead CheckDeadOpts
     | Healthcheck
     | Bench Int (Maybe Text)
@@ -129,6 +141,7 @@ data CheckDeadOpts = CheckDeadOpts
 
 data ImportOpts = ImportOpts
     { optFile :: FilePath
+    , optJson :: Bool
     , optMode :: TagMode
     , optKeepNoise :: Bool
     , optMarkRead :: Bool
@@ -168,6 +181,16 @@ cliParserInfo =
             <> header "eza-bookmarks — a fast, tag-based bookmark manager"
         )
 
+{- | Parse a command line without running it. Exposed so tests can assert that
+@--help@ works on every subcommand (and for embedding the CLI): a help request
+comes back as @Left (text, ExitSuccess)@.
+-}
+parseCliArgs :: [String] -> Either (String, ExitCode) CliCommand
+parseCliArgs args = case OA.execParserPure OA.defaultPrefs cliParserInfo args of
+    OA.Success parsedCommand -> Right parsedCommand
+    OA.Failure failure -> Left (OA.renderFailure failure "eza-bookmarks")
+    OA.CompletionInvoked _ -> Left ("", ExitSuccess)
+
 userOption :: Parser (Maybe Text)
 userOption =
     optional
@@ -182,45 +205,51 @@ userOption =
 commandParser :: Parser CliCommand
 commandParser =
     subparser
-        ( command "serve" (info (pure Serve) (progDesc "Run the web server"))
-            <> command "init" (info (pure Init) (progDesc "Create or migrate the control database and the legacy database file"))
-            <> command "version" (info (pure Version) (progDesc "Print the version"))
-            <> command "stats" (info (Stats <$> userOption) (progDesc "Print database counts and top tags"))
-            <> command "verify" (info (Verify <$> userOption) (progDesc "Verify counts and FTS consistency"))
-            <> command "repair-domains" (info (RepairDomains <$> userOption) (progDesc "Backfill empty domain fields from URLs"))
-            <> command "backup" (info (Backup <$> userOption) (progDesc "Back up the control database and every enabled user database (--user narrows it)"))
-            <> command "healthcheck" (info (pure Healthcheck) (progDesc "Probe the local /healthz endpoint (container healthcheck)"))
+        ( command "serve" (info (pure Serve <**> helper) (progDesc "Run the web server"))
+            <> command "init" (info (pure Init <**> helper) (progDesc "Create or migrate the control database and the legacy database file"))
+            <> command "version" (info (pure Version <**> helper) (progDesc "Print the version"))
+            <> command "stats" (info (Stats <$> userOption <**> helper) (progDesc "Print database counts and top tags"))
+            <> command "verify" (info (Verify <$> userOption <**> helper) (progDesc "Verify counts and FTS index consistency"))
+            <> command "repair-domains" (info (RepairDomains <$> userOption <**> helper) (progDesc "Backfill empty domain fields from URLs"))
+            <> command
+                "backup"
+                (info (Backup <$> userOption <**> helper) (progDesc "Back up the control database and every account database into one verified stamp (--user narrows the libraries; page snapshots are not included)"))
+            <> command
+                "restore"
+                (info (RestoreCmd <$> restoreOpts <**> helper) (progDesc "Restore a backup stamp (stop the server first; library snapshots are not in a stamp)"))
+            <> command "healthcheck" (info (pure Healthcheck <**> helper) (progDesc "Probe the local /healthz endpoint (container healthcheck)"))
             <> command
                 "bench"
                 ( info
                     ( Bench
                         <$> option auto (long "iterations" <> value 100 <> metavar "N" <> help "Iterations per query")
                         <*> userOption
+                            <**> helper
                     )
                     (progDesc "Benchmark list/search queries against one library")
                 )
             <> command
                 "check-dead"
                 ( info
-                    (CheckDead <$> checkDeadOpts)
+                    (CheckDead <$> checkDeadOpts <**> helper)
                     (progDesc "Sweep bookmarks for dead links")
                 )
             <> command
                 "import"
                 ( info
-                    (ImportCmd <$> importOpts)
+                    (ImportCmd <$> importOpts <**> helper)
                     (progDesc "Import a Netscape bookmarks.html export")
                 )
             <> command
                 "dedupe"
                 ( info
-                    (DedupeCmd <$> dedupeOpts)
+                    (DedupeCmd <$> dedupeOpts <**> helper)
                     (progDesc "Merge same-URL duplicate bookmarks (title matches stay review-only)")
                 )
             <> command
                 "enrich"
                 ( info
-                    (EnrichCmd <$> enrichOpts)
+                    (EnrichCmd <$> enrichOpts <**> helper)
                     (progDesc "Extract text and metadata for bookmarks, one at a time")
                 )
             <> command
@@ -229,27 +258,36 @@ commandParser =
                     ( ExportCmd
                         <$> switch (long "json" <> help "Write the versioned eza JSON document instead of Netscape HTML")
                         <*> userOption
+                            <**> helper
                     )
                     (progDesc "Export the library to stdout")
                 )
             <> command
                 "set-password"
                 ( info
-                    (SetPasswordCmd <$> setPasswordOpts)
+                    (SetPasswordCmd <$> setPasswordOpts <**> helper)
                     (progDesc "Set the account password (prompts twice with echo off)")
                 )
             <> command
                 "users"
                 ( info
-                    (UsersCmd <$> usersCommandParser)
+                    (UsersCmd <$> usersCommandParser <**> helper)
                     (progDesc "List and manage accounts (add, enable, disable, reset-password, delete)")
                 )
         )
 
+restoreOpts :: Parser RestoreOpts
+restoreOpts =
+    RestoreOpts
+        <$> strArgument (metavar "STAMP" <> help "Backup stamp directory (e.g. backups/20260101-031700)")
+        <*> switch (long "dry-run" <> help "Validate the stamp and print the restore plan without writing anything")
+        <*> switch (long "yes" <> help "Confirm the restore (required unless --dry-run)")
+        <*> switch (long "force" <> help "Continue when the current installation cannot be auto-backed up")
+
 usersCommandParser :: Parser UsersCommand
 usersCommandParser =
     subparser
-        ( command "list" (info (pure UsersList) (progDesc "List accounts with role, state, and database size"))
+        ( command "list" (info (pure UsersList <**> helper) (progDesc "List accounts with role, state, and database size"))
             <> command
                 "add"
                 ( info
@@ -263,19 +301,20 @@ usersCommandParser =
                                 <> help "Role (default: member)"
                             )
                         <*> switch (long "password-stdin" <> help "Read the initial password from stdin (never argv)")
+                            <**> helper
                     )
                     (progDesc "Create an account and print its one-time recovery codes")
                 )
             <> command
                 "enable"
                 ( info
-                    (UsersEnable . T.pack <$> strArgument (metavar "NAME|ID" <> help "Username or id"))
+                    (UsersEnable . T.pack <$> strArgument (metavar "NAME|ID" <> help "Username or id") <**> helper)
                     (progDesc "Enable an account")
                 )
             <> command
                 "disable"
                 ( info
-                    (UsersDisable . T.pack <$> strArgument (metavar "NAME|ID" <> help "Username or id"))
+                    (UsersDisable . T.pack <$> strArgument (metavar "NAME|ID" <> help "Username or id") <**> helper)
                     (progDesc "Disable an account and revoke its sessions")
                 )
             <> command
@@ -284,6 +323,7 @@ usersCommandParser =
                     ( UsersResetPassword
                         <$> (T.pack <$> strArgument (metavar "NAME|ID" <> help "Username or id"))
                         <*> switch (long "password-stdin" <> help "Read the temporary password from stdin (never argv)")
+                            <**> helper
                     )
                     (progDesc "Set a temporary password and revoke the account's sessions")
                 )
@@ -293,6 +333,7 @@ usersCommandParser =
                     ( UsersDelete
                         <$> (T.pack <$> strArgument (metavar "NAME|ID" <> help "Username or id"))
                         <*> switch (long "delete-db" <> help "Also delete the account's database and snapshots (cannot be undone)")
+                            <**> helper
                     )
                     (progDesc "Delete an account (refuses the last enabled admin)")
                 )
@@ -327,11 +368,18 @@ runCli cfg passwords cmd = case cmd of
             putStrLn ("db: " <> path)
             mapM_ (\(k, n) -> putStrLn (T.unpack k <> ": " <> show n)) counts
             putStrLn ("fts_rows: " <> show ftsCount)
+            integrity <- Db.ftsIntegrityCheck conn
+            case integrity of
+                Left message -> do
+                    hPutStrLn stderr ("verify: the FTS index is corrupt: " <> T.unpack message)
+                    exitFailure
+                Right () -> pure ()
             let bookmarks = maybe 0 id (lookup "bookmarks" counts)
             if ftsCount == bookmarks
                 then putStrLn "verify: ok" >> exitSuccess
                 else hPutStrLn stderr "verify: FTS row count does not match bookmarks" >> exitFailure
     Backup userSelector -> runBackupCommand cfg userSelector
+    RestoreCmd opts -> runRestoreCommand cfg opts
     CheckDead opts ->
         withLibrary cfg (cdUser opts) $ \_ conn -> do
             (checked, dead, alive) <- checkDead conn (cdLimit opts) (cdOlderThan opts) (cdIncludeDead opts)
@@ -390,17 +438,61 @@ runBackupCommand cfg userSelector = do
         Right report -> do
             putStrLn ("backup: " <> brRoot report)
             mapM_ (\target -> putStrLn ("  " <> T.unpack (btLabel target) <> " -> " <> btDest target)) (brTargets report)
+            putStrLn "  (library snapshots are not part of a stamp)"
+
+runRestoreCommand :: Config -> RestoreOpts -> IO ()
+runRestoreCommand cfg opts = do
+    unless (rstYes opts || rstDryRun opts) $
+        die "restore: pass --yes to overwrite the current installation (or --dry-run to inspect the stamp first)"
+    result <-
+        runRestore
+            cfg
+            RestoreOptions
+                { roStamp = rstStamp opts
+                , roDryRun = rstDryRun opts
+                , roForce = rstForce opts
+                }
+    case result of
+        Left message -> die ("restore failed: " <> message)
+        Right report -> do
+            let verb = if rrsDryRun report then "would restore" else "restored"
+            putStrLn ((if rrsDryRun report then "restore plan: " else "restore: ") <> rrsStamp report)
+            case rrsAutoBackup report of
+                Nothing -> putStrLn ("  current installation backup: " <> if rrsDryRun report then "(not taken on a dry run)" else "(none)")
+                Just path -> putStrLn ("  current installation backup: " <> path)
+            putStrLn ("  control database target: " <> rrsControlTarget report)
+            mapM_ (\(userId, username) -> putStrLn ("  " <> T.unpack verb <> " user " <> show userId <> " (" <> T.unpack username <> ")")) (rrsRestored report)
+            mapM_ (\(userId, username) -> putStrLn ("  keep current library for user " <> show userId <> " (" <> T.unpack username <> "): the stamp has no copy")) (rrsPreserved report)
+            mapM_ (\(userId, username) -> putStrLn ("  drop account " <> show userId <> " (" <> T.unpack username <> "): no library in the stamp or the current installation")) (rrsDropped report)
+            mapM_ (\path -> putStrLn ("  legacy database target: " <> path)) (rrsLegacyTarget report)
+            unless (null (rrsDropped report)) $
+                putStrLn "  note: dropped accounts are removed from the restored control database"
+            if rrsDryRun report
+                then putStrLn "restore: dry run only, nothing was written"
+                else putStrLn "restore: done; start the server to use the restored installation"
 
 runHealthcheck :: Config -> IO ()
 runHealthcheck cfg = do
+    outcome <- try (probeHealth cfg) :: IO (Either SomeException Bool)
+    case outcome of
+        Right True -> exitSuccess
+        Right False -> do
+            hPutStrLn stderr "eza: healthcheck: the server answered but not with HTTP 200"
+            exitFailure
+        Left err -> do
+            hPutStrLn stderr ("eza: healthcheck failed: " <> T.unpack (firstLine (T.pack (show err))))
+            exitFailure
+  where
+    firstLine = T.takeWhile (/= '\n')
+
+probeHealth :: Config -> IO Bool
+probeHealth cfg = do
     let port = bindPort (cfgBind cfg)
         url = "http://127.0.0.1:" <> show port <> "/healthz"
     manager <- newTlsManager
     request <- parseRequest url
     response <- httpLbs request manager
-    if statusCode (responseStatus response) == 200
-        then exitSuccess
-        else exitFailure
+    pure (statusCode (responseStatus response) == 200)
 
 runSetPassword :: Config -> PasswordSource -> SetPasswordOpts -> IO ()
 runSetPassword cfg passwords opts = do
@@ -428,46 +520,99 @@ runSetPassword cfg passwords opts = do
                             case Password.validateUsername rawUsername of
                                 Left message -> die ("set-password: " <> message)
                                 Right username -> do
-                                    passwordHash <- Password.hashPassword (cfgArgon2 cfg) first
-                                    Auth.setAccountPassword conn username passwordHash
-                                    syncControlUsername cfg controlUser username
-                                    if spResetSessions opts
-                                        then do
-                                            revoked <- Auth.deleteAllSessions conn
-                                            putStrLn ("sessions revoked: " <> show revoked)
-                                        else pure ()
-                                    if spDisable2fa opts
-                                        then do
-                                            Auth.setRequirePasskey conn False
-                                            putStrLn "passkey requirement cleared"
-                                        else pure ()
-                                    remaining <- Auth.recoveryCodesRemaining conn
-                                    putStrLn ("password updated for " <> T.unpack username)
-                                    if remaining == 0
-                                        then putStrLn "note: no unused recovery codes remain; regenerate them from the account page"
-                                        else putStrLn ("recovery codes unchanged: " <> show remaining <> " unused")
+                                    -- The control row is the login lookup key, so the
+                                    -- rename happens first: a duplicate username is
+                                    -- reported before the library is touched.
+                                    renamed <- renameControlFirst cfg controlUser username
+                                    case renamed of
+                                        Left message -> die message
+                                        Right () -> do
+                                            passwordHash <- Password.hashPassword (cfgArgon2 cfg) first
+                                            writeResult <-
+                                                try (writePassword cfg opts conn first passwordHash username) ::
+                                                    IO (Either SomeException ())
+                                            case writeResult of
+                                                Left err -> do
+                                                    rollbackControlUsername cfg controlUser
+                                                    die ("set-password: the password could not be stored: " <> T.pack (show err))
+                                                Right () -> do
+                                                    remaining <- Auth.recoveryCodesRemaining conn
+                                                    putStrLn ("password updated for " <> T.unpack username)
+                                                    if remaining == 0
+                                                        then putStrLn "note: no unused recovery codes remain; regenerate them from the account page"
+                                                        else putStrLn ("recovery codes unchanged: " <> show remaining <> " unused")
 
-{- | The control row is the login lookup key, so a password-set rename must
-land there too when the account is registered in the control database.
+{- | Store the password and the optional follow-up changes in the library. Runs
+after the control rename; a failure here needs the rename rolled back.
 -}
-syncControlUsername :: Config -> Maybe Control.ControlUser -> Text -> IO ()
-syncControlUsername _ Nothing _ = pure ()
-syncControlUsername cfg (Just user) username
-    | Control.cuUsername user == username = pure ()
-    | otherwise =
-        withControl cfg $ \control -> do
-            _ <- Control.setUsername control (Control.cuId user) username
-            pure ()
+writePassword :: Config -> SetPasswordOpts -> Connection -> Text -> Text -> Text -> IO ()
+writePassword cfg opts conn _first passwordHash username = do
+    Auth.setAccountPassword conn username passwordHash
+    when (spResetSessions opts) $ do
+        revoked <- Auth.deleteAllSessions conn
+        putStrLn ("sessions revoked: " <> show revoked)
+    when (spDisable2fa opts) $ do
+        Auth.setRequirePasskey conn False
+        putStrLn "passkey requirement cleared"
+  where
+    _ = cfg
+
+{- | Rename the control row before the library is written. An account that is
+not registered in the control database (the legacy single-user layout) keeps
+its library-only username, as before.
+-}
+renameControlFirst :: Config -> Maybe Control.ControlUser -> Text -> IO (Either Text ())
+renameControlFirst _ Nothing _ = pure (Right ())
+renameControlFirst cfg (Just user) username
+    | Control.cuUsername user == username = pure (Right ())
+    | otherwise = do
+        result <- withControl cfg $ \control -> Control.setUsername control (Control.cuId user) username
+        pure $ case result of
+            Right () -> Right ()
+            Left Control.ControlDuplicateUsername ->
+                Left ("set-password: the username " <> username <> " is already used by another account")
+            Left err -> Left ("set-password: the control username could not be changed: " <> T.pack (show err))
+
+{- | Undo the control rename when the library write failed, so login and the
+stored account name do not diverge.
+-}
+rollbackControlUsername :: Config -> Maybe Control.ControlUser -> IO ()
+rollbackControlUsername _ Nothing = pure ()
+rollbackControlUsername cfg (Just user) = do
+    result <-
+        try (withControl cfg $ \control -> Control.setUsername control (Control.cuId user) (Control.cuUsername user)) ::
+            IO (Either SomeException (Either Control.ControlError ()))
+    case result of
+        Right (Right ()) -> pure ()
+        _ ->
+            hPutStrLn
+                stderr
+                ( "eza: warning: the control username could not be rolled back; it may differ from the library account name ("
+                    <> T.unpack (Control.cuUsername user)
+                    <> ")"
+                )
 
 runImportCommand :: Config -> ImportOpts -> IO ()
 runImportCommand cfg opts = do
     raw <- BS.readFile (optFile opts)
-    let parsed = parseNetscape (ImportOptions (optMode opts) (not (optKeepNoise opts)) (optMarkRead opts)) raw
-    if optDryRun opts
-        then putStrLn (LBS8.unpack (encode (dryReport parsed)))
-        else withLibrary cfg (optUser opts) $ \_ conn -> do
-            report <- importParsed conn (ImportOptions (optMode opts) (not (optKeepNoise opts)) (optMarkRead opts)) parsed
-            putStrLn (LBS8.unpack (encode report))
+    if optJson opts
+        then
+            if optDryRun opts
+                then die "import: --dry-run is only available for Netscape HTML imports"
+                else case eitherDecodeStrict' raw of
+                    Left err -> die ("import: the file is not valid JSON: " <> T.pack err)
+                    Right decodedImport -> withLibrary cfg (optUser opts) $ \_ conn -> do
+                        result <- importJson conn decodedImport
+                        case result of
+                            Left message -> die ("import: " <> message)
+                            Right report -> putStrLn (LBS8.unpack (encode report))
+        else do
+            let parsed = parseNetscape (ImportOptions (optMode opts) (not (optKeepNoise opts)) (optMarkRead opts)) raw
+            if optDryRun opts
+                then putStrLn (LBS8.unpack (encode (dryReport parsed)))
+                else withLibrary cfg (optUser opts) $ \_ conn -> do
+                    report <- importParsed conn (ImportOptions (optMode opts) (not (optKeepNoise opts)) (optMarkRead opts)) parsed
+                    putStrLn (LBS8.unpack (encode report))
 
 dryReport :: ParsedImport -> ImportReport
 dryReport parsed =
@@ -660,7 +805,8 @@ setPasswordOpts =
 importOpts :: Parser ImportOpts
 importOpts =
     ImportOpts
-        <$> strArgument (metavar "FILE" <> help "Netscape bookmarks.html file")
+        <$> strArgument (metavar "FILE" <> help "Bookmarks file: a Netscape bookmarks.html or an eza JSON export with --json")
+        <*> switch (long "json" <> help "Read the versioned eza JSON export instead of Netscape HTML")
         <*> ( option
                 (eitherReader parseMode)
                 ( long "tag-mode"

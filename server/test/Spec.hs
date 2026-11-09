@@ -10,7 +10,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Database.SQLite.Simple (close)
 import qualified Database.SQLite.Simple as Sqlite
-import System.Directory (listDirectory)
+import System.Directory (doesFileExist, listDirectory)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
@@ -43,6 +43,7 @@ import Eza.Url (dedupeKey, dedupeLookupUrls, normalizeUrl)
 import qualified GraphLayoutSpec
 import qualified IsolationSpec
 import qualified PerfSpec
+import qualified SecuritySpec
 import qualified ViewContractSpec
 import qualified ViewServerSpec
 import qualified WebhookSpec
@@ -135,6 +136,42 @@ main = hspec $ do
                 count <- queryScalar target "SELECT COUNT(*) FROM bookmarks"
                 count `shouldBe` 1
                 close target
+
+    describe "JSON export version 2" $ do
+        it "carries captures and the highlight anchors through a round-trip" $
+            withSystemTempDirectory "eza-json-v2" $ \dir -> do
+                source <- openDb (dir </> "source.db")
+                Sqlite.execute_ source "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at,note_body) VALUES ('https://example.test/v2','V2','example.test',1,1,1,'a note')"
+                Sqlite.execute_ source "INSERT INTO highlights (bookmark_id,quote,prefix,suffix,start_offset,end_offset,note,color,created_at,updated_at) VALUES (1,'quote','before ',' after',1,6,'', 'yellow',1,1)"
+                Sqlite.execute_ source "INSERT INTO captures (bookmark_id,url,content_html,content_text,captured_at,created_at) VALUES (1,'https://example.test/v2','<p>captured</p>','captured',1,1)"
+                document <- exportJson source
+                close source
+                target <- openDb (dir </> "target.db")
+                result <- importJson target document
+                case result of
+                    Left err -> expectationFailure (T.unpack err)
+                    Right report -> do
+                        jrBookmarks report `shouldBe` 1
+                        jrCaptures report `shouldBe` 1
+                captures <- queryScalar target "SELECT COUNT(*) FROM captures"
+                captures `shouldBe` 1
+                prefix <- Sqlite.query_ target "SELECT prefix, suffix FROM highlights" :: IO [(Text, Text)]
+                prefix `shouldBe` [("before ", " after")]
+                close target
+
+    describe "tag-aware search" $ do
+        it "finds a record by a tag name in free-text search" $
+            withSystemTempDirectory "eza-tag-search" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                _ <- insertBookmark conn "https://example.test/rust-only" "No matching words" ["rust", "tooling"]
+                _ <- insertBookmark conn "https://example.test/other" "Different words" ["haskell"]
+                rust <- listBookmarks conn defaultListQuery{lqQ = "rust"}
+                map bsId (spItems rust) `shouldBe` [1]
+                both <- listBookmarks conn defaultListQuery{lqQ = "rust tooling"}
+                map bsId (spItems both) `shouldBe` [1]
+                none <- listBookmarks conn defaultListQuery{lqQ = "rust missing"}
+                spTotal none `shouldBe` 0
+                close conn
 
     describe "highlights" $ do
         it "creates, lists, updates, and deletes a highlight" $
@@ -258,6 +295,8 @@ main = hspec $ do
                     spTotal rust `shouldBe` 2
                     fts <- listBookmarks conn (defaultListQuery{lqQ = "B"})
                     spTotal fts `shouldBe` 1
+                    enrichJobs <- queryScalar conn "SELECT COUNT(*) FROM jobs WHERE kind = 'enrich' AND state = 'queued'"
+                    enrichJobs `shouldBe` 3
                     tagged <- listBookmarks conn (defaultListQuery{lqTags = ["toolbar"]})
                     spTotal tagged `shouldBe` 1
                     case map bsId (spItems tagged) of
@@ -569,17 +608,35 @@ main = hspec $ do
             case mpath of
                 Nothing -> pendingWith "set EZA_IMPORT_FIXTURE to run the full-file acceptance test"
                 Just path -> do
+                    exists <- doesFileExist path
+                    if not exists
+                        then pendingWith ("EZA_IMPORT_FIXTURE does not exist: " <> path)
+                        else do
+                            raw <- BS.readFile path
+                            let p = parseNetscape defaultImportOptions raw
+                            piFound p `shouldBe` 9457
+                            piHttp p `shouldBe` 9453
+                            piNonHttp p `shouldBe` 4
+                            -- Normalizes www., fragments, tracking parameters
+                            -- and trailing slashes before deduplicating, so
+                            -- this is higher than the 465 raw duplicate
+                            -- anchors.
+                            piDuplicates p `shouldBe` 548
+                            length (piItems p) `shouldBe` 8905
+                            piUntagged p `shouldBe` 238
+        it "parses the deterministic export slice with the default leaf mode" $ do
+            let path = ".." </> "tests" </> "fixtures" </> "export-slice.html"
+            exists <- doesFileExist path
+            if not exists
+                then pendingWith ("tests/fixtures/export-slice.html is not present: " <> path)
+                else do
                     raw <- BS.readFile path
                     let p = parseNetscape defaultImportOptions raw
-                    piFound p `shouldBe` 9457
-                    piHttp p `shouldBe` 9453
-                    piNonHttp p `shouldBe` 4
-                    -- Normalizes www., fragments, tracking parameters and
-                    -- trailing slashes before deduplicating, so this is
-                    -- higher than the 465 raw duplicate anchors.
-                    piDuplicates p `shouldBe` 548
-                    length (piItems p) `shouldBe` 8905
-                    piUntagged p `shouldBe` 238
+                    piFound p `shouldBe` 14
+                    piHttp p `shouldBe` 12
+                    piNonHttp p `shouldBe` 2
+                    piDuplicates p `shouldBe` 4
+                    length (piItems p) `shouldBe` 8
 
     describe "password hashing" $ do
         it "round-trips a password and rejects a wrong one" $
@@ -901,6 +958,7 @@ main = hspec $ do
     CliSpec.spec
     WorkerSpec.spec
     WebhookSpec.spec
+    SecuritySpec.spec
 
 -- ---------------------------------------------------------------------------
 -- Test helpers

@@ -10,10 +10,11 @@ per-user snapshots directory.
 module AdminSpec (spec) where
 
 import Data.Aeson (encode, object, (.=))
+import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.FilePath ((</>))
 import System.Posix.Files (
     groupExecuteMode,
@@ -30,6 +31,7 @@ import Test.Hspec
 
 import Control.Exception (finally)
 import qualified Database.SQLite.Simple as Sqlite
+import qualified Eza.Admin as Admin
 import Eza.Config (Config (..))
 import qualified Eza.Control as Control
 import Eza.User (UserCreateResult (..), UserView (..))
@@ -273,16 +275,139 @@ spec = describe "admin API" $ do
             addTestBookmark server sessionB csrfB 1
             aliceSnapshot <- snapshot server sessionA csrfA 1
             bobSnapshot <- snapshot server sessionB csrfB 1
-            alicePath <- expectJust "alice snapshot path" (jsonTextField "value" (hrespBody aliceSnapshot))
-            bobPath <- expectJust "bob snapshot path" (jsonTextField "value" (hrespBody bobSnapshot))
-            alicePath `shouldSatisfy` T.isInfixOf (T.pack ("users" </> show (Control.cuId alice) </> "snapshots"))
-            bobPath `shouldSatisfy` T.isInfixOf (T.pack ("users" </> show (Control.cuId bob) </> "snapshots"))
+            aliceValue <- expectJust "alice snapshot name" (jsonTextField "value" (hrespBody aliceSnapshot))
+            bobValue <- expectJust "bob snapshot name" (jsonTextField "value" (hrespBody bobSnapshot))
+            -- The API answers with a relative file name, never an absolute path.
+            aliceValue `shouldSatisfy` T.isSuffixOf ".html"
+            bobValue `shouldSatisfy` T.isSuffixOf ".html"
+            aliceValue `shouldSatisfy` (not . T.isInfixOf "/")
+            bobValue `shouldSatisfy` (not . T.isInfixOf "/")
+            let aliceDir = cfgUsersDir (tsConfig server) </> show (Control.cuId alice) </> "snapshots"
+                bobDir = cfgUsersDir (tsConfig server) </> show (Control.cuId bob) </> "snapshots"
+                alicePath = aliceDir </> T.unpack aliceValue
+                bobPath = bobDir </> T.unpack bobValue
             alicePath `shouldNotBe` bobPath
-            aliceFile <- doesFileExist (T.unpack alicePath)
+            aliceFile <- doesFileExist alicePath
             aliceFile `shouldBe` True
+            bobFile <- doesFileExist bobPath
+            bobFile `shouldBe` True
             served <- httpRequest server "GET" "/api/v1/bookmarks/1/snapshot" (cookieHeaders sessionA csrfA) Nothing
             served `shouldHaveStatus` 200
             hrespBody served `shouldSatisfy` containsText "snapshot"
+
+    it "caps account creation at EZA_MAX_USERS" $
+        withTestServerCustom (\cfg -> cfg{cfgMaxUsers = 1}) (\_ -> pure ()) $ \server -> do
+            _ <- createTestUser server "alice" "alice password" Control.RoleAdmin
+            (session, csrf) <- loginAs server "alice" "alice password"
+            created <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/v1/admin/users"
+                    (authHeaders session csrf)
+                    (Just (encode (object ["username" .= ("carol" :: Text), "password" .= ("carol password" :: Text)])))
+            created `shouldHaveStatus` 409
+            hrespBody created `shouldSatisfy` containsText "user_limit"
+            users <- withControlUsers (tsConfig server) Control.listUsers
+            length users `shouldBe` 1
+
+    it "exposes startup warnings for missing libraries and the over-limit case" $
+        withTestServerCustom (\cfg -> cfg{cfgMaxUsers = 1}) (\_ -> pure ()) $ \server -> do
+            _ <- createTestUser server "alice" "alice password" Control.RoleAdmin
+            bob <- createTestUser server "bob" "bob password" Control.RoleMember
+            let cfg = tsConfig server
+                control = tsControl server
+            missingBefore <- Admin.missingUserDatabases cfg control
+            missingBefore `shouldBe` []
+            removeFile (Control.cuDbPath bob)
+            missing <- Admin.missingUserDatabases cfg control
+            map Control.cuId missing `shouldBe` [Control.cuId bob]
+            overLimit <- Admin.userLimitWarning cfg control
+            case overLimit of
+                Just message -> message `shouldSatisfy` T.isInfixOf "EZA_MAX_USERS"
+                Nothing -> expectationFailure "two enabled accounts over a limit of one must warn"
+
+    it "deletes an account and its library only when delete_db is true" $
+        withTwoUsers $ \server alice _bob -> do
+            (session, csrf) <- loginAs server "alice" "alice password"
+            carol <- createTestUser server "carol" "carol password" Control.RoleMember
+            let carolPath = "/api/v1/admin/users/" <> show (Control.cuId carol)
+            noConfirm <-
+                httpRequest
+                    server
+                    "DELETE"
+                    carolPath
+                    (authHeaders session csrf)
+                    (Just (encode (object ["delete_db" .= True])))
+            noConfirm `shouldHaveStatus` 400
+            kept <-
+                httpRequest
+                    server
+                    "DELETE"
+                    carolPath
+                    (authHeaders session csrf)
+                    (Just (encode (object ["confirm" .= True, "delete_db" .= False])))
+            kept `shouldHaveStatus` 200
+            doesFileExist (Control.cuDbPath carol) `shouldReturn` True
+            -- A second account can be removed together with its library.
+            dave <- createTestUser server "dave" "dave password" Control.RoleMember
+            removed <-
+                httpRequest
+                    server
+                    "DELETE"
+                    ("/api/v1/admin/users/" <> show (Control.cuId dave))
+                    (authHeaders session csrf)
+                    (Just (encode (object ["confirm" .= True, "delete_db" .= True])))
+            removed `shouldHaveStatus` 200
+            doesFileExist (Control.cuDbPath dave) `shouldReturn` False
+            users <- withControlUsers (tsConfig server) Control.listUsers
+            map Control.cuUsername users `shouldBe` ["alice", "bob"]
+            -- Self-delete is refused before any files change.
+            selfDelete <-
+                httpRequest
+                    server
+                    "DELETE"
+                    ("/api/v1/admin/users/" <> show (Control.cuId alice))
+                    (authHeaders session csrf)
+                    (Just (encode (object ["confirm" .= True])))
+            selfDelete `shouldHaveStatus` 409
+            hrespBody selfDelete `shouldSatisfy` containsText "self_disable"
+
+    it "imports an eza JSON document through both the JSON and multipart routes" $
+        withTwoUsers $ \server _alice _bob -> do
+            (session, csrf) <- loginAs server "alice" "alice password"
+            let document =
+                    "{\"format\":\"eza-json\",\"version\":2,"
+                        <> "\"bookmarks\":[{\"url\":\"https://example.test/json-import\",\"title\":\"JSON import\",\"tags\":[\"json\"]}]}"
+            direct <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/v1/import/json"
+                    (("Content-Type", "application/json") : authHeaders session csrf)
+                    (Just (LBS.fromStrict (TE.encodeUtf8 document)))
+            direct `shouldHaveStatus` 200
+            multipart <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/v1/import"
+                    (("Content-Type", "multipart/form-data; boundary=EzaTest") : authHeaders session csrf)
+                    ( Just
+                        ( LBS.fromStrict
+                            ( TE.encodeUtf8
+                                ( "--EzaTest\r\nContent-Disposition: form-data; name=\"file\"; filename=\"eza.json\"\r\nContent-Type: application/json\r\n\r\n"
+                                    <> document
+                                    <> "\r\n--EzaTest--\r\n"
+                                )
+                            )
+                        )
+                    )
+            multipart `shouldHaveStatus` 200
+            hrespBody multipart `shouldSatisfy` containsText "json_report"
+            listed <- httpRequest server "GET" "/api/v1/bookmarks?limit=10" (cookieHeaders session csrf) Nothing
+            listed `shouldHaveStatus` 200
+            hrespBody listed `shouldSatisfy` containsText "JSON import"
 
 snapshot :: TestServer -> T.Text -> T.Text -> Int -> IO HttpResponse
 snapshot server session csrf bookmarkId =
@@ -312,7 +437,7 @@ file, so the capture path can be exercised without network access.
 withSnapshotServer :: (TestServer -> IO a) -> IO a
 withSnapshotServer =
     withTestServerCustom
-        (\cfg -> cfg{cfgMonolith = cfgDataDir cfg </> "fake-monolith.sh"})
+        (\cfg -> cfg{cfgMonolith = cfgDataDir cfg </> "fake-monolith.sh", cfgAllowPrivateFetch = True})
         ( \cfg -> do
             let script = cfgMonolith cfg
             writeFile

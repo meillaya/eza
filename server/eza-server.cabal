@@ -134,6 +134,7 @@ test-suite eza-test
                     DedupSpec
                     GraphLayoutSpec
                     PerfSpec
+                    SecuritySpec
                     ViewContractSpec
                     ViewServerSpec
                     WebhookSpec

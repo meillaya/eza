@@ -158,8 +158,7 @@ testConfig dir =
         , cfgShareTtlDays = 7
         , cfgAiProvider = "none"
         , cfgOllamaBaseUrl = "http://127.0.0.1:11434"
-        , cfgAiModel = "llama3.2"
-        , cfgAiAutoTag = False
+        , cfgAiModel = ""
         , -- Cheap Argon2 keeps the suite fast; the production cost is unchanged.
           cfgArgon2 = Password.PasswordParams 1024 1 1
         , cfgLoginMaxAttempts = 100

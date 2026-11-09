@@ -53,7 +53,7 @@ spec = do
                 migrated <- openDb path
                 version <- schemaVersion migrated
                 version `shouldBe` targetSchemaVersion
-                version `shouldBe` 11
+                version `shouldBe` targetSchemaVersion
                 books <- queryScalar migrated "SELECT COUNT(*) FROM bookmarks"
                 books `shouldBe` 1
                 tags <- queryScalar migrated "SELECT COUNT(*) FROM tags"

@@ -39,7 +39,7 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
 import Text.Read (readMaybe)
 
-import Eza.Events (bookmarkEventData, bookmarkEventDataMany, recordEvent)
+import Eza.Events (bookmarkEventData, bookmarkEventDataMany, recordEvent, recordEventMany)
 import Eza.Links (syncLinks)
 import Eza.Rules (applyRules)
 import Eza.SearchQuery
@@ -142,6 +142,7 @@ listBookmarks conn q = do
         (joinSql, whereSql, params, orderSql) = buildFilter q parsed tags
         terms = sqTerms parsed
         pageParams = params <> [(":limit" := lqLimit q), (":offset" := lqOffset q)]
+
         pageSql columns =
             Query
                 ( "SELECT "
@@ -206,10 +207,14 @@ buildFilter q parsed tags =
     (joinSql, whereSql, params, orderSql)
   where
     joinSql = case sqFts parsed of
-        Just _ -> " JOIN (SELECT rowid, rank FROM bookmarks_fts WHERE bookmarks_fts MATCH :fts) f ON f.rowid = b.id "
+        -- LEFT JOIN so a tag-name match can surface a row the text index did
+        -- not match; the combined filter below accepts either source.
+        Just _ -> " LEFT JOIN (SELECT rowid, rank FROM bookmarks_fts WHERE bookmarks_fts MATCH :fts) f ON f.rowid = b.id "
         Nothing -> ""
     orderSql = case sqFts parsed of
-        Just _ -> " ORDER BY f.rank ASC, " <> sortClause
+        Just _ ->
+            " ORDER BY CASE WHEN f.rowid IS NULL THEN 1 ELSE 0 END, f.rank ASC, "
+                <> sortClause
         Nothing -> " ORDER BY " <> sortClause
     sortClause = case T.toLower (T.strip (lqSort q)) of
         "added" -> "b.added_at DESC, b.id DESC"
@@ -219,6 +224,20 @@ buildFilter q parsed tags =
     ftsParams = case sqFts parsed of
         Nothing -> []
         Just expr -> [":fts" := expr]
+
+    -- Free-text terms also match tag names. Each term is required to appear in
+    -- some tag of the row; the text index keeps precedence in the ordering.
+    tagTermFilters :: [(Text, [NamedParam])]
+    tagTermFilters =
+        [ ( "b.id IN (SELECT bt.bookmark_id FROM bookmark_tags bt JOIN tags t ON t.id = bt.tag_id WHERE instr(lower(t.name), :tagTerm"
+                <> n
+                <> ") > 0)"
+          , [":tagTerm" <> n := T.toLower term]
+          )
+        | (i, term) <- zip [0 :: Int ..] (sqTerms parsed)
+        , T.length (T.strip term) >= 2
+        , let n = T.pack (show i)
+        ]
 
     tagFilter = case tags of
         [] -> Nothing
@@ -290,12 +309,25 @@ buildFilter q parsed tags =
                 )
                 (sqDay parsed)
 
+    textOrTagParts :: [(Text, [NamedParam])]
+    textOrTagParts = case (null ftsParams, tagTermFilters) of
+        (True, _) -> []
+        (False, []) -> [("f.rowid IS NOT NULL", [])]
+        (False, termFilters) ->
+            [
+                ( "f.rowid IS NOT NULL OR ("
+                    <> T.intercalate " AND " (map fst termFilters)
+                    <> ")"
+                , concatMap snd termFilters
+                )
+            ]
     parts =
         (case tagFilter of Nothing -> []; Just x -> [x])
             <> dateFilters
             <> flagFilters
             <> negFilters
             <> linkFilters
+            <> textOrTagParts
     params = ftsParams <> concatMap snd parts
     whereSql = case parts of
         [] -> ""
@@ -577,6 +609,8 @@ bulkUpdate conn action ids
                         forM_ uniqueIds $ \bid ->
                             execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (bid, tid)
                     _ -> pure ()
+            updatedData <- bookmarkEventDataMany conn uniqueIds
+            recordEventMany conn BookmarkUpdated updatedData
             pure (length uniqueIds)
         BulkRemoveTags tags -> do
             let idNames = [":bid" <> T.pack (show i) | i <- [0 .. length uniqueIds - 1]]
@@ -588,6 +622,8 @@ bulkUpdate conn action ids
                 conn
                 (Query ("DELETE FROM bookmark_tags WHERE bookmark_id IN (" <> marks <> ") AND tag_id IN (SELECT id FROM tags WHERE name IN (" <> tagMarks <> "))"))
                 params
+            updatedData <- bookmarkEventDataMany conn uniqueIds
+            recordEventMany conn BookmarkUpdated updatedData
             pure (length uniqueIds)
         BulkMarkRead value -> do
             let marks = T.intercalate "," (replicate (length uniqueIds) "?")
@@ -595,6 +631,8 @@ bulkUpdate conn action ids
                 conn
                 (Query ("UPDATE bookmarks SET is_read = ?, updated_at = strftime('%s','now') WHERE id IN (" <> marks <> ")"))
                 ((if value then 1 else 0 :: Int) : uniqueIds)
+            updatedData <- bookmarkEventDataMany conn uniqueIds
+            recordEventMany conn BookmarkUpdated updatedData
             pure (length uniqueIds)
         BulkDelete -> do
             let marks = T.intercalate "," (replicate (length uniqueIds) "?")
@@ -612,6 +650,10 @@ dedupeTextIds = go []
 {- | Mark the unread rows at or above one boundary in the ledger. The caller
 must name a real row: an empty list previously meant "mark the whole library
 read", which is not a safe interpretation of an empty inbox.
+
+The affected rows are snapshotted first (bounded to the same 10,000 ids a
+bulk request may touch) so an undo puts the read flags back instead of
+silently restoring an older operation.
 -}
 markAllAbove :: Connection -> Maybe Int -> IO Int
 markAllAbove _conn Nothing = pure 0
@@ -620,12 +662,31 @@ markAllAbove conn (Just bid) =
         boundary <- query conn "SELECT created_at FROM bookmarks WHERE id = ?" (Only bid) :: IO [Only Int]
         case boundary of
             [Only createdAt] -> do
-                execute
-                    conn
-                    "UPDATE bookmarks SET is_read = 1 WHERE is_read = 0 AND created_at >= ?"
-                    (Only createdAt)
-                changes conn
+                ids <-
+                    map fromOnly
+                        <$> ( query
+                                conn
+                                "SELECT id FROM bookmarks WHERE is_read = 0 AND created_at >= ? ORDER BY id LIMIT ?"
+                                (createdAt, markAllAboveLimit) ::
+                                IO [Only Int]
+                            )
+                case ids of
+                    [] -> pure 0
+                    _ -> do
+                        _ <- recordUndoIds conn "bulk_mark_read" ids
+                        let marks = T.intercalate "," (replicate (length ids) "?")
+                        execute
+                            conn
+                            (Query ("UPDATE bookmarks SET is_read = 1 WHERE id IN (" <> marks <> ")"))
+                            ids
+                        changes conn
             _ -> pure 0
+
+{- | Upper bound on the rows one mark-all-above request snapshots and updates,
+matching the bulk endpoint's per-request cap.
+-}
+markAllAboveLimit :: Int
+markAllAboveLimit = 10000
 
 {- | Keep stored wikilinks pointing at a renamed bookmark, and resolve any
 unresolved links that now match its new title.

@@ -15,12 +15,13 @@ is not re-emitted as bookmark.created/updated.
 -}
 module Eza.Events (
     recordEvent,
+    recordEventMany,
     bookmarkEventData,
     bookmarkEventDataMany,
     clipEventData,
 ) where
 
-import Control.Monad (forM)
+import Control.Monad (forM, forM_)
 import Data.Aeson (Value, encode, object, (.=))
 import qualified Data.ByteString.Lazy as LBS
 import Data.List (nub, sortOn)
@@ -31,6 +32,10 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
 
 import Eza.Webhook (EventType, eventTypeText)
+
+-- | Append one outbox row per value, all in the caller's transaction.
+recordEventMany :: Connection -> EventType -> [Value] -> IO ()
+recordEventMany conn eventType values = forM_ values (recordEvent conn eventType)
 
 -- | Append one outbox row in the caller's transaction.
 recordEvent :: Connection -> EventType -> Value -> IO ()

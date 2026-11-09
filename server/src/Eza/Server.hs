@@ -33,11 +33,13 @@ import Control.Concurrent.QSem (QSem, newQSem)
 import Control.Exception (IOException, SomeException, bracket, onException, throwIO, try)
 import Control.Monad (filterM, forM, forM_, void, when)
 import Data.Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isDigit, toLower)
+import Data.Int (Int64)
 import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, fromMaybe, isNothing, mapMaybe)
@@ -48,6 +50,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (getPOSIXTime, utcTimeToPOSIXSeconds)
+import Data.Word (Word64)
 import Database.SQLite.Simple (Connection, Only (..), query)
 import qualified Database.SQLite.Simple as Sqlite
 import Network.HTTP.Client (Manager)
@@ -57,6 +60,8 @@ import Network.Socket (SockAddr (..))
 import Network.Wai
 import Network.Wai.Handler.Warp
 import Network.Wai.Middleware.Gzip (GzipFiles (..), GzipSettings (..), defaultGzipSettings, gzip)
+import Network.Wai.Middleware.RequestLogger (logStdout, logStdoutDev)
+import Network.Wai.Middleware.RequestSizeLimit (defaultRequestSizeLimitSettings, requestSizeLimitMiddleware, setMaxLengthForRequest, setOnLengthExceeded)
 import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist, getFileSize, getModificationTime)
 import System.Environment (lookupEnv)
 import System.Exit (exitFailure)
@@ -65,7 +70,7 @@ import System.IO (hPutStrLn, stderr)
 import qualified Web.Cookie as Cookie
 
 import qualified Eza.Admin as Admin
-import Eza.AiTag (aiSuggestions)
+import Eza.AiTag (aiSuggestions, resolveAiModel)
 import qualified Eza.Auth as Auth
 import qualified Eza.Authz as Authz
 import Eza.Bookmarks
@@ -84,7 +89,7 @@ import Eza.Graph (LayoutCache (..), emptyLayoutCache, globalGraph, graphLayoutPa
 import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateHighlight)
 import Eza.Import (defaultImportOptions, importParsed, parseNetscape)
 import Eza.Jobs (resetRunningJobs)
-import Eza.JsonExport (exportJson, importJson)
+import Eza.JsonExport (JsonImportReport (..), exportJson, importJson)
 import Eza.Pages (addPasskeyPage, loginPage, passkeyLoginPage, recoverPage, recoverySetupPage, setupPage)
 import Eza.Password (validatePassword, validateUsername)
 import qualified Eza.Password as Password
@@ -102,11 +107,12 @@ import Eza.View (ViewInput (..))
 import Eza.Views (ViewError, ViewPatch (..), createView, deleteView, getView, listViews, updateView, viewErrorCode, viewErrorMessage, viewErrorStatus)
 import Eza.Webhook (WebhookInput (..))
 import Eza.Webhooks (WebhookError, WebhookWorkerConfig (..), createWebhook, defaultWebhookWorkerConfig, deleteWebhook, getWebhook, listDeliveries, listWebhooks, runWebhookWorker, testWebhook, updateWebhook, webhookErrorCode, webhookErrorMessage, webhookErrorStatus)
-import Network.Wai.Parse (FileInfo (..), defaultParseRequestBodyOptions, lbsBackEnd, parseRequestBodyEx)
+import Network.Wai.Parse (File, FileInfo (..), Param, defaultParseRequestBodyOptions, lbsBackEnd, parseRequestBodyEx, setMaxRequestFileSize, setMaxRequestFilesSize, setMaxRequestNumFiles, setMaxRequestParmsSize)
 
 runServer :: Config -> IO ()
 runServer cfg = do
     state <- newAppState cfg
+    logStartupWarnings cfg state
     enableWorkers state
     supervisor <- async (workerSupervisor state) `onException` closeAppState state
     let settings =
@@ -115,7 +121,7 @@ runServer cfg = do
                 . setServerName "eza"
                 . setBeforeMainLoop (hPutStrLn stderr ("eza listening on " <> cfgBind cfg))
                 $ defaultSettings
-    outcome <- try (runSettings settings (gzip gzipSettings (securityMiddleware cfg (app cfg state)))) :: IO (Either IOException ())
+    outcome <- try (runSettings settings (gzip gzipSettings (securityMiddleware cfg (accessLogger cfg (app cfg state))))) :: IO (Either IOException ())
     cancel supervisor
     stopAllUserWorkers state
     closeAppState state
@@ -258,7 +264,17 @@ newAppState cfg = do
     bootstrapControl cfg control
     manager <- newTlsManager
     recoveryLimiter <- Auth.newRateLimiter 5 900
-    loginLimiter <- Auth.newRateLimiter 10 900
+    {- The per-host login limiter is checked before the current attempt is
+    recorded, while an account's database lockout is decided after the attempt
+    that reaches 'EZA_LOGIN_MAX_ATTEMPTS'. Sizing the limiter one attempt short
+    makes a known username and an unknown one answer 429 on the same attempt,
+    so the rate limiter cannot be used to test whether an account exists. With
+    'EZA_LOGIN_MAX_ATTEMPTS=1' both paths answer 429 on the first attempt.
+    -}
+    loginLimiter <-
+        Auth.newRateLimiter
+            (max 1 (cfgLoginMaxAttempts cfg - 1))
+            (max 1 (cfgLoginLockoutSeconds cfg))
     controlVar <- newMVar control
     usersVar <- newMVar Map.empty
     workersEnabledVar <- newMVar False
@@ -719,6 +735,38 @@ cleanupAllSessions state = do
                 hPutStrLn stderr ("eza: session cleanup failed for user " <> show (cuId (usUser slot)) <> ": " <> show err)
             Right () -> pure ()
 
+{- | Warn once at startup instead of letting the first request discover the
+problem: accounts over the slot cap cannot sign in, and an enabled account
+whose library file vanished would otherwise be silently recreated empty when
+first opened.
+-}
+logStartupWarnings :: Config -> AppState -> IO ()
+logStartupWarnings cfg state =
+    withControl state $ \control -> do
+        limitMessage <- Admin.userLimitWarning cfg control
+        forM_ limitMessage (hPutStrLn stderr . T.unpack)
+        missing <- Admin.missingUserDatabases cfg control
+        forM_ missing $ \user ->
+            hPutStrLn
+                stderr
+                ( "eza: account "
+                    <> T.unpack (cuUsername user)
+                    <> " has no library database at "
+                    <> cuDbPath user
+                    <> "; restore it from a backup instead of signing in"
+                )
+
+{- | Access logging follows @EZA_LOG_LEVEL@: @debug@ logs the full request
+development line, @info@ logs one access line per request, and @warn@/@error@
+(the default is @info@) leave access logging off while the explicit error
+messages keep going to stderr.
+-}
+accessLogger :: Config -> Middleware
+accessLogger cfg = case map toLower (cfgLogLevel cfg) of
+    "debug" -> logStdoutDev
+    "info" -> logStdout
+    _ -> id
+
 {- | The server's worker supervisor: reconcile every five seconds and sweep
 expired sessions once a day for every open user database.
 -}
@@ -736,8 +784,40 @@ workerSupervisor state = do
     threadDelay (5 * 1000000)
     workerSupervisor state
 
+{- | Request-body limits in front of the routes. The limit is per path: the
+multipart import keeps its larger import cap, every other unsafe method uses
+the general JSON cap, and GET/HEAD carry no body. A declared or chunked body
+over the cap is answered with the same JSON 413 shape as the public auth
+ceremonies. The handlers still read through 'jsonBody', so the cap is also
+enforced if a body arrives without a declared length.
+-}
+requestBodyLimitMiddleware :: Config -> Middleware
+requestBodyLimitMiddleware cfg =
+    requestSizeLimitMiddleware
+        ( setOnLengthExceeded
+            (\limit _app _req sendResponse -> sendResponse (requestTooLargeResponse limit))
+            (setMaxLengthForRequest (pure . bodyLimitFor cfg) defaultRequestSizeLimitSettings)
+        )
+
+bodyLimitFor :: Config -> Request -> Maybe Word64
+bodyLimitFor cfg req
+    | requestMethod req `elem` ["GET", "HEAD"] = Nothing
+    | pathInfo req == ["api", "v1", "import"] = Just (fromIntegral (cfgImportMaxBytes cfg))
+    | otherwise = Just (fromIntegral (cfgMaxBodyBytes cfg))
+
+requestTooLargeResponse :: Word64 -> Response
+requestTooLargeResponse limit =
+    jsonError
+        status413
+        "payload_too_large"
+        ("request body must be at most " <> T.pack (show limit) <> " bytes")
+
 app :: Config -> AppState -> Application
-app cfg state req respond =
+app cfg state = requestBodyLimitMiddleware cfg (dispatchApp cfg state)
+
+-- | The routed application, behind the request-body limit.
+dispatchApp :: Config -> AppState -> Application
+dispatchApp cfg state req respond =
     case (requestMethod req, pathInfo req) of
         -- CORS preflight for the browser clipper. This must run before the
         -- auth guard: the preflight deliberately carries no Authorization.
@@ -1034,21 +1114,31 @@ passwordSetupHandler state req respond =
     case requireOrigin cfg req of
         Left err -> respond (authErrResponse err)
         Right () -> do
-            body <- readAuthBody cfg req
-            case body of
-                Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
-                Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
-                Right value -> case parseSetupBody value of
-                    Left message -> respond (jsonError status400 "bad_request" message)
-                    Right (rawUsername, password) -> do
-                        msess <- requestSession state req
-                        case msess of
-                            Just (user, slot, sess)
-                                | Auth.sessScope sess == "recovery" ->
-                                    finishRecoverySetup user slot rawUsername password
-                            Just _ ->
-                                respond (jsonError status403 "recovery_session_required" "a recovery session is required to finish recovery setup")
-                            Nothing -> startFreshSetup rawUsername password
+            msess <- requestSession state req
+            case msess of
+                -- A recovery session is a live cookie session, so this route
+                -- needs the same CSRF check as every other unsafe session
+                -- request. The Origin check above only covers the fresh
+                -- install, which has no session at all.
+                Just (_, _, sess)
+                    | Auth.sessScope sess == "recovery"
+                    , not (csrfOk req sess) ->
+                        respond (jsonError status403 "csrf" "missing or invalid CSRF token")
+                _ -> do
+                    body <- readAuthBody cfg req
+                    case body of
+                        Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
+                        Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
+                        Right value -> case parseSetupBody value of
+                            Left message -> respond (jsonError status400 "bad_request" message)
+                            Right (rawUsername, password) ->
+                                case msess of
+                                    Just (user, slot, sess)
+                                        | Auth.sessScope sess == "recovery" ->
+                                            finishRecoverySetup user slot rawUsername password
+                                    Just _ ->
+                                        respond (jsonError status403 "recovery_session_required" "a recovery session is required to finish recovery setup")
+                                    Nothing -> startFreshSetup rawUsername password
   where
     cfg = asConfig state
 
@@ -1262,8 +1352,8 @@ authedRoute rctx req respond conn =
         ("GET", ["api", "v1", "bookmarks"]) -> do
             page <- listBookmarks conn (listQueryFrom req)
             respond (jsonResponse status200 page)
-        ("POST", ["api", "v1", "bookmarks"]) -> addBookmark conn req respond
-        ("POST", ["api", "v1", "bookmarks", "bulk"]) -> bulkHandler conn req respond
+        ("POST", ["api", "v1", "bookmarks"]) -> addBookmark cfg conn req respond
+        ("POST", ["api", "v1", "bookmarks", "bulk"]) -> bulkHandler cfg conn req respond
         ("GET", ["api", "v1", "bookmarks", idTxt]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid bookmark id")
             Just bid -> do
@@ -1279,7 +1369,7 @@ authedRoute rctx req respond conn =
         ("GET", ["api", "v1", "favicons", domain]) ->
             faviconHandler conn req domain respond
         ("POST", ["api", "v1", "quick-save"]) ->
-            quickSaveHandler conn req respond
+            quickSaveHandler cfg conn req respond
         ("GET", ["api", "v1", "bookmarks", idTxt, "highlights"]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid bookmark id")
             Just bid -> do
@@ -1287,10 +1377,10 @@ authedRoute rctx req respond conn =
                 respond (jsonResponse status200 (object ["highlights" .= highlights]))
         ("POST", ["api", "v1", "bookmarks", idTxt, "highlights"]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid bookmark id")
-            Just bid -> highlightCreateHandler conn bid req respond
+            Just bid -> highlightCreateHandler cfg conn bid req respond
         ("PATCH", ["api", "v1", "bookmarks", idTxt, "highlights", hidTxt]) ->
             case (readInt idTxt, readInt hidTxt) of
-                (Just bid, Just hid) -> highlightUpdateHandler conn bid hid req respond
+                (Just bid, Just hid) -> highlightUpdateHandler cfg conn bid hid req respond
                 _ -> respond (jsonError status400 "bad_request" "invalid highlight id")
         ("DELETE", ["api", "v1", "bookmarks", idTxt, "highlights", hidTxt]) ->
             case (readInt idTxt, readInt hidTxt) of
@@ -1313,10 +1403,10 @@ authedRoute rctx req respond conn =
         ("GET", ["api", "v1", "tags"]) -> do
             tags <- allTags conn
             respond (jsonResponse status200 (object ["tags" .= tags]))
-        ("POST", ["api", "v1", "inbox", "mark-all-above"]) -> markAbove conn req respond
+        ("POST", ["api", "v1", "inbox", "mark-all-above"]) -> markAbove cfg conn req respond
         ("PATCH", ["api", "v1", "bookmarks", idTxt]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid bookmark id")
-            Just bid -> patchBookmark conn bid req respond
+            Just bid -> patchBookmark cfg conn bid req respond
         ("POST", ["api", "v1", "bookmarks", idTxt, action]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid bookmark id")
             Just bid -> do
@@ -1356,14 +1446,14 @@ authedRoute rctx req respond conn =
             views <- listViews conn
             respond (jsonResponse status200 (object ["views" .= views]))
         ("POST", ["api", "v1", "views"]) ->
-            viewsCreateHandler conn req respond
+            viewsCreateHandler cfg conn req respond
         ("GET", ["api", "v1", "views", viewSlug]) -> do
             found <- getView conn viewSlug
             case found of
                 Nothing -> respond (jsonError status404 "not_found" "view not found")
                 Just view -> respond (jsonResponse status200 view)
         ("PATCH", ["api", "v1", "views", viewSlug]) ->
-            viewsUpdateHandler conn viewSlug req respond
+            viewsUpdateHandler cfg conn viewSlug req respond
         ("DELETE", ["api", "v1", "views", viewSlug]) -> do
             result <- deleteView conn viewSlug
             case result of
@@ -1373,7 +1463,7 @@ authedRoute rctx req respond conn =
             webhooks <- listWebhooks conn
             respond (jsonResponse status200 (object ["webhooks" .= webhooks]))
         ("POST", ["api", "v1", "webhooks"]) ->
-            webhookCreateHandler conn req respond
+            webhookCreateHandler cfg conn req respond
         ("GET", ["api", "v1", "webhooks", idTxt]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid webhook id")
             Just webhookId -> do
@@ -1383,7 +1473,7 @@ authedRoute rctx req respond conn =
                     Just webhook -> respond (jsonResponse status200 webhook)
         ("PATCH", ["api", "v1", "webhooks", idTxt]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid webhook id")
-            Just webhookId -> webhookUpdateHandler conn webhookId req respond
+            Just webhookId -> webhookUpdateHandler cfg conn webhookId req respond
         ("DELETE", ["api", "v1", "webhooks", idTxt]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid webhook id")
             Just webhookId -> do
@@ -1409,9 +1499,9 @@ authedRoute rctx req respond conn =
             s <- listSavedSearches conn
             respond (jsonResponse status200 (object ["saved_searches" .= s]))
         ("POST", ["api", "v1", "saved-searches"]) -> do
-            body <- jsonBody req
+            body <- jsonBody cfg req
             case body of
-                Left e -> respond (jsonError status400 "bad_request" e)
+                Left response -> respond response
                 Right v -> case parseMaybeObj v of
                     Nothing -> respond (jsonError status400 "bad_request" "invalid body")
                     Just o -> case (parseMaybe (.: "name") o, parseMaybe (.: "q") o, parseMaybe (.: "tags") o) of
@@ -1428,9 +1518,9 @@ authedRoute rctx req respond conn =
             report <- dedupCandidates conn (dedupQueryFrom req)
             respond (jsonResponse status200 report)
         ("POST", ["api", "v1", "dedup", "merge-all"]) -> do
-            body <- jsonBody req
+            body <- jsonBody cfg req
             case body of
-                Left e -> respond (jsonError status400 "bad_request" e)
+                Left response -> respond response
                 Right v -> case parseMaybeObj v of
                     Just o
                         | (parseMaybe (.: "confirm") o :: Maybe Bool) == Just True -> do
@@ -1438,9 +1528,9 @@ authedRoute rctx req respond conn =
                             respond (jsonResponse status200 report)
                     _ -> respond (jsonError status400 "bad_request" "confirm is required")
         ("POST", ["api", "v1", "dedup", "merge"]) -> do
-            body <- jsonBody req
+            body <- jsonBody cfg req
             case body of
-                Left e -> respond (jsonError status400 "bad_request" e)
+                Left response -> respond response
                 Right v -> case parseMaybeObj v of
                     Nothing -> respond (jsonError status400 "bad_request" "invalid body")
                     Just o -> case (parseMaybe (.: "keep_id") o, parseMaybe (.: "merge_ids") o) of
@@ -1452,9 +1542,9 @@ authedRoute rctx req respond conn =
             report <- consolidationCandidates conn
             respond (jsonResponse status200 report)
         ("POST", ["api", "v1", "tags", "apply"]) -> do
-            body <- jsonBody req
+            body <- jsonBody cfg req
             case body of
-                Left e -> respond (jsonError status400 "bad_request" e)
+                Left response -> respond response
                 Right v -> case parseMaybeObj v of
                     Nothing -> respond (jsonError status400 "bad_request" "invalid body")
                     Just o -> case (parseMaybe (.: "bookmark_id") o, parseMaybe (.: "tags") o) of
@@ -1463,9 +1553,9 @@ authedRoute rctx req respond conn =
                             respond (jsonResponse status200 (object ["updated" .= n]))
                         _ -> respond (jsonError status400 "bad_request" "bookmark_id and tags are required")
         ("POST", ["api", "v1", "tags", "merge"]) -> do
-            body <- jsonBody req
+            body <- jsonBody cfg req
             case body of
-                Left e -> respond (jsonError status400 "bad_request" e)
+                Left response -> respond response
                 Right v -> case parseMaybeObj v of
                     Nothing -> respond (jsonError status400 "bad_request" "invalid body")
                     Just o -> case (parseMaybe (.: "from") o, parseMaybe (.: "into") o) of
@@ -1474,7 +1564,7 @@ authedRoute rctx req respond conn =
                             respond (jsonResponse status200 (object ["updated" .= n]))
                         _ -> respond (jsonError status400 "bad_request" "from and into are required")
         ("GET", ["api", "v1", "tags", tag, "suggestions"]) -> do
-            r <- aiSuggestions conn tag 20
+            r <- aiSuggestions (T.pack (cfgAiProvider cfg)) (T.pack (cfgAiModel cfg)) (T.pack (cfgOllamaBaseUrl cfg)) conn tag 20
             case r of
                 Left notice ->
                     respond
@@ -1485,9 +1575,9 @@ authedRoute rctx req respond conn =
                 Right suggestions -> respond (jsonResponse status200 (object ["suggestions" .= suggestions]))
         ("POST", ("api" : "v1" : "tags" : rest)) -> do
             let tagName = T.intercalate "/" rest
-            body <- jsonBody req
+            body <- jsonBody cfg req
             case body of
-                Left e -> respond (jsonError status400 "bad_request" e)
+                Left response -> respond response
                 Right v -> case parseMaybeObj v of
                     Nothing -> respond (jsonError status400 "bad_request" "invalid body")
                     Just o -> case parseMaybe (.: "name") o of
@@ -1501,9 +1591,9 @@ authedRoute rctx req respond conn =
             ok <- if detach == Just True then deleteTagWithLinks conn tagName else deleteTag conn tagName
             if ok then respond (emptyResponse status204) else respond (jsonError status409 "conflict" "tag is not empty or does not exist")
         ("POST", ["api", "v1", "maintenance", "check-dead"]) -> do
-            body <- jsonBody req
+            body <- jsonBody cfg req
             case body of
-                Left e -> respond (jsonError status400 "bad_request" e)
+                Left response -> respond response
                 Right v -> do
                     let o = fromMaybe mempty (parseMaybeObj v) :: Object
                         limit = fromMaybe 500 (parseMaybe (.: "limit") o :: Maybe Int)
@@ -1515,24 +1605,24 @@ authedRoute rctx req respond conn =
             items <- pruneCandidates conn 365
             respond (jsonResponse status200 (object ["items" .= items]))
         ("POST", ["api", "v1", "maintenance", "prune"]) -> do
-            body <- jsonBody req
+            body <- jsonBody cfg req
             case body of
-                Left e -> respond (jsonError status400 "bad_request" e)
+                Left response -> respond response
                 Right v -> case parseMaybeObj v of
                     Nothing -> respond (jsonError status400 "bad_request" "invalid body")
                     Just o -> case parseMaybe (.: "ids") o :: Maybe [Int] of
                         Nothing -> respond (jsonError status400 "bad_request" "ids is required")
                         Just ids -> do
                             n <- pruneApply conn ids
-                            respond (jsonResponse status200 (object ["pruned" .= n, "restored" .= (0 :: Int)]))
+                            respond (jsonResponse status200 (object ["pruned" .= n]))
         ("POST", ["api", "v1", "undo"]) -> do
             n <- undoLast conn
             respond (jsonResponse status200 (object ["restored" .= n]))
-        ("POST", ["api", "v1", "import"]) -> importHandler conn req respond
+        ("POST", ["api", "v1", "import"]) -> importHandler cfg conn req respond
         ("POST", ["api", "v1", "import", "json"]) -> do
-            body <- strictRequestBody req
-            case eitherDecode body of
-                Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+            body <- jsonBody cfg req
+            case body of
+                Left response -> respond response
                 Right value -> do
                     result <- importJson conn value
                     case result of
@@ -1592,7 +1682,8 @@ authedRoute rctx req respond conn =
                     )
                 )
         ("GET", ["api", "v1", "ai", "status"]) -> do
-            provider <- fromMaybe (cfgAiProvider cfg) <$> lookupEnv "EZA_AI_PROVIDER"
+            let provider = cfgAiProvider cfg
+                model = resolveAiModel (T.pack provider) (T.pack (cfgAiModel cfg))
             key <-
                 case provider of
                     "ollama" -> pure (Just "")
@@ -1600,13 +1691,13 @@ authedRoute rctx req respond conn =
                     "openai-compatible" -> lookupEnv "OPENAI_API_KEY"
                     "none" -> pure Nothing
                     _ -> lookupEnv "ANTHROPIC_API_KEY"
-            let configured = maybe False (not . null) key
+            let configured = provider /= "none" && maybe False (not . null) key
             respond
                 ( jsonResponse
                     status200
                     ( object
                         [ "provider" .= provider
-                        , "model" .= (if provider == "ollama" then T.pack (cfgAiModel cfg) else ("default" :: Text))
+                        , "model" .= model
                         , "configured" .= configured
                         ]
                     )
@@ -1615,25 +1706,25 @@ authedRoute rctx req respond conn =
             rules <- listRules conn
             respond (jsonResponse status200 (object ["rules" .= rules]))
         ("POST", ["api", "v1", "rules"]) -> do
-            body <- strictRequestBody req
-            case eitherDecode body of
-                Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+            body <- jsonValue cfg req
+            case body of
+                Left response -> respond response
                 Right rule -> do
                     created <- createRule conn (sanitizeRule rule)
                     respond (jsonResponse status201 created)
         ("POST", ["api", "v1", "rules", "test"]) -> do
-            body <- strictRequestBody req
-            case eitherDecode body of
-                Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+            body <- jsonValue cfg req
+            case body of
+                Left response -> respond response
                 Right rule -> do
                     ids <- matchingBookmarks conn (ruleField rule) (rulePattern rule)
                     respond (jsonResponse status200 (object ["matches" .= length ids, "bookmark_ids" .= ids]))
         ("PATCH", ["api", "v1", "rules", idTxt]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid rule id")
             Just rid -> do
-                body <- strictRequestBody req
-                case eitherDecode body of
-                    Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+                body <- jsonValue cfg req
+                case body of
+                    Left response -> respond response
                     Right rule -> do
                         ok <- updateRule conn (sanitizeRule rule){ruleId = rid}
                         if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status404 "not_found" "rule not found")
@@ -1646,9 +1737,9 @@ authedRoute rctx req respond conn =
             tokens <- listTokens conn
             respond (jsonResponse status200 (object ["tokens" .= tokens]))
         ("POST", ["api", "v1", "tokens"]) -> do
-            body <- strictRequestBody req
-            case eitherDecode body of
-                Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+            body <- jsonValue cfg req
+            case body of
+                Left response -> respond response
                 Right (TokenCreateBody name scopes) -> do
                     (_, raw, view) <- createToken conn name (fromMaybe ["read", "write"] scopes)
                     respond (jsonResponse status201 (object ["token" .= wireApiToken user raw, "token_info" .= view]))
@@ -1675,9 +1766,9 @@ authedRoute rctx req respond conn =
             r <- Auth.addPasskeyOptions conn (authConfig cfg) handle
             either (respond . authErrResponse) (respond . jsonResponse status200) r
         ("POST", ["api", "v1", "account", "passkeys", "verify"]) -> do
-            body <- jsonBody req
+            body <- jsonBody cfg req
             case body of
-                Left e -> respond (jsonError status400 "bad_request" e)
+                Left response -> respond response
                 Right v -> do
                     handle <- passkeyHandle state user
                     r <- Auth.verifyAddPasskey conn (authConfig cfg) handle v
@@ -1688,9 +1779,9 @@ authedRoute rctx req respond conn =
             case Auth.decodeCredentialId cidTxt of
                 Nothing -> respond (jsonError status400 "bad_request" "invalid credential id")
                 Just cid -> do
-                    body <- jsonBody req
+                    body <- jsonBody cfg req
                     case body of
-                        Left e -> respond (jsonError status400 "bad_request" e)
+                        Left response -> respond response
                         Right v -> case parseMaybeObj v of
                             Nothing -> respond (jsonError status400 "bad_request" "nickname is required")
                             Just o -> case parseMaybe (.: "nickname") o of
@@ -1722,6 +1813,9 @@ authedRoute rctx req respond conn =
         ("POST", ["api", "v1", "admin", "users", idTxt, "password"]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid user id")
             Just userId -> adminResetPassword state userId req respond
+        ("DELETE", ["api", "v1", "admin", "users", idTxt]) -> case readInt idTxt of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid user id")
+            Just userId -> adminDeleteUser state user userId req respond
         ("GET", path)
             | not ("api" `elem` path)
             , not ("assets" `elem` path) ->
@@ -1956,11 +2050,11 @@ graphLayoutHandler slot conn req respond =
                     pure built
             respond (jsonResponse status200 payload)
 
-viewsCreateHandler :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-viewsCreateHandler conn req respond = do
-    body <- jsonBody req
+viewsCreateHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+viewsCreateHandler cfg conn req respond = do
+    body <- jsonBody cfg req
     case body of
-        Left message -> respond (jsonError status400 "bad_request" message)
+        Left response -> respond response
         Right value -> case fromJSON value :: Result ViewInput of
             Error message -> respond (jsonError status400 "bad_request" (T.pack message))
             Success input -> do
@@ -1969,11 +2063,11 @@ viewsCreateHandler conn req respond = do
                     Left err -> respond (viewErrorResponse err)
                     Right view -> respond (jsonResponse status201 view)
 
-viewsUpdateHandler :: Connection -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-viewsUpdateHandler conn viewSlug req respond = do
-    body <- jsonBody req
+viewsUpdateHandler :: Config -> Connection -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+viewsUpdateHandler cfg conn viewSlug req respond = do
+    body <- jsonBody cfg req
     case body of
-        Left message -> respond (jsonError status400 "bad_request" message)
+        Left response -> respond response
         Right value -> case fromJSON value :: Result ViewPatch of
             Error message -> respond (jsonError status400 "bad_request" (T.pack message))
             Success patch -> do
@@ -1990,11 +2084,11 @@ viewErrorResponse err =
 -- Webhooks
 -- ---------------------------------------------------------------------------
 
-webhookCreateHandler :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-webhookCreateHandler conn req respond = do
-    body <- jsonBody req
+webhookCreateHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+webhookCreateHandler cfg conn req respond = do
+    body <- jsonBody cfg req
     case body of
-        Left message -> respond (jsonError status400 "bad_request" message)
+        Left response -> respond response
         Right value -> case fromJSON value :: Result WebhookInput of
             Error message -> respond (jsonError status400 "bad_request" (T.pack message))
             Success input -> do
@@ -2004,11 +2098,11 @@ webhookCreateHandler conn req respond = do
                     Right (webhook, secret) ->
                         respond (jsonResponse status201 (object ["webhook" .= webhook, "secret" .= secret]))
 
-webhookUpdateHandler :: Connection -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-webhookUpdateHandler conn webhookId req respond = do
-    body <- jsonBody req
+webhookUpdateHandler :: Config -> Connection -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+webhookUpdateHandler cfg conn webhookId req respond = do
+    body <- jsonBody cfg req
     case body of
-        Left message -> respond (jsonError status400 "bad_request" message)
+        Left response -> respond response
         Right value -> case fromJSON value :: Result WebhookInput of
             Error message -> respond (jsonError status400 "bad_request" (T.pack message))
             Success input -> do
@@ -2348,11 +2442,11 @@ instance FromJSON AddBody where
     parseJSON = withObject "AddBody" $ \o ->
         AddBody <$> o .: "url" <*> o .:? "title" <*> o .:? "tags"
 
-addBookmark :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-addBookmark conn req respond = do
-    body <- strictRequestBody req
-    case eitherDecode body of
-        Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+addBookmark :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+addBookmark cfg conn req respond = do
+    body <- jsonValue cfg req
+    case body of
+        Left response -> respond response
         Right (AddBody url title tags) ->
             if not (isHttpUrl url)
                 then respond (jsonError status400 "bad_request" "url must be http(s)")
@@ -2386,11 +2480,11 @@ instance FromJSON HighlightCreateBody where
             <*> o .:? "note"
             <*> o .:? "color"
 
-highlightCreateHandler :: Connection -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-highlightCreateHandler conn bid req respond = do
-    body <- strictRequestBody req
-    case eitherDecode body of
-        Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+highlightCreateHandler :: Config -> Connection -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+highlightCreateHandler cfg conn bid req respond = do
+    body <- jsonValue cfg req
+    case body of
+        Left response -> respond response
         Right (HighlightCreateBody quote prefix suffix start end note color) -> do
             result <- createHighlight conn bid quote (fromMaybe "" prefix) (fromMaybe "" suffix) start end (fromMaybe "" note) (fromMaybe "yellow" color)
             case result of
@@ -2403,11 +2497,11 @@ instance FromJSON HighlightPatchBody where
     parseJSON = withObject "HighlightPatchBody" $ \o ->
         HighlightPatchBody <$> o .:? "note" <*> o .:? "color"
 
-highlightUpdateHandler :: Connection -> Int -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-highlightUpdateHandler conn bid hid req respond = do
-    body <- strictRequestBody req
-    case eitherDecode body of
-        Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+highlightUpdateHandler :: Config -> Connection -> Int -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+highlightUpdateHandler cfg conn bid hid req respond = do
+    body <- jsonValue cfg req
+    case body of
+        Left response -> respond response
         Right (HighlightPatchBody note color) -> do
             ok <- updateHighlight conn bid hid note color
             if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status404 "not_found" "highlight not found")
@@ -2420,9 +2514,9 @@ instance FromJSON ShareCreateBody where
 
 shareCreateHandler :: Config -> Control.ControlUser -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 shareCreateHandler cfg user conn req respond = do
-    body <- strictRequestBody req
-    case eitherDecode body of
-        Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+    body <- jsonValue cfg req
+    case body of
+        Left response -> respond response
         Right (ShareCreateBody scope targetId includeNote expires) -> do
             let days = fromMaybe (cfgShareTtlDays cfg) expires
             result <- createShare conn scope targetId (fromMaybe False includeNote) days
@@ -2521,11 +2615,11 @@ instance FromJSON BulkBody where
     parseJSON = withObject "BulkBody" $ \o ->
         BulkBody <$> o .: "action" <*> o .:? "ids" .!= [] <*> o .:? "tags" <*> o .:? "confirm"
 
-bulkHandler :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-bulkHandler conn req respond = do
-    body <- strictRequestBody req
-    case eitherDecode body of
-        Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+bulkHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+bulkHandler cfg conn req respond = do
+    body <- jsonValue cfg req
+    case body of
+        Left response -> respond response
         Right (BulkBody action ids tags confirm) -> do
             let parsed = case action of
                     "add_tags" -> Right (BulkAddTags (fromMaybe [] tags))
@@ -2556,11 +2650,11 @@ instance FromJSON QuickBody where
     parseJSON = withObject "QuickBody" $ \o ->
         QuickBody <$> o .: "url" <*> o .:? "title" <*> o .:? "tags"
 
-quickSaveHandler :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-quickSaveHandler conn req respond = do
-    body <- strictRequestBody req
-    case eitherDecode body of
-        Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+quickSaveHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+quickSaveHandler cfg conn req respond = do
+    body <- jsonValue cfg req
+    case body of
+        Left response -> respond response
         Right (QuickBody url title tags)
             | not (isHttpUrl url) -> respond (jsonError status400 "bad_request" "url must be http(s)")
             | otherwise -> do
@@ -2578,11 +2672,11 @@ data MarkAboveBody = MarkAboveBody (Maybe Int)
 instance FromJSON MarkAboveBody where
     parseJSON = withObject "MarkAboveBody" $ \o -> MarkAboveBody <$> o .:? "above_id"
 
-markAbove :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-markAbove conn req respond = do
-    body <- strictRequestBody req
-    case eitherDecode body of
-        Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+markAbove :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+markAbove cfg conn req respond = do
+    body <- jsonValue cfg req
+    case body of
+        Left response -> respond response
         Right (MarkAboveBody aid) -> do
             n <- markAllAbove conn aid
             respond (jsonResponse status200 (object ["updated" .= n]))
@@ -2593,11 +2687,11 @@ instance FromJSON PatchBody where
     parseJSON = withObject "PatchBody" $ \o ->
         PatchBody <$> o .:? "title" <*> o .:? "note_body" <*> o .:? "is_read" <*> o .:? "tags"
 
-patchBookmark :: Connection -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-patchBookmark conn bid req respond = do
-    body <- strictRequestBody req
-    case eitherDecode body of
-        Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+patchBookmark :: Config -> Connection -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+patchBookmark cfg conn bid req respond = do
+    body <- jsonValue cfg req
+    case body of
+        Left response -> respond response
         Right (PatchBody mTitle mNote mRead mTags)
             | maybe False (T.null . T.strip) mTitle -> respond (jsonError status400 "bad_request" "title must not be empty")
             | all (== Nothing) [fmap (const ()) mTitle, fmap (const ()) mNote, fmap (const ()) mRead, fmap (const ()) mTags] ->
@@ -2606,21 +2700,136 @@ patchBookmark conn bid req respond = do
                 ok <- updateBookmark conn bid mTitle mNote mRead mTags
                 if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status404 "not_found" "bookmark not found")
 
-importHandler :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-importHandler conn req respond = do
-    (_, files) <- parseRequestBodyEx defaultParseRequestBodyOptions lbsBackEnd req
-    case lookup "file" files of
-        Nothing -> respond (jsonError status400 "bad_request" "multipart field \"file\" is required")
-        Just fileInfo -> do
-            let raw = LBS.toStrict (fileContent fileInfo)
-                parsed = parseNetscape defaultImportOptions raw
-            report <- importParsed conn defaultImportOptions parsed
-            respond (jsonResponse status200 report)
+importHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+importHandler cfg conn req respond =
+    case lookup hContentType (requestHeaders req) of
+        Just contentType | "application/json" `BS.isPrefixOf` contentType -> importJsonBody
+        _ -> importMultipart
+  where
+    importLimit = fromIntegral (cfgImportMaxBytes cfg) :: Int64
+    options =
+        setMaxRequestNumFiles 1
+            . setMaxRequestParmsSize (cfgImportMaxBytes cfg)
+            . setMaxRequestFilesSize importLimit
+            . setMaxRequestFileSize importLimit
+            $ defaultParseRequestBodyOptions
 
-jsonBody :: Request -> IO (Either Text Value)
-jsonBody req = do
-    body <- strictRequestBody req
-    pure (case eitherDecode body :: Either String Value of Left e -> Left (T.pack e); Right v -> Right v)
+    -- A JSON body is an eza export (the browser-clipper upload path and the
+    -- documented portable backup). It answers with the Netscape report shape so
+    -- the account import panel can show one result format for both sources.
+    importJsonBody = do
+        body <- jsonBody cfg req
+        case body of
+            Left response -> respond response
+            Right value -> do
+                result <- importJson conn value
+                case result of
+                    Left message -> respond (jsonError status400 "bad_request" message)
+                    Right report ->
+                        respond
+                            ( jsonResponse
+                                status200
+                                ( object
+                                    [ "format" .= ("eza-json" :: Text)
+                                    , "json_report" .= report
+                                    , "imported" .= jrBookmarks report
+                                    , "inserted" .= jrBookmarks report
+                                    , "found" .= jrBookmarks report
+                                    , "existing" .= (0 :: Int)
+                                    , "highlights" .= jrHighlights report
+                                    , "captures" .= jrCaptures report
+                                    , "views" .= jrViews report
+                                    , "clip_templates" .= jrTemplates report
+                                    , "skipped" .= jrSkipped report
+                                    ]
+                                )
+                            )
+
+    importMultipart = do
+        parsed <- try (parseRequestBodyEx options lbsBackEnd req) :: IO (Either SomeException ([Param], [File LBS.ByteString]))
+        case parsed of
+            Left _ ->
+                -- The wai parser throws when a file or parameter grows past the
+                -- configured multipart limits; report it as the same 413 the
+                -- size middleware uses rather than a 500.
+                respond (requestTooLargeResponse (fromIntegral (cfgImportMaxBytes cfg)))
+            Right (_, files) -> case lookup "file" files of
+                Nothing -> respond (jsonError status400 "bad_request" "multipart field \"file\" is required")
+                Just fileInfo -> do
+                    let raw = LBS.toStrict (fileContent fileInfo)
+                        -- The account panel uploads .html and .json files under
+                        -- the same multipart flow; sniff the JSON format rather
+                        -- than relying on the browser's content type.
+                        asJson = eitherDecodeStrict' raw :: Either String Value
+                    case asJson of
+                        Right value | isEzaJsonExport value -> do
+                            result <- importJson conn value
+                            case result of
+                                Left message -> respond (jsonError status400 "bad_request" message)
+                                Right report ->
+                                    respond
+                                        ( jsonResponse
+                                            status200
+                                            ( object
+                                                [ "format" .= ("eza-json" :: Text)
+                                                , "json_report" .= report
+                                                , "imported" .= jrBookmarks report
+                                                , "inserted" .= jrBookmarks report
+                                                , "found" .= jrBookmarks report
+                                                , "existing" .= (0 :: Int)
+                                                , "highlights" .= jrHighlights report
+                                                , "captures" .= jrCaptures report
+                                                , "views" .= jrViews report
+                                                , "clip_templates" .= jrTemplates report
+                                                , "skipped" .= jrSkipped report
+                                                ]
+                                            )
+                                        )
+                        _ -> do
+                            let parsedBookmarks = parseNetscape defaultImportOptions raw
+                            report <- importParsed conn defaultImportOptions parsedBookmarks
+                            respond (jsonResponse status200 report)
+
+-- | True when the decoded document announces the eza JSON export format.
+isEzaJsonExport :: Value -> Bool
+isEzaJsonExport (Object o) = case KeyMap.lookup "format" o of
+    Just (String "eza-json") -> True
+    _ -> False
+isEzaJsonExport _ = False
+
+{- | Read the request body under the general per-request cap. The size-limit
+middleware rejects a declared or chunked oversize body before the handler, but
+this is the in-handler backstop: no handler ever builds an unbounded lazy
+bytestring. Returns a ready 413 in the shared JSON error shape.
+-}
+readBodyBounded :: Config -> Request -> IO (Either Response LBS.ByteString)
+readBodyBounded cfg req = do
+    body <- readBodyLimited (cfgMaxBodyBytes cfg) req
+    pure $ case body of
+        Left () -> Left (requestTooLargeResponse (fromIntegral (cfgMaxBodyBytes cfg)))
+        Right raw -> Right raw
+
+{- | Decode a bounded JSON body. A body over the cap is a ready-made 413; a
+parse failure keeps the existing generic 400 shape.
+-}
+jsonBody :: Config -> Request -> IO (Either Response Value)
+jsonBody cfg req = do
+    body <- readBodyBounded cfg req
+    pure $ case body of
+        Left response -> Left response
+        Right raw -> case eitherDecode raw of
+            Left err -> Left (jsonError status400 "bad_request" (T.pack err))
+            Right value -> Right value
+
+-- | Decode a bounded JSON body as one typed value.
+jsonValue :: (FromJSON a) => Config -> Request -> IO (Either Response a)
+jsonValue cfg req = do
+    body <- jsonBody cfg req
+    pure $ case body of
+        Left response -> Left response
+        Right value -> case fromJSON value of
+            Error err -> Left (jsonError status400 "bad_request" (T.pack err))
+            Success parsed -> Right parsed
 
 parseMaybeObj :: Value -> Maybe Object
 parseMaybeObj (Object o) = Just o
@@ -2648,9 +2857,10 @@ adminListUsers state respond = do
 
 adminCreateUser :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 adminCreateUser state req respond = do
-    body <- jsonBody req
+    let cfg = asConfig state
+    body <- jsonBody cfg req
     case body of
-        Left message -> respond (jsonError status400 "bad_request" message)
+        Left response -> respond response
         Right value -> case fromJSON value :: Result UserCreateInput of
             Error message -> respond (jsonError status400 "bad_request" (T.pack message))
             Success input -> do
@@ -2670,9 +2880,10 @@ adminPatchUser ::
     (Response -> IO ResponseReceived) ->
     IO ResponseReceived
 adminPatchUser state admin targetId req respond = do
-    body <- jsonBody req
+    let cfg = asConfig state
+    body <- jsonBody cfg req
     case body of
-        Left message -> respond (jsonError status400 "bad_request" message)
+        Left response -> respond response
         Right value -> case parseMaybeObj value of
             Nothing -> respond (jsonError status400 "bad_request" "invalid body")
             Just object' -> do
@@ -2712,9 +2923,10 @@ adminPatchUser state admin targetId req respond = do
 
 adminResetPassword :: AppState -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 adminResetPassword state targetId req respond = do
-    body <- jsonBody req
+    let cfg = asConfig state
+    body <- jsonBody cfg req
     case body of
-        Left message -> respond (jsonError status400 "bad_request" message)
+        Left response -> respond response
         Right value -> case parseMaybeObj value of
             Nothing -> respond (jsonError status400 "bad_request" "invalid body")
             Just object' -> case parseMaybe (.: "password") object' of
@@ -2726,6 +2938,33 @@ adminResetPassword state targetId req respond = do
                     case result of
                         Left err -> respond (adminErrorResponse err)
                         Right () -> respond (jsonResponse status200 (object ["ok" .= True]))
+
+{- | Delete one account. The control row always goes; the library and its
+snapshots go only when @delete_db@ is true, because they are the user's
+content. Refuses self-delete and the last enabled admin.
+-}
+adminDeleteUser :: AppState -> Control.ControlUser -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+adminDeleteUser state admin targetId req respond = do
+    body <- jsonBody (asConfig state) req
+    case body of
+        Left response -> respond response
+        Right value -> case parseMaybeObj value of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+            Just o -> do
+                let confirmed = parseMaybe (.: "confirm") o :: Maybe Bool
+                    deleteDb = fromMaybe False (parseMaybe (.: "delete_db") o :: Maybe Bool)
+                if confirmed /= Just True
+                    then respond (jsonError status400 "bad_request" "confirm must be true")
+                    else
+                        if targetId == Control.cuId admin
+                            then respond (adminErrorResponse Admin.AdminSelfDisable)
+                            else do
+                                result <-
+                                    withControl state $ \control ->
+                                        Admin.deleteUserAccount (asConfig state) control targetId deleteDb
+                                case result of
+                                    Left err -> respond (adminErrorResponse err)
+                                    Right () -> respond (jsonResponse status200 (object ["ok" .= True]))
 
 -- ---------------------------------------------------------------------------
 -- Account handlers
@@ -2760,9 +2999,9 @@ current password, and turning it on needs an already-registered passkey.
 -}
 accountTwoFactorHandler :: Config -> Connection -> AuthContext -> Control.UserRole -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 accountTwoFactorHandler cfg conn ctx role req respond = do
-    body <- jsonBody req
+    body <- jsonBody cfg req
     case body of
-        Left e -> respond (jsonError status400 "bad_request" e)
+        Left response -> respond response
         Right value -> case parseMaybeObj value of
             Nothing -> respond (jsonError status400 "bad_request" "invalid body")
             Just o -> case parseMaybe (.: "required") o :: Maybe Bool of
@@ -2783,9 +3022,9 @@ the old access.
 -}
 accountPasswordHandler :: Config -> Connection -> AuthContext -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 accountPasswordHandler cfg conn ctx req respond = do
-    body <- jsonBody req
+    body <- jsonBody cfg req
     case body of
-        Left e -> respond (jsonError status400 "bad_request" e)
+        Left response -> respond response
         Right value -> case parseMaybeObj value of
             Nothing -> respond (jsonError status400 "bad_request" "invalid body")
             Just o -> do
@@ -2824,9 +3063,9 @@ so it changes with the user database account name.
 -}
 accountUsernameHandler :: Config -> AppState -> Control.ControlUser -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 accountUsernameHandler cfg state user conn req respond = do
-    body <- jsonBody req
+    body <- jsonBody cfg req
     case body of
-        Left e -> respond (jsonError status400 "bad_request" e)
+        Left response -> respond response
         Right value -> case parseMaybeObj value of
             Nothing -> respond (jsonError status400 "bad_request" "invalid body")
             Just o -> do
@@ -2965,19 +3204,78 @@ serveStaticFile cfg relative headers req respond = case cfgStaticDir cfg of
             then sendFile req "no-cache" headers path respond
             else respond (jsonError status404 "not_found" "asset not found")
 
+{- | Resolve one decoded asset path against the static root. Returns the
+canonical file path only when every segment is a plain name and the canonical
+candidate stays inside the canonical root.
+
+WAI splits the raw path on @/@ and percent-decodes each segment afterwards, so
+@..%2f..%2fetc%2fpasswd@ arrives as a single segment whose text contains
+slashes. Comparing a decoded segment with @".."@ alone is therefore not enough:
+any segment containing a path separator (or @.@/@..@, empty, or NUL) is
+rejected, and the surviving candidate is canonicalized and prefix-checked like
+the snapshot route does. This is also what stops @%2e%2e%2f@ and a backslash
+form.
+-}
+resolveStaticPath :: FilePath -> [Text] -> IO (Maybe FilePath)
+resolveStaticPath root rest
+    | invalidStaticSegments rest = pure Nothing
+    | otherwise = do
+        rootExists <- doesDirectoryExist root
+        if not rootExists
+            then pure Nothing
+            else do
+                rootResult <- try (canonicalizePath root) :: IO (Either SomeException FilePath)
+                case rootResult of
+                    Left (_ :: SomeException) -> pure Nothing
+                    Right canonicalRoot -> do
+                        let rel = foldr ((</>) . T.unpack) "" rest
+                            candidate = canonicalRoot </> rel
+                        exists <- doesFileExist candidate
+                        if not exists
+                            then pure Nothing
+                            else do
+                                resolvedResult <- try (canonicalizePath candidate) :: IO (Either SomeException FilePath)
+                                pure $ case resolvedResult of
+                                    Left (_ :: SomeException) -> Nothing
+                                    Right resolved
+                                        | resolved /= canonicalRoot
+                                        , isUnder resolved canonicalRoot ->
+                                            Just resolved
+                                        | otherwise -> Nothing
+  where
+    isUnder path canonicalRoot =
+        path == canonicalRoot
+            || addTrailingPathSeparator canonicalRoot `isPrefixOf` path
+
+{- | A decoded path segment is only a plain file name: no empty segment, no
+@.@/@..@, no separators of either kind, and no NUL. The encoded-slash
+traversal arrives here as one segment containing @/@, so it is rejected before
+any filesystem call.
+-}
+invalidStaticSegments :: [Text] -> Bool
+invalidStaticSegments = any unsafeStaticSegment
+  where
+    unsafeStaticSegment segment =
+        T.null segment
+            || segment == "."
+            || segment == ".."
+            || T.any (== '/') segment
+            || T.any (== '\\') segment
+            || T.any (== '\NUL') segment
+
 serveAsset :: Config -> [Text] -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 serveAsset cfg rest req respond = case cfgStaticDir cfg of
     Nothing -> respond (jsonError status404 "not_found" "static assets are not configured")
     Just root -> do
-        if any (== "..") rest
+        if invalidStaticSegments rest
             then respond (jsonError status400 "bad_request" "invalid asset path")
             else do
-                let rel = foldr ((</>) . T.unpack) "" rest
-                    path = root </> rel
-                exists <- doesFileExist path
-                if exists
-                    then sendFile req "no-cache" [(hContentType, mimeFor rel)] path respond
-                    else respond (jsonError status404 "not_found" "asset not found")
+                resolved <- resolveStaticPath root rest
+                case resolved of
+                    Nothing -> respond (jsonError status404 "not_found" "asset not found")
+                    Just path -> do
+                        let rel = foldr ((</>) . T.unpack) "" rest
+                        sendFile req "no-cache" [(hContentType, mimeFor rel)] path respond
 
 -- | The shell HTML is never stored: a rebuild must reach the next navigation.
 indexResponse :: Config -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived

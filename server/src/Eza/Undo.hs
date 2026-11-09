@@ -7,14 +7,22 @@
 --     @undo_*_rows@ tables and leaves a marker row in @undo_snapshots@ with an
 --     empty JSON payload. As of schema v7 it covers the bookmark rows
 --     themselves, their tag names, the highlights attached to them and the
---     wikilinks whose source or target is affected. Tag-only operations use
---     the same marker with 'undo_tag_rows' and 'undo_bookmark_tags' rows.
+--     wikilinks whose source or target is affected. Schema v12 adds the
+--     browser-clipper capture rows (@captures@ cascades from @bookmarks@), so
+--     undoing a delete, prune or merge brings those back too. Tag-only
+--     operations use the same marker with 'undo_tag_rows' and
+--     'undo_bookmark_tags' rows.
 --   * A 'legacy snapshot' stores a JSON payload in @undo_snapshots@. Older
 --     binaries wrote those and the restore path is kept so an upgrade does not
 --     strand them.
 --
--- 'undoLast' restores one snapshot as a single transaction. Empty or
+-- 'undoLastDetailed' restores one snapshot as a single transaction. Empty or
 -- malformed snapshots are discarded instead of blocking the undo record.
+-- Restoring never REPLACEs a different bookmark row: a snapshot row is
+-- updated by id when its id is still present, inserted when its id and URL are
+-- free, and skipped (counted) when the URL has been re-used by a newer row.
+-- The FTS index is rebuilt after a bookmark restore so a restore cannot leave
+-- stale search terms behind.
 
 -- | Undo snapshots.
 module Eza.Undo (
@@ -24,9 +32,10 @@ module Eza.Undo (
     recordTagUndo,
     restoreBookmarks,
     undoLast,
+    undoLastDetailed,
 ) where
 
-import Control.Monad (forM_, when)
+import Control.Monad (foldM, forM_, when)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Lazy as LBS
@@ -38,6 +47,7 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
 import GHC.Generics (Generic)
 
+import Eza.Clip (captureColumns)
 import Eza.Json (jsonOptions)
 
 {- | The row shape of a legacy JSON snapshot. Kept byte-compatible with old
@@ -108,13 +118,6 @@ instance ToJSON SnapshotRow where
 instance FromJSON SnapshotRow where
     parseJSON = genericParseJSON (jsonOptions "sr")
 
-{- | Columns of the legacy JSON snapshot. The legacy format predates the
-enrichment, reading-time and AI columns, so it stays at the v1 shape.
--}
-snapshotColumns :: Text
-snapshotColumns =
-    "id,url,title,description,favicon_url,domain,source,created_at,added_at,updated_at,last_opened_at,last_checked_at,open_count,is_dead,is_read,note_body,extracted_text,author,sitename,published_at,language,image_url,final_url,snapshot_path,snapshot_kind,snapshot_captured_at"
-
 {- | Every column of @bookmarks@ in schema order. @undo_bookmark_rows@ mirrors
 this list exactly (v1 columns, the v2 enrichment/reading columns and the v5 AI
 columns), so a side snapshot restores the complete row.
@@ -122,6 +125,225 @@ columns), so a side snapshot restores the complete row.
 bookmarkColumns :: Text
 bookmarkColumns =
     "id,url,title,description,favicon_url,domain,source,created_at,added_at,updated_at,last_opened_at,last_checked_at,open_count,is_dead,is_read,note_body,extracted_text,author,sitename,published_at,language,image_url,final_url,snapshot_path,snapshot_kind,snapshot_captured_at,enrich_state,enrich_error,enrich_attempts,enriched_at,reading_time_minutes,ai_summary,ai_tagged_at"
+
+-- | The column names of 'bookmarkColumns', in order.
+bookmarkColumnList :: [Text]
+bookmarkColumnList = T.splitOn "," bookmarkColumns
+
+{- | Columns of the legacy JSON snapshot. The legacy format predates the
+enrichment, reading-time and AI columns, so it stays at the v1 shape.
+-}
+snapshotColumns :: Text
+snapshotColumns =
+    "id,url,title,description,favicon_url,domain,source,created_at,added_at,updated_at,last_opened_at,last_checked_at,open_count,is_dead,is_read,note_body,extracted_text,author,sitename,published_at,language,image_url,final_url,snapshot_path,snapshot_kind,snapshot_captured_at"
+
+snapshotColumnList :: [Text]
+snapshotColumnList = T.splitOn "," snapshotColumns
+
+{- | One complete bookmark row lifted out of @undo_bookmark_rows@. The restore
+path decides row by row whether its id can be updated, whether it can be
+inserted, or whether its URL is now owned by a different row and must be
+skipped.
+-}
+data SideBookmark = SideBookmark
+    { sbId :: Int
+    , sbUrl :: Text
+    , sbTitle :: Text
+    , sbDescription :: Text
+    , sbFaviconUrl :: Text
+    , sbDomain :: Text
+    , sbSource :: Text
+    , sbCreatedAt :: Int
+    , sbAddedAt :: Int
+    , sbUpdatedAt :: Int
+    , sbLastOpenedAt :: Maybe Int
+    , sbLastCheckedAt :: Maybe Int
+    , sbOpenCount :: Int
+    , sbIsDead :: Int
+    , sbIsRead :: Int
+    , sbNoteBody :: Text
+    , sbExtractedText :: Text
+    , sbAuthor :: Text
+    , sbSitename :: Text
+    , sbPublishedAt :: Maybe Int
+    , sbLanguage :: Text
+    , sbImageUrl :: Text
+    , sbFinalUrl :: Text
+    , sbSnapshotPath :: Text
+    , sbSnapshotKind :: Text
+    , sbSnapshotCapturedAt :: Maybe Int
+    , sbEnrichState :: Text
+    , sbEnrichError :: Text
+    , sbEnrichAttempts :: Int
+    , sbEnrichedAt :: Maybe Int
+    , sbReadingTimeMinutes :: Int
+    , sbAiSummary :: Text
+    , sbAiTaggedAt :: Maybe Int
+    }
+
+instance FromRow SideBookmark where
+    fromRow =
+        SideBookmark
+            <$> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+
+sideBookmarkParams :: SideBookmark -> [NamedParam]
+sideBookmarkParams row =
+    [ ":id" := sbId row
+    , ":url" := sbUrl row
+    , ":title" := sbTitle row
+    , ":description" := sbDescription row
+    , ":favicon_url" := sbFaviconUrl row
+    , ":domain" := sbDomain row
+    , ":source" := sbSource row
+    , ":created_at" := sbCreatedAt row
+    , ":added_at" := sbAddedAt row
+    , ":updated_at" := sbUpdatedAt row
+    , ":last_opened_at" := sbLastOpenedAt row
+    , ":last_checked_at" := sbLastCheckedAt row
+    , ":open_count" := sbOpenCount row
+    , ":is_dead" := sbIsDead row
+    , ":is_read" := sbIsRead row
+    , ":note_body" := sbNoteBody row
+    , ":extracted_text" := sbExtractedText row
+    , ":author" := sbAuthor row
+    , ":sitename" := sbSitename row
+    , ":published_at" := sbPublishedAt row
+    , ":language" := sbLanguage row
+    , ":image_url" := sbImageUrl row
+    , ":final_url" := sbFinalUrl row
+    , ":snapshot_path" := sbSnapshotPath row
+    , ":snapshot_kind" := sbSnapshotKind row
+    , ":snapshot_captured_at" := sbSnapshotCapturedAt row
+    , ":enrich_state" := sbEnrichState row
+    , ":enrich_error" := sbEnrichError row
+    , ":enrich_attempts" := sbEnrichAttempts row
+    , ":enriched_at" := sbEnrichedAt row
+    , ":reading_time_minutes" := sbReadingTimeMinutes row
+    , ":ai_summary" := sbAiSummary row
+    , ":ai_tagged_at" := sbAiTaggedAt row
+    ]
+
+{- | Insert one snapshot row. The URL is written as given; the caller has
+already checked that no other row owns it.
+-}
+sideBookmarkInsertSql :: Query
+sideBookmarkInsertSql =
+    Query
+        ( "INSERT INTO bookmarks ("
+            <> bookmarkColumns
+            <> ") VALUES ("
+            <> T.intercalate ", " (map (":" <>) bookmarkColumnList)
+            <> ")"
+        )
+
+{- | Update the row with the snapshot id. The URL assignment is guarded: when a
+different row took the same URL after the snapshot (a re-save of the deleted
+page), the current URL stays and the rest of the row is restored, so a restore
+never REPLACEs a newer row through the UNIQUE(url) constraint.
+-}
+sideBookmarkUpdateSql :: Query
+sideBookmarkUpdateSql =
+    Query
+        ( "UPDATE bookmarks SET "
+            <> T.intercalate ", " (map assignment (filter (/= "id") bookmarkColumnList))
+            <> " WHERE id = :id"
+        )
+  where
+    assignment column
+        | column == "url" =
+            "url = CASE WHEN EXISTS (SELECT 1 FROM bookmarks AS x WHERE x.url = :url AND x.id <> :id) THEN url ELSE :url END"
+        | otherwise = column <> " = :" <> column
+
+sideBookmarkSelectSql :: Query
+sideBookmarkSelectSql =
+    Query ("SELECT " <> bookmarkColumns <> " FROM undo_bookmark_rows WHERE snapshot_id = ? ORDER BY id")
+
+-- ---------------------------------------------------------------- legacy SQL ---
+
+snapshotParams :: SnapshotRow -> [NamedParam]
+snapshotParams row =
+    [ ":id" := srId row
+    , ":url" := srUrl row
+    , ":title" := srTitle row
+    , ":description" := srDescription row
+    , ":favicon_url" := srFaviconUrl row
+    , ":domain" := srDomain row
+    , ":source" := srSource row
+    , ":created_at" := srCreatedAt row
+    , ":added_at" := srAddedAt row
+    , ":updated_at" := srUpdatedAt row
+    , ":last_opened_at" := srLastOpenedAt row
+    , ":last_checked_at" := srLastCheckedAt row
+    , ":open_count" := srOpenCount row
+    , ":is_dead" := srIsDead row
+    , ":is_read" := srIsRead row
+    , ":note_body" := srNoteBody row
+    , ":extracted_text" := srExtractedText row
+    , ":author" := srAuthor row
+    , ":sitename" := srSitename row
+    , ":published_at" := srPublishedAt row
+    , ":language" := srLanguage row
+    , ":image_url" := srImageUrl row
+    , ":final_url" := srFinalUrl row
+    , ":snapshot_path" := srSnapshotPath row
+    , ":snapshot_kind" := srSnapshotKind row
+    , ":snapshot_captured_at" := srSnapshotCapturedAt row
+    ]
+
+legacyInsertSql :: Query
+legacyInsertSql =
+    Query
+        ( "INSERT INTO bookmarks ("
+            <> snapshotColumns
+            <> ") VALUES ("
+            <> T.intercalate ", " (map (":" <>) snapshotColumnList)
+            <> ")"
+        )
+
+legacyUpdateSql :: Query
+legacyUpdateSql =
+    Query
+        ( "UPDATE bookmarks SET "
+            <> T.intercalate ", " (map assignment (filter (/= "id") snapshotColumnList))
+            <> " WHERE id = :id"
+        )
+  where
+    assignment column
+        | column == "url" =
+            "url = CASE WHEN EXISTS (SELECT 1 FROM bookmarks AS x WHERE x.url = :url AND x.id <> :id) THEN url ELSE :url END"
+        | otherwise = column <> " = :" <> column
 
 {- | Snapshot the complete rows and tag names for the given bookmark ids as a
 legacy JSON payload. Kept for compatibility with old binaries and payloads;
@@ -149,60 +371,20 @@ recordUndo conn op snapshot = do
         (TE.decodeUtf8 (LBS.toStrict (encode (object ["op" .= op, "snapshot" .= snapshot]))), (now :: Int))
 
 {- | Restore a legacy JSON snapshot. No transaction management: the caller
-wraps it. Kept for snapshots written by older binaries.
+wraps it. Kept for snapshots written by older binaries; returns the number of
+bookmark rows restored and ignores URL-conflict skips.
 -}
 restoreBookmarks :: Connection -> Value -> IO Int
-restoreBookmarks conn payload = do
-    let rows = fromMaybe [] (parseMaybe (withObject "snapshot" (.: "rows")) payload :: Maybe [SnapshotRow])
-        tags = fromMaybe [] (parseMaybe (withObject "snapshot" (.: "tags")) payload :: Maybe [(Int, Text)])
-    forM_ rows $ \r ->
-        executeNamed
-            conn
-            "INSERT OR REPLACE INTO bookmarks (id,url,title,description,favicon_url,domain,source,created_at,added_at,updated_at,last_opened_at,last_checked_at,open_count,is_dead,is_read,note_body,extracted_text,author,sitename,published_at,language,image_url,final_url,snapshot_path,snapshot_kind,snapshot_captured_at) VALUES (:id,:url,:title,:description,:favicon,:domain,:source,:created,:added,:updated,:opened,:checked,:open_count,:dead,:read,:note,:extracted,:author,:sitename,:published,:language,:image,:final,:snapshot_path,:snapshot_kind,:snapshot_captured)"
-            [ ":id" := srId r
-            , ":url" := srUrl r
-            , ":title" := srTitle r
-            , ":description" := srDescription r
-            , ":favicon" := srFaviconUrl r
-            , ":domain" := srDomain r
-            , ":source" := srSource r
-            , ":created" := srCreatedAt r
-            , ":added" := srAddedAt r
-            , ":updated" := srUpdatedAt r
-            , ":opened" := srLastOpenedAt r
-            , ":checked" := srLastCheckedAt r
-            , ":open_count" := srOpenCount r
-            , ":dead" := srIsDead r
-            , ":read" := srIsRead r
-            , ":note" := srNoteBody r
-            , ":extracted" := srExtractedText r
-            , ":author" := srAuthor r
-            , ":sitename" := srSitename r
-            , ":published" := srPublishedAt r
-            , ":language" := srLanguage r
-            , ":image" := srImageUrl r
-            , ":final" := srFinalUrl r
-            , ":snapshot_path" := srSnapshotPath r
-            , ":snapshot_kind" := srSnapshotKind r
-            , ":snapshot_captured" := srSnapshotCapturedAt r
-            ]
-    forM_ rows $ \r -> execute conn "DELETE FROM bookmark_tags WHERE bookmark_id = ?" (Only (srId r))
-    forM_ tags $ \(bid, name) -> do
-        execute conn "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, strftime('%s','now'))" (Only name)
-        tagRows <- query conn "SELECT id FROM tags WHERE name = ?" (Only name) :: IO [Only Int]
-        case tagRows of
-            (Only tid : _) -> execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (bid, tid)
-            _ -> pure ()
-    pure (length rows)
+restoreBookmarks conn payload = fst <$> restoreLegacyPayload conn payload
 
 {- | Record a side snapshot for the given bookmark ids, before the caller
 changes them. Must run inside the caller's write transaction.
 
 The marker row (@undo_snapshots@ with an empty JSON payload) plus the side
 tables: bookmark rows, bookmark/tag names, the tag rows those names belong to,
-the highlights attached to the bookmarks and the wikilinks whose source or
-target is one of the bookmarks. That is everything a delete, prune, bulk update
-or merge can cascade away.
+the highlights attached to the bookmarks, the wikilinks whose source or target
+is one of the bookmarks, and (v12) the clip captures attached to them. That is
+everything a delete, prune, bulk update or merge can cascade away.
 -}
 recordUndoIds :: Connection -> Text -> [Int] -> IO Int
 recordUndoIds conn op ids = do
@@ -239,6 +421,10 @@ recordUndoIds conn op ids = do
                 conn
                 (Query ("INSERT OR IGNORE INTO undo_link_rows (snapshot_id,id,source_id,target_id,target_title,display_text,line_number) SELECT ?, l.id, l.source_id, l.target_id, l.target_title, l.display_text, l.line_number FROM links l WHERE l.source_id IN " <> inMarks <> " OR l.target_id IN " <> inMarks))
                 (snapshotId : (uniqueIds <> uniqueIds))
+            execute
+                conn
+                (Query ("INSERT OR IGNORE INTO undo_capture_rows (snapshot_id," <> captureColumns <> ") SELECT ?," <> captureColumns <> " FROM captures WHERE bookmark_id IN " <> inMarks))
+                params
             pure snapshotId
 
 {- | Record a tagged side snapshot for a tag-only operation. @names@ is the set
@@ -270,34 +456,151 @@ recordTagUndo conn op names = do
     pure snapshotId
 
 {- | Restore a bookmark side snapshot. The caller owns the transaction:
-'undoLast' wraps the whole restore in one immediate transaction. Order matters:
-bookmark rows first (so the foreign keys resolve), then the child rows from the
-snapshot, then delete the marker row.
+'undoLastDetailed' wraps the whole restore in one immediate transaction. Bookmark
+rows are restored first (per-id update, or insert when id and URL are free),
+then the tag/highlight/link/capture rows recorded by the snapshot, and finally
+the FTS index is rebuilt and the marker row is removed.
 -}
-restoreSideSnapshot :: Connection -> Int -> IO Int
+restoreSideSnapshot :: Connection -> Int -> IO (Int, Int)
 restoreSideSnapshot conn snapshotId = do
-    bookmarkCount <- countRows conn "undo_bookmark_rows" snapshotId
-    let affectedIds = "SELECT id FROM undo_bookmark_rows WHERE snapshot_id = ?"
-    execute
-        conn
-        (Query ("INSERT OR REPLACE INTO bookmarks (" <> bookmarkColumns <> ") SELECT " <> bookmarkColumns <> " FROM undo_bookmark_rows WHERE snapshot_id = ?"))
-        (Only snapshotId)
-    execute conn (Query ("DELETE FROM bookmark_tags WHERE bookmark_id IN (" <> affectedIds <> ")")) (Only snapshotId)
-    execute conn (Query ("DELETE FROM highlights WHERE bookmark_id IN (" <> affectedIds <> ")")) (Only snapshotId)
-    execute conn (Query ("DELETE FROM links WHERE source_id IN (" <> affectedIds <> ") OR target_id IN (" <> affectedIds <> ")")) (snapshotId, snapshotId)
+    rows <- query conn sideBookmarkSelectSql (Only snapshotId) :: IO [SideBookmark]
+    (restored, skipped) <- foldM (restoreSideRow conn) ([], 0) rows
+    deleteRestoredChildren conn snapshotId
+    restoreSideChildren conn snapshotId
+    rebuildFts conn
+    execute conn "DELETE FROM undo_snapshots WHERE id = ?" (Only snapshotId)
+    pure (length restored, skipped)
+
+{- | Restore one snapshot row and return the accumulated restored ids plus the
+number of URL conflicts skipped. A row whose id still exists is updated in
+place; a row whose id is gone is inserted only when its URL is free. A row
+whose URL was re-used by a newer row is skipped, never REPLACEd away.
+-}
+restoreSideRow :: Connection -> ([Int], Int) -> SideBookmark -> IO ([Int], Int)
+restoreSideRow conn (restored, skipped) row = do
+    byId <- query conn "SELECT 1 FROM bookmarks WHERE id = ?" (Only (sbId row)) :: IO [Only Int]
+    if not (null byId)
+        then do
+            executeNamed conn sideBookmarkUpdateSql (sideBookmarkParams row)
+            pure (sbId row : restored, skipped)
+        else do
+            byUrl <- query conn "SELECT 1 FROM bookmarks WHERE url = ?" (Only (sbUrl row)) :: IO [Only Int]
+            if null byUrl
+                then do
+                    executeNamed conn sideBookmarkInsertSql (sideBookmarkParams row)
+                    pure (sbId row : restored, skipped)
+                else pure (restored, skipped + 1)
+
+{- | Remove the child rows of the restored bookmarks before the snapshot rows
+are put back. The id set comes from the snapshot but only ids that exist in
+@bookmarks@ now (the restored ones) are touched: a skipped row has no children
+to delete, and deleting by its id would be a no-op anyway.
+-}
+deleteRestoredChildren :: Connection -> Int -> IO ()
+deleteRestoredChildren conn snapshotId = do
+    let restoredIds =
+            "SELECT u.id FROM undo_bookmark_rows u WHERE u.snapshot_id = ? AND EXISTS (SELECT 1 FROM bookmarks b WHERE b.id = u.id)"
+    execute conn (Query ("DELETE FROM bookmark_tags WHERE bookmark_id IN (" <> restoredIds <> ")")) (Only snapshotId)
+    execute conn (Query ("DELETE FROM highlights WHERE bookmark_id IN (" <> restoredIds <> ")")) (Only snapshotId)
+    execute conn (Query ("DELETE FROM captures WHERE bookmark_id IN (" <> restoredIds <> ")")) (Only snapshotId)
+    execute conn (Query ("DELETE FROM links WHERE source_id IN (" <> restoredIds <> ") OR target_id IN (" <> restoredIds <> ")")) (snapshotId, snapshotId)
+
+{- | Put back the snapshot's tag rows and the child rows attached to restored
+bookmarks. Children are filtered by an existence check on @bookmarks@ so a row
+whose bookmark was skipped for a URL conflict cannot violate a foreign key.
+-}
+restoreSideChildren :: Connection -> Int -> IO ()
+restoreSideChildren conn snapshotId = do
+    let existsBookmark column =
+            "EXISTS (SELECT 1 FROM bookmarks b WHERE b.id = " <> column <> ")"
     execute conn "INSERT OR IGNORE INTO tags (name, created_at) SELECT name, created_at FROM undo_tag_rows WHERE snapshot_id = ?" (Only snapshotId)
     execute conn "INSERT OR IGNORE INTO tags (name, created_at) SELECT DISTINCT tag_name, strftime('%s','now') FROM undo_bookmark_tags WHERE snapshot_id = ?" (Only snapshotId)
-    execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) SELECT ut.bookmark_id, t.id FROM undo_bookmark_tags ut JOIN tags t ON t.name = ut.tag_name WHERE ut.snapshot_id = ?" (Only snapshotId)
     execute
         conn
-        "INSERT OR REPLACE INTO highlights (id,bookmark_id,quote,prefix,suffix,start_offset,end_offset,note,color,created_at,updated_at) SELECT id,bookmark_id,quote,prefix,suffix,start_offset,end_offset,note,color,created_at,updated_at FROM undo_highlight_rows WHERE snapshot_id = ?"
+        ( Query
+            ( "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) "
+                <> "SELECT ut.bookmark_id, t.id FROM undo_bookmark_tags ut JOIN tags t ON t.name = ut.tag_name "
+                <> "WHERE ut.snapshot_id = ? AND "
+                <> existsBookmark "ut.bookmark_id"
+            )
+        )
         (Only snapshotId)
     execute
         conn
-        "INSERT OR REPLACE INTO links (id,source_id,target_id,target_title,display_text,line_number) SELECT id,source_id,target_id,target_title,display_text,line_number FROM undo_link_rows WHERE snapshot_id = ?"
+        ( Query
+            ( "INSERT OR REPLACE INTO highlights (id,bookmark_id,quote,prefix,suffix,start_offset,end_offset,note,color,created_at,updated_at) "
+                <> "SELECT id,bookmark_id,quote,prefix,suffix,start_offset,end_offset,note,color,created_at,updated_at "
+                <> "FROM undo_highlight_rows WHERE snapshot_id = ? AND "
+                <> existsBookmark "undo_highlight_rows.bookmark_id"
+            )
+        )
         (Only snapshotId)
-    execute conn "DELETE FROM undo_snapshots WHERE id = ?" (Only snapshotId)
-    pure bookmarkCount
+    execute
+        conn
+        ( Query
+            ( "INSERT OR REPLACE INTO links (id,source_id,target_id,target_title,display_text,line_number) "
+                <> "SELECT id,source_id,target_id,target_title,display_text,line_number FROM undo_link_rows ul "
+                <> "WHERE ul.snapshot_id = ? "
+                <> "AND (ul.source_id IS NULL OR "
+                <> existsBookmark "ul.source_id"
+                <> ") "
+                <> "AND (ul.target_id IS NULL OR "
+                <> existsBookmark "ul.target_id"
+                <> ")"
+            )
+        )
+        (Only snapshotId)
+    execute
+        conn
+        ( Query
+            ( "INSERT OR REPLACE INTO captures ("
+                <> captureColumns
+                <> ") "
+                <> "SELECT "
+                <> captureColumns
+                <> " FROM undo_capture_rows "
+                <> "WHERE snapshot_id = ? AND "
+                <> existsBookmark "undo_capture_rows.bookmark_id"
+            )
+        )
+        (Only snapshotId)
+
+{- | Restore a legacy JSON snapshot's bookmark rows. The same id/URL conflict
+rules as the side restore apply: update by id, insert when free, skip when the
+URL belongs to a newer row. The payload has no highlight/link/capture rows, so
+only tags are put back. Returns how many rows were restored and skipped.
+-}
+restoreLegacyPayload :: Connection -> Value -> IO (Int, Int)
+restoreLegacyPayload conn payload = do
+    let rows = fromMaybe [] (parseMaybe (withObject "snapshot" (.: "rows")) payload :: Maybe [SnapshotRow])
+        tags = fromMaybe [] (parseMaybe (withObject "snapshot" (.: "tags")) payload :: Maybe [(Int, Text)])
+    (restored, skipped) <- foldM (restoreLegacyRow conn) ([], 0) rows
+    forM_ restored $ \bid -> execute conn "DELETE FROM bookmark_tags WHERE bookmark_id = ?" (Only bid)
+    forM_ tags $ \(bid, name) -> do
+        present <- query conn "SELECT 1 FROM bookmarks WHERE id = ?" (Only bid) :: IO [Only Int]
+        when (not (null present) && bid `elem` restored) $ do
+            execute conn "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, strftime('%s','now'))" (Only name)
+            tagRows <- query conn "SELECT id FROM tags WHERE name = ?" (Only name) :: IO [Only Int]
+            case tagRows of
+                (Only tid : _) -> execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (bid, tid)
+                _ -> pure ()
+    rebuildFts conn
+    pure (length restored, skipped)
+
+restoreLegacyRow :: Connection -> ([Int], Int) -> SnapshotRow -> IO ([Int], Int)
+restoreLegacyRow conn (restored, skipped) row = do
+    byId <- query conn "SELECT 1 FROM bookmarks WHERE id = ?" (Only (srId row)) :: IO [Only Int]
+    if not (null byId)
+        then do
+            executeNamed conn legacyUpdateSql (snapshotParams row)
+            pure (srId row : restored, skipped)
+        else do
+            byUrl <- query conn "SELECT 1 FROM bookmarks WHERE url = ?" (Only (srUrl row)) :: IO [Only Int]
+            if null byUrl
+                then do
+                    executeNamed conn legacyInsertSql (snapshotParams row)
+                    pure (srId row : restored, skipped)
+                else pure (restored, skipped + 1)
 
 {- | Restore a tag side snapshot. Same transaction contract as
 'restoreSideSnapshot'. Deletes the tag rows and bookmark/tag links for every
@@ -365,22 +668,35 @@ restoreTagSnapshot conn snapshotId = do
     execute conn "DELETE FROM undo_snapshots WHERE id = ?" (Only snapshotId)
     pure tagCount
 
+{- | Rebuild the external-content FTS index from @bookmarks@. A restore writes
+through UPDATE/INSERT paths the sync triggers may not fully cover (and old
+binaries used REPLACE, which skipped the delete trigger), so the index is
+rebuilt at the end of every bookmark restore instead of trusted.
+-}
+rebuildFts :: Connection -> IO ()
+rebuildFts conn =
+    execute_ conn "INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')"
+
 {- | Restore the newest usable snapshot. Empty or malformed snapshots are
 discarded one by one instead of blocking the undo record, and the restore is a
 single immediate transaction so a failure leaves the library untouched.
-Returns the number of bookmarks restored (bookmark snapshots) or tag rows
-restored (tag snapshots).
+Returns the number of rows restored and the number of snapshot rows skipped
+because their URL now belongs to a different row.
 -}
-undoLast :: Connection -> IO Int
-undoLast conn = withImmediateTransaction conn (restoreLatest conn)
+undoLastDetailed :: Connection -> IO (Int, Int)
+undoLastDetailed conn = withImmediateTransaction conn (restoreLatest conn)
 
--- | The body of 'undoLast'. Runs inside one immediate transaction.
-restoreLatest :: Connection -> IO Int
+-- | Compatibility wrapper for callers that only need the restored count.
+undoLast :: Connection -> IO Int
+undoLast conn = fst <$> undoLastDetailed conn
+
+-- | The body of 'undoLastDetailed'. Runs inside one immediate transaction.
+restoreLatest :: Connection -> IO (Int, Int)
 restoreLatest conn = do
     rows <-
         query_ conn "SELECT id, CAST(payload_json AS TEXT) FROM undo_snapshots ORDER BY id DESC LIMIT 1" :: IO [(Int, Text)]
     case rows of
-        [] -> pure 0
+        [] -> pure (0, 0)
         (snapshotId, raw) : _ -> do
             bookmarkRows <- countRows conn "undo_bookmark_rows" snapshotId
             if bookmarkRows > 0
@@ -389,13 +705,17 @@ restoreLatest conn = do
                     tagRows <- countRows conn "undo_tag_rows" snapshotId
                     tagLinks <- countRows conn "undo_bookmark_tags" snapshotId
                     if tagRows > 0 || tagLinks > 0
-                        then restoreTagSnapshot conn snapshotId
+                        then do
+                            restored <- restoreTagSnapshot conn snapshotId
+                            pure (restored, 0)
                         else case legacySnapshot raw of
                             Just snapshot -> do
-                                restored <- restoreBookmarks conn snapshot
+                                (restored, skipped) <- restoreLegacyPayload conn snapshot
                                 discardSnapshot conn snapshotId
                                 -- An empty legacy snapshot is not a restore: keep looking.
-                                if restored > 0 then pure restored else restoreLatest conn
+                                if restored > 0 || skipped > 0
+                                    then pure (restored, skipped)
+                                    else restoreLatest conn
                             Nothing -> do
                                 discardSnapshot conn snapshotId
                                 restoreLatest conn

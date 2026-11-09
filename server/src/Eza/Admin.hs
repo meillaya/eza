@@ -22,6 +22,8 @@ module Eza.Admin (
     setUserRole,
     resetUserPassword,
     deleteUserAccount,
+    missingUserDatabases,
+    userLimitWarning,
     resolveSelector,
     resolveLibraryPath,
     resolveLibraryTarget,
@@ -31,7 +33,7 @@ module Eza.Admin (
 ) where
 
 import Control.Exception (SomeException, try)
-import Control.Monad (forM, forM_, void, when)
+import Control.Monad (filterM, forM, forM_, void, when)
 import Crypto.Random (getRandomBytes)
 import qualified Data.ByteString.Base64.URL as B64
 import Data.Maybe (isNothing)
@@ -61,6 +63,7 @@ data AdminError
     | AdminNotFound
     | AdminLastAdmin
     | AdminSelfDisable
+    | AdminUserLimit
     | AdminInternal Text
     deriving (Show, Eq)
 
@@ -72,6 +75,7 @@ adminErrorStatus err = case err of
     AdminNotFound -> 404
     AdminLastAdmin -> 409
     AdminSelfDisable -> 409
+    AdminUserLimit -> 409
     AdminInternal _ -> 500
 
 adminErrorCode :: AdminError -> Text
@@ -82,6 +86,7 @@ adminErrorCode err = case err of
     AdminNotFound -> "user_not_found"
     AdminLastAdmin -> "last_admin"
     AdminSelfDisable -> "self_disable"
+    AdminUserLimit -> "user_limit"
     AdminInternal _ -> "internal"
 
 adminErrorMessage :: AdminError -> Text
@@ -92,6 +97,7 @@ adminErrorMessage err = case err of
     AdminNotFound -> "no such account"
     AdminLastAdmin -> "the last enabled admin cannot be disabled, demoted, or deleted"
     AdminSelfDisable -> "an admin cannot disable their own account"
+    AdminUserLimit -> "the account limit (EZA_MAX_USERS) has been reached"
     AdminInternal message -> message
 
 -- --------------------------------------------------------------- summaries ---
@@ -161,6 +167,47 @@ snapshotCount dir = do
             result <- try (listDirectory dir) :: IO (Either SomeException [FilePath])
             pure (either (const 0) length result)
 
+{- | The message the per-library CLI commands print when there is no account to
+use and the legacy @EZA_DB@ file is not a claimed eza database. Naming both the
+control path and the legacy path makes the next step obvious: create an
+account, or point the command at an account with @--user@.
+-}
+noAccountMessage :: Config -> Text
+noAccountMessage cfg =
+    "no accounts are registered in the control database ("
+        <> T.pack (cfgControlDbPath cfg)
+        <> ") and the legacy database ("
+        <> T.pack (cfgDbPath cfg)
+        <> ") is missing or has no claimed account. Start the server and finish /setup to create the first account, or pass --user <name|id> for an existing account"
+
+{- | Enabled accounts whose library database file is missing. The server can
+warn at startup instead of silently opening (and creating) a fresh empty
+library when a request first resolves the account.
+-}
+missingUserDatabases :: Config -> Connection -> IO [ControlUser]
+missingUserDatabases _cfg control = do
+    users <- Control.listUsers control
+    filterM (fmap not . doesFileExist . cuDbPath) [user | user <- users, isNothing (cuDisabledAt user)]
+
+{- | A startup warning when more enabled accounts exist than @EZA_MAX_USERS@
+slots, because the accounts past the limit cannot sign in while the process
+runs.
+-}
+userLimitWarning :: Config -> Connection -> IO (Maybe Text)
+userLimitWarning cfg control = do
+    enabled <- Control.countEnabledUsers control
+    pure $
+        if enabled > cfgMaxUsers cfg
+            then
+                Just
+                    ( "eza: "
+                        <> T.pack (show enabled)
+                        <> " enabled accounts but EZA_MAX_USERS="
+                        <> T.pack (show (cfgMaxUsers cfg))
+                        <> "; the accounts past the limit cannot sign in until the limit is raised or the server restarts"
+                    )
+            else Nothing
+
 -- ------------------------------------------------------------------ paths ---
 
 userDir :: Config -> Int -> FilePath
@@ -216,12 +263,16 @@ createUserAccount cfg control rawUsername role password =
         Right username -> case Password.validatePassword password of
             Left message -> pure (Left (AdminWeakPassword message))
             Right () -> do
-                placeholder <- pendingDbPath cfg
-                created <- Control.createUser control username placeholder role Nothing
-                case created of
-                    Left ControlDuplicateUsername -> pure (Left AdminUsernameTaken)
-                    Left err -> pure (Left (AdminInternal (T.pack (show err))))
-                    Right user -> finish user
+                existing <- Control.countUsers control
+                if existing >= cfgMaxUsers cfg
+                    then pure (Left AdminUserLimit)
+                    else do
+                        placeholder <- pendingDbPath cfg
+                        created <- Control.createUser control username placeholder role Nothing
+                        case created of
+                            Left ControlDuplicateUsername -> pure (Left AdminUsernameTaken)
+                            Left err -> pure (Left (AdminInternal (T.pack (show err))))
+                            Right user -> finish user
   where
     finish user = do
         path <- userDbPathFor cfg (cuId user)
@@ -261,49 +312,28 @@ and the worker supervisor stops its workers. The last enabled admin is kept.
 -}
 setUserEnabled :: Config -> Connection -> Int -> Bool -> IO (Either AdminError ControlUser)
 setUserEnabled _cfg control userId enabled = do
-    found <- Control.lookupUserById control userId
-    case found of
-        Nothing -> pure (Left AdminNotFound)
-        Just user -> do
-            admins <- Control.countEnabledAdmins control
-            let disablingLastAdmin =
-                    not enabled
-                        && isNothing (cuDisabledAt user)
-                        && cuRole user == RoleAdmin
-                        && admins <= 1
-            if disablingLastAdmin
-                then pure (Left AdminLastAdmin)
-                else do
-                    changed <- Control.setUserDisabled control userId (not enabled)
-                    if not changed
-                        then pure (Left AdminNotFound)
-                        else do
-                            when (not enabled) (void (try (dropSessions (cuDbPath user)) :: IO (Either SomeException ())))
-                            updated <- Control.lookupUserById control userId
-                            pure (maybe (Left AdminNotFound) Right updated)
+    outcome <- Control.setUserDisabledGuarded control userId (not enabled)
+    case outcome of
+        Control.ControlWriteLastAdmin -> pure (Left AdminLastAdmin)
+        Control.ControlWriteMissing -> pure (Left AdminNotFound)
+        Control.ControlWriteOk -> do
+            found <- Control.lookupUserById control userId
+            case found of
+                Nothing -> pure (Left AdminNotFound)
+                Just user -> do
+                    when (not enabled) (void (try (dropSessions (cuDbPath user)) :: IO (Either SomeException ())))
+                    pure (Right user)
 
 -- | Change one account's role, keeping at least one enabled admin.
 setUserRole :: Connection -> Int -> UserRole -> IO (Either AdminError ControlUser)
 setUserRole control userId role = do
-    found <- Control.lookupUserById control userId
-    case found of
-        Nothing -> pure (Left AdminNotFound)
-        Just user -> do
-            admins <- Control.countEnabledAdmins control
-            let demotingLastAdmin =
-                    role == RoleMember
-                        && cuRole user == RoleAdmin
-                        && isNothing (cuDisabledAt user)
-                        && admins <= 1
-            if demotingLastAdmin
-                then pure (Left AdminLastAdmin)
-                else do
-                    changed <- Control.setUserRole control userId role
-                    if not changed
-                        then pure (Left AdminNotFound)
-                        else do
-                            updated <- Control.lookupUserById control userId
-                            pure (maybe (Left AdminNotFound) Right updated)
+    outcome <- Control.setUserRoleGuarded control userId role
+    case outcome of
+        Control.ControlWriteLastAdmin -> pure (Left AdminLastAdmin)
+        Control.ControlWriteMissing -> pure (Left AdminNotFound)
+        Control.ControlWriteOk -> do
+            updated <- Control.lookupUserById control userId
+            pure (maybe (Left AdminNotFound) Right updated)
 
 dropSessions :: FilePath -> IO ()
 dropSessions path = do
@@ -408,7 +438,7 @@ resolveLibraryPath cfg selector = fmap snd <$> resolveLibraryTarget cfg selector
 resolveLibraryTarget :: Config -> Maybe Text -> IO (Either Text (Maybe ControlUser, FilePath))
 resolveLibraryTarget cfg selector = do
     result <-
-        try (Sqlite.open (cfgControlDbPath cfg)) ::
+        try (Control.openControlDb (cfgControlDbPath cfg)) ::
             IO (Either SomeException Connection)
     case result of
         Left err ->
@@ -434,8 +464,13 @@ resolveLibraryTarget cfg selector = do
         Nothing -> do
             users <- Control.listUsers control
             let enabled = filter (isNothing . cuDisabledAt) users
-            pure $ case (users, enabled) of
-                ([], _) -> Right (Nothing, cfgDbPath cfg)
-                (_, [only]) -> Right (Just only, cuDbPath only)
-                (_, []) -> Left "every account is disabled; choose one with --user <name|id>"
-                _ -> Left "several accounts exist; choose one with --user <name|id>"
+            case (users, enabled) of
+                ([], _) -> do
+                    claimed <- Db.databaseClaimed (cfgDbPath cfg)
+                    pure $
+                        if claimed
+                            then Right (Nothing, cfgDbPath cfg)
+                            else Left (noAccountMessage cfg)
+                (_, [only]) -> pure (Right (Just only, cuDbPath only))
+                (_, []) -> pure (Left "every account is disabled; choose one with --user <name|id>")
+                _ -> pure (Left "several accounts exist; choose one with --user <name|id>")

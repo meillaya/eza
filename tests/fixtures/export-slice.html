@@ -1,0 +1,43 @@
+<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<!-- Deterministic slice of a browser export for the importer acceptance test.
+     With defaultImportOptions (TagLeaf, noise filter on) the parser must report:
+       found = 14, http_anchors = 12, non_http = 2, duplicate_anchors = 4,
+       items = 8, folders_skipped = 1, untagged = 0.
+     The four collapsed anchors exercise exact-repeat, http/https+www, a
+     utm_* tracking parameter, and a trailing slash. Folder tags (toolbar, dev,
+     rust, reading list), an anchor TAGS attribute, and ADD_DATE values are
+     present so tag and date extraction are covered too. -->
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">
+<TITLE>Bookmarks</TITLE>
+<H1>Bookmarks</H1>
+<DL><p>
+    <DT><H3 ADD_DATE="1700000000" PERSONAL_TOOLBAR_FOLDER="true">Bookmarks bar</H3>
+    <DL><p>
+        <DT><A HREF="https://example.test/epsilon" ADD_DATE="1700000100" TAGS="reading,Archive">Epsilon</A>
+    </DL><p>
+    <DT><H3 ADD_DATE="1700000001">Dev</H3>
+    <DL><p>
+        <DT><H3 ADD_DATE="1700000002">Rust</H3>
+        <DL><p>
+            <DT><A HREF="https://example.test/alpha" ADD_DATE="1700000101">Alpha</A>
+            <DT><A HREF="https://example.test/alpha" ADD_DATE="1700000102">Alpha again</A>
+        </DL><p>
+        <DT><A HREF="http://www.example.test/beta" ADD_DATE="1700000103">Beta over http</A>
+        <DT><A HREF="https://example.test/beta" ADD_DATE="1700000104">Beta over https</A>
+        <DT><A HREF="https://example.test/zeta" ADD_DATE="1700000105">Zeta</A>
+    </DL><p>
+    <DT><H3 ADD_DATE="1700000003">Reading list</H3>
+    <DL><p>
+        <DT><A HREF="https://example.test/gamma?utm_source=newsletter" ADD_DATE="1700000106">Gamma with tracking</A>
+        <DT><A HREF="https://example.test/gamma" ADD_DATE="1700000107">Gamma</A>
+        <DT><A HREF="https://example.test/delta/" ADD_DATE="1700000108">Delta with trailing slash</A>
+        <DT><A HREF="https://example.test/delta" ADD_DATE="1700000109">Delta</A>
+        <DT><A HREF="https://example.test/eta" ADD_DATE="1700000110">Eta</A>
+        <DT><A HREF="https://example.test/theta" ADD_DATE="1700000111">Theta</A>
+    </DL><p>
+    <DT><H3 ADD_DATE="1700000004">2024-01-02 03:04:05</H3>
+    <DL><p>
+        <DT><A HREF="chrome://settings" ADD_DATE="1700000112">Chrome settings</A>
+        <DT><A HREF="place:type=6&amp;sort=14" ADD_DATE="1700000113">Firefox places</A>
+    </DL><p>
+</DL><p>

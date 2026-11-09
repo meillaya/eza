@@ -60,7 +60,6 @@ data Config = Config
     , cfgAiProvider :: String
     , cfgOllamaBaseUrl :: String
     , cfgAiModel :: String
-    , cfgAiAutoTag :: Bool
     , cfgArgon2 :: PasswordParams
     , cfgLoginMaxAttempts :: Int
     , cfgLoginLockoutSeconds :: Int
@@ -124,8 +123,7 @@ loadConfig = do
     shareTtl <- readIntEnv "EZA_SHARE_TTL_DAYS" 7
     aiProvider <- fromMaybe "none" <$> lookupEnv "EZA_AI_PROVIDER"
     ollamaUrl <- fromMaybe "http://127.0.0.1:11434" <$> lookupEnv "EZA_OLLAMA_BASE_URL"
-    aiModel <- fromMaybe "llama3.2" <$> lookupEnv "EZA_AI_MODEL"
-    aiAutoTag <- readBoolEnv "EZA_AI_AUTO_TAG" False
+    aiModel <- fromMaybe "" <$> lookupEnv "EZA_AI_MODEL"
     argonMemory <- readIntEnv "EZA_ARGON2_MEMORY_KIB" (fromIntegral (ppMemoryKiB defaultPasswordParams))
     argonIterations <- readIntEnv "EZA_ARGON2_ITERATIONS" (fromIntegral (ppIterations defaultPasswordParams))
     argonParallelism <- readIntEnv "EZA_ARGON2_PARALLELISM" (fromIntegral (ppParallelism defaultPasswordParams))
@@ -171,7 +169,6 @@ loadConfig = do
             , cfgAiProvider = aiProvider
             , cfgOllamaBaseUrl = ollamaUrl
             , cfgAiModel = aiModel
-            , cfgAiAutoTag = aiAutoTag
             , cfgArgon2 = argon2Params
             , cfgLoginMaxAttempts = max 1 loginMaxAttempts
             , cfgLoginLockoutSeconds = max 1 loginLockout

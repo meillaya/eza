@@ -37,9 +37,11 @@ import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
 
+import Eza.Events (bookmarkEventData, bookmarkEventDataMany, recordEvent, recordEventMany)
 import Eza.Types (BookmarkSummary (..), DedupCounts (..), DedupGroup (..), DedupMergeAllReport (..), DedupReport (..))
 import Eza.Undo (recordUndoIds)
 import Eza.Url (dedupeKey, domainOf, hostOf)
+import Eza.Webhook (EventType (..))
 
 -- ---------------------------------------------------------------------------
 -- Detection
@@ -210,7 +212,16 @@ normalizeTitle = T.unwords . T.words . T.toLower . T.map replace
 row parser works for the keeper and for each absorbed row.
 -}
 data MergeRow = MergeRow
-    { mrCreatedAt :: Int
+    { mrTitle :: Text
+    , mrDescription :: Text
+    , mrExtractedText :: Text
+    , mrAuthor :: Text
+    , mrSitename :: Text
+    , mrPublishedAt :: Maybe Int
+    , mrLanguage :: Text
+    , mrImageUrl :: Text
+    , mrFinalUrl :: Text
+    , mrCreatedAt :: Int
     , mrAddedAt :: Int
     , mrOpenCount :: Int
     , mrLastOpenedAt :: Maybe Int
@@ -239,10 +250,19 @@ instance FromRow MergeRow where
             <*> field
             <*> field
             <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
 
 mergeRowColumns :: Text
 mergeRowColumns =
-    "created_at,added_at,open_count,last_opened_at,last_checked_at,is_read,is_dead,favicon_url,snapshot_path,snapshot_kind,snapshot_captured_at,ai_summary"
+    "title,description,extracted_text,author,sitename,published_at,language,image_url,final_url,created_at,added_at,open_count,last_opened_at,last_checked_at,is_read,is_dead,favicon_url,snapshot_path,snapshot_kind,snapshot_captured_at,ai_summary"
 
 -- | A note row with the title/url used for the appended source heading.
 data NoteRow = NoteRow
@@ -297,6 +317,9 @@ mergeGroupTx conn keep merges preferHttps = do
         then pure 0
         else do
             now <- (floor <$> getPOSIXTime) :: IO Int
+            -- The deleted events carry the absorbed rows as they are before
+            -- the merge touches them; this runs in the caller's transaction.
+            deletedData <- bookmarkEventDataMany conn found
             -- 1. Tags are unioned onto the keeper.
             forM_ found $ \mid ->
                 execute
@@ -367,10 +390,32 @@ mergeGroupTx conn keep merges preferHttps = do
                         createdAt = minimum (map mrCreatedAt allRows)
                         addedAt = minimum (map mrAddedAt allRows)
                         capturedAt = firstJust (map mrSnapshotCapturedAt allRows)
+                        -- Empty keeper metadata is filled from the first absorbed
+                        -- row that has it, so a merge never drops a description,
+                        -- extraction text, author, date, language, image or the
+                        -- final URL of an absorbed duplicate.
+                        firstTitle = firstText (map mrTitle allRows)
+                        firstDescription = firstText (map mrDescription allRows)
+                        firstExtracted = firstText (map mrExtractedText allRows)
+                        firstAuthor = firstText (map mrAuthor allRows)
+                        firstSitename = firstText (map mrSitename allRows)
+                        firstPublished = firstJust (map mrPublishedAt allRows)
+                        firstLanguage = firstText (map mrLanguage allRows)
+                        firstImage = firstText (map mrImageUrl allRows)
+                        firstFinalUrl = firstText (map mrFinalUrl allRows)
                     executeNamed
                         conn
-                        "UPDATE bookmarks SET note_body = :note, open_count = :open_count, last_opened_at = :last_opened, last_checked_at = :last_checked, is_read = :is_read, is_dead = :is_dead, created_at = :created, added_at = :added, favicon_url = :favicon, snapshot_path = :snapshot_path, snapshot_kind = :snapshot_kind, snapshot_captured_at = :snapshot_captured, ai_summary = :ai_summary, updated_at = :updated WHERE id = :keep"
-                        [ ":note" := mergedNote
+                        "UPDATE bookmarks SET title = CASE WHEN trim(title) = '' THEN :title ELSE title END, description = CASE WHEN trim(description) = '' THEN :description ELSE description END, extracted_text = CASE WHEN trim(extracted_text) = '' THEN :extracted_text ELSE extracted_text END, author = CASE WHEN trim(author) = '' THEN :author ELSE author END, sitename = CASE WHEN trim(sitename) = '' THEN :sitename ELSE sitename END, published_at = CASE WHEN published_at IS NULL THEN :published ELSE published_at END, language = CASE WHEN trim(language) = '' THEN :language ELSE language END, image_url = CASE WHEN trim(image_url) = '' THEN :image ELSE image_url END, final_url = CASE WHEN trim(final_url) = '' THEN :final_url ELSE final_url END, note_body = :note, open_count = :open_count, last_opened_at = :last_opened, last_checked_at = :last_checked, is_read = :is_read, is_dead = :is_dead, created_at = :created, added_at = :added, favicon_url = :favicon, snapshot_path = :snapshot_path, snapshot_kind = :snapshot_kind, snapshot_captured_at = :snapshot_captured, ai_summary = :ai_summary, updated_at = :updated WHERE id = :keep"
+                        [ ":title" := firstTitle
+                        , ":description" := firstDescription
+                        , ":extracted_text" := firstExtracted
+                        , ":author" := firstAuthor
+                        , ":sitename" := firstSitename
+                        , ":published" := firstPublished
+                        , ":language" := firstLanguage
+                        , ":image" := firstImage
+                        , ":final_url" := firstFinalUrl
+                        , ":note" := mergedNote
                         , ":open_count" := openCount
                         , ":last_opened" := lastOpened
                         , ":last_checked" := lastChecked
@@ -389,6 +434,11 @@ mergeGroupTx conn keep merges preferHttps = do
                     execute conn (Query ("DELETE FROM bookmarks WHERE id IN (" <> marks <> ")")) merges
                     when preferHttps $
                         upgradeKeeperUrl conn keep now (keeperUrlRows, noteRows)
+                    -- Extension outbox: the keeper's post-merge state and the
+                    -- absorbed rows that this transaction removed.
+                    keeperData <- bookmarkEventData conn keep
+                    forM_ keeperData $ \value -> recordEvent conn BookmarkUpdated value
+                    recordEventMany conn BookmarkDeleted deletedData
                     pure (length found)
 
 {- | Upgrade an http keeper to the https address of the same page once the
