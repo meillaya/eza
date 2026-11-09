@@ -48,7 +48,7 @@ server already computes.
 
 <div align="center">
 
-<img src="docs/screenshots/detail.png" alt="A record: the reading spread with marked passages beside the catalogue record card" width="100%">
+<img src="docs/screenshots/detail.png" alt="A record: the extracted text in a bounded reading window beside the catalogue record card" width="100%">
 
 <sub>A record keeps the reading copy, its marks, the note, and the filing facts together.</sub>
 
