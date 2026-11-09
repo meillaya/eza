@@ -183,6 +183,22 @@ try {
   check("the merge-all dialog states the keeper policy", dialogText.includes("oldest"), dialogText.slice(0, 240));
   check("the merge-all dialog excludes title matches", dialogText.includes("title"), dialogText.slice(0, 240));
   check("the merge-all dialog states the undo snapshot", dialogText.includes("undo snapshot"), dialogText.slice(0, 240));
+  // The merge-all confirmation is a modal layer: Escape closes it and a bare
+  // letter belongs to the layer, not to the command palette underneath.
+  await page.keyboard.press("Escape");
+  await sleep(400);
+  check("Escape closes the merge-all dialog", (await page.locator('[data-testid="dialog-dedup-merge-all"]').count()) === 0);
+  check("Escape sends no merge-all request", mergeAllRequests === 0, "requests " + mergeAllRequests);
+  await mergeAllButton.click();
+  await page.waitForSelector('[data-testid="dialog-dedup-merge-all"]', { timeout: 15000 });
+  await page.locator('[data-testid="dialog-dedup-merge-all"] [data-testid="dialog-cancel"]').focus();
+  await page.keyboard.press("k");
+  await sleep(400);
+  check(
+    "bare k does not open the palette under the merge-all dialog",
+    (await page.locator(SEL.palette).count()) === 0,
+    "palette " + (await page.locator(SEL.palette).count())
+  );
   await page.click('[data-testid="dialog-cancel"]');
   await sleep(300);
   check("cancel closes the merge-all dialog", (await page.locator('[data-testid="dialog-dedup-merge-all"]').count()) === 0);

@@ -713,7 +713,7 @@ updateModel = \case
             editable = keEditable key
             plain = not withModifier && not (keAlt key)
             ledger = isListRoute (mRoute m)
-            graphKeys = mRoute m == Graph && not editable && plain && not (hasModalLayer m)
+            graphKeys = isGraphRoute (mRoute m) && not editable && plain && not (hasModalLayer m)
             runAction action = updateModel action
         -- event.key is upper case for a shifted letter; the shortcut names
         -- below are the unshifted ones.
@@ -721,7 +721,7 @@ updateModel = \case
             -- Escape closes the top layer from any focus, including a field.
             -- On the graph it clears the filter line first, then the selection.
             "escape"
-                | mRoute m == Graph && not (hasModalLayer m) -> graphEscape m
+                | isGraphRoute (mRoute m) && not (hasModalLayer m) -> graphEscape m
                 | otherwise -> closeTopLayer m
             -- The command palette is reachable from every screen: the command
             -- mods always, Shift+K outside fields, and a bare k off the ledger
@@ -1182,9 +1182,13 @@ updateModel = \case
         m <- get
         putModel (\x -> x{mConfirmDelete = Nothing})
         case (mConfirmDelete m, currentDetail m) of
-            (Just bookmarkId, Just detail) | bdId detail == bookmarkId -> do
-                putModel (\x -> x{mDetail = Nothing, mDetailLoading = False})
-                deleteBookmark bookmarkId (DeletedOk bookmarkId) DeleteFailed
+            -- The record stays painted while the write is in flight. Clearing
+            -- it here used to make a failed delete look like a successful one:
+            -- the page dropped to the "record unavailable" state even though
+            -- the server still held the record.
+            (Just bookmarkId, Just detail)
+                | bdId detail == bookmarkId ->
+                    deleteBookmark bookmarkId (DeletedOk bookmarkId) DeleteFailed
             _ -> pure ()
     DeleteBookmark bookmarkId -> do
         m <- get
@@ -1374,12 +1378,14 @@ updateModel = \case
                 unless (mGraphViewReady m) (measureGraphCanvas GraphMeasured)
                 focusGraphPlate m
     GraphFailed err -> do
-        m <- get
         putModel (\x -> x{mGraphLoading = False, mGraphError = Just (ms (aeMessage err))})
-        when (mGraphLayout m == Nothing) (handleApiError err)
+        -- The error panel is only rendered while the plate has no layout to
+        -- fall back on; without this toast a failed refresh of an already
+        -- painted graph looked like a successful one.
+        handleApiError err
     GraphRefresh -> do
         m <- get
-        putModel (\x -> x{mGraphLoading = True, mGraphError = Nothing, mGraphLayoutSource = "local"})
+        putModel (\x -> x{mGraphLoading = True, mGraphError = Nothing})
         fetchGraph GraphLoaded GraphFailed
         fetchGraphLayout (mGraphPreset m) (GraphLayoutLoaded (mGraphPreset m)) GraphLayoutFailed
     OpenGraphAt bookmarkId -> do
@@ -1656,7 +1662,14 @@ updateModel = \case
                         { mViews = viewsFinal
                         , mViewsLoading = False
                         , mViewsError = Nothing
-                        , mViewUi = ui{vuSaveOpen = False, vuBusy = False, vuError = Nothing}
+                        , mViewUi =
+                            ui
+                                { vuSaveOpen = False
+                                , vuImportOpen = False
+                                , vuImportText = ""
+                                , vuBusy = False
+                                , vuError = Nothing
+                                }
                         , mGraphViewId = if isGraph then Just (EV.vId view) else mGraphViewId x
                         , mGraphViewRev = if isGraph then EV.vUpdatedAt view else mGraphViewRev x
                         , mGraphColorGroups = if isGraph then mGraphGroupDrafts x else mGraphColorGroups x
@@ -1673,7 +1686,24 @@ updateModel = \case
             )
     ViewDeleted slug -> do
         notify "View deleted" ToastOk
-        putModel (\x -> x{mViews = [view | view <- mViews x, EV.vSlug view /= slug], mViewsLoading = False})
+        -- The server promotes another view of the same kind to default in the
+        -- same transaction; refetch so the manager shows the surviving default
+        -- badge instead of none. If the deleted view was the active one, drop
+        -- the id so the refetched default becomes active again.
+        m <- get
+        let deletedId = EV.vId <$> findViewBySlug slug (mViews m)
+        putModel
+            ( \x ->
+                x
+                    { mViews = [view | view <- mViews x, EV.vSlug view /= slug]
+                    , mViewsLoading = True
+                    , mGraphViewId =
+                        case deletedId of
+                            Just viewId | mGraphViewId x == Just viewId -> Nothing
+                            _ -> mGraphViewId x
+                    }
+            )
+        fetchViews ViewsLoaded ViewsFailed
     ViewDeleteFailed err ->
         putModel (\x -> x{mViewsError = Just (ms (aeMessage err))})
     ViewOpenView slug -> openSavedView slug
@@ -2734,6 +2764,55 @@ updateModel = \case
             )
     UserRecoveryDismiss -> putModel (\m -> m{mUserRecovery = Nothing})
     UserResetShownDismiss -> putModel (\m -> m{mUserResetShown = Nothing})
+    UserDeleteOpen user ->
+        putModel
+            ( \m ->
+                m
+                    { mUserDelete = Just user
+                    , mUserDeleteName = ""
+                    , mUserDeleteLibrary = False
+                    , mUserDeleteBusy = False
+                    , mUserActionError = Nothing
+                    }
+            )
+    UserDeleteCancel ->
+        putModel
+            ( \m ->
+                m
+                    { mUserDelete = Nothing
+                    , mUserDeleteName = ""
+                    , mUserDeleteLibrary = False
+                    , mUserDeleteBusy = False
+                    }
+            )
+    UserDeleteNameInput value -> putModel (\m -> m{mUserDeleteName = value})
+    UserDeleteLibraryToggled -> putModel (\m -> m{mUserDeleteLibrary = not (mUserDeleteLibrary m)})
+    UserDeleteSubmit -> do
+        m <- get
+        case mUserDelete m of
+            Just user
+                | T.strip (fromMisoString (mUserDeleteName m)) == uvUsername user -> do
+                    putModel (\x -> x{mUserDeleteBusy = True, mUserActionError = Nothing})
+                    deleteAdminUser (uvId user) (mUserDeleteLibrary m) (UserDeleted (uvId user)) UserDeleteFailed
+                | otherwise ->
+                    putModel (\x -> x{mUserActionError = Just "type the account name to confirm"})
+            Nothing -> pure ()
+    UserDeleted userId -> do
+        notify "Account deleted" ToastOk
+        putModel
+            ( \m ->
+                m
+                    { mUserDelete = Nothing
+                    , mUserDeleteName = ""
+                    , mUserDeleteLibrary = False
+                    , mUserDeleteBusy = False
+                    , mUserActionError = Nothing
+                    , mAdminUsers = [user | user <- mAdminUsers m, uvId user /= userId]
+                    }
+            )
+        fetchAdminUsers AdminUsersLoaded AdminUsersFailed
+    UserDeleteFailed err ->
+        putModel (\m -> m{mUserDeleteBusy = False, mUserActionError = Just (ms (aeMessage err))})
     -- webhooks -------------------------------------------------------------
     WebhooksLoaded webhooks ->
         putModel (\m -> m{mWebhooks = webhooks, mWebhooksLoading = False, mWebhooksError = Nothing})
@@ -3206,10 +3285,13 @@ updateModel = \case
             || mShareDialogOpen m
             || isJust (mTagDialog m)
             || isJust (mDedupConfirm m)
+            || mDedupMergeAllOpen m
             || isJust (mSavedShare m)
             || isJust (mTagPrompt m)
             || mConfirmBulkDelete m
             || isJust (mConfirmDelete m)
+            || mHighlightNoteOpen m
+            || isJust (mHighlightEdit m)
             || vuSaveOpen (mViewUi m)
             || vuImportOpen (mViewUi m)
             || isJust (vuExport (mViewUi m))
@@ -3225,6 +3307,7 @@ updateModel = \case
         | isJust (mSavedShare m) = putModel (\x -> x{mSavedShare = Nothing, mShareUrl = Nothing})
         | isJust (mTagDialog m) = putModel (\x -> x{mTagDialog = Nothing, mTagDialogError = Nothing})
         | isJust (mDedupConfirm m) = putModel (\x -> x{mDedupConfirm = Nothing})
+        | mDedupMergeAllOpen m = putModel (\x -> x{mDedupMergeAllOpen = False})
         | mSnapshotOpen m = putModel (\x -> x{mSnapshotOpen = False})
         | isJust (mReaderSel m) = putModel (\x -> x{mReaderSel = Nothing})
         | mPaletteOpen m = putModel (\x -> x{mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})
@@ -3451,28 +3534,42 @@ graphClick m x y =
 immediately after a visit. @preventScroll@ keeps the panel from jumping to
 the canvas on a phone, where focus() would otherwise scroll the title and the
 filter line out of view.
+
+The canvas only exists after the first layout paints, and on a large library
+that can arrive several animation frames after the graph payload. A single
+timer used to give up when the element was not mounted yet; retry over a few
+frames instead, like 'measureGraphCanvas'.
 -}
 focusGraphPlate :: Model -> Effect () () Model Action
 focusGraphPlate m =
     when
-        (mRoute m == Graph && T.null (T.strip (fromMisoString (mGraphFilter m))))
+        (isGraphRoute (mRoute m) && T.null (T.strip (fromMisoString (mGraphFilter m))))
         (liftSinkIO focusGraphCanvas)
 
 focusGraphCanvas :: IO ()
-focusGraphCanvas = do
-    _ <- jsgf "setTimeout" (asyncCallback (focusWithoutScroll "graph-canvas"), 60 :: Int)
-    pure ()
+focusGraphCanvas = attempt (0 :: Int)
+  where
+    attempt tries = do
+        focused <- focusWithoutScroll "graph-canvas"
+        unless focused (retry (tries + 1))
+    retry tries =
+        when (tries < 30) $ do
+            callback <- asyncCallback1 (\_ -> attempt tries)
+            _ <- jsgf "requestAnimationFrame" callback
+            pure ()
 
-focusWithoutScroll :: MisoString -> IO ()
+focusWithoutScroll :: MisoString -> IO Bool
 focusWithoutScroll domId = do
     document <- jsg ("document" :: MisoString)
     element <- (document # ("getElementById" :: MisoString)) domId
     missing <- isNull element
-    unless missing $ do
-        options <- create
-        setField options ("preventScroll" :: MisoString) True
-        _ <- (element # ("focus" :: MisoString)) [options]
-        pure ()
+    if missing
+        then pure False
+        else do
+            options <- create
+            setField options ("preventScroll" :: MisoString) True
+            _ <- (element # ("focus" :: MisoString)) [options]
+            pure True
 
 {- | A hit on a tag node only counts while the tag layer is shown; otherwise a
 click could open a ledger for a node the reader cannot see.

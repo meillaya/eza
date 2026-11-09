@@ -755,6 +755,13 @@ data Action
     | UserUpdated UserView
     | UserUpdateFailed ApiError
     | UserResetOpen Int
+    | UserDeleteOpen UserView
+    | UserDeleteCancel
+    | UserDeleteNameInput MisoString
+    | UserDeleteLibraryToggled
+    | UserDeleteSubmit
+    | UserDeleted Int
+    | UserDeleteFailed ApiError
     | UserResetPasswordInput MisoString
     | UserResetSubmit
     | UserResetCancel
@@ -1054,6 +1061,10 @@ data Model = Model
     , mUserResetPassword :: MisoString
     , mUserResetShown :: Maybe (Text, Text)
     , mUserActionError :: Maybe MisoString
+    , mUserDelete :: Maybe UserView
+    , mUserDeleteName :: MisoString
+    , mUserDeleteLibrary :: Bool
+    , mUserDeleteBusy :: Bool
     , mTokenName :: MisoString
     , mTokenScopes :: [Text]
     , mTokenSecret :: Maybe (Text, TokenView)
@@ -1295,6 +1306,10 @@ initialModel =
         , mUserResetPassword = ""
         , mUserResetShown = Nothing
         , mUserActionError = Nothing
+        , mUserDelete = Nothing
+        , mUserDeleteName = ""
+        , mUserDeleteLibrary = False
+        , mUserDeleteBusy = False
         , mTokenName = ""
         , mTokenScopes = ["read", "write"]
         , mTokenSecret = Nothing

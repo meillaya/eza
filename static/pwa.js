@@ -105,20 +105,32 @@
           report(done, 0, "", String((error && error.message) || error));
         });
     },
-    // Netscape HTML import: the FormData body lets the browser set the
-    // multipart boundary, which a JSON fetch cannot do.
+    // Bookmark import: Netscape HTML goes up as multipart (the browser sets
+    // the boundary), an eza JSON export goes up as a JSON body. Both answer
+    // with the same ImportReport shape from /api/v1/import.
     upload: function (inputId, token, done) {
       var input = document.getElementById(inputId);
       if (!input || !input.files || !input.files.length) {
-        report(done, 0, "", "Choose an HTML bookmarks file first.");
+        report(done, 0, "", "Choose a bookmarks file first.");
         return;
       }
-      var form = new FormData();
-      form.append("file", input.files[0]);
+      var file = input.files[0];
+      var isJson = /\.json$/i.test(file.name || "");
       input.value = "";
       var headers = { Accept: "application/json" };
       if (token) headers["X-CSRF-Token"] = token;
-      fetch("/api/v1/import", { method: "POST", body: form, headers: headers })
+      var body;
+      if (isJson) {
+        headers["Content-Type"] = "application/json";
+        body = file.text();
+      } else {
+        body = new FormData();
+        body.append("file", file);
+      }
+      Promise.resolve(body)
+        .then(function (payload) {
+          return fetch("/api/v1/import", { method: "POST", body: payload, headers: headers });
+        })
         .then(function (response) {
           return response.text().then(function (text) {
             report(done, response.status, text, null);
@@ -380,7 +392,20 @@
         start = end;
         end = swap;
       }
-      var quote = (container.textContent || "").substring(start, end);
+      // The quote must come from the same text projection as the offsets.
+      // container.textContent includes the aria-hidden margin pins, so a
+      // selection made after an earlier highlight picked up a digit from the
+      // pin and stored the wrong excerpt.
+      function countedText() {
+        var text = "";
+        var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+        var current = null;
+        while ((current = walker.nextNode())) {
+          if (counted(current)) text += current.textContent;
+        }
+        return text;
+      }
+      var quote = countedText().substring(start, end);
       if (!quote.trim()) return null;
       return JSON.stringify({ start: start, end: end, quote: quote });
     } catch (error) {

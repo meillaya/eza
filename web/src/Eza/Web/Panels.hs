@@ -1114,6 +1114,7 @@ viewDialogs m =
 viewSaveDialog :: Model -> View () () Model Action
 viewSaveDialog m =
     viewOverlay
+        "Save view"
         (testId "view-save-dialog")
         [ H.h2_ [HP.class_ "dialog__title"] [text (if EV.vKind (selectedKind) == EV.GraphKind then "Save graph view" else "Save ledger view")]
         , H.p_
@@ -1169,6 +1170,7 @@ viewSaveDialog m =
 viewImportDialog :: Model -> View () () Model Action
 viewImportDialog m =
     viewOverlay
+        "Import a view"
         (testId "view-import-dialog")
         [ H.h2_ [HP.class_ "dialog__title"] [text "Import a view"]
         , H.p_ [HP.class_ "meta"] [text "Paste one view JSON document (the export shape). The server validates it."]
@@ -1199,6 +1201,7 @@ viewImportDialog m =
 viewExportDialog :: Model -> View () () Model Action
 viewExportDialog m =
     viewOverlay
+        "Export view"
         (testId "view-export-dialog")
         [ H.h2_ [HP.class_ "dialog__title"] [text "Export view"]
         , H.p_ [HP.class_ "meta"] [text "Copy this JSON body into import on another install."]
@@ -1217,11 +1220,24 @@ viewExportDialog m =
             ]
         ]
 
-viewOverlay :: Attribute Model Action -> [View () () Model Action] -> View () () Model Action
-viewOverlay hook children =
+{- | A modal shell for the views manager. The dialog carries the same role,
+modal marker and accessible name as every other dialog in the client: the
+focus trap in static/pwa.js only sees layers marked this way, and a screen
+reader announces them once.
+-}
+viewOverlay :: MisoString -> Attribute Model Action -> [View () () Model Action] -> View () () Model Action
+viewOverlay label hook children =
     H.div_
         [HP.class_ "overlay is-open"]
-        [H.div_ (HP.class_ "dialog" : [hook]) children]
+        [ H.div_
+            [ HP.class_ "dialog"
+            , HP.role_ "dialog"
+            , HP.aria_ "modal" "true"
+            , HP.aria_ "label" label
+            , hook
+            ]
+            children
+        ]
 
 -- ============================================================== duplicates ===
 
@@ -3420,9 +3436,13 @@ userRow m user =
                 , H.button_
                     [HP.class_ "account-link", HP.type_ "button", testId "user-reset-open", HE.onClick (UserResetOpen (uvId user))]
                     [text "reset password"]
+                , H.button_
+                    [HP.class_ "account-link account-link--danger", HP.type_ "button", testId "user-delete-open", HE.onClick (UserDeleteOpen user)]
+                    [text "delete"]
                 ]
           ]
             ++ [resetPasswordForm m user | mUserReset m == Just (uvId user)]
+            ++ [deleteAccountForm m user | fmap uvId (mUserDelete m) == Just (uvId user)]
         )
   where
     roleClass role = case role of
@@ -3455,6 +3475,63 @@ resetPasswordForm m user =
                 [text "set temporary password"]
             , H.button_
                 [HP.class_ "btn btn--sm", HP.type_ "button", HE.onClick UserResetCancel]
+                [text "cancel"]
+            ]
+        ]
+
+{- | Delete confirmation. Typing the account name is the deliberate second
+step; the library checkbox is off by default so an accidental delete keeps the
+content recoverable from a backup.
+-}
+deleteAccountForm :: Model -> UserView -> View () () Model Action
+deleteAccountForm m user =
+    H.div_
+        [HP.class_ "user-reset-form user-delete-form"]
+        [ H.p_
+            [HP.class_ "account-note meta"]
+            [ text
+                ( ms
+                    ( "Delete "
+                        <> T.unpack (uvUsername user)
+                        <> ". This cannot be undone. The library database and its snapshots are removed only when the box below is ticked."
+                    )
+                )
+            ]
+        , H.input_
+            [ HP.class_ "input"
+            , HP.type_ "text"
+            , HP.placeholder_ (ms (T.unpack (uvUsername user)))
+            , HP.value_ (mUserDeleteName m)
+            , HP.autocomplete_ "off"
+            , testId "user-delete-name"
+            , HE.onInput UserDeleteNameInput
+            ]
+        , H.label_
+            [HP.class_ "account-import-check"]
+            [ H.input_
+                [ HP.type_ "checkbox"
+                , HP.checked_ (mUserDeleteLibrary m)
+                , testId "user-delete-library"
+                , HE.onChange (const UserDeleteLibraryToggled)
+                ]
+            , text " also delete the library and snapshots"
+            ]
+        , case mUserActionError m of
+            Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]
+            Nothing -> H.span_ [] []
+        , H.div_
+            [HP.class_ "account-created-row"]
+            [ H.button_
+                ( [ HP.class_ "btn btn--sm btn--strong"
+                  , HP.type_ "button"
+                  , testId "user-delete-submit"
+                  , HE.onClick UserDeleteSubmit
+                  ]
+                    ++ attrDisabled (mUserDeleteBusy m)
+                )
+                [text (if mUserDeleteBusy m then "deleting…" else "delete account")]
+            , H.button_
+                [HP.class_ "btn btn--sm", HP.type_ "button", testId "user-delete-cancel", HE.onClick UserDeleteCancel]
                 [text "cancel"]
             ]
         ]
@@ -4001,7 +4078,7 @@ importPanel m =
     accountPanel "import" "Import" importNote $
         [ H.p_
             [HP.class_ "account-lede"]
-            [text "Bookmarks arrive as a Netscape HTML export from any browser. Importing keeps the original save dates and turns folders into tags."]
+            [text "Bookmarks arrive as a Netscape HTML export from any browser, or as an eza JSON export from another instance. Importing keeps the original save dates and turns folders into tags."]
         ]
             ++ [importIdle m | not (mImporting m)]
             ++ progress
@@ -4015,7 +4092,7 @@ importPanel m =
             [HP.class_ "account-import-progress"]
             [ H.div_
                 [HP.class_ "account-import-file"]
-                [ H.span_ [HP.class_ "account-import-name mono"] [text "bookmarks.html"]
+                [ H.span_ [HP.class_ "account-import-name mono"] [text "bookmarks.html or eza.json"]
                 , H.span_ [HP.class_ "account-import-size meta"] [text "reading anchors"]
                 ]
             , H.p_
@@ -4035,14 +4112,14 @@ importIdle m =
         [ H.p_ [HP.class_ "account-filefield-title display"] [text "Choose a bookmarks file"]
         , H.p_
             [HP.class_ "account-filefield-note meta"]
-            [text ".html exported from Chrome, Firefox, Safari or Edge. Nothing is imported twice."]
+            [text ".html exported from Chrome, Firefox, Safari or Edge, or an .json exported by eza. Nothing is imported twice."]
         , H.div_
             [HP.class_ "account-actions"]
             [ H.button_
                 ( [HP.class_ "btn btn--strong", HP.type_ "button", HE.onClick ImportStart]
                     ++ attrDisabled (mImporting m)
                 )
-                [text (if mImporting m then "importing" else "choose bookmarks.html")]
+                [text (if mImporting m then "importing" else "choose a bookmarks file")]
             ]
         ]
 
@@ -4231,6 +4308,15 @@ aboutPanel m =
             [HP.class_ "account-lede"]
             [text "A self-hosted catalogue for one person: one Haskell process, one SQLite file, a WebAssembly client. No sync, no telemetry."]
         , H.dl_ [HP.class_ "account-about-list"] (map aboutRow (aboutFigures m))
+        , H.p_ [HP.class_ "about-sub"] [text "your data"]
+        , H.p_
+            [HP.class_ "account-note meta"]
+            [text "The browser session downloads the file; nothing leaves the server."]
+        , H.ul_
+            [HP.class_ "about-links"]
+            [ aboutDownload "export html" "bookmarks.html" "/api/v1/export"
+            , aboutDownload "export json" "eza-export.json" "/api/v1/export?format=json"
+            ]
         , H.p_ [HP.class_ "about-sub"] [text "source"]
         , H.ul_ [HP.class_ "about-links"] (map aboutLink (aboutSourceLinks m))
         , H.p_ [HP.class_ "about-sub"] [text "built with"]
@@ -4291,6 +4377,19 @@ aboutLink (label, host, href) =
             , HP.rel_ "noopener noreferrer"
             ]
             [text label, H.span_ [HP.class_ "about-link-host"] [text host]]
+        ]
+
+{- | A same-tab download link. The server sets
+@Content-Disposition: attachment@ on the export routes, so the browser keeps
+the session cookie and saves the file without leaving the page.
+-}
+aboutDownload :: MisoString -> MisoString -> MisoString -> View () () Model Action
+aboutDownload label filename href =
+    H.li_
+        []
+        [ H.a_
+            [HP.class_ "about-link", HP.href_ href]
+            [text label, H.span_ [HP.class_ "about-link-host"] [text filename]]
         ]
 
 -- ================================================================ helpers ===

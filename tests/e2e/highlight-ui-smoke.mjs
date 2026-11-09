@@ -121,6 +121,51 @@ try {
   await openReader(target.id);
   check("highlight persists and renders after reload", (await page.locator(SEL.readerMark).count()) >= 1);
 
+  // The rendered highlight adds an aria-hidden margin pin to the reader. A
+  // selection made after that pin must still store the exact selected text:
+  // the raw textContent included the pin digit and shifted the quote.
+  const pinnedQuote = await page.evaluate(() => {
+    const container = document.getElementById("reader-text");
+    if (!container) return null;
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    const visible = [];
+    let node = null;
+    while ((node = walker.nextNode())) {
+      const parent = node.parentElement;
+      const hidden = parent && parent.closest && parent.closest('[aria-hidden="true"]');
+      if (!hidden && node.textContent.trim().length >= 24) visible.push(node);
+    }
+    const last = visible[visible.length - 1];
+    if (!last) return null;
+    const start = last.textContent.length - 24;
+    const quote = last.textContent.slice(start);
+    const range = document.createRange();
+    range.setStart(last, start);
+    range.setEnd(last, last.textContent.length);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    container.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    return quote;
+  });
+  check("a selection after an existing pin is dispatched", Boolean(pinnedQuote), JSON.stringify(pinnedQuote));
+  if (pinnedQuote) {
+    await page.waitForSelector(SEL.highlightToolbar, { timeout: 10000 });
+    await page.getByRole("button", { name: /highlight/i }).first().click();
+    await page.waitForTimeout(1600);
+    const withPinned = await highlights(target.id);
+    const pinnedHighlight = withPinned.find((entry) => entry.quote === pinnedQuote) || withPinned[withPinned.length - 1];
+    check(
+      "a quote after an existing pin matches the selected text",
+      Boolean(pinnedHighlight) && pinnedHighlight.quote === pinnedQuote,
+      JSON.stringify({ selected: pinnedQuote, stored: pinnedHighlight?.quote })
+    );
+    if (pinnedHighlight && withPinned.length > 1) {
+      await api("/api/v1/bookmarks/" + target.id + "/highlights/" + pinnedHighlight.id, { method: "DELETE" });
+      await openReader(target.id);
+    }
+  }
+
   // Note highlight through the toolbar.
   await selectReaderRange(60, 100);
   await page.waitForSelector(SEL.highlightToolbar, { timeout: 10000 });

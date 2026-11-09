@@ -100,6 +100,24 @@ async function zoomPercent() {
   return match ? Number(match[1]) : Number.NaN;
 }
 
+async function waitForZoom(operator, value) {
+  return page
+    .waitForFunction(
+      ({ selector, operator, value }) => {
+        const match = (document.querySelector(selector)?.textContent || "").match(/(\d+)/);
+        if (!match) return false;
+        const current = Number(match[1]);
+        if (operator === ">") return current > value;
+        if (operator === "<") return current < value;
+        return current === value;
+      },
+      { selector: SEL.graphZoomValue, operator, value },
+      { timeout: 15000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+}
+
 function firstRecordCount(status) {
   const match = status.match(/([\d,]+) records/);
   return match ? Number(match[1].replace(/,/g, "")) : Number.NaN;
@@ -336,6 +354,28 @@ try {
   check("the deeplink route reports depth 2", /depth 2/.test(localStatus), localStatus);
   const rootedTitle = await page.locator(SEL.graphRoot).first().innerText().catch(() => "");
   check("the deeplink route names its root", rootedTitle.trim() === "Bulk root", rootedTitle || localStatus);
+
+  // The local graph is a graph route: it must keep the documented keyboard
+  // controls even though it is not the plain /graph URL.
+  const localFocus = await page.evaluate(() => document.activeElement && document.activeElement.id);
+  check("the local graph focuses its canvas", localFocus === "graph-canvas", String(localFocus));
+  const localFitZoom = await zoomPercent();
+  await page.locator(SEL.graphStatus).first().click();
+  await page.keyboard.press("+");
+  const localZoomed = await waitForZoom(">", localFitZoom);
+  check("+ zooms the local graph", localZoomed && (await zoomPercent()) > localFitZoom, localFitZoom + " -> " + (await zoomPercent()));
+  await page.fill(SEL.graphFilter, "zzz-no-local-match");
+  const localFilterSet = await waitForStatus(/match the filter/);
+  check("the local graph filter applies", localFilterSet, await statusMain());
+  await page.locator(SEL.graphStatus).first().click();
+  await page.keyboard.press("Escape");
+  const localEsc = await page
+    .waitForFunction((selector) => (document.querySelector(selector)?.value || "") === "", SEL.graphFilter, { timeout: 15000 })
+    .then(() => true)
+    .catch(() => false);
+  check("Esc clears the local graph filter", localEsc, await page.locator(SEL.graphFilter).inputValue());
+  await page.click(SEL.graphFit);
+  await page.waitForTimeout(100);
   const depthTwoRecords = firstRecordCount(localStatus);
   await page.click(SEL.graphDepth(1));
   const depthOne = await waitForStatus(/depth 1/);
@@ -356,6 +396,29 @@ try {
     .catch(() => false);
   check("the whole-scope button leaves the local graph", leftLocal, await statusMain());
   check("the whole graph has no local root", (await page.locator(SEL.graphRoot).count()) === 0, String(await page.locator(SEL.graphRoot).count()));
+
+  // Esc also clears the pinned selection, not just the filter line.
+  await page.goto(BASE + "/bookmark/" + root.id, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector(SEL.record, { timeout: 30000 });
+  await page.click(SEL.openGraph);
+  await page.waitForSelector(SEL.graph, { timeout: 30000 });
+  await waitForGraph();
+  await page.waitForFunction((selector) => (document.querySelector(selector)?.textContent || "").includes("Bulk root"), SEL.graphPreview, { timeout: 15000 }).catch(() => {});
+  await page.click(SEL.graphLocalToggle);
+  const localFromSelection = await waitForStatus(/depth 1/);
+  const pinnedPreview = ((await page.locator(SEL.graphPreview).first().innerText()) || "").replace(/\s+/g, " ").trim();
+  check("the local graph pins the selected record", localFromSelection && pinnedPreview.includes("Bulk root"), pinnedPreview);
+  await page.locator(SEL.graphStatus).first().click();
+  await page.keyboard.press("Escape");
+  const selectionCleared = await page
+    .waitForFunction((selector) => /Hover a node to preview it/.test(document.querySelector(selector)?.textContent || ""), SEL.graphPreview, { timeout: 15000 })
+    .then(() => true)
+    .catch(() => false);
+  check(
+    "Esc clears the local graph selection",
+    selectionCleared,
+    ((await page.locator(SEL.graphPreview).first().innerText()) || "").replace(/\s+/g, " ").trim()
+  );
 
   // ------------------------------------------------------- colour groups ---
   await page.goto(BASE + "/graph", { waitUntil: "domcontentloaded" });
@@ -479,6 +542,39 @@ try {
 
   await page.click(SEL.viewCreate);
   await page.waitForSelector(SEL.viewSaveDialog, { timeout: 15000 });
+  const saveDialogRole = await page.locator(SEL.viewSaveDialog).first().getAttribute("role");
+  const saveDialogModal = await page.locator(SEL.viewSaveDialog).first().getAttribute("aria-modal");
+  const saveDialogLabel = await page.locator(SEL.viewSaveDialog).first().getAttribute("aria-label");
+  check(
+    "the view save dialog is a labelled modal",
+    saveDialogRole === "dialog" && saveDialogModal === "true" && Boolean((saveDialogLabel || "").trim()),
+    JSON.stringify({ role: saveDialogRole, modal: saveDialogModal, label: saveDialogLabel })
+  );
+  const trapInner = async (last) =>
+    page.evaluate(
+      ({ selector, last }) => {
+        const dialog = document.querySelector(selector);
+        if (!dialog) return false;
+        const focusable = dialog.querySelectorAll("button, input, textarea, a[href]");
+        if (!focusable.length) return false;
+        focusable[last ? focusable.length - 1 : 0].focus();
+        return true;
+      },
+      { selector: SEL.viewSaveDialog, last }
+    );
+  await trapInner(true);
+  await page.keyboard.press("Tab");
+  const trapForward = await page.evaluate((selector) => {
+    const dialog = document.querySelector(selector);
+    return Boolean(dialog && document.activeElement && dialog.contains(document.activeElement));
+  }, SEL.viewSaveDialog);
+  await trapInner(false);
+  await page.keyboard.press("Shift+Tab");
+  const trapBack = await page.evaluate((selector) => {
+    const dialog = document.querySelector(selector);
+    return Boolean(dialog && document.activeElement && dialog.contains(document.activeElement));
+  }, SEL.viewSaveDialog);
+  check("the view save dialog traps Tab at both ends", trapForward && trapBack, JSON.stringify({ trapForward, trapBack }));
   await page.fill(SEL.viewNameInput, "Smoke graph view");
   await page.click(SEL.viewSaveSubmit);
   await page.waitForSelector(SEL.viewSaveDialog, { state: "detached", timeout: 20000 }).catch(() => {});
@@ -510,6 +606,17 @@ try {
 
   await rowByName("Smoke graph view").locator(SEL.viewDelete).click();
   await rowByName("Smoke graph view").waitFor({ state: "detached", timeout: 20000 }).catch(() => {});
+  // Deleting the default view promotes another view server-side; the manager
+  // must show that surviving default without waiting for a page reload.
+  const promotedDefault = await page
+    .waitForFunction((selector) => document.querySelectorAll(selector).length === 1, SEL.viewDefaultBadge, { timeout: 20000 })
+    .then(() => true)
+    .catch(() => false);
+  check(
+    "deleting the default view promotes the next default",
+    promotedDefault,
+    "badges=" + (await page.locator(SEL.viewDefaultBadge).count())
+  );
   await page.reload({ waitUntil: "domcontentloaded" });
   await waitForRows();
   check("deleting a view leaves a default again", (await page.locator(SEL.viewDefaultBadge).count()) === 1, String(await page.locator(SEL.viewDefaultBadge).count()));
@@ -528,6 +635,35 @@ try {
   check("an invalid import document is rejected inline", importError);
   await page.locator(SEL.viewImportDialog + " button").filter({ hasText: "cancel" }).first().click();
   await page.waitForSelector(SEL.viewImportDialog, { state: "detached", timeout: 15000 }).catch(() => {});
+
+  // A successful import must close the dialog: leaving it open invited a
+  // second click that imported a duplicate view.
+  const viewsForImport = await api("/api/v1/views");
+  const importSource = (viewsForImport.body?.views || []).find((view) => view.kind === "graph");
+  if (importSource) {
+    const rowsBeforeImport = await page.locator(SEL.viewRow).count();
+    await page.click(SEL.viewImport);
+    await page.waitForSelector(SEL.viewImportDialog, { timeout: 15000 });
+    await page.fill(
+      SEL.viewImportText,
+      JSON.stringify({ name: "Smoke imported view", kind: "graph", definition: importSource.definition })
+    );
+    await page.click(SEL.viewImportSubmit);
+    const importClosed = await page
+      .waitForSelector(SEL.viewImportDialog, { state: "detached", timeout: 20000 })
+      .then(() => true)
+      .catch(() => false);
+    const rowsAfterImport = await page.locator(SEL.viewRow).count();
+    check(
+      "a successful import closes the dialog and adds one view",
+      importClosed && rowsAfterImport === rowsBeforeImport + 1,
+      JSON.stringify({ importClosed, before: rowsBeforeImport, after: rowsAfterImport })
+    );
+    await page.waitForFunction((selector) => [...document.querySelectorAll(selector)].some((row) => (row.textContent || "").includes("Smoke imported view")), SEL.viewRow, { timeout: 20000 }).catch(() => {});
+    check("the imported view is listed", (await rowByName("Smoke imported view").count()) === 1);
+  } else {
+    check("a graph view is available to import", false, JSON.stringify(viewsForImport.body?.views?.length));
+  }
 
   // --------------------------------------------------------- ledger view ---
   await page.click(SEL.section("ledger"));

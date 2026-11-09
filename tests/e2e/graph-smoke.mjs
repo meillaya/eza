@@ -272,8 +272,30 @@ try {
   const firstPreview = ((await page.locator(SEL.graphPreview).first().innerText()) || "").replace(/\s+/g, " ").trim();
   check("the first visit pins the record preview", firstPreview.includes("A") && firstPreview.includes("example.com"), firstPreview);
 
+  // ------------------------------------------------------ refresh error ---
+  // A failed refresh of an already painted graph used to be silent: the error
+  // panel only renders when there is no layout to keep, so the reader was left
+  // with a stale plate and no message.
+  const refreshButton = page.getByRole("button", { name: "refresh", exact: true }).first();
+  check("the graph has a refresh control", (await refreshButton.count()) > 0, String(await refreshButton.count()));
+  await page.context().setOffline(true);
+  await refreshButton.click();
+  const failureToast = await page
+    .waitForFunction(
+      () => [...document.querySelectorAll('[data-testid="toast"]')].some((toast) => /fail|network|fetch|error|offline/i.test(toast.textContent || "")),
+      null,
+      { timeout: 15000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+  const failureToastText = ((await page.locator(SEL.toast).allInnerTexts().catch(() => [])) || []).join(" ");
+  check("a failed graph refresh surfaces an error", failureToast, failureToastText.slice(0, 120));
+  check("a failed graph refresh stops the refreshing readout", await waitForStatusGone(/refreshing/), await statusText());
+  await page.context().setOffline(false);
+
   // ------------------------------------------------------- console noise ---
-  check("no console errors", errors.length === 0, errors.slice(0, 3).join(" | ").slice(0, 400));
+  const unexpected = errors.filter((entry) => !/400|401|net::ERR|Failed to fetch|ERR_INTERNET_DISCONNECTED/.test(entry));
+  check("no console errors", unexpected.length === 0, unexpected.slice(0, 3).join(" | ").slice(0, 400));
 } catch (error) {
   check("unexpected error", false, String(error && error.stack ? error.stack : error));
 } finally {

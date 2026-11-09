@@ -65,7 +65,9 @@ fullPage view_ =
         [HP.id_ "main", HP.class_ "screen"]
         [view_]
 
--- | One main element per list route: facet strip, grid frame, field drawer.
+{- | One main element per list route: facet strip, grid frame, field drawer.
+  The ledger itself is a plain container inside that landmark.
+-}
 listScreen :: [View () () Model Action] -> View () () Model Action
 listScreen =
     H.main_
@@ -432,7 +434,7 @@ notFoundPage =
 
 ledgerMain :: Model -> View () () Model Action
 ledgerMain m =
-    H.main_
+    H.div_
         [ HP.class_ (if isInbox m then "main ledg-main--wide" else "main")
         , C.styleInline_ "min-height:0"
         ]
@@ -2083,7 +2085,7 @@ importInput =
         [ HP.id_ "import-file"
         , HP.class_ "sr-only"
         , HP.type_ "file"
-        , HP.accept_ ".html,text/html"
+        , HP.accept_ ".html,.json,text/html,application/json"
         , HE.onChange (const ImportFileChosen)
         ]
 

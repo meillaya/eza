@@ -36,6 +36,7 @@ module Eza.Web.Api (
     createAdminUser,
     patchAdminUser,
     resetAdminPassword,
+    deleteAdminUser,
     ViewPatch (..),
     createView,
     patchView,
@@ -743,6 +744,23 @@ resetAdminPassword userId password onOk onErr =
         "POST"
         ("/api/v1/admin/users/" <> ms (show userId) <> "/password")
         (Just (object ["password" .= password]))
+        onOk
+        onErr
+
+{- | Delete an account. The library and snapshots are removed only when
+@deleteDb@ is set; the server refuses the last enabled admin and self-delete.
+-}
+deleteAdminUser ::
+    Int ->
+    Bool ->
+    action ->
+    (ApiError -> action) ->
+    Eff model action
+deleteAdminUser userId deleteDb onOk onErr =
+    apiWrite
+        "DELETE"
+        ("/api/v1/admin/users/" <> ms (show userId))
+        (Just (object ["confirm" .= True, "delete_db" .= deleteDb]))
         onOk
         onErr
 
