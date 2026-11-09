@@ -182,6 +182,21 @@ main = hspec $ do
                 spTotal none `shouldBe` 0
                 close conn
 
+    describe "domain search" $ do
+        it "finds a record by its source domain even when the URL omits www" $
+            withSystemTempDirectory "eza-domain-search" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                _ <- insertBookmark conn "https://reddit.com/r/haskell" "Unrelated title" []
+                _ <- insertBookmark conn "https://example.test/other" "Another record" []
+                -- The import keeps the source facet's domain, which can carry a
+                -- www prefix the saved URL does not have.
+                Sqlite.execute_ conn "UPDATE bookmarks SET domain = 'www.reddit.com' WHERE id = 1"
+                byFullDomain <- listBookmarks conn defaultListQuery{lqQ = "www.reddit.com"}
+                map bsId (spItems byFullDomain) `shouldBe` [1]
+                byBareDomain <- listBookmarks conn defaultListQuery{lqQ = "reddit.com"}
+                map bsId (spItems byBareDomain) `shouldBe` [1]
+                close conn
+
     describe "highlights" $ do
         it "creates, lists, updates, and deletes a highlight" $
             withSystemTempDirectory "eza-highlight" $ \dir -> do

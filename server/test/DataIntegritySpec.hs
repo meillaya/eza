@@ -17,7 +17,7 @@ import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 import Eza.Bookmarks
-import Eza.Db (ftsIntegrityCheck, openDb, queryScalar, schemaV1, schemaV10, schemaV11, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaV7, schemaV8, schemaV9, schemaVersion, targetSchemaVersion)
+import Eza.Db (ftsIntegrityCheck, openDb, queryScalar, schemaV1, schemaV10, schemaV11, schemaV12, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaV7, schemaV8, schemaV9, schemaVersion, targetSchemaVersion)
 import Eza.Dedup (mergeBookmarks)
 import Eza.Highlights (createHighlight, listHighlights)
 import Eza.Tags (deleteTag, deleteTagWithLinks, mergeTags, renameTag)
@@ -300,7 +300,6 @@ spec = do
                     Sqlite.execute_ conn "PRAGMA user_version = 11"
                 migrated <- openDb path
                 version <- schemaVersion migrated
-                version `shouldBe` 12
                 version `shouldBe` targetSchemaVersion
                 books <- queryScalar migrated "SELECT COUNT(*) FROM bookmarks"
                 books `shouldBe` 1
@@ -311,6 +310,42 @@ spec = do
                 captureColumns <- columnNames migrated "captures"
                 undoCaptureColumns <- columnNames migrated "undo_capture_rows"
                 filter (/= "snapshot_id") undoCaptureColumns `shouldBe` captureColumns
+                close migrated
+
+    describe "schema v13" $ do
+        it "migrates v12 to v13 and indexes the source domain in FTS" $
+            withSystemTempDirectory "eza-v13-migrate" $ \dir -> do
+                let path = dir </> "test.db"
+                    schemaUpToV12 =
+                        schemaV1
+                            <> schemaV2
+                            <> schemaV3
+                            <> schemaV4
+                            <> schemaV5
+                            <> schemaV6
+                            <> schemaV7
+                            <> schemaV8
+                            <> schemaV9
+                            <> schemaV10
+                            <> schemaV11
+                            <> schemaV12
+                bracket (Sqlite.open path) Sqlite.close $ \conn -> do
+                    mapM_ (Sqlite.execute_ conn) schemaUpToV12
+                    -- The source facet shows www.reddit.com, while the saved
+                    -- URL has no www; the old index could not match the query.
+                    Sqlite.execute_ conn "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://reddit.com/r/x','X','www.reddit.com',1,1,1)"
+                    Sqlite.execute_ conn "PRAGMA user_version = 12"
+                migrated <- openDb path
+                version <- schemaVersion migrated
+                version `shouldBe` targetSchemaVersion
+                found <- listBookmarks migrated defaultListQuery{lqQ = "www.reddit.com"}
+                map bsId (spItems found) `shouldBe` [1]
+                -- Writes after the migration keep the new column indexed.
+                Sqlite.execute_ migrated "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://example.test/new','New','example.test',1,1,1)"
+                fresh <- queryScalar migrated "SELECT COUNT(*) FROM bookmarks_fts WHERE bookmarks_fts MATCH '\"example test\"*'"
+                fresh `shouldBe` 1
+                integrity <- ftsIntegrityCheck migrated
+                integrity `shouldSatisfy` isRight
                 close migrated
 
     describe "capture undo" $ do

@@ -341,7 +341,6 @@ spec = do
                 migrated <- openDb path
                 version <- schemaVersion migrated
                 version `shouldBe` targetSchemaVersion
-                version `shouldBe` 12
                 queryScalar migrated "SELECT COUNT(*) FROM bookmarks" `shouldReturn` (1 :: Int)
                 queryScalar migrated "SELECT COUNT(*) FROM views" `shouldReturn` (1 :: Int)
                 queryScalar migrated "SELECT COUNT(*) FROM captures" `shouldReturn` (1 :: Int)

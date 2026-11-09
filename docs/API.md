@@ -175,9 +175,13 @@ DELETE /api/v1/bookmarks/{id}
 
 `q` accepts the operators `tag:name`, `is:unread`, `is:dead`,
 `link:target`, `-term`, `year:YYYY`, and `day:YYYY-MM-DD`. Free-text terms
-match the FTS index and, as a fallback, source tag names, so `rust` can return
+match the FTS index (title, description, URL, note body, extracted text, and
+source domain) and, as a fallback, source tag names, so `rust` can return
 records filed under the `rust` tag even when no indexed field contains the
-word; FTS hits rank first. Date filters use UTC and match the original save
+word; FTS hits rank first. Because the domain is indexed, a query such as
+`www.reddit.com` returns the records filed from that source even when their
+saved URLs omit the `www.` prefix; the ledger's source facets write exactly
+this query. Date filters use UTC and match the original save
 date (`created_at`); rows with no save date (`created_at` = 0) never match. A
 filter ANDs with the other operators and the `tags`, `is_read`, and
 `is_dead` columns, and `year_counts` reflects it.

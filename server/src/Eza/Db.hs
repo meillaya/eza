@@ -25,6 +25,7 @@ module Eza.Db (
     schemaV10,
     schemaV11,
     schemaV12,
+    schemaV13,
     databaseClaimed,
     ftsIntegrityCheck,
     DbError (..),
@@ -54,7 +55,7 @@ newtype DbError = DbError Text
 instance Exception DbError
 
 targetSchemaVersion :: Int
-targetSchemaVersion = 12
+targetSchemaVersion = 13
 
 {- | Open the database and bring the schema up to date. Every open also makes
 sure the default graph view exists, so a fresh or migrated database always
@@ -269,6 +270,7 @@ migrations =
     , (10, schemaV10)
     , (11, schemaV11)
     , (12, schemaV12)
+    , (13, schemaV13)
     ]
 
 schemaV1 :: [Query]
@@ -458,4 +460,24 @@ removes its capture copies too.
 schemaV12 :: [Query]
 schemaV12 =
     [ "CREATE TABLE IF NOT EXISTS undo_capture_rows (     snapshot_id INTEGER NOT NULL REFERENCES undo_snapshots(id) ON DELETE CASCADE,     id INTEGER NOT NULL,     bookmark_id INTEGER NOT NULL,     url TEXT NOT NULL DEFAULT '',     canonical_url TEXT NOT NULL DEFAULT '',     title TEXT NOT NULL DEFAULT '',     author TEXT NOT NULL DEFAULT '',     site TEXT NOT NULL DEFAULT '',     description TEXT NOT NULL DEFAULT '',     published TEXT NOT NULL DEFAULT '',     language TEXT NOT NULL DEFAULT '',     image_url TEXT NOT NULL DEFAULT '',     favicon_url TEXT NOT NULL DEFAULT '',     content_markdown TEXT NOT NULL DEFAULT '',     rendered_markdown TEXT NOT NULL DEFAULT '',     content_text TEXT NOT NULL DEFAULT '',     content_html TEXT NOT NULL DEFAULT '',     selection TEXT NOT NULL DEFAULT '',     tags TEXT NOT NULL DEFAULT '[]',     template_id INTEGER,     template_name TEXT NOT NULL DEFAULT '',     source TEXT NOT NULL DEFAULT '',     client TEXT NOT NULL DEFAULT '',     idempotency_key TEXT NOT NULL DEFAULT '',     request_hash TEXT NOT NULL DEFAULT '',     extractor TEXT NOT NULL DEFAULT '',     extractor_version TEXT NOT NULL DEFAULT '',     metadata_json TEXT NOT NULL DEFAULT '{}',     word_count INTEGER NOT NULL DEFAULT 0,     parse_time_ms INTEGER NOT NULL DEFAULT 0,     captured_at INTEGER NOT NULL,     created_at INTEGER NOT NULL,     PRIMARY KEY (snapshot_id, id)     )"
+    ]
+
+{- | v13 adds the source domain to the full-text index. The domain is what the
+ledger's source facets show and what a clicked source writes into the query;
+URLs are not a reliable substitute because an import can record
+@www.reddit.com@ while the saved URL is @https://reddit.com/...@. The external
+content table has to be recreated to add a column, so this migration drops the
+old triggers and index and rebuilds both from @bookmarks@.
+-}
+schemaV13 :: [Query]
+schemaV13 =
+    [ "DROP TRIGGER IF EXISTS bookmarks_ai"
+    , "DROP TRIGGER IF EXISTS bookmarks_ad"
+    , "DROP TRIGGER IF EXISTS bookmarks_au"
+    , "DROP TABLE IF EXISTS bookmarks_fts"
+    , "CREATE VIRTUAL TABLE bookmarks_fts USING fts5(     title, description, url, note_body, extracted_text, domain,     content='bookmarks', content_rowid='id', tokenize='porter unicode61'     )"
+    , "CREATE TRIGGER bookmarks_ai AFTER INSERT ON bookmarks BEGIN     INSERT INTO bookmarks_fts(rowid, title, description, url, note_body, extracted_text, domain)     VALUES (new.id, new.title, new.description, new.url, new.note_body, new.extracted_text, new.domain);     END"
+    , "CREATE TRIGGER bookmarks_ad AFTER DELETE ON bookmarks BEGIN     INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, url, note_body, extracted_text, domain)     VALUES('delete', old.id, old.title, old.description, old.url, old.note_body, old.extracted_text, old.domain);     END"
+    , "CREATE TRIGGER bookmarks_au AFTER UPDATE ON bookmarks     WHEN old.title IS NOT new.title OR old.description IS NOT new.description     OR old.url IS NOT new.url OR old.note_body IS NOT new.note_body     OR old.extracted_text IS NOT new.extracted_text OR old.domain IS NOT new.domain     BEGIN     INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, url, note_body, extracted_text, domain)     VALUES('delete', old.id, old.title, old.description, old.url, old.note_body, old.extracted_text, old.domain);     INSERT INTO bookmarks_fts(rowid, title, description, url, note_body, extracted_text, domain)     VALUES (new.id, new.title, new.description, new.url, new.note_body, new.extracted_text, new.domain);     END"
+    , "INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')"
     ]

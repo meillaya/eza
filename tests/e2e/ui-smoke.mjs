@@ -43,6 +43,25 @@ try {
   await page.waitForSelector(SEL.row, { timeout: 30000 }).catch(() => {});
   await page.waitForTimeout(600);
 
+  // ------------------------------------------------ source facet search ---
+  const sourceLink = page.locator(".facets .facet a").first();
+  if (await sourceLink.count()) {
+    const sourceDomain = (await sourceLink.locator(".name").innerText()).trim();
+    await sourceLink.click();
+    await page.waitForTimeout(1400);
+    const queryAfterSource = await page.locator(SEL.search).inputValue();
+    const sourceRows = await page.locator(SEL.row).count();
+    const emptyShown = (await page.locator(".empty-title").count()) > 0;
+    check(
+      "a source facet writes its domain into the search query",
+      queryAfterSource.includes(sourceDomain),
+      "q=" + queryAfterSource + " source=" + sourceDomain
+    );
+    check("a source facet returns that source's records", sourceRows > 0 && !emptyShown, "rows=" + sourceRows);
+    await page.fill(SEL.search, "");
+    await page.waitForTimeout(1400);
+  }
+
   // A row click opens the field drawer; the record page is its own route.
   if (rowCount > 0) {
     const firstRow = page.locator(SEL.row).first();

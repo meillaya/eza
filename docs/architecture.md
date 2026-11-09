@@ -174,7 +174,11 @@ The result order is
 ORDER BY bm25(bookmarks_fts), bookmarks.created_at DESC
 ```
 
-FTS5 computes `bm25` over the five indexed columns. The server then opens a
+FTS5 computes `bm25` over the six indexed columns (title, description, URL,
+note body, extracted text, and source domain). Indexing the domain matters for
+the source facets: an import can record `www.reddit.com` while the saved URL
+is `https://reddit.com/...`, so a URL-only index makes the facet link return
+nothing. The server then opens a
 snippet window around the first matching term and returns at most the requested
 page size.
 

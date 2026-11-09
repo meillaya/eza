@@ -33,7 +33,7 @@ server already computes.
 
 | Area | What it does |
 |---|---|
-| **Search** | `tag:`, `is:unread`, `is:dead`, `link:`, `year:`, `day:`, and `-term` operators over FTS5; free-text terms also match tag names. The date operators use the UTC filing date. Results order by bm25, then save date. |
+| **Search** | `tag:`, `is:unread`, `is:dead`, `link:`, `year:`, `day:`, and `-term` operators over FTS5; free-text terms also match tag names and the source domain, so clicking a source or typing its domain finds that site's records. The date operators use the UTC filing date. Results order by bm25, then save date. |
 | **Ledger** | Year dividers, a provenance line, source and tag facets, a field drawer, bulk selection, and keyboard movement on `j` and `k`. |
 | **Icons** | One cached favicon per source domain, filled in the background with a few conventional requests per site (plus one homepage parse only when those miss) rather than one per link, and served from SQLite; a printed monogram covers sites with no icon. |
 | **Record** | Extracted reading copy, highlights with notes, markdown notes with `[[wikilinks]]`, backlinks, and a sandboxed snapshot viewer. |
