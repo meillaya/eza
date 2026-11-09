@@ -47,9 +47,6 @@ loadingView =
         [HP.class_ "empty"]
         [ H.span_ [HP.class_ "empty-kicker sc"] [text "reading"]
         , H.h1_ [HP.class_ "empty-title"] [text "Opening the record."]
-        , H.p_
-            [HP.class_ "empty-body"]
-            [text "The record is being read from the server."]
         ]
 
 failedView :: Model -> View () () Model Action
@@ -59,18 +56,13 @@ failedView m =
         [ H.span_ [HP.class_ "empty-kicker sc"] [text "record unavailable"]
         , H.h1_ [HP.class_ "empty-title"] [text "This record could not be opened."]
         , H.p_
-            [HP.class_ "empty-body"]
-            [ text
-                "It may have been deleted, or the server did not answer. The rest of the ledger is still here."
-            ]
-        , H.p_
             [HP.class_ "ledg-error-code mono"]
             [text (fromMaybe "the record request failed" (mDetailError m))]
         , H.p_
             [HP.class_ "empty-try"]
             ( H.button_
                 [HP.class_ "btn btn--strong", HE.onClick (Navigate Index)]
-                [text "back to the library"]
+                [text "back to the ledger"]
                 : retryButton m
             )
         ]
@@ -116,21 +108,17 @@ recordPage m detail =
 recordTop :: BookmarkDetail -> View () () Model Action
 recordTop detail =
     H.div_
-        []
-        [ H.div_
-            [HP.class_ "detail-top"]
-            [ H.button_
-                [HP.class_ "detail-back", HE.onClick (Navigate Index)]
-                [ H.span_
-                    [HP.class_ "detail-back-arr", HP.aria_ "hidden" "true"]
-                    [text "←"]
-                , text "the ledger"
-                ]
-            , H.span_
-                [HP.class_ "detail-acc"]
-                [text (accession (bdId detail))]
+        [HP.class_ "detail-top"]
+        [ H.button_
+            [HP.class_ "detail-back", HE.onClick (Navigate Index)]
+            [ H.span_
+                [HP.class_ "detail-back-arr", HP.aria_ "hidden" "true"]
+                [text "←"]
+            , text "ledger"
             ]
-        , H.div_ [HP.class_ "detail-toprule", HP.aria_ "hidden" "true"] []
+        , H.span_
+            [HP.class_ "detail-acc"]
+            [text (accession (bdId detail))]
         ]
 
 recordHead :: Model -> BookmarkDetail -> View () () Model Action
@@ -141,7 +129,7 @@ recordHead m detail =
             [HP.class_ "detail-title"]
             [text (displayTitle m detail)]
         , metaLine detail
-        , tagsRow m
+        , tagRow m
         , actionsLine detail
         ]
 
@@ -159,13 +147,17 @@ metaLine detail =
     items :: [MisoString]
     items =
         filter (not . T.null . T.strip . prose) $
-            [ ms (bdAuthor detail)
+            [ ms author
             , ms (bdDomain detail)
-            , ms ("filed " <> prose (formatFiled (bdCreatedAt detail)))
             ]
-                ++ [ ms (show (bdReadingTimeMinutes detail) <> " min")
-                   | bdReadingTimeMinutes detail > 0
+                ++ [ ms ("published " <> prose (formatProseDate stamp))
+                   | Just stamp <- [bdPublishedAt detail]
+                   , stamp > 0
                    ]
+    author
+        | T.null (T.strip (bdAuthor detail)) = ""
+        | "://" `T.isInfixOf` T.strip (bdAuthor detail) = ""
+        | otherwise = bdAuthor detail
     readSpans =
         [ H.span_
             []
@@ -185,23 +177,6 @@ sepSpan = H.span_ [HP.class_ "detail-sep", HP.aria_ "hidden" "true"] []
 spanText :: MisoString -> View () () Model Action
 spanText value = H.span_ [] [text value]
 
-tagsRow :: Model -> View () () Model Action
-tagsRow m =
-    H.ul_
-        [HP.class_ "detail-tags", HP.aria_ "label" "Tags"]
-        [ H.li_
-            []
-            [ H.button_
-                [ HP.class_ "detail-tag"
-                , HP.type_ "button"
-                , HP.title_ "Filter the library by this tag"
-                , HE.onClick (FilterByTag tag)
-                ]
-                [text (ms tag)]
-            ]
-        | tag <- mEditTags m
-        ]
-
 actionsLine :: BookmarkDetail -> View () () Model Action
 actionsLine detail =
     H.div_
@@ -220,7 +195,7 @@ actionsLine detail =
                 [HP.class_ "btn detail-act-unread", HE.onClick ReadToggled]
                 [text "mark unread"]
           ]
-            ++ enrichAction detail
+            ++ extractAction detail
             ++ [ H.button_
                     [HP.class_ "btn", HE.onClick ShareDialogOpen]
                     [text "share"]
@@ -229,12 +204,11 @@ actionsLine detail =
                     , HE.onClick (DeleteBookmarkRequest (bdId detail))
                     ]
                     [text "delete"]
-               , H.span_ [HP.class_ "detail-status"] [text (statusText detail)]
                ]
         )
 
-enrichAction :: BookmarkDetail -> [View () () Model Action]
-enrichAction detail
+extractAction :: BookmarkDetail -> [View () () Model Action]
+extractAction detail
     | stringEq (bdEnrichState detail) "queued" =
         [ H.button_
             [ HP.class_ "btn"
@@ -243,36 +217,17 @@ enrichAction detail
             ]
             [text "queued"]
         ]
+    | hasText detail = []
     | stringEq (bdEnrichState detail) "failed" =
         [ H.button_
-            [HP.class_ "btn", HE.onClick (RetryEnrich (bdId detail))]
-            [text "extract again"]
-        ]
-    | hasText detail =
-        [ H.button_
-            [ HP.class_ "btn"
-            , HE.onClick (RunBookmarkAction (bdId detail) "extract")
-            ]
+            [HP.class_ "btn", HE.onClick (RunBookmarkAction (bdId detail) "extract")]
             [text "extract again"]
         ]
     | otherwise =
         [ H.button_
-            [ HP.class_ "btn"
-            , HE.onClick (RunBookmarkAction (bdId detail) "extract")
-            ]
+            [HP.class_ "btn", HE.onClick (RunBookmarkAction (bdId detail) "extract")]
             [text "extract text"]
         ]
-
-statusText :: BookmarkDetail -> MisoString
-statusText detail
-    | hasText detail =
-        ms
-            ( "text extracted · "
-                <> paragraphCount (length (visibleParagraphs (bdExtractedText detail)))
-            )
-    | stringEq (bdEnrichState detail) "queued" = ms ("queued for extraction" :: MisoString)
-    | stringEq (bdEnrichState detail) "failed" = ms ("extraction failed" :: MisoString)
-    | otherwise = ms ("nothing lifted yet" :: MisoString)
 
 -- --------------------------------------------------------------- banners --
 
@@ -286,24 +241,33 @@ deadBanner =
         , H.p_
             [HP.class_ "detail-dead-copy"]
             [ H.strong_ [] [text "This link is marked dead."]
-            , text
-                " The page no longer answers. The record, its tags, its note and the extracted text are kept; only the link state changed."
+            , text " The page no longer answers."
             ]
         ]
 
 -- --------------------------------------------------------------- reading --
 
+{- | The extracted text lives in a bounded, rounded window: the record stays
+composed while the copy scrolls inside the card.
+-}
 readingColumn :: Model -> BookmarkDetail -> [View () () Model Action]
 readingColumn m detail =
     snapshotCard detail
-        ++ [H.article_ [HP.class_ "read-text"] (readHead : readingBody m detail)]
+        ++ [ H.section_
+                [HP.class_ "read-window"]
+                ( [ H.header_
+                        [HP.class_ "read-window-head"]
+                        [ H.span_ [HP.class_ "sc"] [text "Extracted text"]
+                        , H.span_ [HP.class_ "read-count"] [text (readCount detail)]
+                        ]
+                  ]
+                    ++ [readingCardBody m detail]
+                )
+           ]
+        ++ selectionBar m
+        ++ marksList detail numbered
   where
-    readHead =
-        H.div_
-            [HP.class_ "read-head"]
-            [ H.span_ [HP.class_ "sc"] [text "Extracted text"]
-            , H.span_ [HP.class_ "read-count"] [text (readCount detail)]
-            ]
+    numbered = numberedHighlights (bdExtractedText detail) (mHighlights m)
 
 readCount :: BookmarkDetail -> MisoString
 readCount detail
@@ -316,30 +280,33 @@ readCount detail
             )
     | stringEq (bdEnrichState detail) "queued" = ms ("queued" :: MisoString)
     | stringEq (bdEnrichState detail) "failed" = ms ("failed" :: MisoString)
-    | otherwise = ms ("nothing lifted" :: MisoString)
+    | otherwise = ms ("none" :: MisoString)
 
-readingBody :: Model -> BookmarkDetail -> [View () () Model Action]
-readingBody m detail
+readingCardBody :: Model -> BookmarkDetail -> View () () Model Action
+readingCardBody m detail
     | hasText detail =
-        paragraphsView (bdExtractedText detail) numbered
-            ++ selectionBar m
-            ++ marksList detail numbered
-            ++ [readingFoot detail]
-    | stringEq (bdEnrichState detail) "queued" = queuedBody
-    | stringEq (bdEnrichState detail) "failed" = failedBody detail
-    | otherwise = noExtractionBody detail
+        H.article_
+            [ HP.id_ "reader-text"
+            , HP.class_ "read-paras reading"
+            , HE.onMouseUp ReaderMouseUp
+            ]
+            (paragraphsView (bdExtractedText detail) numbered)
+    | stringEq (bdEnrichState detail) "queued" =
+        readNote "Extraction is queued."
+    | stringEq (bdEnrichState detail) "failed" =
+        readNote "Extraction failed."
+    | otherwise =
+        readNote "No text extracted yet."
   where
     numbered = numberedHighlights (bdExtractedText detail) (mHighlights m)
 
+readNote :: MisoString -> View () () Model Action
+readNote message =
+    H.p_ [HP.class_ "read-note"] [text message]
+
 paragraphsView :: Text -> [(Int, Highlight)] -> [View () () Model Action]
 paragraphsView body numbered =
-    [ H.div_
-        [ HP.id_ "reader-text"
-        , HP.class_ "read-paras reading"
-        , HE.onMouseUp ReaderMouseUp
-        ]
-        (step 0 (paragraphsOf body))
-    ]
+    step 0 (paragraphsOf body)
   where
     dropcapIndex =
         fst
@@ -400,41 +367,51 @@ marksList :: BookmarkDetail -> [(Int, Highlight)] -> [View () () Model Action]
 marksList detail numbered
     | null numbered = []
     | otherwise =
-        [ H.ol_
-            [HP.class_ "read-marks", HP.aria_ "label" "Marks in this record"]
-            [ H.li_
-                [ HP.class_ "read-mark-row"
-                , HP.data_ "testid" "highlight-row"
-                ]
-                [ H.span_ [HP.class_ "read-mark-n"] [text (ms (show num))]
-                , H.span_
-                    [HP.class_ "read-mark-main"]
-                    [ H.span_ [HP.class_ "read-mark-q"] [text (ms (hQuote hl))]
-                    , H.button_
-                        [ HP.class_ "action"
-                        , HP.data_ "testid" "highlight-edit"
-                        , HP.type_ "button"
-                        , C.styleInline_ "margin-left:12px"
-                        , HP.title_ "Edit this highlight"
-                        , HE.onClick (HighlightEditStart (hId hl))
-                        ]
-                        [text "edit"]
-                    , H.button_
-                        [ HP.class_ "action"
-                        , HP.data_ "testid" "highlight-delete"
-                        , HP.type_ "button"
-                        , C.styleInline_ "margin-left:8px"
-                        , HP.title_ "Delete this highlight"
-                        , HE.onClick (HighlightDelete (hId hl))
-                        ]
-                        [text "delete"]
+        [ H.section_
+            [HP.class_ "marks"]
+            ( [ H.header_
+                    [HP.class_ "marks-head"]
+                    [ H.span_ [HP.class_ "sc"] [text "Marks"]
+                    , H.span_ [HP.class_ "read-count"] [text (ms (show (length numbered)))]
                     ]
-                , H.span_
-                    [HP.class_ "read-mark-where"]
-                    [text (ms ("¶ " <> show (paragraphNumber detail hl)))]
-                ]
-            | (num, hl) <- numbered
-            ]
+              ]
+                ++ [ H.ol_
+                        [HP.class_ "read-marks", HP.aria_ "label" "Marks in this record"]
+                        [ H.li_
+                            [ HP.class_ "read-mark-row"
+                            , HP.data_ "testid" "highlight-row"
+                            ]
+                            [ H.span_ [HP.class_ "read-mark-n"] [text (ms (show num))]
+                            , H.span_
+                                [HP.class_ "read-mark-main"]
+                                [ H.span_ [HP.class_ "read-mark-q"] [text (ms (hQuote hl))]
+                                , H.button_
+                                    [ HP.class_ "action"
+                                    , HP.data_ "testid" "highlight-edit"
+                                    , HP.type_ "button"
+                                    , C.styleInline_ "margin-left:12px"
+                                    , HP.title_ "Edit this highlight"
+                                    , HE.onClick (HighlightEditStart (hId hl))
+                                    ]
+                                    [text "edit"]
+                                , H.button_
+                                    [ HP.class_ "action"
+                                    , HP.data_ "testid" "highlight-delete"
+                                    , HP.type_ "button"
+                                    , C.styleInline_ "margin-left:8px"
+                                    , HP.title_ "Delete this highlight"
+                                    , HE.onClick (HighlightDelete (hId hl))
+                                    ]
+                                    [text "delete"]
+                                ]
+                            , H.span_
+                                [HP.class_ "read-mark-where"]
+                                [text (ms ("¶ " <> show (paragraphNumber detail hl)))]
+                            ]
+                        | (num, hl) <- numbered
+                        ]
+                   ]
+            )
         ]
 
 paragraphNumber :: BookmarkDetail -> Highlight -> Int
@@ -475,170 +452,36 @@ selectionBar m = case mReaderSel m of
             ]
         ]
 
-readingFoot :: BookmarkDetail -> View () () Model Action
-readingFoot detail =
-    H.footer_
-        [HP.class_ "read-foot"]
-        [ H.p_
-            [HP.class_ "read-foot-src"]
-            [text "Text lifted from the saved page by the extractor, as stored."]
-        , H.p_ [HP.class_ "read-byline"] (bylineViews detail)
-        ]
-
-bylineViews :: BookmarkDetail -> [View () () Model Action]
-bylineViews detail =
-    interleaveDot (map spanText items)
-  where
-    items :: [MisoString]
-    items =
-        filter (not . T.null . T.strip . prose) $
-            [primary]
-                ++ [ ms ("published " <> prose (formatProseDate stamp))
-                   | Just stamp <- [bdPublishedAt detail]
-                   , stamp > 0
-                   ]
-    primary
-        | T.null (T.strip (bdAuthor detail)) = ms (bdDomain detail)
-        | otherwise = ms (bdAuthor detail)
-
-interleaveDot :: [View () () Model Action] -> [View () () Model Action]
-interleaveDot [] = []
-interleaveDot [one] = [one]
-interleaveDot (one : rest) =
-    one
-        : H.span_ [HP.aria_ "hidden" "true"] [text " · "]
-        : interleaveDot rest
-
-noExtractionBody :: BookmarkDetail -> [View () () Model Action]
-noExtractionBody detail =
-    [ H.div_
-        [HP.class_ "noextract"]
-        [ H.p_
-            [HP.class_ "noextract-lead"]
-            [text "No text has been lifted from this page."]
-        , H.p_
-            [HP.class_ "noextract-body"]
-            [ text
-                "This is the ordinary case: the record was filed, the page was saved, and the reader is still empty. The title, the source, the date and the tags are enough to find it again."
-            ]
-        , H.p_
-            [HP.class_ "noextract-body"]
-            [text "When extraction runs, the text lands here, in the same column as every other reading copy."]
-        , H.div_
-            [HP.class_ "noextract-lines", HP.aria_ "hidden" "true"]
-            (replicate 4 (H.i_ [] []))
-        , H.p_
-            [HP.class_ "noextract-foot"]
-            [ text "reader empty"
-            , H.span_ [HP.aria_ "hidden" "true"] [text " / "]
-            , text "no snapshot captured"
-            ]
-        , H.div_
-            [HP.class_ "detail-actions"]
-            [ H.button_
-                [ HP.class_ "btn btn--strong"
-                , HE.onClick (RunBookmarkAction (bdId detail) "extract")
-                ]
-                [text "extract the text"]
-            ]
-        ]
-    ]
-
-queuedBody :: [View () () Model Action]
-queuedBody =
-    [ H.div_
-        [HP.class_ "enrich"]
-        [ H.p_ [HP.class_ "enrich-kicker"] [text "Queued for extraction"]
-        , H.p_
-            [HP.class_ "enrich-title"]
-            [text "The page will be fetched and its text lifted."]
-        , H.p_
-            [HP.class_ "enrich-copy"]
-            [ text
-                "Extraction runs in the background on the server. Nothing is lost or overwritten while it waits: the record keeps its link, tags and note, and the text lands in this column when the run finishes."
-            ]
-        , H.div_
-            [HP.class_ "enrich-lines", HP.aria_ "hidden" "true"]
-            (replicate 3 (H.i_ [] []))
-        , H.p_
-            [HP.class_ "enrich-foot"]
-            [ text "in the queue"
-            , H.span_ [HP.aria_ "hidden" "true"] [text " / "]
-            , text "not yet running"
-            ]
-        ]
-    ]
-
-failedBody :: BookmarkDetail -> [View () () Model Action]
-failedBody detail =
-    [ H.div_
-        [HP.class_ "enrich"]
-        [ H.p_ [HP.class_ "enrich-kicker"] [text "Extraction failed"]
-        , H.p_
-            [HP.class_ "enrich-title"]
-            [text "The extractor could not reach the page."]
-        , H.p_
-            [HP.class_ "enrich-copy"]
-            [ text
-                "Nothing was changed. The record, its tags and its note are intact. The text column stays empty until extraction succeeds."
-            ]
-        , H.p_
-            [HP.class_ "enrich-foot"]
-            [ text "no text lifted"
-            , H.span_ [HP.aria_ "hidden" "true"] [text " / "]
-            , text "the record is intact"
-            ]
-        , H.div_
-            [HP.class_ "detail-actions"]
-            [ H.button_
-                [HP.class_ "btn", HE.onClick (RetryEnrich (bdId detail))]
-                [text "extract again"]
-            ]
-        ]
-    ]
-
 -- ------------------------------------------------------------- note editor --
 
 noteEditor :: Model -> BookmarkDetail -> View () () Model Action
 noteEditor m detail =
     H.section_
         [HP.class_ "note-editor", HP.aria_ "label" "Note"]
-        ( [noteHead]
-            ++ [modesRow]
+        ( [ H.div_
+                [HP.class_ "note-head"]
+                ( [H.span_ [HP.class_ "sc"] [text "Note"]]
+                    ++ [ H.div_
+                            [HP.class_ "noteed-modes"]
+                            ( [ modeButton NoteWrite "write"
+                              , modeButton NotePreview "preview"
+                              ]
+                                ++ [ H.span_
+                                        [ HP.class_ "noteed-dirty"
+                                        , C.styleInline_ "display:inline-flex"
+                                        ]
+                                        [H.span_ [HP.class_ "noteed-dirty-dot"] [], text " unsaved"]
+                                   | mDirty m
+                                   ]
+                            )
+                       ]
+                )
+          ]
             ++ [bodyViews]
             ++ suggestions m
-            ++ [foot]
+            ++ [foot | mDirty m || mSaving m]
         )
   where
-    noteHead =
-        H.div_
-            [HP.class_ "read-head"]
-            [ H.span_ [HP.class_ "sc"] [text "Note"]
-            , H.span_
-                [HP.class_ "read-count"]
-                [ text
-                    ( ms
-                        ( prose (accession (bdId detail))
-                            <> " · "
-                            <> wikilinkText (prose (mEditNote m))
-                        )
-                    )
-                ]
-            ]
-    modesRow =
-        H.div_
-            [HP.class_ "noteed-modes"]
-            ( [ modeButton NoteWrite "write"
-              , modeButton NotePreview "preview"
-              ]
-                ++ [ H.span_
-                        [ HP.class_ "noteed-dirty"
-                        , C.styleInline_ "display:inline-flex"
-                        ]
-                        [H.span_ [HP.class_ "noteed-dirty-dot"] [], text " unsaved changes"]
-                   | mDirty m
-                   ]
-            )
     modeButton mode label =
         H.button_
             [ HP.class_
@@ -681,9 +524,7 @@ noteEditor m detail =
                 ]
     previewViews model
         | T.null (T.strip (prose (mEditNote model))) =
-            [ H.p_
-                [HP.class_ "record-empty"]
-                [text "Nothing here yet. Switch to write to add a note."]
+            [ H.p_ [HP.class_ "record-empty"] [text "No note yet."]
             ]
         | otherwise = renderMarkdown (prose (mEditNote model))
     foot =
@@ -693,10 +534,8 @@ noteEditor m detail =
                 [HP.class_ "noteed-hint"]
                 [ H.kbd_ [] [text "⌘S"]
                 , text " saves · "
-                , H.kbd_ [] [text "esc"]
-                , text " closes · "
                 , H.span_ [HP.class_ "mono"] [text "[[title]]"]
-                , text " links another record"
+                , text " links a record"
                 ]
             , H.div_
                 [HP.class_ "noteed-buttons"]
@@ -713,7 +552,7 @@ noteEditor m detail =
                       ]
                         ++ disabledAttr (not (mDirty m) || mSaving m)
                     )
-                    [text (if mSaving m then "saving..." else "save the note")]
+                    [text (if mSaving m then "saving…" else "save changes")]
                 ]
             ]
 
@@ -789,9 +628,7 @@ recordCard m detail =
         [HP.class_ "record", HP.aria_ "label" "Catalogue record"]
         ( [ H.div_
                 [HP.class_ "record-head"]
-                [ H.span_ [HP.class_ "sc"] [text "Catalogue record"]
-                , H.span_ [HP.class_ "record-no"] [text (accession (bdId detail))]
-                ]
+                [H.span_ [HP.class_ "sc"] [text "Catalogue record"]]
           ]
             ++ [ H.span_
                     [ HP.class_ "record-deadmark"
@@ -801,13 +638,11 @@ recordCard m detail =
                | bdIsDead detail
                ]
             ++ [ filedStamp detail
-               , titleField m detail
-               , stampedFields detail
-               , tagRow m
-               , noteSection m
-               , seeSection m detail
-               , recordExtras detail
+               , lastOpened detail
+               , titleField m
                ]
+            ++ seeSection m detail
+            ++ [recordLinks detail]
         )
     ]
 
@@ -821,117 +656,56 @@ filedStamp detail =
             [text (formatFiled (bdCreatedAt detail))]
         ]
 
-titleField :: Model -> BookmarkDetail -> View () () Model Action
-titleField m detail =
+lastOpened :: BookmarkDetail -> View () () Model Action
+lastOpened detail =
+    H.p_
+        [HP.class_ "record-last"]
+        [ H.span_ [HP.class_ "record-label"] [text "opened"]
+        , text (openedText detail)
+        ]
+
+titleField :: Model -> View () () Model Action
+titleField m =
     H.div_
         [HP.class_ "record-sec"]
         [ H.div_
             [HP.class_ "record-sec-head"]
-            [ H.h3_ [HP.class_ "record-sec-title sc"] [text "Title"]
-            , H.span_
-                [HP.class_ "record-sec-n"]
-                [text (if mDirty m then "unsaved" else "editable")]
+            [ H.label_
+                [HP.class_ "record-sec-title sc", HP.for_ "record-title"]
+                [text "Title"]
             ]
         , H.input_
-            [ HP.class_ "input input--serif"
+            [ HP.id_ "record-title"
+            , HP.class_ "input input--serif"
             , HP.aria_ "label" "Bookmark title"
             , HP.value_ (mEditTitle m)
             , HP.placeholder_ "Untitled bookmark"
             , HE.onInput TitleInput
             ]
         ]
-  where
-    _ = detail
-
-stampedFields :: BookmarkDetail -> View () () Model Action
-stampedFields detail =
-    H.dl_
-        [HP.class_ "stamped"]
-        [ field "source" [text (ms (bdDomain detail))]
-        , field
-            "url"
-            [ H.a_
-                [ HP.class_ "record-url"
-                , HP.href_ (ms (bdUrl detail))
-                , HP.target_ "_blank"
-                , HP.rel_ "noopener noreferrer"
-                ]
-                (urlSegments (bdUrl detail))
-            ]
-        , field
-            "read"
-            [ H.span_ [HP.class_ "record-read-yes"] [text "read"]
-            , H.span_ [HP.class_ "record-read-no"] [text "unread"]
-            ]
-        , field "opened" [text (openedText detail)]
-        , field "text" [text (textField detail)]
-        ]
-  where
-    field name body =
-        H.div_
-            [HP.class_ "field"]
-            [H.dt_ [] [text name], H.dd_ [] body]
 
 openedText :: BookmarkDetail -> MisoString
 openedText detail = case bdLastOpenedAt detail of
     Just stamp | stamp > 0 -> formatFiled stamp
     _ -> ms ("never" :: MisoString)
 
-textField :: BookmarkDetail -> MisoString
-textField detail
-    | hasText detail =
-        ms (paragraphCount (length (visibleParagraphs (bdExtractedText detail))))
-    | otherwise = ms ("none" :: MisoString)
-
-noteSection :: Model -> View () () Model Action
-noteSection m =
-    H.section_
-        [HP.class_ "record-sec"]
-        ( [ H.div_
-                [HP.class_ "record-sec-head"]
-                [ H.h3_ [HP.class_ "record-sec-title sc"] [text "Note"]
-                , H.span_
-                    [HP.class_ "record-sec-n"]
-                    [text (ms (wikilinkText (prose (mEditNote m))))]
-                ]
-          ]
-            ++ noteBody
-        )
-  where
-    noteBody
-        | T.null (T.strip (prose (mEditNote m))) =
-            [ H.p_
-                [HP.class_ "record-empty"]
-                [text "No note on this record."]
-            ]
-        | otherwise =
-            [ H.div_
-                [HP.class_ "record-note markdown"]
-                (renderMarkdown (prose (mEditNote m)))
-            , H.p_
-                [HP.class_ "record-prov"]
-                [text "the note filed with this record"]
-            ]
-
-seeSection :: Model -> BookmarkDetail -> View () () Model Action
-seeSection m detail =
-    H.section_
-        [HP.class_ "record-sec"]
-        ( [ H.div_
-                [HP.class_ "record-sec-head"]
-                [ H.h3_ [HP.class_ "record-sec-title sc"] [text "See also"]
-                , H.span_
-                    [HP.class_ "record-sec-n"]
-                    [text (ms (show (length rows)))]
-                ]
-          , H.ul_ [HP.class_ "record-see"] (map seeRow rows)
-          ]
-            ++ [ H.p_
-                    [HP.class_ "record-empty"]
-                    [text "No cross-references yet."]
-               | null rows
-               ]
-        )
+seeSection :: Model -> BookmarkDetail -> [View () () Model Action]
+seeSection m detail
+    | null rows = []
+    | otherwise =
+        [ H.section_
+            [HP.class_ "record-sec"]
+            ( [ H.div_
+                    [HP.class_ "record-sec-head"]
+                    [ H.h3_ [HP.class_ "record-sec-title sc"] [text "See also"]
+                    , H.span_
+                        [HP.class_ "record-sec-n"]
+                        [text (ms (show (length rows)))]
+                    ]
+              , H.ul_ [HP.class_ "record-see"] (map seeRow rows)
+              ]
+            )
+        ]
   where
     rows = seeRows m detail
 
@@ -979,26 +753,32 @@ seeRow (name, direction, target) =
             , H.span_ [HP.class_ "see-no"] [text tailText]
             ]
 
-recordExtras :: BookmarkDetail -> View () () Model Action
-recordExtras detail =
+recordLinks :: BookmarkDetail -> View () () Model Action
+recordLinks detail =
     H.div_
-        [HP.class_ "record-sec"]
-        [ H.div_
-            [HP.class_ "record-sec-head"]
-            [ H.h3_ [HP.class_ "record-sec-title sc"] [text "Record"]
+        [HP.class_ "record-links"]
+        ( H.button_
+            [ HP.class_ "action"
+            , HP.type_ "button"
+            , HP.data_ "testid" "open-graph"
+            , HE.onClick (OpenGraphAt (bdId detail))
             ]
-        , H.div_
-            [HP.class_ "record-tags"]
-            ( H.button_
-                [ HP.class_ "action"
-                , HP.type_ "button"
-                , HP.data_ "testid" "open-graph"
-                , HE.onClick (OpenGraphAt (bdId detail))
-                ]
-                [text "the graph"]
-                : snapshotAction detail
-            )
+            [text "the graph"]
+            : extractAgain detail
+            ++ snapshotAction detail
+        )
+
+extractAgain :: BookmarkDetail -> [View () () Model Action]
+extractAgain detail
+    | hasText detail =
+        [ H.button_
+            [ HP.class_ "action"
+            , HP.type_ "button"
+            , HE.onClick (RunBookmarkAction (bdId detail) "extract")
+            ]
+            [text "extract again"]
         ]
+    | otherwise = []
 
 snapshotAction :: BookmarkDetail -> [View () () Model Action]
 snapshotAction detail
@@ -1007,7 +787,6 @@ snapshotAction detail
     , not (T.null (T.strip (bdSnapshotPath detail))) =
         [ H.a_
             [ HP.class_ "action"
-            , C.styleInline_ "margin-left:16px"
             , HP.href_ (ms (bdSnapshotPath detail))
             , HP.target_ "_blank"
             , HP.rel_ "noopener noreferrer"
@@ -1018,7 +797,6 @@ snapshotAction detail
         [ H.button_
             [ HP.class_ "action"
             , HP.type_ "button"
-            , C.styleInline_ "margin-left:16px"
             , HE.onClick (RunBookmarkAction (bdId detail) "snapshot")
             ]
             [text "capture a snapshot"]
@@ -1029,52 +807,28 @@ snapshotCard detail
     | not (hasSnapshot detail) = []
     | otherwise =
         [ H.section_
-            [ HP.class_ "record"
-            , C.styleInline_ "padding:12px 16px 13px;margin:0 0 24px"
+            [ HP.class_ "snapcard"
             , HP.aria_ "label" "Snapshot"
             ]
-            [ H.div_
-                [HP.class_ "snap-head"]
-                [ H.span_ [HP.class_ "sc"] [text "Snapshot"]
-                , H.span_ [HP.class_ "snap-state"] [text "held on this server"]
+            [ H.span_ [HP.class_ "sc"] [text "Snapshot"]
+            , H.span_ [HP.class_ "snap-state"] [text (snapshotKindLabel detail)]
+            , H.button_
+                [ HP.class_ "btn snap-open"
+                , HP.data_ "testid" "snapshot-open"
+                , HP.type_ "button"
+                , HE.onClick SnapshotOpen
                 ]
-            , H.div_
-                [HP.class_ "snap-row"]
-                [ H.div_
-                    [HP.class_ "snap-facts"]
-                    [ snapFact "kind" (snapshotKindLabel detail)
-                    ]
-                , H.button_
-                    [ HP.class_ "btn snap-open"
-                    , HP.data_ "testid" "snapshot-open"
-                    , HP.type_ "button"
-                    , HE.onClick SnapshotOpen
-                    ]
-                    [text "open the snapshot"]
-                ]
-            , H.p_
-                [HP.class_ "snap-copy"]
-                [ text
-                    "The page as it was when the text was lifted. It opens without the network and is kept with the record."
-                ]
+                [text "open"]
             ]
         ]
-  where
-    snapFact name value =
-        H.span_
-            [HP.class_ "snap-fact"]
-            [ H.span_ [HP.class_ "snap-k"] [text name]
-            , text " "
-            , H.span_ [HP.class_ "snap-v"] [text value]
-            ]
 
 hasSnapshot :: BookmarkDetail -> Bool
 hasSnapshot detail =
     stringEq (bdSnapshotKind detail) "file"
         && not (T.null (T.strip (bdSnapshotPath detail)))
 
-{- | The record card reports the stored snapshot kind only; the DTO carries no
-capture timestamp or file size, so the card does not invent one.
+{- | The card names the stored snapshot kind only; the DTO carries no capture
+timestamp or file size, so the card does not invent one.
 -}
 snapshotKindLabel :: BookmarkDetail -> MisoString
 snapshotKindLabel detail
@@ -1123,9 +877,9 @@ shareSlip m detail
   where
     shareCopy :: Text
     shareCopy =
-        "A read-only page of "
+        "A read-only page. Anyone with the link can read "
             <> prose (accession (bdId detail))
-            <> ". The link is unguessable, and you can revoke it from this record."
+            <> "."
 
 shareLinkRow :: Model -> [View () () Model Action]
 shareLinkRow m = case mShareUrl m of
@@ -1152,7 +906,7 @@ shareLinkRow m = case mShareUrl m of
     Nothing ->
         [ H.div_
             [HP.class_ "dshare-linkrow"]
-            [ H.span_ [HP.class_ "dshare-link"] [text "no link created yet"]
+            [ H.span_ [HP.class_ "dshare-link"] [text "no link yet"]
             , H.button_
                 ( [ HP.class_ "btn btn--strong"
                   , HP.data_ "testid" "share-create"
@@ -1216,12 +970,9 @@ shareLinksSection m detail
     | null activeLinks = H.span_ [] []
     | otherwise =
         H.div_
-            [HP.class_ "record-sec"]
-            [ H.div_
-                [HP.class_ "record-sec-head"]
-                [ H.h3_ [HP.class_ "record-sec-title sc"] [text "Existing links"]
-                ]
-            , H.div_ [HP.class_ "record-tags"] (map linkRow activeLinks)
+            [HP.class_ "dshare-links-sec"]
+            [ H.h3_ [HP.class_ "dshare-links-title sc"] [text "Existing links"]
+            , H.div_ [HP.class_ "dshare-links"] (map linkRow activeLinks)
             ]
   where
     activeLinks =
@@ -1232,11 +983,13 @@ shareLinksSection m detail
         , not (isJust (svRevokedAt share))
         ]
     linkRow share =
-        H.span_
-            [HP.class_ "record-tags", HP.data_ "testid" "share-row"]
-            [ H.span_ [HP.class_ "mono"] [text (ms (svPrefix share))]
+        H.div_
+            [HP.class_ "dshare-link-row", HP.data_ "testid" "share-row"]
+            [ H.span_
+                [HP.class_ "dshare-link-prefix mono"]
+                [text (ms (svPrefix share))]
             , H.span_
-                [HP.class_ "status--warn"]
+                [HP.class_ "dshare-link-expiry meta"]
                 [text (ms ("expires " <> prose (formatFiled (svExpiresAt share))))]
             , H.button_
                 [ HP.class_ "btn btn--sm"
@@ -1250,14 +1003,11 @@ shareLinksSection m detail
 shareFoot :: View () () Model Action
 shareFoot =
     H.div_
-        [HP.class_ "dshare-foot"]
-        [ H.p_
-            [HP.class_ "dshare-note"]
-            [ text
-                "The recipient does not need an account, and this does not make the record public."
-            ]
-        , H.button_
-            [ HP.class_ "btn"
+        [ HP.class_ "dshare-foot"
+        , C.styleInline_ "justify-content:flex-end"
+        ]
+        [ H.button_
+            [ HP.class_ "btn btn--strong"
             , HP.type_ "button"
             , HE.onClick ShareDialogClose
             ]
@@ -1293,13 +1043,12 @@ deleteDialog m detail
                     ]
                     [ H.p_
                         []
-                        [ text "This removes "
+                        [ text "Delete "
                         , H.strong_ [] [text (accession (bdId detail))]
                         , text " · "
                         , H.strong_ [] [text (ms (bdTitle detail))]
-                        , text " from the ledger, together with its note, highlights and links."
+                        , text " with its note, highlights and links. This cannot be undone."
                         ]
-                    , H.p_ [] [text "The write cannot be undone."]
                     ]
                 , H.div_
                     [HP.class_ "dialog__foot"]
@@ -1327,7 +1076,7 @@ highlightNoteDialog m
     | not (mHighlightNoteOpen m) = []
     | otherwise =
         [ dialogShell
-            "Add a note to the selection"
+            "note on the selection"
             HighlightNoteCancel
             [ H.div_
                 [HP.class_ "field"]
@@ -1364,7 +1113,7 @@ highlightEditDialog m
     | not (isJust (mHighlightEdit m)) = []
     | otherwise =
         [ dialogShell
-            "Edit highlight"
+            "edit highlight"
             HighlightEditCancel
             (quoteBlock : [noteField, markField])
             [ H.button_
@@ -1532,21 +1281,6 @@ accession :: Int -> MisoString
 accession bid =
     ms ("EA-" <> T.justifyRight 5 '0' (T.pack (show bid)))
 
-urlText :: Text -> Text
-urlText = T.replace "https://" "" . T.replace "http://" ""
-
-urlSegments :: Text -> [View () () Model Action]
-urlSegments raw =
-    case T.breakOn "/" (urlText raw) of
-        (host, rest)
-            | T.null rest -> [H.span_ [] [text (ms host)]]
-            | otherwise ->
-                H.span_ [] [text (ms host)]
-                    : concat
-                        [ [H.wbr_ [], H.span_ [] [text (ms ("/" <> segment))]]
-                        | segment <- filter (not . T.null) (T.splitOn "/" (T.drop 1 rest))
-                        ]
-
 stringEq :: Text -> Text -> Bool
 stringEq left right =
     T.toLower (T.strip left) == T.toLower (T.strip right)
@@ -1578,12 +1312,6 @@ numberedHighlights body highlights =
 paragraphCount :: Int -> Text
 paragraphCount 1 = "1 paragraph"
 paragraphCount count = T.pack (show count) <> " paragraphs"
-
-wikilinkText :: Text -> Text
-wikilinkText note = case T.count "[[" note of
-    0 -> "no wikilinks"
-    1 -> "one wikilink"
-    n -> T.pack (show n) <> " wikilinks"
 
 markStyleOf :: Text -> Text
 markStyleOf colour = case T.toLower (T.strip colour) of
