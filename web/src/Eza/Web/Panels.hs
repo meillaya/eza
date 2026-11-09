@@ -7,6 +7,8 @@ hidden state says so instead of showing an invented number.
 -}
 module Eza.Web.Panels (
     graphPage,
+    viewsPage,
+    viewDialogs,
     dedupPage,
     tagsPage,
     aiTagsPage,
@@ -15,6 +17,8 @@ module Eza.Web.Panels (
 ) where
 
 import Data.Char (toUpper)
+import qualified Data.IntMap.Strict as IM
+import qualified Data.IntSet as IS
 import Data.List (sortOn)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, isJust, isNothing)
@@ -22,25 +26,41 @@ import Data.Text (Text)
 import qualified Data.Text as T
 
 import Miso
+import qualified Miso.Canvas as Canvas
 import qualified Miso.CSS as C
 import qualified Miso.Html as H
 import qualified Miso.Html.Event as HE
 import qualified Miso.Html.Property as HP
-import qualified Miso.Svg as Svg
-import qualified Miso.Svg.Property as SP
-
+import Miso.JSON (withObject, (.:))
 import Eza.Types (
     BookmarkSummary (..),
     DedupCounts (..),
     DedupGroup (..),
     DedupMergeAllReport (..),
-    GraphData (..),
-    GraphEdge (..),
-    GraphNode (..),
+    GraphRecord (..),
     ImportReport (..),
     LibraryStats (..),
     SavedSearch (..),
     TagStat (..),
+ )
+import Eza.GraphMatch (ColorAssignment (..))
+import qualified Eza.View as EV
+import Eza.User (UserRole (..), UserView (..), userRoleText)
+import Eza.Webhook (DeliveryView (..), Webhook (..), allEventTypes, eventTypeText, maxWebhooks)
+import Eza.Web.Api (WebhookTest (..))
+import Eza.Web.Graph (
+    GraphDraw (..),
+    GraphLayout (..),
+    GraphMatches (..),
+    LayoutPreset (..),
+    drawGraph,
+    gvDpr,
+    gvFit,
+    gvHeight,
+    gvScale,
+    gvWidth,
+    isTagKey,
+    labelCount,
  )
 import Eza.Web.Model
 import Eza.Web.Types (
@@ -238,26 +258,18 @@ confirmationError (Just message) =
 
 graphPage :: Model -> View () () Model Action
 graphPage m =
-    pageWith
-        "The graph"
-        "A record and the records that share its tags. A line joins two records that share at least one tag, and the line is heavier when they share more tags. The seed sits at the centre."
-        (graphFigures m)
-        [ "records joined by shared tags"
-        , "line weight is tags shared"
-        , "depth 1 or 2 hops"
+    H.div_
+        [testId "graph"]
+        [ pageWith
+            "The graph"
+            "Every record and every tag in the library, drawn as one plate. Two records join at a resolved wikilink; a record joins a tag when it carries it. Those two relationships are the whole graph."
+            (graphFigures m)
+            [ "whole-library graph"
+            , "links and tags only"
+            , "canvas 2d"
+            ]
+            (graphBody m)
         ]
-        [graphToolbar m, graphContent m]
-
-graphFigures :: Model -> [View () () Model Action]
-graphFigures m =
-    [ figure "records" (countOrNotYet (length . gdNodes <$> mGraph m))
-    , figure "lines" (countOrNotYet (length . gdEdges <$> mGraph m))
-    , figure "depth" (ms (show (mGraphDepth m)))
-    ]
-
-countOrNotYet :: Maybe Int -> MisoString
-countOrNotYet Nothing = "not yet"
-countOrNotYet (Just value) = num value
 
 -- | Prefer the boot stats the masthead uses; fall back to the loaded rows.
 statIntFields :: Model -> (LibraryStats -> Int) -> Int -> MisoString
@@ -265,392 +277,942 @@ statIntFields m field fallback = case mStats m of
     Nothing -> num fallback
     Just stats -> num (field stats)
 
+countOrNotYet :: Maybe Int -> MisoString
+countOrNotYet Nothing = "not yet"
+countOrNotYet (Just value) = num value
+
+graphFigures :: Model -> [View () () Model Action]
+graphFigures m =
+    [ figure "records" (countOrNotYet (glRecordCount <$> activeGraphLayout m))
+    , figure "tags" (countOrNotYet (glTagCount <$> activeGraphLayout m))
+    , figure "wikilinks" (countOrNotYet (glLinkCount <$> activeGraphLayout m))
+    ]
+
+graphBody :: Model -> [View () () Model Action]
+graphBody m
+    | mGraphLayout m == Nothing
+    , Just message <- mGraphError m =
+        [ panelError "read failed" "The graph did not load." (Just message)
+        ]
+    | mGraphLayout m == Nothing =
+        [graphLoadingPlate m]
+    | mGraphLocal m
+    , activeGraphLayout m == Nothing =
+        [ emptyPanel
+            "no root"
+            "No neighbourhood to draw."
+            "Select a record on the whole graph, then switch the scope back to local. Local mode keeps the root record and everything within the chosen depth."
+            []
+            "local graph"
+            "select a record"
+        ]
+    | Just layout <- activeGraphLayout m
+    , glRecordCount layout == 0
+    , glTagCount layout == 0 =
+        [ emptyPanel
+            "0 records"
+            "The library is empty."
+            "The graph draws records and tags from the whole library. Save a record and it appears here."
+            []
+            "0 records"
+            "nothing to draw"
+        ]
+    | Just layout <- activeGraphLayout m =
+        ( [graphToolbar m]
+            ++ [graphGroupEditor m | mGraphGroupEditor m]
+            ++ [graphGrid m layout]
+        )
+    | otherwise = []
+
+graphLoadingPlate :: Model -> View () () Model Action
+graphLoadingPlate m =
+    H.div_
+        [ HP.class_ "g-plate g-plate--loading"
+        , HP.aria_ "busy" (if mGraphLoading m then "true" else "false")
+        ]
+        [ H.p_ [HP.class_ "g-load-note"] [text "Building the graph."]
+        ]
+
+-- --------------------------------------------------------------- toolbar ---
+
 graphToolbar :: Model -> View () () Model Action
 graphToolbar m =
     H.div_
         [HP.class_ "g-toolbar"]
-        ( [ H.div_
-                [HP.class_ "g-control g-seed"]
-                [ H.span_ [HP.class_ "g-control-label sc"] [text "seed"]
-                , H.input_
-                    [ HP.class_ "input"
-                    , HP.type_ "search"
-                    , HP.placeholder_ "search a record"
-                    , HP.value_ (mGraphQuery m)
-                    , HP.autocomplete_ "off"
-                    , HP.aria_ "label" "Search a record to seed the graph"
-                    , HE.onInput GraphQueryChanged
+        [ H.div_
+            [HP.class_ "g-control g-filter"]
+            [ controlLabel "filter"
+            , H.input_
+                [ HP.class_ "input"
+                , HP.id_ "graph-filter"
+                , HP.type_ "search"
+                , HP.placeholder_ "title, domain, or tag"
+                , HP.value_ (mGraphFilter m)
+                , HP.autocomplete_ "off"
+                , HP.spellcheck_ False
+                , HP.aria_ "label" "Filter the graph by title, domain, or tag"
+                , HE.onInput GraphFilterChanged
+                ]
+            ]
+        , H.div_
+            [HP.class_ "g-settings", testId "graph-settings"]
+            [ H.div_
+            [HP.class_ "g-control g-scope"]
+            ( [ controlLabel "scope"
+              , H.div_
+                    [HP.class_ "g-seg", HP.role_ "group", HP.aria_ "label" "Graph scope"]
+                    [ segmentButton "whole" "graph-scope-whole" (not (mGraphLocal m)) (if mGraphLocal m then GraphScopeToggled else Noop)
+                    , segmentButton "local" "graph-local-toggle" (mGraphLocal m) GraphScopeToggled
+                    ]
+              ]
+                ++ [ H.span_
+                        [HP.class_ "g-root-name mono", testId "graph-root"]
+                        [text (graphRootName m)]
+                   | mGraphLocal m
+                   ]
+            )
+        , H.div_
+            [HP.class_ "g-control g-depth"]
+            ( [ controlLabel "depth"
+              , H.div_
+                    [HP.class_ "g-seg", testId "graph-local-depth", HP.role_ "group", HP.aria_ "label" "Local graph depth"]
+                    [ segmentButton (ms (show depth)) ("graph-depth-" <> ms (show depth)) (mGraphLocalDepth m == depth) (GraphLocalDepthSelected depth)
+                    | depth <- [1, 2, 3]
+                    ]
+              ]
+                ++ [H.span_ [HP.class_ "g-root-hint meta"] [text "hops"] | mGraphLocal m]
+            )
+        , H.div_
+            [HP.class_ "g-control g-preset"]
+            [ controlLabel "layout"
+            , H.div_
+                [HP.class_ "g-seg", testId "graph-preset", HP.role_ "group", HP.aria_ "label" "Layout preset"]
+                [ segmentButton "compact" "graph-preset-compact" (mGraphPreset m == Compact) (GraphPresetSelected Compact)
+                , segmentButton "standard" "graph-preset-standard" (mGraphPreset m == Standard) (GraphPresetSelected Standard)
+                , segmentButton "airy" "graph-preset-airy" (mGraphPreset m == Airy) (GraphPresetSelected Airy)
+                ]
+            ]
+            ]
+        , H.div_
+            [HP.class_ "g-control g-view-actions"]
+            [ controlLabel "view"
+            , H.div_
+                [HP.class_ "g-button-row"]
+                [ H.button_
+                    [HP.class_ "btn btn--sm", HP.type_ "button", testId "view-save-graph", HE.onClick ViewSaveGraph]
+                    [text "save"]
+                , H.button_
+                    [HP.class_ "btn btn--sm", HP.type_ "button", testId "view-save-as", HE.onClick (ViewSaveOpen EV.GraphKind)]
+                    [text "save as…"]
+                , H.button_
+                    [HP.class_ "btn btn--sm", HP.type_ "button", testId "graph-group-edit", HE.onClick ViewGroupEditorToggle]
+                    [text (if mGraphGroupEditor m then "close groups" else "groups")]
+                ]
+            ]
+        , H.div_
+            [HP.class_ "g-control"]
+            [ controlLabel "tags"
+            , H.button_
+                [ HP.class_ ("g-toggle" <> if mGraphTagsShown m then " is-on" else "")
+                , HP.type_ "button"
+                , testId "graph-tags-toggle"
+                , HP.aria_ "pressed" (if mGraphTagsShown m then "true" else "false")
+                , HE.onClick GraphTagsToggled
+                ]
+                [text (if mGraphTagsShown m then "shown" else "hidden")]
+            ]
+        , H.div_
+            [HP.class_ "g-control g-view"]
+            [ controlLabel "zoom"
+            , H.div_
+                [HP.class_ "g-zoom-box"]
+                [ H.button_
+                    [HP.class_ "g-zbtn", HP.type_ "button", testId "graph-zoom-out", HP.aria_ "label" "Zoom out", HE.onClick GraphZoomOut]
+                    [text "-"]
+                , H.span_
+                    [HP.class_ "g-zval mono", testId "graph-zoom-value", HP.aria_ "live" "polite"]
+                    [text (ms (show (graphZoomPercent m) <> "%"))]
+                , H.button_
+                    [HP.class_ "g-zbtn", HP.type_ "button", testId "graph-zoom-in", HP.aria_ "label" "Zoom in", HE.onClick GraphZoomIn]
+                    [text "+"]
+                , H.button_
+                    [HP.class_ "g-zbtn g-zreset", HP.type_ "button", testId "graph-fit", HP.aria_ "label" "Fit the graph", HE.onClick GraphFit]
+                    [text "fit"]
+                ]
+            ]
+        , H.div_
+            [HP.class_ "g-control"]
+            [ controlLabel "data"
+            , H.button_
+                [HP.class_ "btn btn--sm", HP.type_ "button", HE.onClick GraphRefresh]
+                [text "refresh"]
+            ]
+        ]
+
+-- | One button in a segmented control.
+segmentButton :: MisoString -> MisoString -> Bool -> Action -> View () () Model Action
+segmentButton label hook pressed action =
+    H.button_
+        [ HP.class_ ("g-seg-btn" <> if pressed then " is-on" else "")
+        , HP.type_ "button"
+        , testId hook
+        , HP.aria_ "pressed" (if pressed then "true" else "false")
+        , HE.onClick action
+        ]
+        [text label]
+
+-- | The root record of the local graph, by title.
+graphRootName :: Model -> MisoString
+graphRootName m =
+    case activeGraphLayout m of
+        Just layout ->
+            case mGraphLocalRoot m >>= \root -> IM.lookup root (glRecords layout) of
+                Just record -> ms (grTitle record)
+                Nothing -> "no root"
+        Nothing -> "no root"
+
+-- --------------------------------------------------------------- plate -----
+
+graphGrid :: Model -> GraphLayout -> View () () Model Action
+graphGrid m layout =
+    H.div_
+        [HP.class_ "g-grid"]
+        [ H.div_
+            [HP.class_ "g-main"]
+            [ H.div_
+                [HP.class_ "g-plate"]
+                [graphCanvas m layout]
+            , H.p_
+                [HP.class_ "g-plate-hint meta"]
+                [ text (graphHint m) ]
+            , graphStatus m layout
+            , graphResults m layout
+            ]
+        , graphAside m layout
+        ]
+
+graphCanvas :: Model -> GraphLayout -> View () () Model Action
+graphCanvas m layout =
+    Canvas.canvas
+        ( [ HP.class_ ("g-canvas-el" <> if mGraphDrag m /= Nothing then " is-panning" else "")
+          , HP.id_ "graph-canvas"
+          , HP.tabindex_ "0"
+          , HP.width_ (ms (show (round (gvWidth view * max 1 (gvDpr view)) :: Int)))
+          , HP.height_ (ms (show (round (gvHeight view * max 1 (gvDpr view)) :: Int)))
+          , HP.role_ "application"
+          , HP.aria_ "label" "The library graph. Drag to pan, wheel to zoom, click a record to open it. Tab here for keyboard control."
+          , HE.onPointerDown (\pointerEvent -> GraphPointerDown (offsetX pointerEvent) (offsetY pointerEvent))
+          , HE.onPointerUp (\pointerEvent -> GraphPointerUp (offsetX pointerEvent) (offsetY pointerEvent))
+          , HE.onPointerMove (\pointerEvent -> GraphPointerMove (offsetX pointerEvent) (offsetY pointerEvent))
+          , HE.onPointerLeave (const GraphPointerLeave)
+          , wheelAttribute
+          ]
+        )
+        (\_ -> pure ())
+        (\() -> drawGraph draw)
+  where
+    view = mGraphView m
+    draw =
+        GraphDraw
+            { drLayout = layout
+            , drView = view
+            , drHover = mGraphHover m
+            , drSelected = mGraphSelected m
+            , drFocus = mGraphFocus m
+            , drMatches = mGraphMatches m
+            , drTagsShown = mGraphTagsShown m
+            , drLabelMode = mGraphLabelMode m
+            , drRecordColors = maybe IM.empty caRecordColors (mGraphColors m)
+            , drTagColors = maybe M.empty caTagColors (mGraphColors m)
+            , drViewKey = graphViewCacheKey m
+            , drLocal = mGraphLocal m
+            , drSettled = mGraphSettled m
+            , drDetailPhase = mGraphDetailPhase m
+            , drDetailChunks = mGraphDetailChunks m
+            , drDark = mTheme m == ThemeDark
+            }
+    wheelAttribute =
+        onWithOptions
+            BUBBLE
+            preventDefault
+            "wheel"
+            wheelDecoder
+            (\value _ _ -> GraphWheel (first3 value) (second3 value) (third3 value))
+
+wheelDecoder :: Decoder (Double, Double, Double)
+wheelDecoder =
+    at [] $
+        withObject "wheel" $ \o ->
+            (,,)
+                <$> o .: "offsetX"
+                <*> o .: "offsetY"
+                <*> o .: "deltaY"
+
+offsetX :: PointerEvent -> Double
+offsetX = fst . offset
+
+offsetY :: PointerEvent -> Double
+offsetY = snd . offset
+
+first3 :: (a, b, c) -> a
+first3 (first, _, _) = first
+
+second3 :: (a, b, c) -> b
+second3 (_, second, _) = second
+
+third3 :: (a, b, c) -> c
+third3 (_, _, third) = third
+
+-- -------------------------------------------------------------- status -----
+
+graphStatus :: Model -> GraphLayout -> View () () Model Action
+graphStatus m layout =
+    H.p_
+        [ HP.class_ "g-status meta"
+        , testId "graph-status"
+        , HP.aria_ "live" "polite"
+        ]
+        [ H.span_ [testId "graph-status-main"] [text (graphStatusText m layout)]
+        , H.span_ [HP.class_ "g-status-sep", HP.aria_ "hidden" "true"] [text " · "]
+        , H.span_
+            [testId "graph-label-count", HP.class_ "g-label-count"]
+            [text (num (graphLabelCount m layout) <> " labels")]
+        ]
+
+-- | How many labels the current view and label mode draw. The readout uses the
+-- same pure plan as the painter, so it counts what is on screen.
+graphLabelCount :: Model -> GraphLayout -> Int
+graphLabelCount m layout =
+    labelCount layout (mGraphView m) (mGraphTagsShown m) (mGraphLabelMode m)
+
+graphStatusText :: Model -> GraphLayout -> MisoString
+graphStatusText m layout
+    | gmActive matches =
+        num (gmCount matches)
+            <> " of "
+            <> num (glRecordCount layout)
+            <> " records match the filter · "
+            <> graphTagCountText
+            <> " · "
+            <> linkCountText
+            <> localInfo
+            <> layoutSource
+            <> tagsHidden
+            <> refreshing
+    | otherwise =
+        num (glRecordCount layout)
+            <> " records · "
+            <> graphTagCountText
+            <> " · "
+            <> linkCountText
+            <> localInfo
+            <> layoutSource
+            <> tagsHidden
+            <> refreshing
+  where
+    matches = mGraphMatches m
+    graphTagCountText = num (glTagCount layout) <> " tags"
+    linkCountText =
+        num (glLinkCount layout)
+            <> if glLinkCount layout == 1 then " link" else " links"
+    layoutSource
+        | mGraphLayoutSource m == "server" = " · server layout"
+        | otherwise = " · local layout"
+    localInfo
+        | not (mGraphLocal m) = ""
+        | otherwise =
+            " · depth "
+                <> ms (show (mGraphLocalDepth m))
+                <> if mGraphLocalCapped m then " · capped at 2,500 nodes" else ""
+    tagsHidden = if mGraphTagsShown m then "" else " · tags hidden"
+    refreshing = if mGraphLoading m then " · refreshing" else ""
+
+graphHint :: Model -> MisoString
+graphHint m
+    | mGraphLocal m =
+        "local graph · drag to pan · wheel to zoom · click a record to open it · click a tag to open its ledger · tab here for keys"
+    | otherwise =
+        "whole library · drag to pan · wheel to zoom · click a record to open it · click a tag to open its ledger · tab here for keys"
+
+-- -------------------------------------------------------------- results ----
+
+graphResults :: Model -> GraphLayout -> View () () Model Action
+graphResults m layout
+    | not (gmActive (mGraphMatches m)) = H.div_ [] []
+    | null (gmTop matches) =
+        H.div_
+            [HP.class_ "g-results", testId "graph-results"]
+            [ H.p_ [HP.class_ "g-results-empty meta"] [text "No record matches the filter."]
+            ]
+    | otherwise =
+        H.div_
+            [HP.class_ "g-results", testId "graph-results"]
+            ( H.div_
+                [HP.class_ "g-results-head"]
+                [ controlLabel "matches"
+                , H.span_ [HP.class_ "meta"] [text (num (gmCount matches) <> " records, best eight")]
+                ]
+                : [ graphResult layout recordKey
+                  | recordKey <- gmTop matches
+                  ]
+            )
+  where
+    matches = mGraphMatches m
+
+graphResult :: GraphLayout -> Int -> View () () Model Action
+graphResult layout recordKey =
+    case IM.lookup recordKey (glRecords layout) of
+        Nothing -> H.span_ [] []
+        Just record ->
+            H.a_
+                [ HP.class_ "g-result"
+                , testId "graph-result"
+                , HP.href_ (bookmarkPath recordKey)
+                , HE.onClickPrevent (Navigate (Bookmark recordKey))
+                ]
+                [ H.span_ [HP.class_ "g-result-title"] [text (ms (grTitle record))]
+                , H.span_ [HP.class_ "g-result-domain meta"] [text (ms (grDomain record))]
+                ]
+
+bookmarkPath :: Int -> MisoString
+bookmarkPath bookmarkId = "/bookmark/" <> ms (show bookmarkId)
+
+-- ---------------------------------------------------------------- aside ----
+
+graphAside :: Model -> GraphLayout -> View () () Model Action
+graphAside m layout =
+    H.aside_
+        [HP.class_ "g-aside", testId "graph-aside", HP.aria_ "label" "Graph details"]
+        [ graphPreview m layout
+        , graphTopTags layout
+        , graphLegend m
+        ]
+
+-- | The hover preview card. It shows the hovered node while there is one and
+-- falls back to the focused or selected node; an idle line explains the plate
+-- when neither exists.
+graphPreview :: Model -> GraphLayout -> View () () Model Action
+graphPreview m layout =
+    H.div_
+        [HP.class_ "g-preview", testId "graph-preview"]
+        ( case previewKey of
+            Nothing ->
+                [ H.p_ [HP.class_ "g-preview-idle meta"] [text "Hover a node to preview it."]
+                ]
+            Just key
+                | isTagKey key -> tagPreview key
+                | Just record <- IM.lookup key (glRecords layout) -> recordPreview record
+                | otherwise -> []
+        )
+  where
+    previewKey = case mGraphHover m of
+        Just key -> Just key
+        Nothing -> case mGraphSelected m of
+            Just key -> Just key
+            Nothing -> mGraphFocus m
+    recordPreview record =
+        [ H.div_
+            [HP.class_ "g-preview-head"]
+            [ controlLabel (if grIsRead record then "read" else "unread")
+            , H.span_ [HP.class_ "meta mono"] [text (ms (grDomain record))]
+            ]
+        , H.h2_ [HP.class_ "g-preview-title"]
+            [ H.a_
+                [HP.href_ (bookmarkPath (grId record)), HE.onClickPrevent (Navigate (Bookmark (grId record)))]
+                [text (ms (grTitle record))]
+            ]
+        , H.p_
+            [HP.class_ "g-preview-meta meta"]
+            [ text (formatFiled (grCreatedAt record))
+            , text " · "
+            , text (countNoun (recordLinks layout (grId record)) "wikilink" "wikilinks")
+            , text " · "
+            , text (countNoun (sharedRecords layout (grId record)) "tagged record" "tagged records")
+            ]
+        , graphPreviewTags layout (grId record)
+        , H.div_
+            [HP.class_ "g-preview-act"]
+            [ smallAction "open the record" (Navigate (Bookmark (grId record)))
+            ]
+        ]
+    tagPreview key =
+        case IM.lookup key (glTags layout) of
+            Nothing -> []
+            Just (name, count) ->
+                [ H.div_
+                    [HP.class_ "g-preview-head"]
+                    [ controlLabel "tag"
+                    , H.span_ [HP.class_ "meta mono"] [text (countNoun count "record" "records")]
+                    ]
+                , H.h2_ [HP.class_ "g-preview-title"] [H.span_ [] [text (ms ("#" <> name))]]
+                , H.div_
+                    [HP.class_ "g-preview-act"]
+                    [ smallAction "open the tagged ledger" (FilterByQuery ("tag:" <> name))
                     ]
                 ]
-          ]
-            ++ seedResultRow m
-            ++ [ H.div_
-                    [HP.class_ "g-control"]
-                    [ H.span_ [HP.class_ "g-control-label sc"] [text "depth"]
-                    , H.div_
-                        [HP.class_ "seg", HP.role_ "group", HP.aria_ "label" "Depth"]
-                        (map depthButton [1, 2])
+
+-- | A number with a singular or plural noun.
+countNoun :: Int -> MisoString -> MisoString -> MisoString
+countNoun count singular plural =
+    num count <> " " <> if count == 1 then singular else plural
+
+graphPreviewTags :: GraphLayout -> Int -> View () () Model Action
+graphPreviewTags layout recordKey =
+    H.div_
+        [HP.class_ "g-preview-tags"]
+        [ H.span_ [HP.class_ "tagpill"] [text (ms name)]
+        | tagKey <- take 12 (IM.findWithDefault [] recordKey (glRecordTags layout))
+        , Just (name, _) <- [IM.lookup tagKey (glTags layout)]
+        ]
+
+recordLinks :: GraphLayout -> Int -> Int
+recordLinks layout recordKey =
+    length
+        [ neighbour
+        | neighbour <- IM.findWithDefault [] recordKey (glAdj layout)
+        , not (isTagKey neighbour)
+        ]
+
+-- | Records reachable through the record's tags, excluding itself.
+sharedRecords :: GraphLayout -> Int -> Int
+sharedRecords layout recordKey =
+    IS.size
+        ( IS.delete recordKey
+            ( IS.unions
+                ( [IS.singleton recordKey]
+                    ++ [ IS.fromList members
+                       | tagKey <- IM.findWithDefault [] recordKey (glRecordTags layout)
+                       , let members = IM.findWithDefault [] tagKey (glAdj layout)
+                       ]
+                )
+            )
+        )
+
+graphTopTags :: GraphLayout -> View () () Model Action
+graphTopTags layout =
+    H.div_
+        [HP.class_ "g-side-sec"]
+        [ H.div_
+            [HP.class_ "g-side-head"]
+            [ controlLabel "top tags"
+            , H.span_ [HP.class_ "meta"] [text (num (glTagCount layout) <> " in the library")]
+            ]
+        , H.div_
+            [HP.class_ "g-tag-list"]
+            (map tagButton (take 14 (glTagOrder layout)))
+        ]
+  where
+    tagButton tagKey =
+        case IM.lookup tagKey (glTags layout) of
+            Nothing -> H.span_ [] []
+            Just (name, count) ->
+                H.button_
+                    [ HP.class_ "g-tag"
+                    , HP.type_ "button"
+                    , testId "graph-tag"
+                    , HP.title_ (ms ("Open the ledger filtered by #" <> name))
+                    , HE.onClick (FilterByQuery ("tag:" <> name))
                     ]
-               , H.div_
-                    [HP.class_ "g-control g-view"]
-                    [ H.span_ [HP.class_ "g-control-label sc"] [text "view"]
-                    , H.div_
-                        [HP.class_ "g-zoom-box"]
-                        [ H.button_
-                            [HP.class_ "g-zbtn", HP.type_ "button", HP.aria_ "label" "Zoom out", HE.onClick (GraphZoom (mGraphZoom m - 20))]
-                            [text "-"]
-                        , H.span_ [HP.class_ "g-zval mono"] [text (ms (show (mGraphZoom m) <> "%"))]
-                        , H.button_
-                            [HP.class_ "g-zbtn", HP.type_ "button", HP.aria_ "label" "Zoom in", HE.onClick (GraphZoom (mGraphZoom m + 20))]
-                            [text "+"]
-                        , H.button_
-                            [HP.class_ "g-zbtn g-zreset", HP.type_ "button", HP.aria_ "label" "Reset the view", HE.onClick (GraphZoom 100)]
-                            [text "fit"]
-                        ]
+                    [ H.span_ [HP.class_ "g-tag-name mono"] [text (ms ("#" <> name))]
+                    , H.span_ [HP.class_ "g-tag-count meta mono"] [text (num count)]
                     ]
+
+controlLabel :: MisoString -> View () () Model Action
+controlLabel label =
+    H.span_ [HP.class_ "g-control-label sc"] [text label]
+
+graphZoomPercent :: Model -> Int
+graphZoomPercent m =
+    case activeGraphLayout m of
+        Nothing -> 100
+        Just _ ->
+            round
+                ( 100
+                    * gvScale (mGraphView m)
+                    / max 1e-9 (gvFit (mGraphView m))
+                )
+
+-- ------------------------------------------------------------ graph views ---
+
+-- | The cache identity of the active graph view: id, update stamp and the
+-- live color groups. Any group edit or saved-view change invalidates the plate.
+graphViewCacheKey :: Model -> MisoString
+graphViewCacheKey m =
+    ms
+        ( show
+            ( fromMaybe 0 (mGraphViewId m)
+            , mGraphViewRev m
+            , [ (EV.cgName group, EV.cgQuery group, EV.cgColor group, EV.cgEnabled group)
+              | group <- mGraphGroupDrafts m
+              ]
+            )
+        )
+
+-- | The color legend: one row per group with a swatch, the matched record
+-- count and a live enable toggle.
+graphLegend :: Model -> View () () Model Action
+graphLegend m =
+    H.div_
+        [HP.class_ "g-side-sec", testId "graph-legend"]
+        ( H.div_
+            [HP.class_ "g-side-head"]
+            [ controlLabel "color groups"
+            , H.span_
+                [HP.class_ "meta"]
+                [text (num (length (mGraphGroupDrafts m)) <> " groups")]
+            ]
+            : if null (mGraphGroupDrafts m)
+                then [H.p_ [HP.class_ "g-preview-idle meta"] [text "No color groups. Use groups to add one."]]
+                else map legendRow (zip [0 :: Int ..] (mGraphGroupDrafts m))
+        )
+  where
+    legendRow (index, group) =
+        H.div_
+            [HP.class_ ("g-legend-row" <> if EV.cgEnabled group then "" else " is-off")]
+            [ H.span_ [HP.class_ "g-swatch", C.styleInline_ ("background:" <> ms (T.unpack (EV.cgColor group)))] []
+            , H.span_ [HP.class_ "g-legend-name mono"] [text (ms (T.unpack (EV.cgName group)))]
+            , H.span_
+                [HP.class_ "g-legend-count meta mono"]
+                [text (num (indexMaybe index (mGraphGroupCounts m)) <> " matched")]
+            , H.button_
+                [ HP.class_ "g-legend-toggle"
+                , HP.type_ "button"
+                , HP.aria_ "pressed" (if EV.cgEnabled group then "true" else "false")
+                , HP.title_ (if EV.cgEnabled group then "Hide this group" else "Show this group")
+                , HE.onClick (ViewGroupToggleEnabled index)
+                ]
+                [text (if EV.cgEnabled group then "on" else "off")]
+            ]
+
+indexMaybe :: Int -> [a] -> a
+indexMaybe index values = case drop index values of
+    (value : _) -> value
+    [] -> error "indexMaybe: index out of range"
+
+-- | The color-group settings editor: add, edit (name/query/#rrggbb), enable,
+-- remove, with live preview against the current graph.
+graphGroupEditor :: Model -> View () () Model Action
+graphGroupEditor m =
+    H.div_
+        [HP.class_ "g-group-editor", testId "graph-group-editor"]
+        ( [ H.div_
+            [HP.class_ "g-group-head"]
+            [ controlLabel "color groups"
+            , H.span_ [HP.class_ "meta"] [text (num (length drafts) <> " of " <> num EV.maxColorGroups)]
+            , H.button_
+                ( [ HP.class_ "btn btn--sm"
+                  , HP.type_ "button"
+                  , testId "graph-group-add"
+                  , HE.onClick ViewGroupAdd
+                  ]
+                    ++ attrDisabled (length drafts >= EV.maxColorGroups)
+                )
+                [text "add group"]
+            , H.button_
+                [ HP.class_ "btn btn--sm"
+                , HP.type_ "button"
+                , testId "view-groups-save"
+                , HE.onClick ViewGroupsSave
+                ]
+                [text "save view"]
+            , H.button_
+                [ HP.class_ "btn btn--sm"
+                , HP.type_ "button"
+                , testId "view-groups-cancel"
+                , HE.onClick ViewGroupsCancel
+                ]
+                [text "cancel"]
+            , H.span_
+                [HP.class_ "g-group-dirty meta"]
+                [text (if mGraphGroupDirty m then "unsaved changes" else "saved")]
+            ]
+        ]
+            ++ [ H.span_
+                    [HP.class_ "add-error", testId "graph-group-limit", HP.role_ "status"]
+                    [text "at most 24 color groups"]
+               | length drafts >= EV.maxColorGroups
                ]
-            ++ [ H.div_
-                    [HP.class_ "g-control"]
-                    [ H.button_
-                        [HP.class_ "btn btn--sm", HP.type_ "button", HE.onClick GraphRefresh]
-                        [text "refresh"]
-                    ]
+            ++ [ H.p_
+                    [HP.class_ "g-group-hint meta"]
+                    [text "First enabled group wins. Queries use the ledger search syntax; #rrggbb colors."]
+               , H.div_ [HP.class_ "g-group-rows"] (map groupRow (zip [0 :: Int ..] drafts))
+               , case vuError (mViewUi m) of
+                    Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]
+                    Nothing -> H.span_ [] []
                ]
         )
   where
-    depthButton depth =
-        H.button_
-            ( [ HP.type_ "button"
-              , HE.onClick (GraphDepthSelected depth)
-              , HP.aria_ "pressed" (if mGraphDepth m == depth then "true" else "false")
-              ]
-            )
-            [text (ms (show depth <> if depth == 1 then " hop" else " hops"))]
-
--- | Search results shown directly under the seed field while typing.
-seedResultRow :: Model -> [View () () Model Action]
-seedResultRow m
-    | null (mGraphResults m) = []
-    | otherwise =
-        [ H.div_
-            [HP.class_ "g-seed-results"]
-            (map seedButton (take 8 (mGraphResults m)))
-        ]
-  where
-    seedButton bookmark =
-        H.button_
-            [ HP.class_ "tagpill"
-            , HP.type_ "button"
-            , HE.onClick (GraphPickSeed (bsId bookmark))
-            , HP.title_ (ms (bsTitle bookmark))
-            ]
-            [ text (ms (shorten 46 (bsTitle bookmark)))
-            , H.span_ [HP.class_ "meta"] [text (" " <> showDomain (bsDomain bookmark))]
-            ]
-
-shorten :: Int -> Text -> String
-shorten limit title
-    | T.length title <= limit = T.unpack title
-    | otherwise = T.unpack (T.take (limit - 1) title) <> "…"
-
-graphContent :: Model -> View () () Model Action
-graphContent m
-    | mGraphLoading m && mGraph m == Nothing = graphLoading
-    | mGraphSeed m == Nothing =
-        emptyPanel
-            "no seed"
-            "Seed the graph with a record."
-            "Search above and pick a record, or open a record and use its graph action. The neighbourhood is drawn from the cross-references between records."
-            []
-            "no seed"
-            "the graph waits for one"
-    | mGraph m == Nothing =
-        emptyPanel
-            "no data"
-            "No graph data yet."
-            "The seed is set but the neighbourhood has not loaded. Refresh to ask the server again."
-            [H.p_ [HP.class_ "empty-try"] [smallAction "load the graph" GraphRefresh]]
-            "no data"
-            "the server has not answered"
-    | Just graph <- mGraph m
-    , null (gdNodes graph) =
-        emptyPanel
-            "0 neighbours"
-            "This neighbourhood is empty."
-            "No other record shares a tag with this seed at the current depth. A larger depth may find one."
-            []
-            "0 neighbours"
-            "try another seed"
-    | Just graph <- mGraph m =
+    drafts = mGraphGroupDrafts m
+    groupRow (index, group) =
         H.div_
-            [HP.class_ "g-grid"]
-            [ H.div_
-                [HP.class_ "g-main"]
-                [ graphCanvas m graph
-                , graphKeyHead graph
-                , graphKey m graph
+            [HP.class_ "g-group-row", testId "graph-group-row"]
+            [ H.input_
+                [ HP.class_ "input g-group-name"
+                , HP.type_ "text"
+                , HP.placeholder_ "group name"
+                , HP.value_ (ms (T.unpack (EV.cgName group)))
+                , HE.onInput (ViewGroupField index GroupName)
                 ]
-            , graphStrip m graph
-            ]
-    | otherwise = H.span_ [] []
-
-graphLoading :: View () () Model Action
-graphLoading =
-    H.div_
-        [HP.class_ "g-canvas g-canvas--loading"]
-        [ Svg.svg_
-            [ SP.viewBox_ "0 0 1000 400"
-            , HP.class_ "g-svg"
-            , HP.role_ "img"
-            , HP.aria_ "label" "Loading the neighbourhood"
-            ]
-            [ Svg.g_
-                [HP.class_ "g-skel"]
-                ( [ Svg.line_ [SP.x1_ "500", SP.y1_ "200", SP.x2_ "270", SP.y2_ "70"]
-                  , Svg.line_ [SP.x1_ "500", SP.y1_ "200", SP.x2_ "730", SP.y2_ "70"]
-                  , Svg.line_ [SP.x1_ "500", SP.y1_ "200", SP.x2_ "270", SP.y2_ "330"]
-                  , Svg.line_ [SP.x1_ "500", SP.y1_ "200", SP.x2_ "730", SP.y2_ "330"]
-                  ]
-                    ++ [ Svg.circle_ [SP.cx_ (coord x), SP.cy_ (coord y), SP.r_ (coord radius)]
-                       | (x, y, radius) <- [(500, 200, 18), (270, 70, 10), (730, 70, 10), (270, 330, 10), (730, 330, 10)]
-                       ]
-                )
-            ]
-        , H.p_ [HP.class_ "g-load-note"] [text "Building the neighbourhood."]
-        ]
-
--- ------------------------------------------------------------ graph plate ---
-
-{- | Hop distance from the seed. Unreachable records fall outside the rings at
-hop 3, so they are still drawn and named in the key.
--}
-graphHops :: GraphData -> Maybe Int -> M.Map Int Int
-graphHops graph seedId = case seedId of
-    Nothing -> M.empty
-    Just seed -> walk (M.singleton seed 0) [seed]
-  where
-    adjacency =
-        M.fromListWith
-            (++)
-            ( concat
-                [ [(geSource edge, [geTarget edge]), (geTarget edge, [geSource edge])]
-                | edge <- gdEdges graph
+            , H.input_
+                [ HP.class_ "input g-group-query"
+                , HP.type_ "text"
+                , HP.placeholder_ "query (tag:rust perf.example)"
+                , HP.value_ (ms (T.unpack (EV.cgQuery group)))
+                , HE.onInput (ViewGroupField index GroupQuery)
                 ]
-            )
-    walk visited [] = visited
-    walk visited (current : rest) =
-        let depth = M.findWithDefault 0 current visited + 1
-            neighbours = [n | n <- M.findWithDefault [] current adjacency, not (M.member n visited)]
-            visited' = foldr (\n acc -> M.insert n depth acc) visited neighbours
-         in walk visited' (rest ++ neighbours)
-
--- | Every node with its figure number: seed first, then nearer rings first.
-graphOrdered :: Model -> GraphData -> [(Int, GraphNode)]
-graphOrdered m graph =
-    zip [1 ..] (sortOn rank (gdNodes graph))
-  where
-    hops = graphHops graph (mGraphSeed m)
-    rank entry = (M.findWithDefault 3 (gnId entry) hops, negate (gnIndegree entry), gnId entry)
-
-graphPositions :: Model -> GraphData -> M.Map Int (Double, Double)
-graphPositions m graph =
-    M.fromList
-        [ (gnId entry, point hop index (length ring))
-        | (hop, ring) <- M.toAscList rings
-        , (index, entry) <- zip [0 :: Int ..] ring
-        ]
-  where
-    hops = graphHops graph (mGraphSeed m)
-    rings = M.fromListWith (++) [(M.findWithDefault 3 (gnId entry) hops, [entry]) | entry <- gdNodes graph]
-    scale = fromIntegral (max 40 (min 260 (mGraphZoom m))) / 100
-    point hop index total
-        | hop == 0 = (500, 200)
-        | otherwise =
-            let radiusX = min 460 (180 * fromIntegral hop) * scale
-                radiusY = min 168 (92 * fromIntegral hop) * scale
-                angle = 2 * pi * fromIntegral index / fromIntegral (max 1 total) - pi / 2
-             in (500 + radiusX * cos angle, 200 + radiusY * sin angle)
-
-graphCanvas :: Model -> GraphData -> View () () Model Action
-graphCanvas m graph =
-    H.div_
-        [HP.class_ "g-canvas"]
-        [ Svg.svg_
-            [ SP.viewBox_ "0 0 1000 400"
-            , HP.class_ "g-svg"
-            , HP.role_ "img"
-            , HP.aria_ "label" "Record neighbourhood"
-            ]
-            (map edgeView (gdEdges graph) ++ map nodeView (graphOrdered m graph))
-        ]
-  where
-    positions = graphPositions m graph
-    hops = graphHops graph (mGraphSeed m)
-    edgeView edge =
-        case (M.lookup (geSource edge) positions, M.lookup (geTarget edge) positions) of
-            (Just (x1, y1), Just (x2, y2)) ->
-                Svg.line_
-                    ( [ key_ (ms ("edge-" <> show (geSource edge) <> "-" <> show (geTarget edge)))
-                      , SP.x1_ (coord x1)
-                      , SP.y1_ (coord y1)
-                      , SP.x2_ (coord x2)
-                      , SP.y2_ (coord y2)
-                      , HP.class_ (edgeClass edge)
-                      , HP.data_ "weight" (ms (show (geWeight edge)))
-                      , HP.aria_ "hidden" "true"
-                      , C.styleInline_ ("stroke-width:" <> ms (show (edgeWidth edge)))
-                      ]
-                    )
-            _ -> Svg.g_ [] []
-
-    -- \| One shared tag is the thin base line; each extra shared tag thickens
-    -- it, up to five. When the server omits the weight the line stays thin.
-    edgeWidth edge = 1 + min 4 (max 0 (geWeight edge - 1))
-
-    edgeClass edge
-        | max (hopOf (geSource edge)) (hopOf (geTarget edge)) >= 2 = "g-edge g-edge--2"
-        | otherwise = "g-edge"
-    hopOf nodeId = M.findWithDefault 3 nodeId hops
-
-    nodeView (index, entry) =
-        case M.lookup (gnId entry) positions of
-            Nothing -> Svg.g_ [] []
-            Just (x, y) ->
-                Svg.g_
-                    [ key_ (gnId entry)
-                    , HP.class_ (nodeClass entry)
-                    , HP.role_ "button"
-                    , HP.aria_ "label" (ms (gnTitle entry <> T.pack (", " <> show (gnIndegree entry) <> " shared tags with the seed")))
-                    , HP.title_ (ms (gnTitle entry))
-                    , HE.onClick (Navigate (Bookmark (gnId entry)))
-                    ]
-                    [ Svg.circle_ [HP.class_ "g-hit", SP.cx_ (coord x), SP.cy_ (coord y), SP.r_ "24"]
-                    , Svg.circle_ [SP.cx_ (coord x), SP.cy_ (coord y), SP.r_ (coord (nodeRadius entry))]
-                    , Svg.text_
-                        [ HP.class_ "g-num"
-                        , SP.x_ (coord x)
-                        , SP.y_ (coord (y + 4))
-                        , SP.textAnchor_ "middle"
-                        ]
-                        [text (ms (show index))]
-                    ]
-
-    nodeClass entry =
-        "g-node"
-            <> (if mGraphSeed m == Just (gnId entry) then " is-seed" else "")
-            <> (if hopLevel (gnId entry) >= 2 then " is-hop2" else "")
-    hopLevel nodeId = M.findWithDefault 3 nodeId hops
-    nodeRadius entry =
-        6 + fromIntegral (min 8 (gnIndegree entry)) + (if mGraphSeed m == Just (gnId entry) then 5 else 0)
-
-graphKeyHead :: GraphData -> View () () Model Action
-graphKeyHead graph =
-    H.div_
-        [HP.class_ "g-key-head"]
-        [ H.span_ [HP.class_ "sc"] [text "key"]
-        , H.span_
-            [HP.class_ "meta"]
-            [ text
-                ( ms
-                    ( show (length (gdNodes graph))
-                        <> if length (gdNodes graph) == 1
-                            then " record drawn · the number is tags shared with the seed · line weight is tags shared between two records"
-                            else " records drawn · the number is tags shared with the seed · line weight is tags shared between two records"
-                    )
-                )
-            ]
-        ]
-
-graphKey :: Model -> GraphData -> View () () Model Action
-graphKey m graph =
-    H.ol_ [HP.class_ "g-key"] (map keyRow (graphOrdered m graph))
-  where
-    hops = graphHops graph (mGraphSeed m)
-    keyRow (index, entry) =
-        H.li_
-            []
-            [ H.button_
-                [ key_ (gnId entry)
-                , HP.class_ "g-key-row"
+            , H.input_
+                [ HP.class_ "input g-group-color mono"
+                , HP.type_ "text"
+                , HP.placeholder_ "#C98A3E"
+                , HP.value_ (ms (T.unpack (EV.cgColor group)))
+                , HE.onInput (ViewGroupField index GroupColor)
+                ]
+            , H.button_
+                [ HP.class_ ("g-group-on" <> if EV.cgEnabled group then " is-on" else "")
                 , HP.type_ "button"
-                , HE.onClick (Navigate (Bookmark (gnId entry)))
+                , HP.aria_ "pressed" (if EV.cgEnabled group then "true" else "false")
+                , HE.onClick (ViewGroupToggleEnabled index)
                 ]
-                [ H.span_ [HP.class_ "g-key-no mono"] [text (ms (show index))]
-                , H.span_ [HP.class_ "g-key-name"] [text (ms (gnTitle entry))]
-                , H.span_ [HP.class_ "lead", HP.aria_ "hidden" "true"] []
-                , H.span_
-                    [ HP.class_ "g-key-n mono"
-                    , HP.title_ "tags shared with the seed"
-                    ]
-                    [text (num (gnIndegree entry))]
-                , H.span_ [HP.class_ "g-key-w mono"] [text (hopLabel (M.findWithDefault 3 (gnId entry) hops))]
+                [text (if EV.cgEnabled group then "on" else "off")]
+            , H.button_
+                [ HP.class_ "g-group-remove"
+                , HP.type_ "button"
+                , HP.aria_ "label" ("Remove color group " <> ms (T.unpack (EV.cgName group)))
+                , HE.onClick (ViewGroupRemove index)
                 ]
+                [text "remove"]
             ]
-    hopLabel hop
-        | hop == 0 = "seed"
-        | hop == 1 = "1 hop"
-        | otherwise = ms (show hop <> " hops")
 
-graphStrip :: Model -> GraphData -> View () () Model Action
-graphStrip m graph =
-    case (mGraphSeed m, seedNode) of
-        (Just seedId, Just seedEntry) ->
-            H.aside_
-                [HP.class_ "g-strip", HP.aria_ "label" "Seed record"]
-                [ H.div_
-                    [HP.class_ "g-strip-head"]
-                    [ H.span_ [HP.class_ "sc"] [text "seed record"]
-                    , H.span_ [HP.class_ "meta"] [text (ms ("depth " <> show (mGraphDepth m)))]
+-- ------------------------------------------------------------ views page ---
+
+viewsPage :: Model -> View () () Model Action
+viewsPage m =
+    H.div_
+        [testId "views-page"]
+        [ pageWith
+            "Views"
+            "Saved graph and ledger views. A graph view stores the query, tag visibility, label mode, layout preset, local depth and color groups; a ledger view stores a query and a sort order."
+            (viewFigures m)
+            [ "declarative views"
+            , "one default per kind"
+            ]
+            (viewsBody m)
+        ]
+
+viewFigures :: Model -> [View () () Model Action]
+viewFigures m =
+    [ figure "views" (num (length (mViews m)))
+    , figure "graph" (num (length [() | view <- mViews m, EV.vKind view == EV.GraphKind]))
+    , figure "ledger" (num (length [() | view <- mViews m, EV.vKind view == EV.LedgerKind]))
+    ]
+
+viewsBody :: Model -> [View () () Model Action]
+viewsBody m =
+    [ H.div_
+        [HP.class_ "views-toolbar"]
+        [ H.button_
+            [HP.class_ "btn btn--sm btn--strong", HP.type_ "button", testId "view-create", HE.onClick (ViewSaveOpen EV.GraphKind)]
+            [text "new view"]
+        , H.button_
+            [HP.class_ "btn btn--sm", HP.type_ "button", testId "view-import", HE.onClick ViewImportOpen]
+            [text "import JSON"]
+        , H.button_
+            [HP.class_ "btn btn--sm", HP.type_ "button", HE.onClick ReloadRoute]
+            [text "refresh"]
+        , H.span_ [HP.class_ "meta"] [text "Open a view to apply it to the ledger or the graph."]
+        ]
+    , case mViewsError m of
+        Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]
+        Nothing -> H.span_ [] []
+    ]
+        ++ ( if null (mViews m)
+                then
+                    [ emptyPanel
+                        "0 views"
+                        "No views yet."
+                        "Create a graph view from the graph settings, save the current ledger search with save as view, or import a view JSON document."
+                        []
+                        "0 views"
+                        "nothing saved"
                     ]
-                , H.h2_ [HP.class_ "g-strip-name"] [text (ms (gnTitle seedEntry))]
-                , H.p_
-                    [HP.class_ "g-strip-count"]
-                    [H.span_ [HP.class_ "mono"] [text (num (gnIndegree seedEntry))], H.span_ [HP.class_ "meta"] [text "shared tags with the seed"]]
-                , H.div_
-                    [HP.class_ "g-strip-sec"]
-                    [ H.h3_ [] [text "tags"]
-                    , H.div_ [HP.class_ "g-strip-tags"] (map tagPill (gnTags seedEntry))
-                    ]
-                , H.div_
-                    [HP.class_ "g-strip-sec"]
-                    [ H.h3_ [] [text "address"]
-                    , H.p_ [HP.class_ "pnl-quiet"] [text (ms (gnUrl seedEntry))]
-                    ]
-                , H.div_
-                    [HP.class_ "g-strip-act"]
-                    [ smallActionStrong "open the record" (Navigate (Bookmark seedId))
-                    , smallAction "clear the seed" (GraphSeed Nothing)
-                    ]
+                else map (viewRow m) (mViews m)
+           )
+
+viewRow :: Model -> EV.View -> View () () Model Action
+viewRow m view =
+    H.div_
+        [HP.class_ "view-row", testId "view-row"]
+        [ H.div_
+            [HP.class_ "view-row-main"]
+            [ H.h2_
+                [HP.class_ "view-row-name"]
+                [text (ms (T.unpack (EV.vName view)))]
+            , H.p_
+                [HP.class_ "view-row-meta meta"]
+                ( [H.span_ [HP.class_ "view-kind"] [text (ms (T.unpack (EV.viewKindText (EV.vKind view))))]
+                  , H.span_ [HP.class_ "view-slug mono"] [text (ms (T.unpack (EV.vSlug view)))]
+                  ]
+                    ++ [H.span_ [HP.class_ "view-default-badge", testId "view-default-badge"] [text "default"] | EV.vIsDefault view]
+                )
+            , case vuRename (mViewUi m) of
+                Just (slug, name) | slug == EV.vSlug view ->
+                    H.div_
+                        [HP.class_ "view-rename"]
+                        [ H.input_
+                            [ HP.class_ "input"
+                            , HP.type_ "text"
+                            , HP.value_ name
+                            , HE.onInput ViewRenameInput
+                            ]
+                        , H.button_ [HP.class_ "btn btn--sm", HP.type_ "button", HE.onClick ViewRenameSubmit] [text "rename"]
+                        , H.button_ [HP.class_ "btn btn--sm", HP.type_ "button", HE.onClick ViewRenameCancel] [text "cancel"]
+                        ]
+                _ -> H.span_ [] []
+            ]
+        , H.div_
+            [HP.class_ "view-row-actions"]
+            [ H.button_
+                [HP.class_ "btn btn--sm btn--strong", HP.type_ "button", testId "view-open", HE.onClick (ViewOpenView (EV.vSlug view))]
+                [text "open"]
+            , H.button_
+                ([HP.class_ "btn btn--sm", HP.type_ "button", testId "view-default", HE.onClick (ViewDefaultView (EV.vSlug view))] ++ attrDisabled (EV.vIsDefault view))
+                [text "set default"]
+            , H.button_
+                [HP.class_ "btn btn--sm", HP.type_ "button", testId "view-rename", HE.onClick (ViewRenameStart (EV.vSlug view))]
+                [text "rename"]
+            , H.button_
+                [HP.class_ "btn btn--sm", HP.type_ "button", testId "view-duplicate", HE.onClick (ViewDuplicateView (EV.vSlug view))]
+                [text "duplicate"]
+            , H.button_
+                [HP.class_ "btn btn--sm", HP.type_ "button", testId "view-export", HE.onClick (ViewExportView (EV.vSlug view))]
+                [text "export"]
+            , H.button_
+                [HP.class_ "btn btn--sm", HP.type_ "button", testId "view-delete", HE.onClick (ViewDeleteView (EV.vSlug view))]
+                [text "delete"]
+            ]
+        ]
+
+-- ---------------------------------------------------------- view dialogs ---
+
+-- | The save-as / create, import and export dialogs. Rendered by the shell so
+-- the graph page and the ledger can both open them.
+viewDialogs :: Model -> [View () () Model Action]
+viewDialogs m =
+    [viewSaveDialog m | vuSaveOpen (mViewUi m)]
+        ++ [viewImportDialog m | vuImportOpen (mViewUi m)]
+        ++ [viewExportDialog m | isJust (vuExport (mViewUi m))]
+
+viewSaveDialog :: Model -> View () () Model Action
+viewSaveDialog m =
+    viewOverlay
+        (testId "view-save-dialog")
+        [ H.h2_ [HP.class_ "dialog__title"] [text (if EV.vKind (selectedKind) == EV.GraphKind then "Save graph view" else "Save ledger view")]
+        , H.p_
+            [HP.class_ "meta"]
+            [text "The definition captures the current query, tags, label mode, layout preset, local depth and color groups."]
+        , H.div_
+            [HP.class_ "view-kind-pick"]
+            [ H.button_
+                [ HP.class_ ("g-seg-btn" <> if uiKind == EV.GraphKind then " is-on" else "")
+                , HP.type_ "button"
+                , HP.aria_ "pressed" (if uiKind == EV.GraphKind then "true" else "false")
+                , HE.onClick (ViewSaveKindSelected EV.GraphKind)
                 ]
-        _ ->
-            H.aside_
-                [HP.class_ "g-strip", HP.aria_ "label" "Seed record"]
-                [ H.div_
-                    [HP.class_ "g-strip-head"]
-                    [ H.span_ [HP.class_ "sc"] [text "seed record"]
-                    , H.span_ [HP.class_ "meta"] [text "none"]
-                    ]
-                , H.p_ [HP.class_ "pnl-quiet"] [text "Pick a record above. Its tags decide which records join the plate."]
+                [text "graph"]
+            , H.button_
+                [ HP.class_ ("g-seg-btn" <> if uiKind == EV.LedgerKind then " is-on" else "")
+                , HP.type_ "button"
+                , HP.aria_ "pressed" (if uiKind == EV.LedgerKind then "true" else "false")
+                , HE.onClick (ViewSaveKindSelected EV.LedgerKind)
                 ]
+                [text "ledger"]
+            ]
+        , H.input_
+            [ HP.class_ "input"
+            , HP.type_ "text"
+            , HP.placeholder_ "view name"
+            , HP.value_ (vuSaveName ui)
+            , testId "view-name-input"
+            , HE.onInput ViewSaveNameInput
+            ]
+        , case vuError ui of
+            Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]
+            Nothing -> H.span_ [] []
+        , H.div_
+            [HP.class_ "dialog__actions"]
+            [ H.button_
+                [HP.class_ "btn btn--sm btn--strong", HP.type_ "button", testId "view-save-submit", HE.onClick ViewSaveSubmit]
+                [text "save view"]
+            , H.button_
+                [HP.class_ "btn btn--sm", HP.type_ "button", testId "view-save-cancel", HE.onClick ViewSaveCancel]
+                [text "cancel"]
+            ]
+        ]
   where
-    seedNode = do
-        seedId <- mGraphSeed m
-        case [entry | entry <- gdNodes graph, gnId entry == seedId] of
-            (entry : _) -> Just entry
-            [] -> Nothing
+    ui = mViewUi m
+    uiKind = vuSaveKind ui
+    selectedKind = case mGraphViewId m of
+        Just viewId -> case [view | view <- mViews m, EV.vId view == viewId] of
+            (view : _) -> view
+            [] -> EV.View 0 "" "" EV.GraphKind False (EV.GraphDefinition EV.defaultGraphViewDefinition) 0 0
+        Nothing -> EV.View 0 "" "" EV.GraphKind False (EV.GraphDefinition EV.defaultGraphViewDefinition) 0 0
 
-tagPill :: Text -> View () () Model Action
-tagPill tag =
-    H.span_ [HP.class_ "tagpill"] [text (ms tag)]
+viewImportDialog :: Model -> View () () Model Action
+viewImportDialog m =
+    viewOverlay
+        (testId "view-import-dialog")
+        [ H.h2_ [HP.class_ "dialog__title"] [text "Import a view"]
+        , H.p_ [HP.class_ "meta"] [text "Paste one view JSON document (the export shape). The server validates it."]
+        , H.textarea_
+            [ HP.class_ "input view-import-text"
+            , HP.rows_ "8"
+            , HP.placeholder_ "{ \"name\": ... }"
+            , HP.value_ (vuImportText ui)
+            , testId "view-import-text"
+            , HE.onInput ViewImportTextInput
+            ]
+        , case vuError ui of
+            Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]
+            Nothing -> H.span_ [] []
+        , H.div_
+            [HP.class_ "dialog__actions"]
+            [ H.button_
+                [HP.class_ "btn btn--sm btn--strong", HP.type_ "button", testId "view-import-submit", HE.onClick ViewImportSubmit]
+                [text "import"]
+            , H.button_
+                [HP.class_ "btn btn--sm", HP.type_ "button", HE.onClick ViewImportCancel]
+                [text "cancel"]
+            ]
+        ]
+  where
+    ui = mViewUi m
 
-smallActionStrong :: MisoString -> Action -> View () () Model Action
-smallActionStrong label action =
-    H.button_
-        [HP.class_ "btn btn--sm btn--strong", HP.type_ "button", HE.onClick action]
-        [text label]
+viewExportDialog :: Model -> View () () Model Action
+viewExportDialog m =
+    viewOverlay
+        (testId "view-export-dialog")
+        [ H.h2_ [HP.class_ "dialog__title"] [text "Export view"]
+        , H.p_ [HP.class_ "meta"] [text "Copy this JSON body into import on another install."]
+        , H.textarea_
+            [ HP.class_ "input view-export-text"
+            , HP.rows_ "10"
+            , HP.readonly_ True
+            , HP.value_ (maybe "" ms (vuExport (mViewUi m)))
+            , testId "view-export-text"
+            ]
+        , H.div_
+            [HP.class_ "dialog__actions"]
+            [ H.button_
+                [HP.class_ "btn btn--sm", HP.type_ "button", testId "view-export-close", HE.onClick ViewExportClose]
+                [text "close"]
+            ]
+        ]
 
-coord :: Double -> MisoString
-coord value = ms (show (round value :: Int))
+viewOverlay :: Attribute Model Action -> [View () () Model Action] -> View () () Model Action
+viewOverlay hook children =
+    H.div_
+        [HP.class_ "overlay is-open"]
+        [H.div_ (HP.class_ "dialog" : [hook]) children]
 
 -- ============================================================== duplicates ===
 
@@ -1979,6 +2541,7 @@ accountIndex m =
         , (AccountRecovery, "recovery", "recovery", Nothing)
         , (AccountSessions, "sessions", "sessions", Just (length (mSessions m)))
         , (AccountTokens, "api tokens", "tokens", Just (length (mTokens m)))
+        , (AccountWebhooks, "webhooks", "webhooks", Just (length (mWebhooks m)))
         , (AccountShares, "share links", "shares", Just (length (activeShares m)))
         , (AccountRules, "rules", "rules", Just (length (mRules m)))
         , (AccountImport, "import", "import", Nothing)
@@ -1986,6 +2549,12 @@ accountIndex m =
         , (AccountAppearance, "appearance", "appearance", Nothing)
         , (AccountAbout, "about", "about", Nothing)
         ]
+            -- The admin-only item goes last: the async admin probe adds it
+            -- after first paint, and appending must not shift the tabs above
+            -- it under the reader's pointer.
+            ++ [ (AccountUsers, "users", "users", Just (length (mAdminUsers m)))
+               | userIsAdmin m
+               ]
 
 navItem :: Model -> (AccountTab, MisoString, MisoString, Maybe Int) -> View () () Model Action
 navItem m (tab, label, slug, count) =
@@ -1994,7 +2563,12 @@ navItem m (tab, label, slug, count) =
         [ H.button_
             ( [ HP.type_ "button"
               , HE.onClick (AccountTabSelected tab)
-              , testId ("account-tab-" <> slug)
+              , testId
+                    ( case tab of
+                        AccountWebhooks -> "webhooks-tab"
+                        AccountUsers -> "account-users-tab"
+                        _ -> "account-tab-" <> slug
+                    )
               , HP.aria_ "current" (if mAccountTab m == tab then "true" else "false")
               ]
             )
@@ -2016,6 +2590,8 @@ activeAccountPanel m = case mAccountTab m of
     AccountRecovery -> recoveryPanel m
     AccountSessions -> sessionsPanel m
     AccountTokens -> tokensPanel m
+    AccountWebhooks -> webhooksPanel m
+    AccountUsers -> usersPanel m
     AccountShares -> sharesPanel m
     AccountRules -> rulesPanel m
     AccountImport -> importPanel m
@@ -2072,6 +2648,7 @@ securityPanel m =
         , H.dl_
             [HP.class_ "account-fields"]
             [ statusFact "username" (if T.null (T.strip (aiUsername account)) then "not set" else ms (aiUsername account))
+            , statusFact "role" (ms (T.unpack (userRoleText (aiRole account))))
             , statusFact "password" (if aiHasPassword account then "set" else "not set")
             , statusFact "passkeys" (ms (show (length (aiCredentials account))))
             , statusFact "passkey 2FA" (if aiRequirePasskey account then "required" else "off")
@@ -2457,6 +3034,482 @@ sessionRecord session =
         ]
 
 -- ---------------------------------------------------------------- tokens ---
+
+-- ------------------------------------------------------------- webhooks ---
+
+webhooksPanel :: Model -> View () () Model Action
+webhooksPanel m =
+    accountPanel "webhooks" "Webhooks" panelNote $
+        [ H.p_
+            [HP.class_ "account-lede"]
+            [text "A webhook posts a signed event to an external URL when a record is filed, changed, removed, or clipped. Each delivery carries an HMAC signature; the secret is shown once when the webhook is created."]
+        ]
+            ++ secretReveal
+            ++ case mWebhooksError m of
+                Just message -> [accountReadError "The webhooks could not be read." (Just message)]
+                Nothing ->
+                    [ H.div_ [HP.class_ "account-list"] webhookRows
+                    , H.div_ [HP.class_ "account-list"] (deliveriesView m)
+                    , if null (mWebhooks m) then webhookEmpty m else H.span_ [] []
+                    , webhookForm m
+                    ]
+  where
+    panelNote =
+        let count = length (mWebhooks m)
+         in ms (show count <> " of " <> show maxWebhooks <> if count == 1 then " webhook" else " webhooks")
+    secretReveal = case mWebhookSecret m of
+        Nothing -> []
+        Just raw ->
+            [ H.div_
+                [HP.class_ "account-created", testId "webhook-secret"]
+                [ H.p_ [HP.class_ "account-created-label meta"] [text "signing secret, shown once"]
+                , H.div_
+                    [HP.class_ "account-created-row"]
+                    [ H.code_ [HP.class_ "account-created-token mono"] [text (ms raw)]
+                    , H.button_
+                        [HP.class_ "btn", HP.type_ "button", HE.onClick (WebhookSecretCopied raw)]
+                        [text "copy"]
+                    , H.button_
+                        [HP.class_ "btn btn--ghost", HP.type_ "button", HE.onClick WebhookSecretDismiss]
+                        [text "done"]
+                    ]
+                , H.p_
+                    [HP.class_ "account-note meta"]
+                    [text "Every delivery is signed with this secret. The catalogue keeps only a hash, so it cannot show it again."]
+                ]
+            ]
+    webhookRows
+        | mWebhooksLoading m && null (mWebhooks m) = [quietNote "Loading webhooks."]
+        | otherwise = concatMap (\webhook -> webhookRecord webhook : webhookTestNote m (whId webhook)) (mWebhooks m)
+
+webhookEmpty :: Model -> View () () Model Action
+webhookEmpty m
+    | mWebhooksLoading m = H.span_ [] []
+    | otherwise =
+        H.div_
+            [HP.class_ "account-empty", testId "webhook-empty"]
+            [ H.p_ [HP.class_ "account-empty-title display"] [text "No webhooks yet."]
+            , H.p_
+                [HP.class_ "account-empty-body"]
+                [text "Create one to send file and clip events to another service. A disabled webhook records nothing."]
+            ]
+
+webhookRecord :: Webhook -> View () () Model Action
+webhookRecord webhook =
+    H.div_
+        [ HP.class_ ("account-record webhook-record" <> if whEnabled webhook then "" else " is-off")
+        , testId "webhook-row"
+        ]
+        [ H.div_
+            [HP.class_ "account-record-main"]
+            [ H.h3_
+                [HP.class_ "account-record-title"]
+                [ text (ms (T.unpack (whName webhook)))
+                , H.span_ [HP.class_ "mono token-prefix"] [text (ms (" #" <> show (whId webhook)))]
+                ]
+            , H.p_
+                [HP.class_ "account-record-meta meta webhook-url"]
+                [text (ms (T.unpack (whUrl webhook)))]
+            , H.div_
+                [HP.class_ "account-scope-row"]
+                [ H.span_ [HP.class_ "tagpill"] [text (ms (T.unpack (eventTypeText eventType)))]
+                | eventType <- whEvents webhook
+                ]
+            , H.p_
+                [HP.class_ "account-record-meta meta"]
+                ( [ text (if whEnabled webhook then "enabled" else "disabled")
+                  , metaSep
+                  , text (ms ("last status " <> maybe "never" (T.pack . show) (whLastStatus webhook)))
+                  , metaSep
+                  , text (ms ("last attempt " <> maybe "never" (fromMisoString' . formatFiled) (whLastAttemptAt webhook)))
+                  ]
+                    ++ [metaSep | not (T.null (whLastError webhook))]
+                    ++ [H.span_ [HP.class_ "status status--warn"] [text (ms (T.unpack (whLastError webhook)))] | not (T.null (whLastError webhook))]
+                    ++ [metaSep | whFailStreak webhook > 0]
+                    ++ [text (ms ("fail streak " <> show (whFailStreak webhook))) | whFailStreak webhook > 0]
+                )
+            ]
+        , H.div_
+            [HP.class_ "account-record-actions webhook-actions"]
+            [ H.button_
+                [ HP.class_ "account-link"
+                , HP.type_ "button"
+                , testId "webhook-toggle"
+                , HE.onClick (WebhookToggle webhook)
+                ]
+                [text (if whEnabled webhook then "disable" else "enable")]
+            , H.button_
+                [ HP.class_ "account-link"
+                , HP.type_ "button"
+                , testId "webhook-test"
+                , HE.onClick (WebhookTestRequest (whId webhook))
+                ]
+                [text "send test"]
+            , H.button_
+                [ HP.class_ "account-link"
+                , HP.type_ "button"
+                , testId "webhook-deliveries-open"
+                , HE.onClick (WebhookDeliveriesOpen (whId webhook))
+                ]
+                [text "deliveries"]
+            , H.button_
+                [ HP.class_ "account-link account-link--danger"
+                , HP.type_ "button"
+                , testId "webhook-delete"
+                , HE.onClick (WebhookDelete (whId webhook))
+                ]
+                [text "delete"]
+            ]
+        ]
+
+webhookTestNote :: Model -> Int -> [View () () Model Action]
+webhookTestNote m webhookId =
+    case mWebhookTest m of
+        Just (id_, result) | id_ == webhookId ->
+            [ H.p_
+                [HP.class_ "account-record-meta meta webhook-test-result", HP.role_ "status"]
+                ( [text (if wtOk result then "test delivered" else "test failed")]
+                    ++ [text (ms (" · HTTP " <> maybe "no response" (T.pack . show) (wtStatus result)))]
+                    ++ [text (ms (" · " <> T.unpack (wtError result))) | not (T.null (wtError result))]
+                )
+            ]
+        _ -> []
+
+deliveriesView :: Model -> [View () () Model Action]
+deliveriesView m =
+    case mWebhookDeliveries m of
+        Nothing ->
+            case mWebhookDeliveriesError m of
+                Just message -> [accountReadError "The deliveries could not be read." (Just message)]
+                Nothing -> []
+        Just (webhookId, deliveries) ->
+            case [webhook | webhook <- mWebhooks m, whId webhook == webhookId] of
+                (webhook : _) ->
+                    [ H.div_
+                        [HP.class_ "webhook-deliveries", testId "webhook-deliveries"]
+                        ( H.p_
+                            [HP.class_ "account-record-meta meta"]
+                            [text (ms ("recent deliveries · " <> T.unpack (whName webhook)))]
+                            : if null deliveries
+                                then [quietNote "No deliveries yet."]
+                                else map deliveryRow deliveries
+                        )
+                    ]
+                [] -> []
+
+deliveryRow :: DeliveryView -> View () () Model Action
+deliveryRow delivery =
+    H.div_
+        [HP.class_ "webhook-delivery", testId "webhook-delivery-row"]
+        [ H.span_ [HP.class_ "mono webhook-delivery-event"] [text (ms (T.unpack (eventTypeText (dvEvent delivery))))]
+        , H.span_ [HP.class_ ("status webhook-state webhook-state--" <> stateClass (dvState delivery))] [text (ms (T.unpack (dvState delivery)))]
+        , H.span_ [HP.class_ "meta mono"] [text (ms ("attempts " <> show (dvAttempts delivery)))]
+        , H.span_ [HP.class_ "meta mono"] [text (ms (fromMisoString' (formatFiled (dvCreatedAt delivery))))]
+        ]
+  where
+    stateClass state = case state of
+        "delivered" -> "ok"
+        "failed" -> "failed"
+        "delivering" -> "delivering"
+        _ -> "queued"
+
+webhookForm :: Model -> View () () Model Action
+webhookForm m =
+    H.form_
+        [HP.class_ "account-form", testId "webhook-form"]
+        [ H.h3_ [HP.class_ "account-h3 display"] [text "Create a webhook"]
+        , H.div_
+            [HP.class_ "account-form-grid"]
+            [ H.div_
+                [HP.class_ "field"]
+                [ H.label_ [HP.class_ "field-label account-label", HP.for_ "webhook-name"] [text "name"]
+                , H.input_
+                    [ HP.id_ "webhook-name"
+                    , HP.class_ "input"
+                    , HP.placeholder_ "e.g. Archive bot"
+                    , HP.value_ (mWebhookName m)
+                    , HP.autocomplete_ "off"
+                    , testId "webhook-name"
+                    , HE.onInput WebhookNameInput
+                    ]
+                ]
+            , H.div_
+                [HP.class_ "field"]
+                [ H.label_ [HP.class_ "field-label account-label", HP.for_ "webhook-url"] [text "url"]
+                , H.input_
+                    [ HP.id_ "webhook-url"
+                    , HP.class_ "input"
+                    , HP.type_ "url"
+                    , HP.placeholder_ "https://example.com/hooks/eza"
+                    , HP.value_ (mWebhookUrl m)
+                    , HP.autocomplete_ "off"
+                    , testId "webhook-url"
+                    , HE.onInput WebhookUrlInput
+                    ]
+                ]
+            ]
+        , H.fieldset_
+            [HP.class_ "webhook-events"]
+            [ H.legend_ [HP.class_ "field-label account-label"] [text "events"]
+            , H.div_
+                [HP.class_ "webhook-event-grid"]
+                [ H.label_
+                    [HP.class_ "webhook-event"]
+                    [ H.input_
+                        [ HP.type_ "checkbox"
+                        , HP.checked_ (eventType `elem` mWebhookEvents m)
+                        , testId ("webhook-event-" <> ms (T.unpack (eventTypeText eventType)))
+                        , HE.onChange (const (WebhookEventToggled eventType))
+                        ]
+                    , H.span_ [HP.class_ "mono"] [text (ms (T.unpack (eventTypeText eventType)))]
+                    ]
+                | eventType <- allEventTypes
+                ]
+            ]
+        , H.label_
+            [HP.class_ "webhook-enable"]
+            [ H.input_
+                [ HP.type_ "checkbox"
+                , HP.checked_ (mWebhookEnabled m)
+                , HE.onChange (const WebhookEnabledToggled)
+                ]
+            , H.span_ [] [text "enabled"]
+            ]
+        , case mWebhookFormError m of
+            Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]
+            Nothing -> H.span_ [] []
+        , H.button_
+            [ HP.class_ "btn btn--sm btn--strong"
+            , HP.type_ "button"
+            , testId "webhook-create"
+            , HE.onClick WebhookCreate
+            ]
+            [text (if mWebhookBusy m then "creating…" else "create webhook")]
+        ]
+
+-- ---------------------------------------------------------- admin users ---
+
+userIsAdmin :: Model -> Bool
+userIsAdmin m = mAdminUsersAllowed m || maybe False ((== RoleAdmin) . aiRole) (mAccount m)
+
+usersPanel :: Model -> View () () Model Action
+usersPanel m
+    | not (userIsAdmin m) =
+        accountPanel
+            "users"
+            "Users"
+            "admin only"
+            [quietNote "Only an administrator can manage the accounts on this installation."]
+    | otherwise = accountPanel "users" "Users" note body
+  where
+    note =
+        let count = length (mAdminUsers m)
+         in ms (show count <> if count == 1 then " user" else " users")
+    body =
+        [ H.p_
+            [HP.class_ "account-lede"]
+            [text "Each person has their own username, password and private library. Admins can add people, change a role, enable or disable an account, and set a break-glass temporary password. Recovery codes are shown once."]
+        ]
+            ++ recoveryReveal
+            ++ resetReveal
+            ++ [ H.p_ [HP.class_ "add-error", HP.role_ "alert", testId "user-action-error"] [text message]
+               | Just message <- [mUserActionError m]
+               ]
+            ++ case mAdminUsersError m of
+                Just message -> [accountReadError "The accounts could not be read." (Just message)]
+                Nothing ->
+                    [ H.div_
+                        [HP.class_ "account-list users-table", testId "users-table"]
+                        ( if mAdminUsersLoading m && null (mAdminUsers m)
+                            then [quietNote "Loading accounts."]
+                            else map (userRow m) (mAdminUsers m)
+                        )
+                    ]
+            ++ [userCreateForm m]
+    recoveryReveal = case mUserRecovery m of
+        Nothing -> []
+        Just (username, codes) ->
+            [ H.div_
+                [HP.class_ "account-created", testId "user-recovery-codes"]
+                [ H.p_
+                    [HP.class_ "account-created-label meta"]
+                    [text (ms ("recovery codes for " <> T.unpack username <> ", shown once"))]
+                , H.ul_
+                    [HP.class_ "account-created-codes mono"]
+                    [H.li_ [] [H.code_ [] [text (ms (T.unpack code))]] | code <- codes]
+                , H.div_
+                    [HP.class_ "account-created-row"]
+                    [ H.button_
+                        [HP.class_ "btn", HP.type_ "button", HE.onClick (UserRecoveryCopied (T.intercalate "\n" codes))]
+                        [text "copy all"]
+                    , H.button_
+                        [HP.class_ "btn btn--ghost", HP.type_ "button", HE.onClick UserRecoveryDismiss]
+                        [text "done"]
+                    ]
+                , H.p_
+                    [HP.class_ "account-note meta"]
+                    [text "Give these to the person now. The catalogue keeps only hashes and cannot show them again."]
+                ]
+            ]
+    resetReveal = case mUserResetShown m of
+        Nothing -> []
+        Just (username, password) ->
+            [ H.div_
+                [HP.class_ "account-created", testId "user-reset-shown"]
+                [ H.p_
+                    [HP.class_ "account-created-label meta"]
+                    [text (ms ("temporary password for " <> T.unpack username <> ", shown once"))]
+                , H.code_ [HP.class_ "account-created-token mono"] [text (ms (T.unpack password))]
+                , H.button_
+                    [HP.class_ "btn btn--ghost", HP.type_ "button", HE.onClick UserResetShownDismiss]
+                    [text "done"]
+                , H.p_
+                    [HP.class_ "account-note meta"]
+                    [text "The account's second factor is off and its existing sessions are revoked. Ask the person to sign in and change it."]
+                ]
+            ]
+
+userRow :: Model -> UserView -> View () () Model Action
+userRow m user =
+    H.div_
+        [HP.class_ "account-record user-record", testId "user-row"]
+        ( [ H.div_
+                [HP.class_ "account-record-main"]
+                [ H.h3_
+                    [HP.class_ "account-record-title"]
+                    [ text (ms (T.unpack (uvUsername user)))
+                    , H.span_ [HP.class_ ("tagpill user-role-pill user-role--" <> roleClass (uvRole user))] [text (ms (T.unpack (userRoleText (uvRole user))))]
+                    ]
+                , H.p_
+                    [HP.class_ "account-record-meta meta"]
+                    [ text (ms ("created " <> fromMisoString' (formatFiled (uvCreatedAt user))))
+                    , metaSep
+                    , text (ms ("last login " <> maybe "never" (fromMisoString' . formatFiled) (uvLastLoginAt user)))
+                    ]
+                , case uvDisabledAt user of
+                    Just _ -> H.p_ [HP.class_ "status status--warn"] [text "disabled"]
+                    Nothing -> H.span_ [] []
+                ]
+          , H.div_
+                [HP.class_ "account-record-actions user-actions"]
+                [ H.button_
+                    ( [ HP.class_ "account-link"
+                      , HP.type_ "button"
+                      , testId (if isUserEnabledLocal user then "user-disable" else "user-enable")
+                      , HE.onClick (UserToggleEnabled user)
+                      ]
+                        ++ []
+                    )
+                    [text (if isUserEnabledLocal user then "disable" else "enable")]
+                , H.button_
+                    [ HP.class_ "account-link"
+                    , HP.type_ "button"
+                    , testId "user-role-toggle"
+                    , HE.onClick (UserRoleChange user)
+                    ]
+                    [text (if uvRole user == RoleAdmin then "make member" else "make admin")]
+                , H.button_
+                    [HP.class_ "account-link", HP.type_ "button", testId "user-reset-open", HE.onClick (UserResetOpen (uvId user))]
+                    [text "reset password"]
+                ]
+          ]
+            ++ [resetPasswordForm m user | mUserReset m == Just (uvId user)]
+        )
+  where
+    roleClass role = case role of
+        RoleAdmin -> "admin"
+        RoleMember -> "member"
+
+isUserEnabledLocal :: UserView -> Bool
+isUserEnabledLocal user = isNothing (uvDisabledAt user)
+
+resetPasswordForm :: Model -> UserView -> View () () Model Action
+resetPasswordForm m user =
+    H.div_
+        [HP.class_ "user-reset-form"]
+        [ H.p_
+            [HP.class_ "account-note meta"]
+            [text (ms ("Set a temporary password for " <> T.unpack (uvUsername user) <> ". Its second factor is cleared and its sessions are revoked."))]
+        , H.input_
+            [ HP.class_ "input"
+            , HP.type_ "password"
+            , HP.placeholder_ "temporary password"
+            , HP.value_ (mUserResetPassword m)
+            , HP.autocomplete_ "new-password"
+            , testId "user-reset-password"
+            , HE.onInput UserResetPasswordInput
+            ]
+        , H.div_
+            [HP.class_ "account-created-row"]
+            [ H.button_
+                [HP.class_ "btn btn--sm btn--strong", HP.type_ "button", testId "user-reset-submit", HE.onClick UserResetSubmit]
+                [text "set temporary password"]
+            , H.button_
+                [HP.class_ "btn btn--sm", HP.type_ "button", HE.onClick UserResetCancel]
+                [text "cancel"]
+            ]
+        ]
+
+userCreateForm :: Model -> View () () Model Action
+userCreateForm m =
+    H.form_
+        [HP.class_ "account-form", testId "user-create-form"]
+        [ H.h3_ [HP.class_ "account-h3 display"] [text "Add a user"]
+        , H.div_
+            [HP.class_ "account-form-grid"]
+            [ H.div_
+                [HP.class_ "field"]
+                [ H.label_ [HP.class_ "field-label account-label", HP.for_ "user-name"] [text "username"]
+                , H.input_
+                    [ HP.id_ "user-name"
+                    , HP.class_ "input"
+                    , HP.placeholder_ "e.g. river"
+                    , HP.value_ (mUserName m)
+                    , HP.autocomplete_ "off"
+                    , testId "user-name"
+                    , HE.onInput UserNameInput
+                    ]
+                ]
+            , H.div_
+                [HP.class_ "field"]
+                [ H.label_ [HP.class_ "field-label account-label", HP.for_ "user-password"] [text "temporary password"]
+                , H.input_
+                    [ HP.id_ "user-password"
+                    , HP.class_ "input"
+                    , HP.type_ "password"
+                    , HP.autocomplete_ "new-password"
+                    , HP.value_ (mUserPassword m)
+                    , testId "user-password"
+                    , HE.onInput UserPasswordInput
+                    ]
+                ]
+            ]
+        , H.div_
+            [HP.class_ "field"]
+            [ H.label_ [HP.class_ "field-label account-label", HP.for_ "user-role"] [text "role"]
+            , H.select_
+                [ HP.id_ "user-role"
+                , HP.class_ "input"
+                , testId "user-role"
+                , HE.onChange (\raw -> UserRoleSelected (if fromMisoString raw == ("admin" :: Text) then RoleAdmin else RoleMember))
+                ]
+                [ H.option_ [HP.value_ "member", HP.selected_ (mUserRole m == RoleMember)] [text "member"]
+                , H.option_ [HP.value_ "admin", HP.selected_ (mUserRole m == RoleAdmin)] [text "admin"]
+                ]
+            ]
+        , case mUserFormError m of
+            Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert", testId "user-form-error"] [text message]
+            Nothing -> H.span_ [] []
+        , H.button_
+            ( [ HP.class_ "btn btn--sm btn--strong"
+              , HP.type_ "button"
+              , testId "user-create"
+              , HE.onClick UserCreate
+              ]
+                ++ attrDisabled (mUserBusy m)
+            )
+            [text (if mUserBusy m then "creating…" else "create user")]
+        ]
 
 tokensPanel :: Model -> View () () Model Action
 tokensPanel m =

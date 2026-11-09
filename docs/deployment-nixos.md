@@ -91,10 +91,12 @@ sudo nixos-rebuild switch --flake .#host
 curl -fsS https://eza.tail1234.ts.net/healthz   # {"status":"ok","version":"0.1.0"}
 ```
 
-Open the origin in a browser: the first visit redirects to `/setup` for
-passkey enrollment (later visits go to `/login`). Save the one-time recovery
-codes shown at the end of setup: they are the only way back in if the passkey
-is lost. `/recover` redeems a recovery code.
+Open the origin in a browser: the first visit redirects to `/setup`, where the
+first account claims the installation with a username and password (later
+visits go to `/login`). That account is the admin; it can add the other
+accounts under Account > users. Save the one-time recovery codes shown at the
+end of setup: they are the only way back in if the password is lost.
+`/recover` redeems a recovery code.
 
 ## Minimal configuration (Caddy, public domain)
 
@@ -123,7 +125,7 @@ All options live under `services.eza`:
 | `enable` | `false` | Enable the service. |
 | `package` | flake `eza-bookmarks` | Server package (provides `bin/eza-bookmarks`). |
 | `webAssets` | flake `eza-web` (CI asset) | Bundle served at `share/eza/static`; use `eza-web-local` for local builds. |
-| `dataDir` | `/var/lib/eza` | `eza.db` + `snapshots/` + `backups/`. Default is a systemd StateDirectory owned by user `eza`. |
+| `dataDir` | `/var/lib/eza` | `control.db` + `users/<id>/eza.db` + `backups/`. Default is a systemd StateDirectory owned by user `eza`. |
 | `bind` | `127.0.0.1:8080` | Warp listen address (`EZA_BIND`). Keep loopback behind Caddy/Tailscale. |
 | `publicOrigin` | `https://<caddy.hostname>` or `http://localhost:<port>` | Browser-visible origin (`PUBLIC_ORIGIN`). Passkeys are bound to it. |
 | `rpId` | host of `publicOrigin` | WebAuthn relying-party ID (`EZA_RP_ID`); host only, no scheme/port. |
@@ -162,9 +164,11 @@ so the SQLite file keeps a stable owner) with `StateDirectory=eza` →
 
     /var/lib/eza/eza.db       SQLite database (WAL mode)
     /var/lib/eza/snapshots/   full-page HTML snapshots
-    /var/lib/eza/backups/     online backups from the timer
+    /var/lib/eza/users/       one library database per account
+    /var/lib/eza/backups/     verified backup stamps from the timer
 
-Environment: `EZA_DATA_DIR`, `EZA_DB`, `EZA_BIND`, `PUBLIC_ORIGIN`,
+Environment: `EZA_DATA_DIR`, `EZA_CONTROL_DB`, `EZA_USERS_DIR`,
+`EZA_MAX_USERS`, `EZA_DB` (legacy migration path only), `EZA_BIND`, `PUBLIC_ORIGIN`,
 `EZA_RP_ID`, `EZA_RP_NAME`, `EZA_STATIC_DIR`, `EZA_SNAPSHOT_DIR`,
 `EZA_BACKUP_DIR`, `EZA_LOG_LEVEL`, `EZA_ALLOW_PRIVATE_FETCH`,
 `EZA_ENRICH_WORKERS`, `EZA_FETCH_TIMEOUT_MS`, `EZA_FAVICON_MAX_BYTES`,
@@ -226,26 +230,36 @@ regardless).
 ## Backups and restore
 
 `backup.enable = true` installs `eza-backup.service` + `eza-backup.timer`
-(plus `RandomizedDelaySec=15m`, `Persistent=true`). Each run:
+(daily at 03:17 by default). One run:
 
-1. runs `eza-bookmarks backup` as the `eza` user: `VACUUM INTO` creates a
-   consistent copy of the live database (`<backups>/eza-<stamp>.db`, safe while
-   the server is running), verifies it with `PRAGMA integrity_check` and
-   removes it again if the check fails,
-2. applies the module's `keepDays` retention pass (the binary also prunes
-   older than 14 days itself, so `keepDays > 14` cannot retain longer yet),
-3. optionally copies the newest backup to `backup.offsite` (absolute local
-   path: `cp`; `remote:path`: `rclone copy`).
+1. runs `eza-bookmarks backup` as the `eza` user: `VACUUM INTO` copies the
+   control database and every enabled account library into one verified stamp
+   directory (`<backups>/<stamp>/control.db` and
+   `<backups>/<stamp>/users/<id>.db`, safe while eza is writing);
+2. prunes stamp directories older than `backup.keepDays`;
+3. optionally copies the newest stamp to `backup.offsite` (absolute local path
+   or rclone remote).
 
-Restore:
+A single account can be backed up with
+`eza-bookmarks backup --user <name|id>` (the control database is always
+included). `eza-bookmarks users list` shows the accounts, their roles, states,
+database sizes, and snapshot counts.
+
+Restore with the service stopped (so nothing is writing):
 
 ```bash
-sudo systemctl stop eza.service
-sudo -u eza cp /var/lib/eza/backups/eza-<stamp>.db /var/lib/eza/eza.db
-sudo -u eza sh -c 'rm -f /var/lib/eza/eza.db-wal /var/lib/eza/eza.db-shm'
-sudo systemctl start eza.service
-curl -fsS http://127.0.0.1:8080/healthz
+sudo systemctl stop eza
+sudo rm -rf /var/lib/eza/control.db /var/lib/eza/control.db-wal \
+  /var/lib/eza/control.db-shm /var/lib/eza/users
+sudo cp -a /var/lib/eza/backups/<stamp>/control.db /var/lib/eza/control.db
+sudo cp -a /var/lib/eza/backups/<stamp>/users /var/lib/eza/users
+sudo chown -R eza:eza /var/lib/eza/control.db /var/lib/eza/users
+sudo systemctl start eza
 ```
+
+Restoring only one library is the same operation for that
+`users/<id>.db` file. Snapshots live outside the database; copy
+`users/<id>/snapshots/` from a volume backup when the snapshot pages matter.
 
 Run a backup on demand: `sudo systemctl start eza-backup.service` and check
 `journalctl -u eza-backup`.

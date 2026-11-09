@@ -13,10 +13,19 @@ build-type:         Simple
 library
   hs-source-dirs:   src
   exposed-modules:  Eza.Types
+                    Eza.Authz
+                    Eza.Boot
+                    Eza.GraphLayout
+                    Eza.GraphMatch
                     Eza.Json
                     Eza.SearchQuery
-                    Eza.Wikilink
+                    Eza.Time
+                    Eza.TokenPrefix
                     Eza.Url
+                    Eza.User
+                    Eza.View
+                    Eza.Webhook
+                    Eza.Wikilink
   build-depends:    base >=4.18 && <5
                   , aeson >=2.1 && <2.4
                   , bytestring

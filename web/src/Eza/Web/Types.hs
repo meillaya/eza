@@ -33,6 +33,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 
 import Eza.Types (BookmarkSummary, TagStat)
+import Eza.User (UserRole (..))
 
 -- | A failed API call.  @aeStatus@ is @Nothing@ for network/parse failures.
 data ApiError = ApiError
@@ -238,6 +239,7 @@ account; the rest are the credentials, unused recovery codes, and sessions.
 -}
 data AccountInfo = AccountInfo
     { aiUsername :: Text
+    , aiRole :: UserRole
     , aiHasPassword :: Bool
     , aiRequirePasskey :: Bool
     , aiAccountConfigured :: Bool
@@ -251,6 +253,7 @@ instance FromJSON AccountInfo where
     parseJSON = withObject "AccountInfo" $ \o ->
         AccountInfo
             <$> o .:? "username" .!= ""
+            <*> o .:? "role" .!= RoleMember
             <*> o .:? "has_password" .!= False
             <*> o .:? "require_passkey" .!= False
             <*> o .:? "account_configured" .!= False

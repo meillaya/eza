@@ -122,6 +122,9 @@ try {
   // Account section + revoke.
   await page.goto(BASE + "/account", { waitUntil: "domcontentloaded" });
   await page.waitForSelector(SEL.appShell, { timeout: 30000 });
+  // The shell paints before the boot re-render settles; wait one beat so the
+  // account tab click is not lost to the re-render.
+  await page.waitForTimeout(500);
   await page.click(SEL.accountTab("shares"));
   await page.waitForSelector(SEL.accountPanel("shares"), { timeout: 20000 });
   const accountShareRow = page.locator(SEL.shareLinkRow, { hasText: String(bookmark.id) }).first();

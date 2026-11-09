@@ -1,7 +1,9 @@
 module Main (main) where
 
 import Control.Exception (bracket)
-import Data.Aeson (object)
+import Data.Aeson (Value (..), decode, encode, object, toJSON)
+import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Foldable (toList)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import Data.Text (Text)
@@ -14,14 +16,27 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
+import qualified AdminSpec
+import qualified AuthzSpec
+import qualified BackupSpec
 import qualified ClipSpec
+import qualified CliSpec
+import qualified ControlSpec
+import qualified CoreViewSpec
+import qualified ViewContractSpec
 import qualified DataIntegritySpec
 import qualified DedupSpec
+import qualified GraphLayoutSpec
+import qualified IsolationSpec
 import qualified PerfSpec
+import qualified ViewServerSpec
+import qualified WebhookSpec
+import qualified WorkerSpec
 import qualified Eza.Auth as Auth
 import Eza.Bookmarks
 import Eza.Db (openDb, queryScalar, schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaVersion, targetSchemaVersion)
 import Eza.Favicon (parseDataIcon, parseIconLinks, sniffImage)
+import Eza.Graph (GraphLayoutPayload (..), emptyLayoutCache, globalGraph, graphLayoutPayload, graphRevision, layoutPresetFromText, layoutPresetText, lookupCachedLayout, storeCachedLayout)
 import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateHighlight)
 import Eza.Import
 import Eza.JsonExport (JsonImportReport (..), exportJson, importJson)
@@ -29,7 +44,8 @@ import qualified Eza.Password as Password
 import Eza.Rules (Rule (..), createRule, listRules, matchingBookmarks)
 import Eza.SearchQuery
 import Eza.Shares (ShareRecord (..), ShareState (..), ShareUnavailable (..), createShare, resolveShare, resolveShareState, revokeShare, shareUnavailablePage)
-import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), Highlight (..), ImportReport (..), LibraryStats (..), SearchPage (..))
+import Eza.GraphLayout (LayoutPreset (..))
+import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), GraphData (..), GraphLink (..), GraphRecord (..), GraphTag (..), Highlight (..), ImportReport (..), LibraryStats (..), SearchPage (..))
 import Eza.Url (dedupeKey, dedupeLookupUrls, normalizeUrl)
 
 main :: IO ()
@@ -194,6 +210,18 @@ main = hspec $ do
             sqTags q `shouldBe` []
             sqIsUnread q `shouldBe` False
             sqNegated q `shouldBe` ["web"]
+        it "extracts year and day filters without treating them as search terms" $ do
+            let q = parseSearchQuery "rust year:2023 day:2023-11-14"
+            sqYear q `shouldBe` Just 2023
+            sqDay q `shouldBe` Just "2023-11-14"
+            sqFts q `shouldBe` Just "\"rust\"*"
+            sqTerms q `shouldBe` ["rust"]
+            sqDay (parseSearchQuery "day:2024-02-29") `shouldBe` Just "2024-02-29"
+        it "drops malformed year and day filters silently" $ do
+            let q = parseSearchQuery "year:23 year:20233 day:2023-13-01 day:2023-02-30 day:2023-02-29 day:2023-1-04 rust"
+            sqYear q `shouldBe` Nothing
+            sqDay q `shouldBe` Nothing
+            sqTerms q `shouldBe` ["rust"]
 
     describe "Netscape import" $ do
         it "debug fixture" $ do
@@ -312,6 +340,226 @@ main = hspec $ do
                     lsFilingDays stats `shouldBe` [("2023-11-14", 3)]
                     page <- listBookmarks conn defaultListQuery
                     spYearCounts page `shouldBe` [(2023, 3)]
+
+    describe "year and day filters" $ do
+        it "filters the ledger by the UTC filed date" $
+            withSystemTempDirectory "eza-date-filter" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                first <- insertFiledBookmark conn "https://d.test/a" "A" "d.test" 1700000000 0 -- 2023-11-14T22:13:20Z
+                second <- insertFiledBookmark conn "https://d.test/b" "B" "d.test" 1699999999 0 -- 2023-11-14T22:13:19Z
+                monthEnd <- insertFiledBookmark conn "https://d.test/c" "C" "d.test" 1701388799 0 -- 2023-11-30T23:59:59Z
+                monthStart <- insertFiledBookmark conn "https://d.test/d" "D" "d.test" 1701388800 0 -- 2023-12-01T00:00:00Z
+                fifth <- insertFiledBookmark conn "https://d.test/e" "E" "d.test" 1717200000 0 -- 2024-06-01T00:00:00Z
+                _ <- insertFiledBookmark conn "https://d.test/epoch" "Epoch" "d.test" 0 0
+                attachTag conn first "rust"
+                attachTag conn fifth "rust"
+                year2023 <- listBookmarks conn (defaultListQuery{lqQ = "year:2023"})
+                spTotal year2023 `shouldBe` 4
+                spYearCounts year2023 `shouldBe` [(2023, 4)]
+                map bsId (spItems year2023) `shouldBe` [monthStart, monthEnd, first, second]
+                year2024 <- listBookmarks conn (defaultListQuery{lqQ = "year:2024"})
+                spTotal year2024 `shouldBe` 1
+                map bsId (spItems year2024) `shouldBe` [fifth]
+                nov14 <- listBookmarks conn (defaultListQuery{lqQ = "day:2023-11-14"})
+                spTotal nov14 `shouldBe` 2
+                map bsId (spItems nov14) `shouldBe` [first, second]
+                monthEndDay <- listBookmarks conn (defaultListQuery{lqQ = "day:2023-11-30"})
+                spTotal monthEndDay `shouldBe` 1
+                map bsId (spItems monthEndDay) `shouldBe` [monthEnd]
+                monthStartDay <- listBookmarks conn (defaultListQuery{lqQ = "day:2023-12-01"})
+                spTotal monthStartDay `shouldBe` 1
+                map bsId (spItems monthStartDay) `shouldBe` [monthStart]
+                -- created_at = 0 has no UTC filing date, so it is not a 1970 row.
+                epochYear <- listBookmarks conn (defaultListQuery{lqQ = "year:1970"})
+                spTotal epochYear `shouldBe` 0
+                epochDay <- listBookmarks conn (defaultListQuery{lqQ = "day:1970-01-01"})
+                spTotal epochDay `shouldBe` 0
+                -- The date predicate ANDs with the other filters.
+                combined <- listBookmarks conn (defaultListQuery{lqQ = "year:2023 tag:rust"})
+                spTotal combined `shouldBe` 1
+                spYearCounts combined `shouldBe` [(2023, 1)]
+                map bsId (spItems combined) `shouldBe` [first]
+                taggedYear <- listBookmarks conn (defaultListQuery{lqQ = "year:2024 tag:rust", lqTags = ["rust"]})
+                spTotal taggedYear `shouldBe` 1
+                map bsId (spItems taggedYear) `shouldBe` [fifth]
+                close conn
+
+        it "keeps FTS snippets after a date filter" $
+            withSystemTempDirectory "eza-date-snippet" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                first <- insertFiledBookmark conn "https://d.test/s" "S" "d.test" 1700000000 0
+                _ <- insertFiledBookmark conn "https://d.test/t" "T" "d.test" 1717200000 0
+                Sqlite.execute conn "UPDATE bookmarks SET note_body = 'hello rustacean world' WHERE id = ?" (Sqlite.Only first)
+                page <- listBookmarks conn (defaultListQuery{lqQ = "rustacean day:2023-11-14"})
+                spTotal page `shouldBe` 1
+                case spItems page of
+                    (item : _) -> bsSnippet item `shouldSatisfy` maybe False (T.isInfixOf "rustacean")
+                    [] -> expectationFailure "expected the dated search to find the bookmark"
+                close conn
+
+    describe "global graph" $ do
+        it "returns an empty graph for an empty database" $
+            withSystemTempDirectory "eza-graph-empty" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                globalGraph conn `shouldReturn` GraphData [] [] [] "0:0:0:0:0"
+                close conn
+
+        it "orders tags by count and name and points records at their tag indexes" $
+            withSystemTempDirectory "eza-graph-populated" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                first <- insertFiledBookmark conn "https://g.test/a" "A" "g.test" 1700000000 0
+                second <- insertFiledBookmark conn "https://g.test/b" "" "g.test" 1700000001 1
+                third <- insertFiledBookmark conn "https://g.test/c" "C" "g.test" 1700000002 0
+                _ <- Sqlite.execute conn "UPDATE bookmarks SET is_dead = 1 WHERE id = ?" (Sqlite.Only second)
+                attachTag conn first "rust"
+                attachTag conn first "toolbar"
+                attachTag conn second "rust"
+                attachTag conn third "alpha"
+                attachTag conn third "zeta"
+                insertLink conn first second
+                insertLink conn second third
+                Sqlite.execute conn "INSERT INTO links (source_id, target_id, target_title) VALUES (?,NULL,'unresolved')" (Sqlite.Only first)
+                -- A dangling endpoint can only exist in a database written
+                -- with foreign keys off. The payload still has to drop it.
+                Sqlite.execute_ conn "PRAGMA foreign_keys = OFF"
+                insertLink conn first 9999
+                insertLink conn 9998 third
+                Sqlite.execute_ conn "PRAGMA foreign_keys = ON"
+                graph <- globalGraph conn
+                gdTags graph `shouldBe` [GraphTag "rust" 2, GraphTag "alpha" 1, GraphTag "toolbar" 1, GraphTag "zeta" 1]
+                gdRecords graph
+                    `shouldBe` [ GraphRecord first "A" "g.test" 1700000000 False False [0, 2]
+                               , GraphRecord second "g.test" "g.test" 1700000001 True True [0]
+                               , GraphRecord third "C" "g.test" 1700000002 False False [1, 3]
+                               ]
+                gdLinks graph `shouldBe` [GraphLink first second, GraphLink second third]
+                gdRevision graph `shouldBe` "3:" <> T.pack (show (1700000002 :: Int)) <> ":4:5:4"
+                -- Touching a record changes the revision; unrelated reads do not.
+                revBefore <- graphRevision conn
+                graphAgain <- globalGraph conn
+                gdRevision graphAgain `shouldBe` revBefore
+                _ <- Sqlite.execute conn "UPDATE bookmarks SET title = 'A2', updated_at = 1700000010 WHERE id = ?" (Sqlite.Only first)
+                changed <- graphRevision conn
+                changed `shouldNotBe` revBefore
+                close conn
+
+        it "round-trips through the compact array JSON" $ do
+            let graph =
+                    GraphData
+                        [GraphTag "rust" 2, GraphTag "toolbar" 1]
+                        [ GraphRecord 7 "Title" "example.com" 1700000000 True False [0, 1]
+                        , GraphRecord 8 "example.com" "example.com" 0 False True []
+                        ]
+                        [GraphLink 7 8]
+                        "r1:3:4:5:2"
+                wire =
+                    "{\"tags\":[[\"rust\",2],[\"toolbar\",1]],"
+                        <> "\"records\":[[7,\"Title\",\"example.com\",1700000000,true,false,[0,1]],"
+                        <> "[8,\"example.com\",\"example.com\",0,false,true,[]]],"
+                        <> "\"links\":[[7,8]],"
+                        <> "\"revision\":\"r1:3:4:5:2\"}"
+            decode (encode graph) `shouldBe` Just graph
+            (decode wire :: Maybe GraphData) `shouldBe` Just graph
+            -- Older payloads had no revision; the decoder defaults it.
+            (decode "{\"tags\":[],\"records\":[],\"links\":[]}" :: Maybe GraphData)
+                `shouldBe` Just (GraphData [] [] [] "")
+            -- The compact shapes cannot drift: tag 2, record 7, link 2.
+            arrayLength (toJSON (GraphTag "rust" 2)) `shouldBe` Just 2
+            arrayLength (toJSON (GraphRecord 7 "Title" "example.com" 1700000000 True False [0, 1])) `shouldBe` Just 7
+            arrayLength (toJSON (GraphLink 7 8)) `shouldBe` Just 2
+
+    describe "graph layout payload" $ do
+        it "ships quantized positions for one preset with the graph revision" $
+            withSystemTempDirectory "eza-graph-layout" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                first <- insertFiledBookmark conn "https://l.test/a" "A" "l.test" 1700000000 0
+                second <- insertFiledBookmark conn "https://l.test/b" "B" "l.test" 1700000001 0
+                attachTag conn first "rust"
+                attachTag conn second "rust"
+                insertLink conn first second
+                graph <- globalGraph conn
+                let payload = graphLayoutPayload Standard graph
+                glpSchema payload `shouldBe` 1
+                glpRevision payload `shouldBe` gdRevision graph
+                glpPreset payload `shouldBe` Standard
+                length (glpTags payload) `shouldBe` 1
+                length (glpRecords payload) `shouldBe` 2
+                let (minX, minY, maxX, maxY) = glpBounds payload
+                minX <= maxX `shouldBe` True
+                minY <= maxY `shouldBe` True
+                -- Every coordinate is a whole number of hundredths.
+                let quantized value =
+                        (value * 100) `shouldBe` (fromIntegral (round (value * 100) :: Int) :: Double)
+                mapM_ quantized (concatMap (\(x, y) -> [x, y]) (glpTags payload <> glpRecords payload) <> [minX, minY, maxX, maxY])
+                close conn
+
+        it "encodes the documented layout object" $ do
+            let graph =
+                    GraphData
+                        [GraphTag "rust" 2]
+                        [GraphRecord 1 "A" "a.test" 1700000000 False False [0]]
+                        []
+                        "r1"
+            case toJSON (graphLayoutPayload Compact graph) of
+                Object objectValue -> do
+                    KeyMap.lookup "schema" objectValue `shouldBe` Just (toJSON (1 :: Int))
+                    KeyMap.lookup "preset" objectValue `shouldBe` Just (toJSON ("compact" :: Text))
+                    KeyMap.lookup "revision" objectValue `shouldBe` Just (toJSON ("r1" :: Text))
+                    case KeyMap.lookup "tags" objectValue of
+                        Just (Array tags) -> case toList tags of
+                            [pair] -> case pair of
+                                Array coordinates -> length coordinates `shouldBe` 2
+                                _ -> expectationFailure "a tag position must be an [x,y] array"
+                            _ -> expectationFailure "one tag tag position expected"
+                        _ -> expectationFailure "tags must be an array of [x,y] pairs"
+                    case KeyMap.lookup "records" objectValue of
+                        Just (Array recordsValue) -> length recordsValue `shouldBe` 1
+                        _ -> expectationFailure "records must be an array"
+                    case KeyMap.lookup "bounds" objectValue of
+                        Just (Array bounds) -> length bounds `shouldBe` 4
+                        _ -> expectationFailure "bounds must be a four-element array"
+                _ -> expectationFailure "layout payload must be a JSON object"
+
+        it "parses every preset name and rejects the rest" $ do
+            layoutPresetFromText "compact" `shouldBe` Just Compact
+            layoutPresetFromText " Standard " `shouldBe` Just Standard
+            layoutPresetFromText "airy" `shouldBe` Just Airy
+            layoutPresetFromText "huge" `shouldBe` Nothing
+            map layoutPresetText [Compact, Standard, Airy] `shouldBe` ["compact", "standard", "airy"]
+
+        it "sizes the presets compact < standard < airy" $ do
+            let graph =
+                    GraphData
+                        [GraphTag "rust" 2, GraphTag "toolbar" 1]
+                        [ GraphRecord 1 "A" "a.test" 1700000000 False False [0, 1]
+                        , GraphRecord 2 "B" "b.test" 1700000001 False False [0]
+                        ]
+                        [GraphLink 1 2]
+                        "r1"
+                spanOf payload =
+                    let (minX, minY, maxX, maxY) = glpBounds payload
+                     in max (maxX - minX) (maxY - minY)
+                spans = map (spanOf . (`graphLayoutPayload` graph)) [Compact, Standard, Airy]
+            spans `shouldSatisfy` (\values -> case values of
+                [compactSpan, standardSpan, airySpan] -> compactSpan < standardSpan && standardSpan < airySpan
+                _ -> False)
+
+        it "caches one payload per revision and preset" $ do
+            let graph =
+                    GraphData
+                        [GraphTag "rust" 2]
+                        [GraphRecord 1 "A" "a.test" 1700000000 False False [0]]
+                        []
+                        "r1"
+                built = graphLayoutPayload Standard graph
+                cached = storeCachedLayout "r1" Standard built emptyLayoutCache
+            lookupCachedLayout "r1" Standard emptyLayoutCache `shouldBe` Nothing
+            lookupCachedLayout "r1" Standard cached `shouldBe` Just built
+            lookupCachedLayout "r2" Standard cached `shouldBe` Nothing
+            lookupCachedLayout "r1" Compact cached `shouldBe` Nothing
+            let replaced = storeCachedLayout "r2" Standard built cached
+            lookupCachedLayout "r2" Standard replaced `shouldBe` Just built
+            lookupCachedLayout "r1" Standard replaced `shouldBe` Nothing
 
     describe "full export counts" $ do
         it "matches the analysed 2026-08 export" $ do
@@ -531,7 +779,7 @@ main = hspec $ do
                 let params = testPasswordParams
                     ac = testAuthConfig params 3600 5 900
                 seedPasswordAccount conn params
-                options <- Auth.addPasskeyOptions conn ac
+                options <- Auth.addPasskeyOptions conn ac (BS.pack [0x01])
                 case options of
                     Left err -> expectationFailure ("passkey options were retired: " <> T.unpack (Auth.aeCode err))
                     Right _ -> pure ()
@@ -637,8 +885,20 @@ main = hspec $ do
 
     DataIntegritySpec.spec
     DedupSpec.spec
+    GraphLayoutSpec.spec
+    AuthzSpec.authzSpec
+    CoreViewSpec.coreViewSpec
+    ControlSpec.controlSpec
+    ViewContractSpec.viewContractSpec
     PerfSpec.spec
     ClipSpec.spec
+    ViewServerSpec.spec
+    IsolationSpec.spec
+    AdminSpec.spec
+    BackupSpec.spec
+    CliSpec.spec
+    WorkerSpec.spec
+    WebhookSpec.spec
 
 -- ---------------------------------------------------------------------------
 -- Test helpers
@@ -714,3 +974,37 @@ bookmarkTagNames conn bid = do
             (Sqlite.Only bid) ::
             IO [Sqlite.Only Text]
     pure [name | Sqlite.Only name <- rows]
+
+-- | Raw bookmark insert with a chosen original save date and read flag, for
+-- the date-filter and graph tests.
+insertFiledBookmark :: Sqlite.Connection -> Text -> Text -> Text -> Int -> Int -> IO Int
+insertFiledBookmark conn url title domain createdAt isRead = do
+    Sqlite.execute
+        conn
+        "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at,is_read) VALUES (?,?,?,?,?,?,?)"
+        (url, title, domain, createdAt, createdAt, createdAt, isRead)
+    fromIntegral <$> Sqlite.lastInsertRowId conn
+
+-- | Create the tag when needed and attach it to the bookmark.
+attachTag :: Sqlite.Connection -> Int -> Text -> IO ()
+attachTag conn bid name = do
+    Sqlite.execute conn "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, 1)" (Sqlite.Only name)
+    rows <- Sqlite.query conn "SELECT id FROM tags WHERE name = ?" (Sqlite.Only name) :: IO [Sqlite.Only Int]
+    case rows of
+        (Sqlite.Only tid : _) ->
+            Sqlite.execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?,?)" (bid, tid)
+        [] -> pure ()
+
+-- | A resolved wikilink row; unresolved targets stay NULL and are not part of
+-- the graph payload.
+insertLink :: Sqlite.Connection -> Int -> Int -> IO ()
+insertLink conn source target =
+    Sqlite.execute
+        conn
+        "INSERT INTO links (source_id, target_id, target_title) VALUES (?,?, '')"
+        (source, Just target :: Maybe Int)
+
+-- | The length of a JSON array, or 'Nothing' for any other value.
+arrayLength :: Value -> Maybe Int
+arrayLength (Array values) = Just (length values)
+arrayLength _ = Nothing

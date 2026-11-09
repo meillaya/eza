@@ -173,6 +173,9 @@ try {
   // Bookmarklet on the account capture section.
   await page.goto(BASE + "/account", { waitUntil: "domcontentloaded" });
   await page.waitForSelector(SEL.appShell, { timeout: 30000 });
+  // The shell paints before the boot re-render settles; wait one beat so the
+  // account tab click is not lost to the re-render.
+  await page.waitForTimeout(500);
   await page.click(SEL.accountTab("capture"));
   await page.waitForSelector(SEL.captureBox, { timeout: 20000 });
   const bookmarklet = await page.evaluate(() => {

@@ -237,6 +237,8 @@ import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import Database.SQLite.Simple
 import GHC.Generics (Generic)
 
+import Eza.Webhook (EventType (..))
+import Eza.Events (clipEventData, recordEvent)
 import Eza.ClipTemplates
 import Eza.Rules (applyRules)
 import Eza.Url (dedupeLookupUrls, domainOf, hostOf, isHttpUrl, normalizeUrl)
@@ -799,6 +801,7 @@ saveClip conn request =
                         Right Nothing -> do
                           (bookmarkId, created) <- upsertBookmark conn clean now title rendered tags
                           captureId <- insertCapture conn clean now title rendered tags template bookmarkId
+                          recordEvent conn ClipCreated (clipEventData captureId bookmarkId)
                           pure
                             ( Right
                                 SaveClipResult

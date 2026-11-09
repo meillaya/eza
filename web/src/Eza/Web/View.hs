@@ -14,6 +14,7 @@ import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Miso
+import Eza.View (ViewKind (..))
 import qualified Miso.CSS as C
 import qualified Miso.Html as H
 import qualified Miso.Html.Event as HE
@@ -26,7 +27,7 @@ import Eza.Types (BookmarkSummary (..), LibraryStats (..), SavedSearch (..), Tag
 import Eza.Web.Accessions (accessionsPage)
 import Eza.Web.Detail (detailPage)
 import Eza.Web.Model
-import Eza.Web.Panels (accountPage, aiTagsPage, dedupPage, graphPage, maintenancePage, tagsPage)
+import Eza.Web.Panels (accountPage, aiTagsPage, dedupPage, graphPage, maintenancePage, tagsPage, viewDialogs, viewsPage)
 import Eza.Web.Types (ShareView (..))
 import Eza.Web.Widgets (disabledAttr, formatCount)
 
@@ -52,6 +53,7 @@ viewModel m =
             ++ [logoutDialog | mConfirmLogout m]
             ++ [tagPromptDialog m | isJust (mTagPrompt m)]
             ++ [bulkDeleteDialog m | mConfirmBulkDelete m]
+            ++ viewDialogs m
         )
 
 {- | Non-list pages: one main element holding the group page, which brings its
@@ -292,6 +294,7 @@ sectionsNav m =
         [ ("ledger", "section-ledger", Index)
         , ("inbox", "section-inbox", Inbox)
         , ("graph", "section-graph", Graph)
+        , ("views", "section-views", Views)
         , ("duplicates", "section-dedup", Dedup)
         , ("tags", "section-tags", Tags)
         , ("ai tags", "section-ai-tags", AiTags)
@@ -314,6 +317,7 @@ sectionsNav m =
             Bookmark _ -> True
             Save{} -> True
             _ -> False
+        | route == Graph = isGraphRoute (mRoute m)
         | otherwise = route == mRoute m
 
 routePath :: Route -> MisoString
@@ -322,6 +326,14 @@ routePath = \case
     Bookmark bid -> "/bookmark/" <> ms (show bid)
     Inbox -> "/inbox"
     Graph -> "/graph"
+    GraphLocal rootKey depth ->
+        "/graph?focus="
+            <> ms (show rootKey)
+            <> "&depth="
+            <> ms (show depth)
+            <> "&local=1"
+    Views -> "/views"
+    ViewOpen slug -> "/views/" <> ms (T.unpack slug)
     Dedup -> "/dedup"
     Tags -> "/tags"
     AiTags -> "/tags/ai"
@@ -366,6 +378,9 @@ routeBody m = case mRoute m of
     Save{} -> fullPage (savePage m)
     Bookmark _ -> fullPage (detailPage m)
     Graph -> fullPage (graphPage m)
+    GraphLocal _ _ -> fullPage (graphPage m)
+    Views -> fullPage (viewsPage m)
+    ViewOpen _ -> fullPage (viewsPage m)
     Dedup -> fullPage (dedupPage m)
     Tags -> fullPage (tagsPage m)
     AiTags -> fullPage (aiTagsPage m)
@@ -556,6 +571,13 @@ savedSearchesBlock m =
             , HE.onClick SavedSearchSave
             ]
             [text "save this search"]
+        , H.button_
+            [ HP.class_ "facet-all"
+            , HP.type_ "button"
+            , HP.data_ "testid" "view-save-current"
+            , HE.onClick (ViewSaveOpen LedgerKind)
+            ]
+            [text "save as view"]
         ]
   where
     railHead title right =
@@ -1135,12 +1157,16 @@ filteredEmpty m =
                 , H.span_ [HP.class_ "mono"] [text "link:"]
                 , text " needs a note that links to a record, a leading "
                 , H.span_ [HP.class_ "mono"] [text "−"]
-                , text " excludes."
+                , text " excludes. The "
+                , H.span_ [HP.class_ "mono"] [text "year:"]
+                , text " operator takes YYYY and "
+                , H.span_ [HP.class_ "mono"] [text "day:"]
+                , text " takes YYYY-MM-DD."
                 ]
             , H.p_
                 [HP.class_ "empty-try"]
                 ( H.span_ [HP.class_ "try-label meta"] [text "try"]
-                    : map tryLink ["tag:books", "is:unread", "link:Determinate"]
+                    : map tryLink ["tag:books", "is:unread", "link:Determinate", "year:2025", "day:2025-11-03"]
                     ++ [ H.button_
                             [HP.class_ "try-link", HP.type_ "button", HE.onClick ClearFilters]
                             [text "clear the query"]
@@ -1216,32 +1242,59 @@ errorState m =
             [H.span_ [] [text "no entries loaded"], H.span_ [] [text "the catalogue is untouched"]]
         ]
 
-{- | The parser drops an unknown is: value, so the page says so rather than
-pretending the query was understood.
+{- | The parser drops an unknown is: value and a year: or day: token whose
+date it cannot keep, so the page says so rather than pretending the query was
+understood.
 -}
 invalidHint :: Model -> [View () () Model Action]
 invalidHint m = case invalidFlags (qText m) of
     [] -> []
     (bad : _) ->
-        [ H.div_
-            [HP.class_ "srch-hint"]
-            [ H.p_ [HP.class_ "srch-hint-kicker sc"] [text "dropped token"]
-            , H.p_
-                [HP.class_ "srch-hint-title"]
-                [H.span_ [HP.class_ "mono"] [text (msText bad)], text " is not a search flag."]
-            , H.p_
-                [HP.class_ "srch-hint-body"]
-                [text "The parser ignores an unknown is: value; it is not an error. The list below is what remains of the query. Known flags: is:unread and is:dead."]
+        let (suffix, body) = droppedCopy bad
+         in [ H.div_
+                [HP.class_ "srch-hint"]
+                [ H.p_ [HP.class_ "srch-hint-kicker sc"] [text "dropped token"]
+                , H.p_
+                    [HP.class_ "srch-hint-title"]
+                    [H.span_ [HP.class_ "mono"] [text (msText bad)], text suffix]
+                , H.p_ [HP.class_ "srch-hint-body"] [text body]
+                ]
             ]
-        ]
+
+-- | Why the first dropped token did not become a filter.
+droppedCopy :: Text -> (MisoString, MisoString)
+droppedCopy bad
+    | isMalformedDate bad =
+        ( " is not a complete date and was dropped."
+        , "The parser drops a year: or day: token that is not a full date; it is not an error. Use year:YYYY or day:YYYY-MM-DD. Other flags are is:unread and is:dead."
+        )
+    | otherwise =
+        ( " is not a search flag."
+        , "The parser ignores an unknown is: value; it is not an error. The list below is what remains of the query. Known flags: is:unread, is:dead, year:YYYY and day:YYYY-MM-DD."
+        )
 
 invalidFlags :: Text -> [Text]
 invalidFlags query =
     [ word
     | word <- T.words query
-    , "is:" `T.isPrefixOf` T.toLower word
-    , T.toLower word `notElem` ["is:unread", "is:dead"]
+    , isUnknownFlag word || isMalformedDate word
     ]
+  where
+    isUnknownFlag word =
+        "is:" `T.isPrefixOf` T.toLower word
+            && T.toLower word `notElem` ["is:unread", "is:dead"]
+
+{- | A year: or day: word whose date the parser could not keep. The parser
+conditionally swallows the token and never falls back to plain text, so the
+word is simply dropped.
+-}
+isMalformedDate :: Text -> Bool
+isMalformedDate word
+    | "year:" `T.isPrefixOf` word = isNothing (sqYear parsed)
+    | "day:" `T.isPrefixOf` word = isNothing (sqDay parsed)
+    | otherwise = False
+  where
+    parsed = parseSearchQuery word
 
 -- ---------------------------------------------------------------- footer ---
 
@@ -2096,6 +2149,8 @@ data ChipToken
     | IsUnread
     | IsDead
     | LinkToken Text
+    | YearToken Int
+    | DayToken Text
     | BadToken Text
 
 chipBody :: ChipToken -> [View () () Model Action]
@@ -2106,6 +2161,8 @@ chipBody = \case
     IsUnread -> [H.span_ [HP.class_ "op"] [text "is:"], text "unread"]
     IsDead -> [H.span_ [HP.class_ "op"] [text "is:"], text "dead"]
     LinkToken target -> [H.span_ [HP.class_ "op"] [text "link:"], text (msText target)]
+    YearToken year -> [H.span_ [HP.class_ "op"] [text "year:"], text (ms (show year))]
+    DayToken day -> [H.span_ [HP.class_ "op"] [text "day:"], text (msText day)]
     BadToken raw -> [text (msText raw)]
 
 chipClass :: ChipToken -> MisoString
@@ -2123,6 +2180,8 @@ tokensOf m =
         ++ [IsUnread | sqIsUnread parsed]
         ++ [IsDead | sqIsDead parsed]
         ++ map LinkToken (sqLinkTargets parsed)
+        ++ [YearToken year | Just year <- [sqYear parsed]]
+        ++ [DayToken day | Just day <- [sqDay parsed]]
         ++ map BadToken (invalidFlags (qText m))
   where
     parsed = parseSearchQuery (qText m)
@@ -2138,6 +2197,8 @@ removeToken token query = T.unwords (dropFirst matching (T.words query))
         IsUnread -> T.toLower word == "is:unread"
         IsDead -> T.toLower word == "is:dead"
         LinkToken target -> T.toLower word == T.toLower ("link:" <> target)
+        YearToken year -> T.toLower word == "year:" <> T.pack (show year)
+        DayToken day -> T.toLower word == "day:" <> T.toLower day
         BadToken raw -> word == raw
 
 -- ------------------------------------------------------------- utilities ---

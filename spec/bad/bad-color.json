@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "slug": "bad-color",
+  "name": "Bad colour",
+  "kind": "graph",
+  "is_default": false,
+  "definition": {
+    "query": "",
+    "tags_shown": true,
+    "label_mode": "auto",
+    "layout_preset": "compact",
+    "local_depth": 1,
+    "color_groups": [
+      {"name": "Broken", "query": "tag:broken", "color": "#00ff0", "enabled": true}
+    ]
+  }
+}

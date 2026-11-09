@@ -1,33 +1,82 @@
 # Architecture
 
-eza runs one Haskell process, serves one WebAssembly client, and stores every
-row in one SQLite file. This document explains the request path, the import
-math, the search model, and the deployment shape.
+eza runs one Haskell process, serves one WebAssembly client, and stores each
+account's rows in its own SQLite file behind a shared control database. This
+document explains the data layout, the request path, the import math, the
+search model, and the deployment shape.
 
-## One process, one file
+## One process, one control file, one library per account
 
 A Warp/WAI process owns the HTTP surface. It serves `/assets/*` from
 `EZA_STATIC_DIR`, renders the login/setup/recovery pages, and answers
-`/api/v1/*`. The same process opens `data/eza.db` at startup and keeps one
-write connection behind an `MVar`.
+`/api/v1/*` for every account.
 
-Every API route passes the table in `Eza.Server`. The table is deny-by-default,
-so a new route without a guard returns 401. Unsafe methods also require the
-`X-CSRF-Token` header. The single account signs in with a username and
-password: the server stores the Argon2id password hash and only the SHA-256
-hash of each session token. Login attempts are counted in `app_state` so a
-restart does not clear a lockout. A password account can register passkeys
-and enable a second factor; a password login then returns a short-lived
-pending session and requires a WebAuthn assertion before a normal session is
-created. Pending scopes cannot reach `/api/v1`. Recovery clears the flag.
+Data lives in two shapes under `EZA_DATA_DIR`:
 
-![Architecture: one process, one SQLite file](figures/architecture.png)
+```
+control.db                     accounts: username, role, db_path, handle, state
+users/<id>/eza.db              one account's library (the full schema)
+users/<id>/snapshots/          that account's captured pages
+backups/<stamp>/control.db     a backup run's control database
+backups/<stamp>/users/<id>.db  a backup run's library files
+```
+
+`control.db` (`EZA_CONTROL_DB`) holds identity only: a row per account with a
+unique case-insensitive username, an `admin`/`member` role, the path to the
+account's library, a per-account WebAuthn user handle, and timestamps for
+creation, disablement, and last login. `users/<id>/eza.db` (`EZA_USERS_DIR`)
+holds everything else. Requests open library databases lazily: a per-account
+slot owns one write connection behind an `MVar`, a small read-only pool for
+GET/HEAD, and a graph layout cache, with the number of open slots capped by
+`EZA_MAX_USERS`.
+
+Every API route passes the table in `Eza.Server`. The table is deny-by-default
+and `Eza.Authz` is the single classification and scope matrix, so a new route
+without a guard returns 401 and admin routes accept only admin browser
+sessions. Unsafe methods also require the `X-CSRF-Token` header. Session,
+pending, share, and API tokens carry the owning account id in their prefix
+(`u<id>_...`, `eza_pat_u<id>_...`); the guard resolves that id through the
+control database and then verifies the token hash in that account's library,
+so a rewritten prefix fails. A token without a prefix is accepted only while
+exactly one enabled account exists, which keeps pre-M3 sessions working after
+the startup migration. The control database is never a content path: handlers
+only ever see the signed-in account's connection.
+
+Login resolves the username through the control database. An unknown or
+disabled username pays a dummy Argon2 hash and returns the same generic 401 as
+a wrong password, and attempts are capped per client host and username. Each
+account stores its Argon2id password hash and only the SHA-256 hash of each
+session token, and its own login counters in `app_state`. A password account
+can register passkeys and enable a second factor; a password login then
+returns a short-lived pending session and requires a WebAuthn assertion before
+a normal session is created. Pending scopes cannot reach `/api/v1`. Recovery
+requires a username and clears that account's password, passkeys, and flag.
+
+Startup migration: when the control database has no rows and `EZA_DB` exists
+with a claimed account, that file is registered as user 1 with the admin role
+in place, with no copy or move; removing `control.db` rolls the registration
+back. An unclaimed legacy file is left alone. Otherwise the first
+`/setup` claims a fresh account under `users/<id>/`.
+
+Background work is per account. Opening an account database starts its
+enrichment claimers and webhook delivery worker (each database has its own
+outbox and cursor); `EZA_ENRICH_WORKERS` is a process-wide semaphore, and a
+disabled account's workers stop on the next supervisor tick. Expired sessions
+are swept when a database opens and once a day after.
+
+![Architecture: one process, one control database, one library per account](figures/architecture.png)
 
 The CLI commands (`import`, `export`, `enrich`, `verify`, `backup`,
-`check-dead`, `set-password`) open the same file from a separate process. `set-password`
-prompts twice with the terminal echo off, so the password never reaches argv. SQLite serializes
-the writers, so a running server and a one-off CLI command do not corrupt the
-database.
+`check-dead`, `set-password`) accept `--user <name|id>`; without it they use
+the only enabled account (a control database with no rows falls back to the
+legacy `EZA_DB` path). `eza-bookmarks users list|add|enable|disable|reset-password|delete`
+manages accounts, `init` creates the control schema, and `set-password`
+prompts twice with the terminal echo off, so the password never reaches argv.
+`backup` copies the control database and every enabled library into one
+verified stamp directory; restore means stopping the server and copying the
+stamp's files back over `control.db` and `users/<id>/eza.db`. SQLite
+serializes the writers per file, so a running server and a one-off CLI command
+do not corrupt a library database.
 
 ## Import math
 
@@ -164,8 +213,11 @@ keep both stable while a passkey is still in use.
 
 ## What the design leaves out
 
-SQLite has one writer, so the deployment uses one replica. A second pod would
-contend for the same file lock.
+SQLite has one writer per file and the control database adds one more writer,
+so the deployment uses one replica. A second pod would contend for the same
+file locks. Account creation, disabling, and backup are operator actions; the
+web client has no admin screen yet, so administration is the admin API and the
+`users` CLI.
 
 The client reads all data through the API: lists, detail views, and search
 results come from the server. This keeps one data model.

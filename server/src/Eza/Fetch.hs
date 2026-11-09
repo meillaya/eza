@@ -15,6 +15,7 @@ module Eza.Fetch
   , FetchPage (..)
   , FetchError (..)
   , fetchUrl
+  , postJson
   , documentOptions
   , anyOptions
   ) where
@@ -32,7 +33,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word32)
 import Network.HTTP.Client
-import Network.HTTP.Types.Header (hAccept, hAcceptLanguage, hContentType, hLocation, hUserAgent)
+import Network.HTTP.Types.Header (HeaderName, hAccept, hAcceptLanguage, hContentType, hLocation, hUserAgent)
 import Network.HTTP.Types.Status (statusCode)
 import Network.Socket
 import Network.URI (parseURI, parseURIReference, relativeTo, uriScheme)
@@ -85,6 +86,69 @@ documentOptions manager timeoutMs maxBytes allowPrivate =
 anyOptions :: Manager -> Int -> Int -> Bool -> FetchOptions
 anyOptions manager timeoutMs maxBytes allowPrivate =
   (documentOptions manager timeoutMs maxBytes allowPrivate) {foDocument = False}
+
+{- | POST one JSON body to an absolute http(s) URL. The response body is
+drained (bounded) and discarded, and only the status code comes back, so a
+webhook receiver cannot fill the database with its answer. Redirects are not
+followed: a 3xx is 'FetchRedirect'. The private-network guard runs on the host
+exactly like 'fetchUrl'. @foMaxBytes@ caps both the request body and the bytes
+drained from the response.
+-}
+postJson :: FetchOptions -> Text -> [(HeaderName, BS.ByteString)] -> BS.ByteString -> IO (Either FetchError Int)
+postJson opts rawUrl extraHeaders body
+  | T.null stripped = pure (Left (FetchInvalidUrl rawUrl))
+  | BS.length body > foMaxBytes opts = pure (Left FetchTooLarge)
+  | otherwise =
+      case parseURI (T.unpack stripped) of
+        Nothing -> pure (Left (FetchInvalidUrl rawUrl))
+        Just uri
+          | schemeNotHttp (uriScheme uri) -> pure (Left (FetchInvalidUrl rawUrl))
+          | otherwise -> do
+              requestResult <- try (parseRequest (T.unpack stripped))
+              case requestResult of
+                Left (err :: SomeException) -> pure (Left (FetchInvalidUrl (T.pack (show err))))
+                Right request -> do
+                  allowed <- assertPublicHost opts (TE.decodeUtf8 (host request))
+                  case allowed of
+                    Left err -> pure (Left err)
+                    Right () -> do
+                      let baseHeaders =
+                            [ (hContentType, "application/json")
+                            , (hUserAgent, userAgent)
+                            , (hAccept, "application/json")
+                            ]
+                          headers = baseHeaders <> filter (\(name, _) -> name `notElem` map fst baseHeaders) extraHeaders
+                          prepared =
+                            request
+                              { method = "POST"
+                              , redirectCount = 0
+                              , responseTimeout = responseTimeoutMicro (foTimeoutMs opts * 1000)
+                              , requestHeaders = headers
+                              , requestBody = RequestBodyBS body
+                              }
+                      outcome <-
+                        try
+                          ( withResponse prepared (foManager opts) $ \response -> do
+                              let code = statusCode (responseStatus response)
+                              drainBody 0 (responseBody response)
+                              pure code
+                          )
+                      pure $ case outcome of
+                        Left (err :: HttpException) -> Left (FetchNetwork (T.pack (show err)))
+                        Right code
+                          | code >= 200 && code < 300 -> Right code
+                          | code >= 300 && code < 400 -> Left FetchRedirect
+                          | otherwise -> Left (FetchHttp code)
+  where
+    stripped = T.strip rawUrl
+    schemeNotHttp rawScheme =
+      let scheme = map toLower (takeWhile (/= ':') rawScheme)
+       in scheme /= "http" && scheme /= "https"
+    drainBody total reader
+      | total >= foMaxBytes opts = pure ()
+      | otherwise = do
+          chunk <- brRead reader
+          if BS.null chunk then pure () else drainBody (total + BS.length chunk) reader
 
 fetchUrl :: FetchOptions -> Text -> IO (Either FetchError FetchPage)
 fetchUrl opts rawUrl

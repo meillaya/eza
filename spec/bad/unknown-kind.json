@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "slug": "table-view",
+  "name": "Table view",
+  "kind": "table",
+  "is_default": false,
+  "definition": {
+    "query": "is:unread",
+    "sort": "created"
+  }
+}

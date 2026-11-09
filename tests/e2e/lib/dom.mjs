@@ -89,6 +89,24 @@ export const SEL = {
   shareLinkRevoke: '[data-testid="share-link-revoke"]',
   captureBox: '[data-testid="capture-box"]',
 
+  accountUsersTab: '[data-testid="account-users-tab"]',
+  accountWebhooksTab: '[data-testid="webhooks-tab"]',
+  usersTable: '[data-testid="users-table"]',
+  userRow: '[data-testid="user-row"]',
+  userName: '[data-testid="user-name"]',
+  userPassword: '[data-testid="user-password"]',
+  userRole: '[data-testid="user-role"]',
+  userCreate: '[data-testid="user-create"]',
+  userFormError: '[data-testid="user-form-error"]',
+  userActionError: '[data-testid="user-action-error"]',
+  userRecoveryCodes: '[data-testid="user-recovery-codes"]',
+  userDisable: '[data-testid="user-disable"]',
+  userEnable: '[data-testid="user-enable"]',
+  userResetOpen: '[data-testid="user-reset-open"]',
+  userResetPassword: '[data-testid="user-reset-password"]',
+  userResetSubmit: '[data-testid="user-reset-submit"]',
+  userResetShown: '[data-testid="user-reset-shown"]',
+
   addUrl: "#add-url",
   addTitle: "#add-title",
   addTags: "#add-tags",
@@ -96,7 +114,79 @@ export const SEL = {
   saveTitle: "#save-title",
   saveTags: "#save-tags",
   accessions: '[data-testid="accessions"]',
+  accessionsYear: (year) => `[data-testid="accessions-year"][data-year="${year}"]`,
+  accessionsYears: '[data-testid="accessions-year"]',
+  accessionsDay: (day) => `[data-testid="accessions-day"][data-day="${day}"]`,
+  accessionsDays: '[data-testid="accessions-day"]',
+  accessionsSource: (source) => `[data-testid="accessions-source"][data-source="${source}"]`,
+  accessionsSources: '[data-testid="accessions-source"]',
+  accessionsBusiest: (day) => `[data-testid="accessions-busiest"][data-day="${day}"]`,
+  accessionsBusiestRows: '[data-testid="accessions-busiest"]',
   aiBanner: '[data-testid="ai-banner"]',
+
+  graph: '[data-testid="graph"]',
+  graphFilter: "#graph-filter",
+  graphPlate: ".g-plate",
+  graphCanvas: "canvas.g-canvas-el",
+  graphStatus: '[data-testid="graph-status"]',
+  graphStatusMain: '[data-testid="graph-status-main"]',
+  graphResults: '[data-testid="graph-results"]',
+  graphResult: '[data-testid="graph-result"]',
+  graphAside: '[data-testid="graph-aside"]',
+  graphPreview: '[data-testid="graph-preview"]',
+  graphZoomIn: '[data-testid="graph-zoom-in"]',
+  graphZoomOut: '[data-testid="graph-zoom-out"]',
+  graphFit: '[data-testid="graph-fit"]',
+  graphZoomValue: '[data-testid="graph-zoom-value"]',
+  graphTagsToggle: '[data-testid="graph-tags-toggle"]',
+  graphTag: '[data-testid="graph-tag"]',
+  graphRoot: '[data-testid="graph-root"]',
+  graphLabelCount: '[data-testid="graph-label-count"]',
+  graphLegend: '[data-testid="graph-legend"]',
+  graphPreset: '[data-testid="graph-preset"]',
+  graphPresetCompact: '[data-testid="graph-preset-compact"]',
+  graphPresetStandard: '[data-testid="graph-preset-standard"]',
+  graphPresetAiry: '[data-testid="graph-preset-airy"]',
+  graphLocalToggle: '[data-testid="graph-local-toggle"]',
+  graphLocalDepth: '[data-testid="graph-local-depth"]',
+  graphScopeWhole: '[data-testid="graph-scope-whole"]',
+  graphDepth: (depth) => `[data-testid="graph-depth-${depth}"]`,
+  graphSettings: '[data-testid="graph-settings"]',
+  graphGroupEdit: '[data-testid="graph-group-edit"]',
+  graphGroupEditor: '[data-testid="graph-group-editor"]',
+  graphGroupRow: '[data-testid="graph-group-row"]',
+  graphGroupAdd: '[data-testid="graph-group-add"]',
+  graphGroupName: ".g-group-name",
+  graphGroupQuery: ".g-group-query",
+  graphGroupColor: ".g-group-color",
+  graphGroupsSave: '[data-testid="view-groups-save"]',
+  graphGroupsCancel: '[data-testid="view-groups-cancel"]',
+  openGraph: '[data-testid="open-graph"]',
+
+  viewsPage: '[data-testid="views-page"]',
+  viewRow: '[data-testid="view-row"]',
+  viewOpen: '[data-testid="view-open"]',
+  viewDefault: '[data-testid="view-default"]',
+  viewDefaultBadge: '[data-testid="view-default-badge"]',
+  viewDelete: '[data-testid="view-delete"]',
+  viewCreate: '[data-testid="view-create"]',
+  viewImport: '[data-testid="view-import"]',
+  viewRename: '[data-testid="view-rename"]',
+  viewDuplicate: '[data-testid="view-duplicate"]',
+  viewExport: '[data-testid="view-export"]',
+  viewExportDialog: '[data-testid="view-export-dialog"]',
+  viewExportText: '[data-testid="view-export-text"]',
+  viewExportClose: '[data-testid="view-export-close"]',
+  viewImportDialog: '[data-testid="view-import-dialog"]',
+  viewImportText: '[data-testid="view-import-text"]',
+  viewImportSubmit: '[data-testid="view-import-submit"]',
+  viewSaveDialog: '[data-testid="view-save-dialog"]',
+  viewNameInput: '[data-testid="view-name-input"]',
+  viewSaveSubmit: '[data-testid="view-save-submit"]',
+  viewSaveCancel: '[data-testid="view-save-cancel"]',
+  viewSaveGraph: '[data-testid="view-save-graph"]',
+  viewSaveAs: '[data-testid="view-save-as"]',
+  viewSaveCurrent: '[data-testid="view-save-current"]',
 };
 
 // Attach a virtual WebAuthn authenticator so passkey ceremonies complete
@@ -120,27 +210,33 @@ export async function enableWebAuthn(context, page) {
 const TEST_USER = process.env.EZA_TEST_USER || "e2e";
 const TEST_PASSWORD = process.env.EZA_TEST_PASSWORD || "e2e-password-123";
 
-// First-run setup (or login when the scratch database is already claimed).
-// Leaves the ledger mounted and returns when the app shell has painted.
-export async function enterLibrary(page) {
+// Claim the first account on a fresh installation or sign in to an existing
+// one. Leaves the ledger mounted and returns when the app shell has painted.
+export async function enterLibraryAs(page, username, password) {
   await page.goto(BASE + "/", { waitUntil: "domcontentloaded" });
   if (page.url().includes("/setup")) {
-    await page.fill("#username", TEST_USER);
-    await page.fill("#password", TEST_PASSWORD);
-    await page.fill("#confirm-password", TEST_PASSWORD);
+    await page.fill("#username", username);
+    await page.fill("#password", password);
+    await page.fill("#confirm-password", password);
     await page.click("#password-setup");
     await page.waitForSelector("#recovery:not([hidden])", { timeout: 60000 });
     await page.click("#continue");
   } else if (page.url().includes("/login")) {
     if (await page.locator("#password-login").count()) {
-      await page.fill("#username", TEST_USER);
-      await page.fill("#password", TEST_PASSWORD);
+      await page.fill("#username", username);
+      await page.fill("#password", password);
       await page.click("#password-login");
     } else {
       await page.click("#passkey-login");
     }
   }
   await page.waitForSelector(SEL.appShell, { timeout: 60000 });
+}
+
+// Sign in as the harness account, with the first-run setup fallback kept for
+// scripts that claim a fresh installation.
+export async function enterLibrary(page) {
+  return enterLibraryAs(page, TEST_USER, TEST_PASSWORD);
 }
 
 // Cookie-authenticated JSON API call from inside the page, mirroring the

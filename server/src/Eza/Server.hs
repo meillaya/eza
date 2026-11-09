@@ -2,55 +2,85 @@
 
 {- | Warp application: public auth pages/ceremonies, deny-by-default API,
 CSRF/session guard, and the bookmark/tag JSON surface.
+
+Since M3a one process serves many accounts. The control database holds
+identity; a request's session, pending, bearer, or share token names its
+account in the token prefix, the guard resolves that account to a lazily
+opened 'UserSlot', and every handler receives that user's library connection.
+Tokens without a prefix fall back to the single-account behaviour only while
+exactly one enabled account exists.
 -}
 module Eza.Server (
+    AppState (..),
+    UserSlot (..),
+    newAppState,
+    closeAppState,
+    userSlotFor,
+    userSlotCount,
+    enableWorkers,
+    syncUserWorkers,
+    stopAllUserWorkers,
+    userWorkerIds,
+    app,
     runServer,
+    bootPayloadFor,
 ) where
 
-import Control.Concurrent.Async (async)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (Async, async, cancel, poll)
 import Control.Concurrent.MVar
-import Control.Exception (IOException, throwIO, try)
-import Control.Monad (forM_, void)
+import Control.Concurrent.QSem (QSem, newQSem)
+import Control.Exception (IOException, SomeException, bracket, onException, throwIO, try)
+import Control.Monad (filterM, forM, forM_, void, when)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
-import Data.Char (toLower)
+import Data.Char (isDigit, toLower)
 import Data.List (isInfixOf, isPrefixOf)
-import Data.Maybe (fromMaybe)
-import Data.Pool (Pool, defaultPoolConfig, newPool, withResource)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (catMaybes, fromMaybe, isNothing, mapMaybe)
+import Data.Pool (Pool, defaultPoolConfig, destroyAllResources, newPool, withResource)
+import qualified Data.Set as Set
 import Data.String (fromString)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
+import Data.Time.Clock.POSIX (getPOSIXTime, utcTimeToPOSIXSeconds)
 import Database.SQLite.Simple (Connection, Only (..), query)
 import qualified Database.SQLite.Simple as Sqlite
+import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types
+import Network.Socket (SockAddr (..))
 import Network.Wai
 import Network.Wai.Handler.Warp
 import Network.Wai.Middleware.Gzip (GzipFiles (..), GzipSettings (..), defaultGzipSettings, gzip)
-import System.Directory (canonicalizePath, doesFileExist, getFileSize, getModificationTime)
+import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist, getFileSize, getModificationTime)
 import System.Environment (lookupEnv)
 import System.Exit (exitFailure)
-import System.FilePath ((</>))
+import System.FilePath (addTrailingPathSeparator, (</>))
 import System.IO (hPutStrLn, stderr)
 import qualified Web.Cookie as Cookie
 
+import qualified Eza.Admin as Admin
 import Eza.AiTag (aiSuggestions)
 import qualified Eza.Auth as Auth
+import qualified Eza.Authz as Authz
 import Eza.Bookmarks
+import Eza.Boot (BootPayload (..))
 import Eza.Clip (ClipError, ClipRequest (..), ClipTemplate (..), SaveClipResult (..), TemplateError, clipErrorCode, clipErrorMessage, clipErrorStatus, createTemplate, deleteTemplate, getTemplate, previewClip, saveClip, templateErrorCode, templateErrorMessage, templateErrorStatus, templatesPayload, updateTemplate)
 import Eza.Config
+import Eza.Control (ControlUser (..))
+import qualified Eza.Control as Control
 import qualified Eza.Db as Db
 import Eza.DeadLinks (checkDead)
 import Eza.Dedup (DedupQuery (..), dedupCandidates, mergeBookmarks, mergeUrlDuplicatesAll)
-import Eza.Enrich (enqueueEnrichment, runEnrichWorker)
+import Eza.Enrich (enqueueEnrichment, runEnrichWorkerFor)
 import Eza.Export (exportBookmarks)
 import Eza.Favicon (Favicon (..), getFavicon)
-import Eza.Graph (graphNeighborhood)
+import Eza.Graph (LayoutCache (..), emptyLayoutCache, globalGraph, graphLayoutPayload, graphRevision, layoutPresetFromText, lookupCachedLayout, storeCachedLayout)
 import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateHighlight)
 import Eza.Import (defaultImportOptions, importParsed, parseNetscape)
 import Eza.Jobs (resetRunningJobs)
@@ -63,35 +93,32 @@ import Eza.SavedSearches (createSavedSearch, deleteSavedSearch, listSavedSearche
 import Eza.Shares (ShareRecord (..), ShareState (..), ShareUnavailable (..), createShare, listShares, resolveShareState, revokeShare, shareBookmarkPage, shareSearchFeed, shareSearchPage, shareUnavailablePage)
 import Eza.Snapshot (captureSnapshot)
 import Eza.Tags (consolidationCandidates, deleteTag, deleteTagWithLinks, mergeTags, renameTag)
-import Eza.Tokens (Token (..), authenticateToken, createToken, listTokens, revokeToken, tokenAllows)
+import qualified Eza.TokenPrefix as TokenPrefix
+import Eza.Tokens (Token (..), authenticateToken, createToken, listTokens, revokeToken)
 import Eza.Types
 import Eza.Undo (undoLast)
+import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..))
+import Eza.View (ViewInput (..))
+import Eza.Views (ViewError, ViewPatch (..), createView, deleteView, getView, listViews, updateView, viewErrorCode, viewErrorMessage, viewErrorStatus)
+import Eza.Webhook (WebhookInput (..))
+import Eza.Webhooks (WebhookError, WebhookWorkerConfig (..), createWebhook, defaultWebhookWorkerConfig, deleteWebhook, getWebhook, listDeliveries, listWebhooks, runWebhookWorker, testWebhook, updateWebhook, webhookErrorCode, webhookErrorMessage, webhookErrorStatus)
 import Network.Wai.Parse (FileInfo (..), defaultParseRequestBodyOptions, lbsBackEnd, parseRequestBodyEx)
 
-runServer :: Config -> Connection -> IO ()
-runServer cfg conn = do
-    Auth.cleanupExpired conn
-    resetRunningJobs conn
-    recoveryLimiter <- Auth.newRateLimiter 5 900
-    manager <- newTlsManager
-    forM_ [1 .. cfgEnrichWorkers cfg] $ \_ -> void (async (runEnrichWorker manager cfg))
-    writeVar <- newMVar conn
-    readPool <-
-        newPool
-            ( defaultPoolConfig
-                (openReadConnection (cfgDbPath cfg))
-                Sqlite.close
-                60
-                4
-            )
-    let db = ServerDb writeVar readPool
+runServer :: Config -> IO ()
+runServer cfg = do
+    state <- newAppState cfg
+    enableWorkers state
+    supervisor <- async (workerSupervisor state) `onException` closeAppState state
     let settings =
             setHost (fromString (bindHost (cfgBind cfg)))
                 . setPort (bindPort (cfgBind cfg))
                 . setServerName "eza"
                 . setBeforeMainLoop (hPutStrLn stderr ("eza listening on " <> cfgBind cfg))
                 $ defaultSettings
-    outcome <- try (runSettings settings (gzip gzipSettings (securityMiddleware cfg (app cfg db recoveryLimiter)))) :: IO (Either IOException ())
+    outcome <- try (runSettings settings (gzip gzipSettings (securityMiddleware cfg (app cfg state)))) :: IO (Either IOException ())
+    cancel supervisor
+    stopAllUserWorkers state
+    closeAppState state
     case outcome of
         Right () -> pure ()
         Left err
@@ -140,13 +167,51 @@ isSnapshotRequest r = case pathInfo r of
     ["api", "v1", "bookmarks", _, "snapshot"] -> requestMethod r == "GET"
     _ -> False
 
-{- | The single writer plus a small pool of query-only readers. Reads (GET and
-HEAD) run on the pool so a large merge, import or export does not stall
-browsing; every mutation still goes through the one writer connection.
+{- | One server process, one control database, and a lazily opened slot per
+user library database.
+
+The control connection carries identity only: account lookup, login
+bookkeeping, and the per-user WebAuthn handle. Library rows never travel
+through it. Each 'UserSlot' owns its own writer, a small read-only pool, and
+the graph layout cache for that database, so one user's import or merge cannot
+stall another user's browsing.
 -}
-data ServerDb = ServerDb
-    { sdbWrite :: MVar Connection
-    , sdbRead :: Pool Connection
+data AppState = AppState
+    { asConfig :: Config
+    , asControl :: MVar Connection
+    , asUsers :: MVar (Map.Map Int UserSlot)
+    , asManager :: Manager
+    , asRecoveryLimiter :: Auth.RateLimiter
+    , asLoginLimiter :: Auth.RateLimiter
+    , asWorkersEnabled :: MVar Bool
+    , asEnrichSem :: QSem
+    , asLastSessionCleanup :: MVar Int
+    , asWorkerLimitWarned :: MVar [Int]
+    }
+
+{- | An opened user library. Slots are created on first use and closed at
+shutdown. The map in 'asUsers' is the only place a request gets a database
+path, and every path comes from the control row, never from a request.
+-}
+data UserSlot = UserSlot
+    { usUser :: Control.ControlUser
+    , usDbPath :: FilePath
+    , usWrite :: MVar Connection
+    , usRead :: Pool Connection
+    , usLayoutCache :: MVar LayoutCache
+    , usSnapshotDir :: FilePath
+    , usWorkers :: MVar [Async ()]
+    }
+
+{- | What one authenticated request resolved to. Handlers keep their plain
+'Connection' signature; the connection they receive is this user's database.
+-}
+data RequestContext = RequestContext
+    { rcConfig :: Config
+    , rcState :: AppState
+    , rcUser :: Control.ControlUser
+    , rcSlot :: UserSlot
+    , rcAuth :: AuthContext
     }
 
 {- | A pooled read-only connection. WAL lets these run alongside the writer;
@@ -178,87 +243,532 @@ authConfig cfg =
         , Auth.acLoginLockoutSeconds = cfgLoginLockoutSeconds cfg
         }
 
-app :: Config -> ServerDb -> Auth.RateLimiter -> Application
-app cfg db recoveryLimiter req respond = do
+-- ---------------------------------------------------------------------------
+-- Application state
+-- ---------------------------------------------------------------------------
+
+{- | Open the control database, register an existing single-user installation
+when the control registry is empty, and start with no user slots open. The
+control database is cheap and the user databases open lazily; a request only
+ever opens the database its authenticated account names.
+-}
+newAppState :: Config -> IO AppState
+newAppState cfg = do
+    control <- Control.openControlDb (cfgControlDbPath cfg)
+    bootstrapControl cfg control
+    manager <- newTlsManager
+    recoveryLimiter <- Auth.newRateLimiter 5 900
+    loginLimiter <- Auth.newRateLimiter 10 900
+    controlVar <- newMVar control
+    usersVar <- newMVar Map.empty
+    workersEnabledVar <- newMVar False
+    enrichSem <- newQSem (max 1 (cfgEnrichWorkers cfg))
+    lastCleanupVar <- newMVar 0
+    limitWarnedVar <- newMVar []
+    pure
+        AppState
+            { asConfig = cfg
+            , asControl = controlVar
+            , asUsers = usersVar
+            , asManager = manager
+            , asRecoveryLimiter = recoveryLimiter
+            , asLoginLimiter = loginLimiter
+            , asWorkersEnabled = workersEnabledVar
+            , asEnrichSem = enrichSem
+            , asLastSessionCleanup = lastCleanupVar
+            , asWorkerLimitWarned = limitWarnedVar
+            }
+
+{- | Bootstrap and migration. The two existing shapes are:
+
+  * @EZA_DB@ (default @data/eza.db@) is claimed, meaning it already has an
+    account, and the control database is empty: register that exact file as
+    user 1 with the admin role. The file is never copied or moved, so an
+    operator can roll back by removing the control database.
+
+  * Everything else: leave the legacy file alone. The first @/setup@ creates
+    @users/1/eza.db@ and registers it.
+
+A control database with any user row ignores @EZA_DB@ entirely.
+-}
+bootstrapControl :: Config -> Connection -> IO ()
+bootstrapControl cfg control = do
+    accounts <- Control.countUsers control
+    when (accounts == 0) $ do
+        claimed <- legacyDatabaseClaimed cfg
+        when claimed $ do
+            created <- Control.createUser control "owner" (cfgDbPath cfg) RoleAdmin Nothing
+            case created of
+                Left err ->
+                    ioError (userError ("could not register the existing database at " <> cfgDbPath cfg <> ": " <> show err))
+                Right user ->
+                    hPutStrLn
+                        stderr
+                        ( "eza: registered the existing database "
+                            <> cfgDbPath cfg
+                            <> " as user "
+                            <> show (cuId user)
+                            <> " ("
+                            <> T.unpack (cuUsername user)
+                            <> ", admin); the file was left in place"
+                        )
+
+{- | True when the legacy single-user database exists and its @app_state@ says
+an account was claimed. A missing table (the old Python layout) or an
+unclaimed database is not migrated.
+-}
+legacyDatabaseClaimed :: Config -> IO Bool
+legacyDatabaseClaimed cfg = do
+    exists <- doesFileExist (cfgDbPath cfg)
+    if not exists
+        then pure False
+        else do
+            result <-
+                try (bracket (Sqlite.open (cfgDbPath cfg)) Sqlite.close Auth.setupClaimed) ::
+                    IO (Either SomeException Bool)
+            pure (either (const False) id result)
+
+{- | Close every open user database and the control database. Warp has already
+stopped routing requests when this runs.
+-}
+closeAppState :: AppState -> IO ()
+closeAppState state = do
+    -- Worker loops hold their own database connections, so stop them before
+    -- the slots and the control database go away.
+    stopAllUserWorkers state
+    slots <- modifyMVar (asUsers state) (\current -> pure (Map.empty, Map.elems current))
+    mapM_ closeUserSlot slots
+    withMVar (asControl state) Sqlite.close
+
+closeUserSlot :: UserSlot -> IO ()
+closeUserSlot slot = do
+    destroyAllResources (usRead slot)
+    withMVar (usWrite slot) Sqlite.close
+
+{- | The slot for one account, opening the library the first time this process
+needs it. The registry cap is enforced here so a request cannot make the
+server open unbounded database files.
+-}
+userSlotFor :: AppState -> Control.ControlUser -> IO (Either Text UserSlot)
+userSlotFor state user = do
+    opened <- modifyMVar (asUsers state) $ \slots ->
+        case Map.lookup (cuId user) slots of
+            Just slot -> pure (slots, Right slot)
+            Nothing
+                | Map.size slots >= cfgMaxUsers (asConfig state) ->
+                    pure (slots, Left "the server has reached its configured user limit")
+                | otherwise -> do
+                    slot <- openUserSlot (asConfig state) user
+                    pure (Map.insert (cuId user) slot slots, Right slot)
+    case opened of
+        Left message -> pure (Left message)
+        Right slot -> do
+            startUserWorkers state slot
+            pure (Right slot)
+
+-- | How many user databases this process currently has open (tests use it).
+userSlotCount :: AppState -> IO Int
+userSlotCount state = Map.size <$> readMVar (asUsers state)
+
+openUserSlot :: Config -> Control.ControlUser -> IO UserSlot
+openUserSlot cfg user = do
+    conn <- Db.openDb (cuDbPath user)
+    Auth.cleanupExpired conn
+    resetRunningJobs conn
+    writeVar <- newMVar conn
+    readPool <-
+        newPool
+            ( defaultPoolConfig
+                (openReadConnection (cuDbPath user))
+                Sqlite.close
+                60
+                4
+            )
+    layoutCache <- newMVar emptyLayoutCache
+    workersVar <- newMVar []
+    pure
+        UserSlot
+            { usUser = user
+            , usDbPath = cuDbPath user
+            , usWrite = writeVar
+            , usRead = readPool
+            , usLayoutCache = layoutCache
+            , usSnapshotDir = Admin.userSnapshotDir cfg (cuId user)
+            , usWorkers = workersVar
+            }
+
+withDb :: UserSlot -> (Connection -> IO a) -> IO a
+withDb slot = withMVar (usWrite slot)
+
+withReadDb :: UserSlot -> (Connection -> IO a) -> IO a
+withReadDb slot = withResource (usRead slot)
+
+withControl :: AppState -> (Connection -> IO a) -> IO a
+withControl state = withMVar (asControl state)
+
+withSlot ::
+    AppState ->
+    Control.ControlUser ->
+    (Response -> IO ResponseReceived) ->
+    (UserSlot -> IO ResponseReceived) ->
+    IO ResponseReceived
+withSlot state user respond action = do
+    result <- userSlotFor state user
+    case result of
+        Left message -> respond (jsonError status503 "user_limit" message)
+        Right slot -> action slot
+
+enabledUserById :: AppState -> Int -> IO (Maybe Control.ControlUser)
+enabledUserById state userId = withControl state $ \control -> do
+    found <- Control.lookupUserById control userId
+    pure (enabledOnly found)
+
+enabledUserByUsername :: AppState -> Text -> IO (Maybe Control.ControlUser)
+enabledUserByUsername state username = withControl state $ \control -> do
+    found <- Control.lookupUserByUsername control (T.strip username)
+    pure (enabledOnly found)
+
+enabledOnly :: Maybe Control.ControlUser -> Maybe Control.ControlUser
+enabledOnly found = case found of
+    Just user | isNothing (cuDisabledAt user) -> Just user
+    _ -> Nothing
+
+{- | The legacy fallback: an unprefixed token may only resolve while exactly one
+enabled account exists, so there is never a question of whose database it
+belongs to.
+-}
+legacyUser :: AppState -> IO (Maybe Control.ControlUser)
+legacyUser state = withControl state $ \control -> do
+    enabled <- Control.countEnabledUsers control
+    if enabled /= 1
+        then pure Nothing
+        else do
+            users <- Control.listUsers control
+            pure $ case filter (isNothing . cuDisabledAt) users of
+                [user] -> Just user
+                _ -> Nothing
+
+-- ---------------------------------------------------------------------------
+-- Token prefixes
+-- ---------------------------------------------------------------------------
+
+{- | The wire format carries the owning account id, so the server can pick the
+user database before it hashes and validates the token. A rewritten prefix
+lands on the wrong database and fails the hash check. Unprefixed values use
+the explicit single-account fallback.
+
+Wire forms: @u<id>_<raw>@ for sessions, pending sessions, and share links,
+and @eza_pat_u<id>_<raw>@ for API bearer tokens.
+-}
+stripSessionPrefix :: Text -> Maybe (Int, Text)
+stripSessionPrefix = TokenPrefix.splitUserPrefix
+
+{- | Split @eza_pat_u<id>_<random>@ into the account id and the bare
+@eza_pat_<random>@ value whose hash the user database stores.
+-}
+stripApiTokenPrefix :: Text -> Maybe (Int, Text)
+stripApiTokenPrefix wire = do
+    userId <- TokenPrefix.parseApiTokenUserId wire
+    rest <- T.stripPrefix TokenPrefix.apiTokenPrefix wire
+    let (digits, afterDigits) = T.span isDigit rest
+    body <- T.stripPrefix "_" afterDigits
+    if T.null digits || T.null body
+        then Nothing
+        else Just (userId, "eza_pat_" <> body)
+
+wireSessionToken :: Control.ControlUser -> Auth.NewSession -> Auth.NewSession
+wireSessionToken user session =
+    session{Auth.nsToken = TokenPrefix.withUserPrefix TokenPrefix.sessionPrefix (cuId user) (Auth.nsToken session)}
+
+wireApiToken :: Control.ControlUser -> Text -> Text
+wireApiToken user raw = case T.stripPrefix "eza_pat_" raw of
+    Just body -> TokenPrefix.withUserPrefix TokenPrefix.apiTokenPrefix (cuId user) body
+    Nothing -> raw
+
+wireShareToken :: Control.ControlUser -> Text -> Text
+wireShareToken user raw = TokenPrefix.withUserPrefix TokenPrefix.sharePrefix (cuId user) raw
+
+{- | Resolve a prefixed (or legacy unprefixed) token to the account and slot
+that own it, plus the bare value its database stores. Left carries a limit
+message the guard reports as 503; Right Nothing means the token names no
+usable account.
+-}
+resolveOwner ::
+    AppState ->
+    Maybe (Int, Text) ->
+    Text ->
+    IO (Either Text (Maybe (Control.ControlUser, UserSlot, Text)))
+resolveOwner state parsed raw =
+    case parsed of
+        Just (userId, bare) -> do
+            muser <- enabledUserById state userId
+            case muser of
+                Nothing -> pure (Right Nothing)
+                Just user -> slotThen user bare
+        Nothing -> do
+            muser <- legacyUser state
+            case muser of
+                Nothing -> pure (Right Nothing)
+                Just user -> slotThen user raw
+  where
+    slotThen user bare = do
+        result <- userSlotFor state user
+        pure $ case result of
+            Left message -> Left message
+            Right slot -> Right (Just (user, slot, bare))
+
+resolveSession ::
+    AppState ->
+    Text ->
+    IO (Either Text (Maybe (Control.ControlUser, UserSlot, Auth.Session)))
+resolveSession state wire = do
+    owner <- resolveOwner state (stripSessionPrefix wire) wire
+    case owner of
+        Left message -> pure (Left message)
+        Right Nothing -> pure (Right Nothing)
+        Right (Just (user, slot, bare)) -> do
+            found <- withDb slot $ \conn -> Auth.getSession conn bare
+            pure (Right (fmap (\session -> (user, slot, session)) found))
+
+resolveApiToken ::
+    AppState ->
+    Text ->
+    IO (Either Text (Maybe (Control.ControlUser, UserSlot, Text)))
+resolveApiToken state wire = resolveOwner state (stripApiTokenPrefix wire) wire
+
+resolveShareOwner ::
+    AppState ->
+    Text ->
+    IO (Either Text (Maybe (Control.ControlUser, UserSlot, Text)))
+resolveShareOwner state wire = resolveOwner state (stripSessionPrefix wire) wire
+
+-- ---------------------------------------------------------------------------
+-- Per-user workers
+-- ---------------------------------------------------------------------------
+
+{- | Turn worker supervision on for this process. A plain 'newAppState' (tests,
+-- tools) leaves it off so no worker touches a temporary database unexpectedly;
+-- 'runServer' enables it at startup.
+-}
+enableWorkers :: AppState -> IO ()
+enableWorkers state = modifyMVar_ (asWorkersEnabled state) (const (pure True))
+
+-- | How many live worker loops each open account currently has (tests use it).
+userWorkerIds :: AppState -> IO [(Int, Int)]
+userWorkerIds state = do
+    slots <- Map.elems <$> readMVar (asUsers state)
+    forM slots $ \slot -> do
+        workers <- readMVar (usWorkers slot)
+        pure (cuId (usUser slot), length workers)
+
+{- | Start (or restart) the enrichment and webhook loops for one open user
+database. A healthy set is left alone; a set with a dead member is replaced.
+The enrich semaphore is process-wide, so @EZA_ENRICH_WORKERS@ caps total
+network work across every account while each database keeps its own claimer.
+-}
+startUserWorkers :: AppState -> UserSlot -> IO ()
+startUserWorkers state slot = do
+    enabled <- readMVar (asWorkersEnabled state)
+    when enabled $ do
+        let user = usUser slot
+        when (isNothing (cuDisabledAt user)) $
+            modifyMVar_ (usWorkers slot) $ \running -> do
+                alive <- filterM stillRunning running
+                if not (null running) && length alive == length running
+                    then pure running
+                    else do
+                        mapM_ cancel running
+                        spawnUserWorkers state slot
+
+spawnUserWorkers :: AppState -> UserSlot -> IO [Async ()]
+spawnUserWorkers state slot = do
+    let cfg = asConfig state
+        manager = asManager state
+        databasePath = usDbPath slot
+        enrichCount = cfgEnrichWorkers cfg
+        webhookCfg = (defaultWebhookWorkerConfig cfg manager){wwcDatabase = databasePath}
+    enrichWorkers <-
+        forM [1 .. enrichCount] $ \_ ->
+            async (runEnrichWorkerFor manager cfg databasePath (asEnrichSem state))
+    webhookWorker <- async (runWebhookWorker webhookCfg)
+    pure (enrichWorkers <> [webhookWorker])
+
+stillRunning :: Async () -> IO Bool
+stillRunning worker = isNothing <$> poll worker
+
+-- | Stop one account's workers (disable, shutdown, or tests).
+stopUserWorkers :: UserSlot -> IO ()
+stopUserWorkers slot = modifyMVar_ (usWorkers slot) $ \running -> do
+    mapM_ cancel running
+    pure []
+
+stopAllUserWorkers :: AppState -> IO ()
+stopAllUserWorkers state = do
+    slots <- readMVar (asUsers state)
+    mapM_ stopUserWorkers (Map.elems slots)
+
+{- | One reconciliation pass: workers exist only for enabled accounts, enabled
+accounts get their database opened, disabled or removed accounts lose their
+workers. Disabling therefore stops enrichment and webhook delivery at the next
+tick (five seconds in the server) without touching the control row again.
+-}
+syncUserWorkers :: AppState -> IO ()
+syncUserWorkers state = do
+    users <- withControl state Control.listUsers
+    let enabledIds = Set.fromList [cuId user | user <- users, isNothing (cuDisabledAt user)]
+    slots <- readMVar (asUsers state)
+    forM_ (Map.elems slots) $ \slot ->
+        if cuId (usUser slot) `Set.member` enabledIds
+            then startUserWorkers state slot
+            else stopUserWorkers slot
+    misses <-
+        fmap catMaybes $
+            forM users $ \user ->
+                if isNothing (cuDisabledAt user) && not (Map.member (cuId user) slots)
+                    then do
+                        opened <- userSlotFor state user
+                        pure $ case opened of
+                            Left message -> Just (cuId user, message)
+                            Right _ -> Nothing
+                    else pure Nothing
+    warnWorkerLimit state misses
+
+{- | Report accounts the process cannot open because of the user cap once per
+change, not once per tick.
+-}
+warnWorkerLimit :: AppState -> [(Int, T.Text)] -> IO ()
+warnWorkerLimit state misses = do
+    let ids = map fst misses
+    previous <- readMVar (asWorkerLimitWarned state)
+    when (ids /= previous) $ do
+        forM_ misses $ \(userId, message) ->
+            hPutStrLn stderr ("eza: worker supervisor: user " <> show userId <> ": " <> T.unpack message)
+        modifyMVar_ (asWorkerLimitWarned state) (const (pure ids))
+
+cleanupAllSessions :: AppState -> IO ()
+cleanupAllSessions state = do
+    slots <- readMVar (asUsers state)
+    forM_ (Map.elems slots) $ \slot -> do
+        result <- try (withDb slot Auth.cleanupExpired) :: IO (Either SomeException ())
+        case result of
+            Left err ->
+                hPutStrLn stderr ("eza: session cleanup failed for user " <> show (cuId (usUser slot)) <> ": " <> show err)
+            Right () -> pure ()
+
+{- | The server's worker supervisor: reconcile every five seconds and sweep
+expired sessions once a day for every open user database.
+-}
+workerSupervisor :: AppState -> IO ()
+workerSupervisor state = do
+    result <- try (syncUserWorkers state) :: IO (Either SomeException ())
+    case result of
+        Left err -> hPutStrLn stderr ("eza: worker supervisor: " <> show err)
+        Right () -> pure ()
+    now <- floor <$> getPOSIXTime
+    lastCleanup <- readMVar (asLastSessionCleanup state)
+    when (now - lastCleanup >= 86400) $ do
+        cleanupAllSessions state
+        modifyMVar_ (asLastSessionCleanup state) (const (pure now))
+    threadDelay (5 * 1000000)
+    workerSupervisor state
+
+app :: Config -> AppState -> Application
+app cfg state req respond =
     case (requestMethod req, pathInfo req) of
         -- CORS preflight for the browser clipper. This must run before the
         -- auth guard: the preflight deliberately carries no Authorization.
         ("OPTIONS", path) | isClipPath path -> clipPreflight cfg req respond
         -- Public: health + password auth pages/ceremonies.
-        ("GET", ["healthz"]) -> health db respond
-        ("GET", ["login"]) -> withDb db $ \conn -> loginHandler conn req respond
-        ("GET", ["setup"]) -> withDb db $ \conn -> setupHandler conn req respond
+        ("GET", ["healthz"]) -> health state respond
+        ("GET", ["login"]) -> loginHandler state req respond
+        ("GET", ["setup"]) -> setupHandler state req respond
         ("GET", ["recover"]) -> respond (htmlResponse recoverPage)
-        ("GET", ["s", token]) -> withDb db $ \conn -> publicShareHandler conn token respond
-        ("POST", ["api", "auth", "login"]) -> withDb db $ \conn -> passwordLoginHandler cfg conn req respond
-        ("POST", ["api", "auth", "passkey", "options"]) -> withDb db $ \conn -> passkeySecondFactorOptionsHandler cfg conn req respond
-        ("POST", ["api", "auth", "passkey", "verify"]) -> withDb db $ \conn -> passkeySecondFactorVerifyHandler cfg conn req respond
-        ("POST", ["api", "auth", "options"]) -> withDb db $ \conn -> legacyPasskeyOptionsHandler cfg conn req respond
-        ("POST", ["api", "auth", "verify"]) -> withDb db $ \conn -> legacyPasskeyVerifyHandler cfg conn req respond
-        ("POST", ["api", "setup", "password"]) -> withDb db $ \conn -> passwordSetupHandler cfg conn req respond
+        ("GET", ["s", token]) -> publicShareHandler state token respond
+        ("POST", ["api", "auth", "login"]) -> passwordLoginHandler state req respond
+        ("POST", ["api", "auth", "passkey", "options"]) -> passkeySecondFactorOptionsHandler state req respond
+        ("POST", ["api", "auth", "passkey", "verify"]) -> passkeySecondFactorVerifyHandler state req respond
+        ("POST", ["api", "auth", "options"]) -> legacyPasskeyOptionsHandler state req respond
+        ("POST", ["api", "auth", "verify"]) -> legacyPasskeyVerifyHandler state req respond
+        ("POST", ["api", "setup", "password"]) -> passwordSetupHandler state req respond
         -- Passkey-first setup is retired. Recovery sets a password too.
         ("POST", ["api", "setup", "options"]) -> respond passkeySetupRetired
         ("POST", ["api", "setup", "verify"]) -> respond passkeySetupRetired
-        ("POST", ["api", "recovery", "redeem"]) -> withDb db $ \conn -> recoveryRedeemHandler cfg recoveryLimiter conn req respond
+        ("POST", ["api", "recovery", "redeem"]) -> recoveryRedeemHandler state req respond
         ("GET", ("assets" : rest)) -> serveAsset cfg rest req respond
         ("GET", ["favicon.svg"]) -> serveAsset cfg ["favicon.svg"] req respond
         ("GET", ["theme.js"]) -> serveAsset cfg ["theme.js"] req respond
         ("GET", ["manifest.webmanifest"]) ->
             serveStaticFile cfg "manifest.webmanifest" [("Content-Type", "application/manifest+json")] req respond
         ("GET", ["sw.js"]) -> serveServiceWorker cfg req respond
-        ("GET", []) -> withDb db $ \conn -> do
-            msess <- sessionFromReq conn req
+        ("GET", []) -> do
+            msess <- requestSession state req
             case msess of
-                Just sess | Auth.sessScope sess == "normal" -> indexResponse cfg req respond
+                Just (_, _, sess) | Auth.sessScope sess == "normal" -> indexResponse cfg req respond
                 _ -> respond (redirectTo "/login")
         -- Authenticated API.
-        _ -> withAuthed cfg db req respond $ \ctx conn -> authedRoute cfg db req respond ctx conn
+        _ -> withAuthed cfg state req respond $ \rctx conn -> authedRoute rctx req respond conn
 
 -- ---------------------------------------------------------------------------
 -- Public auth handlers
 -- ---------------------------------------------------------------------------
 
-loginHandler :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-loginHandler conn req respond = do
-    msess <- sessionFromReq conn req
-    if maybe False (\sess -> Auth.sessScope sess == "normal") msess
+loginHandler :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+loginHandler state req respond = do
+    msess <- requestSession state req
+    if maybe False (\(_, _, sess) -> Auth.sessScope sess == "normal") msess
         then respond (redirectTo "/")
         else do
-            configured <- Auth.accountConfigured conn
-            allowed <- Auth.setupAllowed conn
-            legacy <- Auth.legacyPasskeyLoginAllowed conn
-            if allowed
+            accounts <- withControl state Control.countUsers
+            if accounts == 0
                 then respond (redirectTo "/setup")
-                else
-                    if configured
-                        then respond (htmlResponse loginPage)
-                        else
-                            if legacy
-                                then respond (htmlResponse passkeyLoginPage)
-                                else respond (htmlResponse loginPage)
+                else do
+                    legacy <- legacyPasskeyLogin state
+                    respond (htmlResponse (if legacy then passkeyLoginPage else loginPage))
 
-{- | A fresh database and a recovery session both open the password setup;
-anything else goes back to sign in.
+{- | The legacy passkey page is only for a single-account database that still
+has passkeys and no password. A multi-user install always shows the password
+form.
 -}
-setupHandler :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-setupHandler conn req respond = do
-    msess <- sessionFromReq conn req
+legacyPasskeyLogin :: AppState -> IO Bool
+legacyPasskeyLogin state = do
+    muser <- legacyUser state
+    case muser of
+        Nothing -> pure False
+        Just user -> do
+            result <- userSlotFor state user
+            case result of
+                Left _ -> pure False
+                Right slot -> withDb slot (Auth.legacyPasskeyLoginAllowed)
+
+{- | A fresh control database and a recovery session both open the password
+setup; anything else goes back to sign in.
+-}
+setupHandler :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+setupHandler state req respond = do
+    msess <- requestSession state req
     case msess of
-        Just sess
-            | Auth.sessScope sess == "recovery" -> do
-                account <- Auth.loadAccount conn
-                respond (htmlResponse (recoverySetupPage (Auth.acctUsername account)))
+        Just (user, _, sess)
+            | Auth.sessScope sess == "recovery" ->
+                respond (htmlResponse (recoverySetupPage (cuUsername user)))
         Just _ -> respond (redirectTo "/")
         Nothing -> do
-            allowed <- Auth.setupAllowed conn
-            if allowed then respond (htmlResponse setupPage) else respond (redirectTo "/login")
+            accounts <- withControl state Control.countUsers
+            if accounts == 0
+                then respond (htmlResponse setupPage)
+                else respond (redirectTo "/login")
 
 passkeySetupRetired :: Response
 passkeySetupRetired =
     jsonError status410 "passkey_setup_retired" "passkey setup is retired; create a username and password first"
 
-passwordLoginHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-passwordLoginHandler cfg conn req respond =
+{- | Password sign-in for one named account. The username selects the control
+row and therefore the database; an unknown or disabled name pays for a dummy
+Argon2 hash and returns the same generic 401 as a wrong password. A per-host
+and per-username limiter caps the attempts before the database is touched, and
+the user database keeps its own lockout counter.
+-}
+passwordLoginHandler :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+passwordLoginHandler state req respond =
     case requireOrigin cfg req of
         Left err -> respond (authErrResponse err)
         Right () -> do
@@ -270,54 +780,96 @@ passwordLoginHandler cfg conn req respond =
                     Nothing -> respond (jsonError status400 "bad_request" "invalid body")
                     Just o -> case (parseMaybe (.: "username") o, parseMaybe (.: "password") o) of
                         (Just username, Just password) -> do
-                            result <- Auth.verifyPasswordLogin conn (authConfig cfg) username password
-                            case result of
-                                Left err -> respond (authErrResponse err)
-                                Right (Auth.LoginComplete sess) ->
-                                    respond
-                                        ( withAuthCookies
-                                            cfg
-                                            sess
-                                            (jsonResponse status200 (object ["requires_2fa" .= False, "redirect" .= ("/" :: Text)]))
-                                        )
-                                Right (Auth.LoginNeedsPasskey pending) ->
-                                    respond
-                                        ( withPendingCookie
-                                            cfg
-                                            pending
-                                            (jsonResponse status200 (object ["requires_2fa" .= True]))
-                                        )
+                            let limiterKey = clientHostKey req <> "|" <> T.toLower (T.strip username)
+                            attempt <- Auth.checkRateLimit (asLoginLimiter state) limiterKey
+                            case attempt of
+                                Left retryAfter -> respond (lockedResponse "login_locked" retryAfter)
+                                Right () -> attemptLogin username password limiterKey
                         _ -> respond (jsonError status400 "bad_request" "username and password are required")
+  where
+    cfg = asConfig state
+
+    attemptLogin username password limiterKey = do
+        mfound <- enabledUserByUsername state username
+        case mfound of
+            Nothing -> do
+                Password.dummyVerify (cfgArgon2 cfg) password
+                respond invalidCredentials
+            Just user -> withSlot state user respond $ \slot -> do
+                result <-
+                    withDb slot $ \conn ->
+                        Auth.verifyPasswordLogin conn (authConfig cfg) username password
+                case result of
+                    Left err -> respond (authErrResponse err)
+                    Right (Auth.LoginComplete session) -> do
+                        Auth.resetRateLimit (asLoginLimiter state) limiterKey
+                        withControl state $ \control -> Control.setUserLastLogin control (cuId user)
+                        respond
+                            ( withAuthCookies
+                                cfg
+                                (wireSessionToken user session)
+                                (jsonResponse status200 (object ["requires_2fa" .= False, "redirect" .= ("/" :: Text)]))
+                            )
+                    Right (Auth.LoginNeedsPasskey pending) -> do
+                        Auth.resetRateLimit (asLoginLimiter state) limiterKey
+                        withControl state $ \control -> Control.setUserLastLogin control (cuId user)
+                        respond
+                            ( withPendingCookie
+                                cfg
+                                (wireSessionToken user pending)
+                                (jsonResponse status200 (object ["requires_2fa" .= True]))
+                            )
+
+invalidCredentials :: Response
+invalidCredentials = jsonError status401 "invalid_credentials" "invalid username or password"
+
+lockedResponse :: Text -> Int -> Response
+lockedResponse code retryAfter =
+    mapResponseHeaders
+        (<> [("Retry-After", BSC.pack (show retryAfter))])
+        (jsonError status429 code "too many failed attempts; try again later")
+
+{- | The client address without the ephemeral source port, so the login and
+recovery limiters key on the host instead of on each new connection.
+-}
+clientHostKey :: Request -> Text
+clientHostKey req = case remoteHost req of
+    SockAddrInet _ address -> T.pack (show address)
+    SockAddrInet6 _ _ address _ -> T.pack (show address)
+    other -> T.pack (show other)
 
 {- | The passkey half of a two-factor sign-in. Both handlers need the pending
 cookie that the password step set; without it there is no sign-in to finish.
+The cookie prefix selects the same database the password step used.
 -}
-passkeySecondFactorOptionsHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-passkeySecondFactorOptionsHandler cfg conn req respond =
+passkeySecondFactorOptionsHandler :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+passkeySecondFactorOptionsHandler state req respond =
     case requireOrigin cfg req of
         Left err -> respond (authErrResponse err)
         Right () -> do
-            mpending <- pendingSessionFromReq conn req
+            mpending <- pendingSession state req
             case mpending of
                 Nothing -> respond pendingRequired
-                Just _ -> do
+                Just (_, slot, _) -> withDb slot $ \conn -> do
                     result <- Auth.secondFactorOptions conn (authConfig cfg)
                     either (respond . authErrResponse) (respond . jsonResponse status200) result
+  where
+    cfg = asConfig state
 
-passkeySecondFactorVerifyHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-passkeySecondFactorVerifyHandler cfg conn req respond =
+passkeySecondFactorVerifyHandler :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+passkeySecondFactorVerifyHandler state req respond =
     case requireOrigin cfg req of
         Left err -> respond (authErrResponse err)
         Right () -> do
-            mpending <- pendingSessionFromReq conn req
-            case mpending of
-                Nothing -> respond pendingRequired
-                Just pending -> do
-                    body <- readAuthBody cfg req
-                    case body of
-                        Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
-                        Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
-                        Right value -> do
+            body <- readAuthBody cfg req
+            case body of
+                Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
+                Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
+                Right value -> do
+                    mpending <- pendingSession state req
+                    case mpending of
+                        Nothing -> respond pendingRequired
+                        Just (user, slot, pending) -> withDb slot $ \conn -> do
                             result <- Auth.verifySecondFactor conn (authConfig cfg) value
                             case result of
                                 Left err -> respond (authErrResponse err)
@@ -325,70 +877,96 @@ passkeySecondFactorVerifyHandler cfg conn req respond =
                                     completed <- Auth.completePendingLogin conn (authConfig cfg) pending
                                     case completed of
                                         Left err -> respond (authErrResponse err)
-                                        Right sess ->
+                                        Right session ->
                                             respond
                                                 ( clearPendingCookie
                                                     cfg
                                                     ( withAuthCookies
                                                         cfg
-                                                        sess
+                                                        (wireSessionToken user session)
                                                         (jsonResponse status200 (object ["requires_2fa" .= False, "redirect" .= ("/" :: Text)]))
                                                     )
                                                 )
+  where
+    cfg = asConfig state
 
 pendingRequired :: Response
 pendingRequired = jsonError status401 "pending_required" "the password sign-in expired; sign in again"
 
-{- | Legacy passkey sign-in: only while the database has passkeys and no
-password, and never during a recovery setup.
+{- | Legacy passkey sign-in: only while exactly one enabled account exists and
+its database has passkeys but no password, and never during a recovery setup.
 -}
-legacyPasskeyOptionsHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-legacyPasskeyOptionsHandler cfg conn req respond =
+legacyCeremonySlot :: AppState -> IO (Maybe (Control.ControlUser, UserSlot))
+legacyCeremonySlot state = do
+    muser <- legacyUser state
+    case muser of
+        Nothing -> pure Nothing
+        Just user -> do
+            result <- userSlotFor state user
+            pure $ case result of
+                Left _ -> Nothing
+                Right slot -> Just (user, slot)
+
+legacyPasskeyOptionsHandler :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+legacyPasskeyOptionsHandler state req respond =
     case requireOrigin cfg req of
         Left err -> respond (authErrResponse err)
         Right () -> do
-            allowed <- legacyCeremonyAllowed conn
-            if not allowed
-                then respond passkeysRetired
-                else do
-                    result <- Auth.authenticationOptions conn (authConfig cfg)
-                    either (respond . authErrResponse) (respond . jsonResponse status200) result
+            target <- legacyCeremonySlot state
+            case target of
+                Nothing -> respond passkeysRetired
+                Just (_, slot) -> withDb slot $ \conn -> do
+                    allowed <- Auth.legacyPasskeyLoginAllowed conn
+                    if not allowed
+                        then respond passkeysRetired
+                        else do
+                            result <- Auth.authenticationOptions conn (authConfig cfg)
+                            either (respond . authErrResponse) (respond . jsonResponse status200) result
+  where
+    cfg = asConfig state
 
-legacyPasskeyVerifyHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-legacyPasskeyVerifyHandler cfg conn req respond =
+legacyPasskeyVerifyHandler :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+legacyPasskeyVerifyHandler state req respond =
     case requireOrigin cfg req of
         Left err -> respond (authErrResponse err)
         Right () -> do
-            allowed <- legacyCeremonyAllowed conn
-            if not allowed
-                then respond passkeysRetired
-                else do
-                    body <- readAuthBody cfg req
-                    case body of
-                        Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
-                        Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
-                        Right value -> do
-                            result <- Auth.verifyLogin conn (authConfig cfg) value
-                            case result of
-                                Left err -> respond (authErrResponse err)
-                                Right sess -> respond (withAuthCookies cfg sess (jsonResponse status200 (object ["redirect" .= ("/" :: Text)])))
-
-legacyCeremonyAllowed :: Connection -> IO Bool
-legacyCeremonyAllowed conn = do
-    rec <- Auth.hasRecoverySession conn
-    configured <- Auth.accountConfigured conn
-    pure (not configured && not rec)
+            target <- legacyCeremonySlot state
+            case target of
+                Nothing -> respond passkeysRetired
+                Just (user, slot) -> do
+                    allowed <- withDb slot (Auth.legacyPasskeyLoginAllowed)
+                    if not allowed
+                        then respond passkeysRetired
+                        else do
+                            body <- readAuthBody cfg req
+                            case body of
+                                Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
+                                Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
+                                Right value -> do
+                                    result <- withDb slot $ \conn -> Auth.verifyLogin conn (authConfig cfg) value
+                                    case result of
+                                        Left err -> respond (authErrResponse err)
+                                        Right session ->
+                                            respond
+                                                ( withAuthCookies
+                                                    cfg
+                                                    (wireSessionToken user session)
+                                                    (jsonResponse status200 (object ["redirect" .= ("/" :: Text)]))
+                                                )
+  where
+    cfg = asConfig state
 
 passkeysRetired :: Response
 passkeysRetired =
     jsonError status403 "passkeys_retired" "password sign-in is active; passkeys are legacy credentials"
 
-{- | Create the account on a fresh database or finish a recovery setup: store
-the Argon2id hash, claim the database, replace the recovery codes, and sign
-the browser in.
+{- | Finish a password setup. With a recovery session the session's account is
+the target; on an empty control database this claims a new user and creates
+the next free @users/N/eza.db@ (never the legacy @EZA_DB@ file, which is only
+adopted by the startup bootstrap when it already holds an account).
 -}
-passwordSetupHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-passwordSetupHandler cfg conn req respond =
+passwordSetupHandler :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+passwordSetupHandler state req respond =
     case requireOrigin cfg req of
         Left err -> respond (authErrResponse err)
         Right () -> do
@@ -399,29 +977,68 @@ passwordSetupHandler cfg conn req respond =
                 Right value -> case parseSetupBody value of
                     Left message -> respond (jsonError status400 "bad_request" message)
                     Right (rawUsername, password) -> do
-                        allowed <- Auth.setupAllowed conn
-                        claimed <- Auth.setupClaimed conn
-                        msess <- sessionFromReq conn req
-                        let recoverySession = maybe False (\sess -> Auth.sessScope sess == "recovery") msess
-                        if not allowed
-                            then respond (jsonError status403 "setup_unavailable" "setup is not available")
-                            else
-                                if claimed && not recoverySession
-                                    then respond (jsonError status403 "recovery_session_required" "a recovery session is required to finish recovery setup")
-                                    else case validateUsername rawUsername of
-                                        Left message -> respond (jsonError status400 "invalid_username" message)
-                                        Right username -> case validatePassword password of
-                                            Left message -> respond (jsonError status400 "weak_password" message)
-                                            Right () -> do
-                                                passwordHash <- Password.hashPassword (cfgArgon2 cfg) password
-                                                codes <- Auth.completeSetup conn username passwordHash
-                                                sess <- Auth.createSession conn "normal" (cfgSessionTtlSeconds cfg)
-                                                respond
-                                                    ( withAuthCookies
-                                                        cfg
-                                                        sess
-                                                        (jsonResponse status200 (object ["codes" .= codes, "redirect" .= ("/" :: Text)]))
-                                                    )
+                        msess <- requestSession state req
+                        case msess of
+                            Just (user, slot, sess)
+                                | Auth.sessScope sess == "recovery" ->
+                                    finishRecoverySetup user slot rawUsername password
+                            Just _ ->
+                                respond (jsonError status403 "recovery_session_required" "a recovery session is required to finish recovery setup")
+                            Nothing -> startFreshSetup rawUsername password
+  where
+    cfg = asConfig state
+
+    finishRecoverySetup user slot rawUsername password =
+        case validateSetupCredentials rawUsername password of
+            Left response -> respond response
+            Right username -> do
+                renamed <- withControl state $ \control -> Control.setUsername control (cuId user) username
+                case renamed of
+                    Left Control.ControlDuplicateUsername ->
+                        respond (jsonError status409 "username_taken" "that username is already in use")
+                    Left err -> respond (jsonError status500 "control" (T.pack (show err)))
+                    Right () -> do
+                        passwordHash <- Password.hashPassword (cfgArgon2 cfg) password
+                        codes <- withDb slot $ \conn -> Auth.completeSetup conn username passwordHash
+                        session <- withDb slot $ \conn -> Auth.createSession conn "normal" (cfgSessionTtlSeconds cfg)
+                        withControl state $ \control -> Control.setUserLastLogin control (cuId user)
+                        respond
+                            ( withAuthCookies
+                                cfg
+                                (wireSessionToken user session)
+                                (jsonResponse status200 (object ["codes" .= codes, "redirect" .= ("/" :: Text)]))
+                            )
+
+    startFreshSetup rawUsername password = do
+        accounts <- withControl state Control.countUsers
+        if accounts /= 0
+            then respond (jsonError status403 "setup_unavailable" "setup is not available")
+            else case validateSetupCredentials rawUsername password of
+                Left response -> respond response
+                Right username -> do
+                    -- The shared account path allocates the control row first,
+                    -- then creates and migrates the user database.
+                    created <-
+                        withControl state $ \control ->
+                            Admin.createUserAccount cfg control username RoleAdmin password
+                    case created of
+                        Left err -> respond (adminErrorResponse err)
+                        Right (user, codes) -> withSlot state user respond $ \slot -> do
+                            session <- withDb slot $ \conn -> Auth.createSession conn "normal" (cfgSessionTtlSeconds cfg)
+                            withControl state $ \control -> Control.setUserLastLogin control (cuId user)
+                            respond
+                                ( withAuthCookies
+                                    cfg
+                                    (wireSessionToken user session)
+                                    (jsonResponse status200 (object ["codes" .= codes, "redirect" .= ("/" :: Text)]))
+                                )
+
+    validateSetupCredentials rawUsername password =
+        case validateUsername rawUsername of
+            Left message -> Left (jsonError status400 "invalid_username" message)
+            Right username -> case validatePassword password of
+                Left message -> Left (jsonError status400 "weak_password" message)
+                Right () -> Right username
 
 parseSetupBody :: Value -> Either Text (Text, Text)
 parseSetupBody value = case parseMaybeObj value of
@@ -432,8 +1049,12 @@ parseSetupBody value = case parseMaybeObj value of
             | otherwise -> Right (username, password)
         _ -> Left "username, password, and confirm are required"
 
-recoveryRedeemHandler :: Config -> Auth.RateLimiter -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-recoveryRedeemHandler cfg limiter conn req respond =
+{- | Redeem one recovery code for a named account. The username resolves the
+control row first, so a multi-user install can no longer redeem a code blindly
+against the one database. Unknown names and used codes share the same 400.
+-}
+recoveryRedeemHandler :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+recoveryRedeemHandler state req respond =
     case requireOrigin cfg req of
         Left err -> respond (authErrResponse err)
         Right () -> do
@@ -442,26 +1063,37 @@ recoveryRedeemHandler cfg limiter conn req respond =
                 Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
                 Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
                 Right value -> do
-                    let clientKey = T.pack (show (remoteHost req))
-                    attempt <- Auth.checkRateLimit limiter clientKey
+                    let limiterKey = clientHostKey req <> "|recovery"
+                    attempt <- Auth.checkRateLimit (asRecoveryLimiter state) limiterKey
                     case attempt of
-                        Left retryAfter ->
-                            respond
-                                ( mapResponseHeaders
-                                    (<> [("Retry-After", BSC.pack (show retryAfter))])
-                                    (jsonError status429 "recovery_locked" "too many recovery attempts; try again later")
-                                )
+                        Left retryAfter -> respond (lockedResponse "recovery_locked" retryAfter)
                         Right () -> case parseMaybeObj value of
                             Nothing -> respond (jsonError status400 "bad_request" "invalid body")
-                            Just o -> case parseMaybe (.: "code") o of
-                                Nothing -> respond (jsonError status400 "bad_request" "code is required")
-                                Just code -> do
-                                    result <- Auth.redeemRecoveryCode conn code
-                                    case result of
-                                        Left err -> respond (authErrResponse err)
-                                        Right sess -> do
-                                            Auth.resetRateLimit limiter clientKey
-                                            respond (withAuthCookies cfg sess (jsonResponse status200 (object ["redirect" .= ("/setup" :: Text)])))
+                            Just o -> case (parseMaybe (.: "username") o, parseMaybe (.: "code") o) of
+                                (Just username, Just code) -> redeem username code limiterKey
+                                _ -> respond (jsonError status400 "bad_request" "username and code are required")
+  where
+    cfg = asConfig state
+
+    redeem username code limiterKey = do
+        mfound <- enabledUserByUsername state username
+        case mfound of
+            Nothing -> respond badCode
+            Just user -> withSlot state user respond $ \slot -> do
+                result <- withDb slot $ \conn -> Auth.redeemRecoveryCode conn code
+                case result of
+                    Left err -> respond (authErrResponse err)
+                    Right session -> do
+                        Auth.resetRateLimit (asRecoveryLimiter state) limiterKey
+                        withControl state $ \control -> Control.setUserLastLogin control (cuId user)
+                        respond
+                            ( withAuthCookies
+                                cfg
+                                (wireSessionToken user session)
+                                (jsonResponse status200 (object ["redirect" .= ("/setup" :: Text)]))
+                            )
+
+    badCode = jsonError status400 "bad_code" "unknown or already-used recovery code"
 
 -- ---------------------------------------------------------------------------
 -- Auth body size and origin checks
@@ -532,8 +1164,12 @@ data AuthContext
     = CookieSession Auth.Session
     | BearerToken Token
 
-authedRoute :: Config -> ServerDb -> Request -> (Response -> IO ResponseReceived) -> AuthContext -> Connection -> IO ResponseReceived
-authedRoute cfg _db req respond ctx conn =
+{- | Every authenticated JSON and app-shell route. The handler keeps its
+plain 'Connection' signature; the connection is the authenticated user's
+database, and the context carries that user's control row and slot.
+-}
+authedRoute :: RequestContext -> Request -> (Response -> IO ResponseReceived) -> Connection -> IO ResponseReceived
+authedRoute rctx req respond conn =
     case (requestMethod req, pathInfo req) of
         ("GET", ["api", "v1", "whoami"]) -> whoAmI cfg conn req ctx respond
         ("POST", ["api", "v1", "clip"]) -> clipSaveHandler cfg conn req respond
@@ -557,11 +1193,8 @@ authedRoute cfg _db req respond ctx conn =
             Just tid -> templateWriteSession respond ctx (templateDeleteHandler conn tid respond)
         ("GET", ["save"]) -> indexResponse cfg req respond
         ("GET", ["api", "v1", "boot"]) -> do
-            page <- listBookmarks conn defaultListQuery
-            tags <- allTags conn
-            stats <- libraryStats conn
-            searches <- listSavedSearches conn
-            respond (jsonResponse status200 (BootPayload "0.1.0" (cfgPublicOrigin cfg) tags searches page stats))
+            payload <- bootPayloadFor (cfgPublicOrigin cfg) conn
+            respond (jsonResponse status200 payload)
         ("GET", ["api", "v1", "bookmarks"]) -> do
             page <- listBookmarks conn (listQueryFrom req)
             respond (jsonResponse status200 page)
@@ -604,7 +1237,7 @@ authedRoute cfg _db req respond ctx conn =
         ("GET", ["api", "v1", "share-links"]) -> do
             shares <- listShares conn
             respond (jsonResponse status200 (object ["shares" .= shares]))
-        ("POST", ["api", "v1", "share-links"]) -> shareCreateHandler cfg conn req respond
+        ("POST", ["api", "v1", "share-links"]) -> shareCreateHandler cfg user conn req respond
         ("DELETE", ["api", "v1", "share-links", idTxt]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid share id")
             Just shareId -> do
@@ -612,7 +1245,7 @@ authedRoute cfg _db req respond ctx conn =
                 if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "share not found")
         ("GET", ["api", "v1", "bookmarks", idTxt, "snapshot"]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid bookmark id")
-            Just bid -> snapshotHandler cfg conn bid respond
+            Just bid -> snapshotHandler cfg slot conn bid respond
         ("GET", ["api", "v1", "tags"]) -> do
             tags <- allTags conn
             respond (jsonResponse status200 (object ["tags" .= tags]))
@@ -635,7 +1268,7 @@ authedRoute cfg _db req respond ctx conn =
                             enqueueEnrichment conn bid
                             respond (jsonResponse status200 (object ["ok" .= True, "queued" .= True]))
                         "snapshot" -> do
-                            m <- captureSnapshot cfg conn bid
+                            m <- captureSnapshot cfg (usSnapshotDir slot) conn bid
                             case m of
                                 Nothing -> respond (jsonError status502 "snapshot_failed" "the snapshot could not be captured")
                                 Just (kind, value) ->
@@ -651,14 +1284,63 @@ authedRoute cfg _db req respond ctx conn =
             items <- autocomplete conn q 10
             respond (jsonResponse status200 (object ["items" .= items]))
         ("GET", ["api", "v1", "graph"]) -> do
-            case (readInt =<< param "seed" req) of
-                Nothing -> respond (jsonError status400 "bad_request" "seed is required")
-                Just seed -> do
-                    let depth = fromMaybe 1 (readInt =<< param "depth" req)
-                    m <- graphNeighborhood conn seed depth
-                    case m of
-                        Nothing -> respond (jsonError status404 "not_found" "bookmark not found")
-                        Just g -> respond (jsonResponse status200 g)
+            graph <- globalGraph conn
+            respond (jsonResponse status200 graph)
+        ("GET", ["api", "v1", "graph", "layout"]) ->
+            graphLayoutHandler slot conn req respond
+        ("GET", ["api", "v1", "views"]) -> do
+            views <- listViews conn
+            respond (jsonResponse status200 (object ["views" .= views]))
+        ("POST", ["api", "v1", "views"]) ->
+            viewsCreateHandler conn req respond
+        ("GET", ["api", "v1", "views", viewSlug]) -> do
+            found <- getView conn viewSlug
+            case found of
+                Nothing -> respond (jsonError status404 "not_found" "view not found")
+                Just view -> respond (jsonResponse status200 view)
+        ("PATCH", ["api", "v1", "views", viewSlug]) ->
+            viewsUpdateHandler conn viewSlug req respond
+        ("DELETE", ["api", "v1", "views", viewSlug]) -> do
+            result <- deleteView conn viewSlug
+            case result of
+                Left err -> respond (viewErrorResponse err)
+                Right () -> respond (emptyResponse status204)
+        ("GET", ["api", "v1", "webhooks"]) -> do
+            webhooks <- listWebhooks conn
+            respond (jsonResponse status200 (object ["webhooks" .= webhooks]))
+        ("POST", ["api", "v1", "webhooks"]) ->
+            webhookCreateHandler conn req respond
+        ("GET", ["api", "v1", "webhooks", idTxt]) -> case readInt idTxt of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid webhook id")
+            Just webhookId -> do
+                found <- getWebhook conn webhookId
+                case found of
+                    Nothing -> respond (jsonError status404 "not_found" "webhook not found")
+                    Just webhook -> respond (jsonResponse status200 webhook)
+        ("PATCH", ["api", "v1", "webhooks", idTxt]) -> case readInt idTxt of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid webhook id")
+            Just webhookId -> webhookUpdateHandler conn webhookId req respond
+        ("DELETE", ["api", "v1", "webhooks", idTxt]) -> case readInt idTxt of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid webhook id")
+            Just webhookId -> do
+                removed <- deleteWebhook conn webhookId
+                if removed
+                    then respond (emptyResponse status204)
+                    else respond (jsonError status404 "not_found" "webhook not found")
+        ("POST", ["api", "v1", "webhooks", idTxt, "test"]) -> case readInt idTxt of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid webhook id")
+            Just webhookId ->
+                webhookTestHandler cfg state conn webhookId respond
+        ("GET", ["api", "v1", "webhooks", idTxt, "deliveries"]) -> case readInt idTxt of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid webhook id")
+            Just webhookId -> do
+                exists <- getWebhook conn webhookId
+                case exists of
+                    Nothing -> respond (jsonError status404 "not_found" "webhook not found")
+                    Just _ -> do
+                        let limit = fromMaybe 20 (readInt =<< param "limit" req)
+                        deliveries <- listDeliveries conn webhookId limit
+                        respond (jsonResponse status200 (object ["deliveries" .= deliveries]))
         ("GET", ["api", "v1", "saved-searches"]) -> do
             s <- listSavedSearches conn
             respond (jsonResponse status200 (object ["saved_searches" .= s]))
@@ -905,34 +1587,36 @@ authedRoute cfg _db req respond ctx conn =
                 Left err -> respond (jsonError status400 "bad_request" (T.pack err))
                 Right (TokenCreateBody name scopes) -> do
                     (_, raw, view) <- createToken conn name (fromMaybe ["read", "write"] scopes)
-                    respond (jsonResponse status201 (object ["token" .= raw, "token_info" .= view]))
+                    respond (jsonResponse status201 (object ["token" .= wireApiToken user raw, "token_info" .= view]))
         ("DELETE", ["api", "v1", "tokens", idTxt]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid token id")
             Just tokenId -> do
                 ok <- revokeToken conn tokenId
                 if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "token not found")
         ("GET", ["api", "v1", "account"]) -> do
-            payload <- accountPayload conn ctx
+            payload <- accountPayload conn ctx (Control.cuRole user)
             respond (jsonResponse status200 payload)
-        ("POST", ["api", "v1", "account", "2fa"]) -> accountTwoFactorHandler cfg conn ctx req respond
+        ("POST", ["api", "v1", "account", "2fa"]) -> accountTwoFactorHandler cfg conn ctx (Control.cuRole user) req respond
         ("POST", ["api", "v1", "account", "password"]) ->
             accountPasswordHandler cfg conn ctx req respond
         ("POST", ["api", "v1", "account", "username"]) ->
-            accountUsernameHandler cfg conn req respond
+            accountUsernameHandler cfg state user conn req respond
         ("POST", ["api", "v1", "account", "sessions", "revoke-others"]) -> case ctx of
             CookieSession sess -> do
                 revoked <- Auth.deleteOtherSessions conn sess
                 respond (jsonResponse status200 (object ["revoked" .= revoked]))
             BearerToken _ -> respond (jsonError status403 "session_required" "a bearer token cannot revoke browser sessions")
         ("POST", ["api", "v1", "account", "passkeys", "options"]) -> do
-            r <- Auth.addPasskeyOptions conn (authConfig cfg)
+            handle <- passkeyHandle state user
+            r <- Auth.addPasskeyOptions conn (authConfig cfg) handle
             either (respond . authErrResponse) (respond . jsonResponse status200) r
         ("POST", ["api", "v1", "account", "passkeys", "verify"]) -> do
             body <- jsonBody req
             case body of
                 Left e -> respond (jsonError status400 "bad_request" e)
                 Right v -> do
-                    r <- Auth.verifyAddPasskey conn (authConfig cfg) v
+                    handle <- passkeyHandle state user
+                    r <- Auth.verifyAddPasskey conn (authConfig cfg) handle v
                     case r of
                         Left e -> respond (authErrResponse e)
                         Right () -> respond (jsonResponse status200 (object ["ok" .= True]))
@@ -964,11 +1648,27 @@ authedRoute cfg _db req respond ctx conn =
                 Auth.deleteSessionHash conn (Auth.sessId sess)
                 respond (clearAuthCookies cfg (emptyResponse status204))
             BearerToken _ -> respond (jsonError status403 "session_required" "a bearer token cannot end a browser session")
+        -- Admin user management. The guard already restricts this namespace
+        -- to admin browser sessions (Authz AdminClass).
+        ("GET", ["api", "v1", "admin", "users"]) -> adminListUsers state respond
+        ("POST", ["api", "v1", "admin", "users"]) -> adminCreateUser state req respond
+        ("PATCH", ["api", "v1", "admin", "users", idTxt]) -> case readInt idTxt of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid user id")
+            Just userId -> adminPatchUser state user userId req respond
+        ("POST", ["api", "v1", "admin", "users", idTxt, "password"]) -> case readInt idTxt of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid user id")
+            Just userId -> adminResetPassword state userId req respond
         ("GET", path)
             | not ("api" `elem` path)
             , not ("assets" `elem` path) ->
                 indexResponse cfg req respond
         _ -> respond (jsonError status404 "not_found" "No such route")
+  where
+    cfg = rcConfig rctx
+    state = rcState rctx
+    user = rcUser rctx
+    slot = rcSlot rctx
+    ctx = rcAuth rctx
 
 -- ---------------------------------------------------------------------------
 -- Auth guard
@@ -1154,46 +1854,233 @@ templateErrorResponse :: TemplateError -> Response
 templateErrorResponse err =
     jsonError (mkStatus (templateErrorStatus err) "") (templateErrorCode err) (templateErrorMessage err)
 
-withAuthed :: Config -> ServerDb -> Request -> (Response -> IO ResponseReceived) -> (AuthContext -> Connection -> IO ResponseReceived) -> IO ResponseReceived
-withAuthed cfg db req respond action = do
-    authResult <- withMVar (sdbWrite db) $ \conn -> authenticateRequest cfg conn req
+-- ---------------------------------------------------------------------------
+-- Graph layout and views
+-- ---------------------------------------------------------------------------
+
+{- | Everything one boot request reads. Exported so the server tests can check
+the boot document without starting Warp.
+-}
+bootPayloadFor :: Text -> Connection -> IO BootPayload
+bootPayloadFor origin conn = do
+    page <- listBookmarks conn defaultListQuery
+    tags <- allTags conn
+    stats <- libraryStats conn
+    searches <- listSavedSearches conn
+    views <- listViews conn
+    pure (BootPayload "0.1.0" origin tags searches page stats views)
+
+{- | @GET /api/v1/graph/layout?preset=...@. The positions are built from the
+same graph data the graph endpoint returns and cached per database until the
+revision changes, so switching presets after the first load is a map lookup.
+-}
+graphLayoutHandler :: UserSlot -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+graphLayoutHandler slot conn req respond =
+    case layoutPresetFromText (fromMaybe "standard" (param "preset" req)) of
+        Nothing ->
+            respond (jsonError status400 "bad_request" "preset must be compact, standard, or airy")
+        Just preset -> do
+            revision <- graphRevision conn
+            cached <- withMVar (usLayoutCache slot) $ \cache -> pure (lookupCachedLayout revision preset cache)
+            payload <- case cached of
+                Just hit -> pure hit
+                Nothing -> do
+                    graph <- globalGraph conn
+                    let built = graphLayoutPayload preset graph
+                    modifyMVar_ (usLayoutCache slot) $ \cache ->
+                        pure (storeCachedLayout (gdRevision graph) preset built cache)
+                    pure built
+            respond (jsonResponse status200 payload)
+
+viewsCreateHandler :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+viewsCreateHandler conn req respond = do
+    body <- jsonBody req
+    case body of
+        Left message -> respond (jsonError status400 "bad_request" message)
+        Right value -> case fromJSON value :: Result ViewInput of
+            Error message -> respond (jsonError status400 "bad_request" (T.pack message))
+            Success input -> do
+                result <- createView conn input
+                case result of
+                    Left err -> respond (viewErrorResponse err)
+                    Right view -> respond (jsonResponse status201 view)
+
+viewsUpdateHandler :: Connection -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+viewsUpdateHandler conn viewSlug req respond = do
+    body <- jsonBody req
+    case body of
+        Left message -> respond (jsonError status400 "bad_request" message)
+        Right value -> case fromJSON value :: Result ViewPatch of
+            Error message -> respond (jsonError status400 "bad_request" (T.pack message))
+            Success patch -> do
+                result <- updateView conn viewSlug patch
+                case result of
+                    Left err -> respond (viewErrorResponse err)
+                    Right view -> respond (jsonResponse status200 view)
+
+viewErrorResponse :: ViewError -> Response
+viewErrorResponse err =
+    jsonError (mkStatus (viewErrorStatus err) "") (viewErrorCode err) (viewErrorMessage err)
+
+-- ---------------------------------------------------------------------------
+-- Webhooks
+-- ---------------------------------------------------------------------------
+
+webhookCreateHandler :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+webhookCreateHandler conn req respond = do
+    body <- jsonBody req
+    case body of
+        Left message -> respond (jsonError status400 "bad_request" message)
+        Right value -> case fromJSON value :: Result WebhookInput of
+            Error message -> respond (jsonError status400 "bad_request" (T.pack message))
+            Success input -> do
+                result <- createWebhook conn input
+                case result of
+                    Left err -> respond (webhookErrorResponse err)
+                    Right (webhook, secret) ->
+                        respond (jsonResponse status201 (object ["webhook" .= webhook, "secret" .= secret]))
+
+webhookUpdateHandler :: Connection -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+webhookUpdateHandler conn webhookId req respond = do
+    body <- jsonBody req
+    case body of
+        Left message -> respond (jsonError status400 "bad_request" message)
+        Right value -> case fromJSON value :: Result WebhookInput of
+            Error message -> respond (jsonError status400 "bad_request" (T.pack message))
+            Success input -> do
+                result <- updateWebhook conn webhookId input
+                case result of
+                    Left err -> respond (webhookErrorResponse err)
+                    Right webhook -> respond (jsonResponse status200 webhook)
+
+webhookTestHandler ::
+    Config ->
+    AppState ->
+    Connection ->
+    Int ->
+    (Response -> IO ResponseReceived) ->
+    IO ResponseReceived
+webhookTestHandler cfg state conn webhookId respond = do
+    result <- testWebhook (defaultWebhookWorkerConfig cfg (asManager state)) conn webhookId
+    case result of
+        Left err -> respond (webhookErrorResponse err)
+        Right (ok, status, message) ->
+            respond
+                ( jsonResponse
+                    status200
+                    (object ["ok" .= ok, "status" .= status, "error" .= message])
+                )
+
+webhookErrorResponse :: WebhookError -> Response
+webhookErrorResponse err =
+    jsonError (mkStatus (webhookErrorStatus err) "") (webhookErrorCode err) (webhookErrorMessage err)
+
+{- | Resolve the request principal, then run the handler on the right
+connection: reads use the user database's read pool, writes use its one writer.
+Authentication itself runs on the writer because a session lookup records
+@last_seen_at@.
+-}
+withAuthed ::
+    Config ->
+    AppState ->
+    Request ->
+    (Response -> IO ResponseReceived) ->
+    (RequestContext -> Connection -> IO ResponseReceived) ->
+    IO ResponseReceived
+withAuthed cfg state req respond action = do
+    authResult <- authenticateRequest state req
     case authResult of
         Left response -> respond response
-        Right ctx
-            | requestMethod req `elem` ["GET", "HEAD"] -> withReadDb db (action ctx)
-            | otherwise -> withDb db (action ctx)
+        Right (user, slot, ctx) -> do
+            let rctx = RequestContext cfg state user slot ctx
+            if requestMethod req `elem` ["GET", "HEAD"]
+                then withReadDb slot (action rctx)
+                else withDb slot (action rctx)
 
-{- | Resolve the bearer token or session and apply the scope/CSRF/origin
-checks. Runs on the writer connection because session lookup may touch
-@last_seen_at@; the handler itself runs on the read pool for GET/HEAD.
+{- | The single guard. "Eza.Authz" decides what class of principal a route
+takes and whether the presented scope or role may use it; this function
+resolves the token prefix to the owning user database and applies the origin
+and CSRF checks. The query strings in "Eza.Authz" are the only route-scope
+source; the duplicate local classifiers are gone.
 -}
-authenticateRequest :: Config -> Connection -> Request -> IO (Either Response AuthContext)
-authenticateRequest cfg conn req =
+authenticateRequest ::
+    AppState ->
+    Request ->
+    IO (Either Response (Control.ControlUser, UserSlot, AuthContext))
+authenticateRequest state req =
     case bearerToken req of
-        Just raw -> do
-            mtoken <- authenticateToken conn raw
-            pure $ case mtoken of
-                Nothing -> Left (jsonError status401 "unauthenticated" "invalid bearer token")
-                Just token
-                    | requiresSession (pathInfo req) ->
-                        Left (jsonError status403 "session_required" "this route requires a browser session")
-                    | not (tokenAllows token (TE.decodeUtf8 (requestMethod req)) (pathInfo req)) ->
-                        Left (jsonError status403 "token_scope" "this token does not allow the request")
-                    | not (requestOriginAllowed cfg req) ->
-                        Left (jsonError status403 "origin" "origin is not allowed")
-                    | otherwise -> Right (BearerToken token)
-        Nothing -> do
-            msess <- sessionFromReq conn req
-            pure $ case msess of
-                Nothing -> Left (unauthorized req)
-                Just sess
-                    | not (Auth.scopeAllows (Auth.sessScope sess) (TE.decodeUtf8 (requestMethod req)) (pathInfo req)) ->
-                        Left (jsonError status403 "session_scope" "this session may not use this route")
-                    | not (requestOriginAllowed cfg req) ->
-                        Left (jsonError status403 "origin" "origin is not allowed")
-                    | not (csrfOk req sess) ->
-                        Left (jsonError status403 "csrf" "missing or invalid CSRF token")
-                    | otherwise -> Right (CookieSession sess)
+        Just rawToken -> bearerAuth rawToken
+        Nothing -> cookieAuth
+  where
+    cfg = asConfig state
+    method = TE.decodeUtf8 (requestMethod req)
+    path = pathInfo req
+    klass = Authz.routeClass method path
+    sessionRequired =
+        jsonError status403 "session_required" "this route requires a browser session"
+
+    bearerAuth rawToken
+        | klass `elem` [Authz.SessionClass, Authz.AdminClass] = pure (Left sessionRequired)
+        | klass == Authz.DeniedClass = pure (Left (jsonError status404 "not_found" "No such route"))
+        | otherwise = do
+            resolved <- resolveApiToken state rawToken
+            case resolved of
+                Left message -> pure (Left (jsonError status503 "user_limit" message))
+                Right Nothing -> pure (Left invalidBearerToken)
+                Right (Just (user, slot, bare)) -> do
+                    mtoken <- withDb slot $ \conn -> authenticateToken conn bare
+                    case mtoken of
+                        Nothing -> pure (Left invalidBearerToken)
+                        Just token
+                            | not (Authz.tokenAllows (mapMaybe Authz.scopeFromText (tokenScopes token)) method path) ->
+                                pure (Left (jsonError status403 "token_scope" "this token does not allow the request"))
+                            | not (requestOriginAllowed cfg req) ->
+                                pure (Left (jsonError status403 "origin" "origin is not allowed"))
+                            | otherwise -> pure (Right (user, slot, BearerToken token))
+
+    cookieAuth =
+        case cookieValue req Auth.sessionCookieName of
+            Nothing -> pure (Left (unauthorized req))
+            Just wire -> do
+                resolved <- resolveSession state wire
+                pure $ case resolved of
+                    Left message -> Left (jsonError status503 "user_limit" message)
+                    Right Nothing -> Left (unauthorized req)
+                    Right (Just (user, slot, sess))
+                        | not (sessionScopeAllows (cuRole user) (Auth.sessScope sess) method path) ->
+                            Left (jsonError status403 "session_scope" "this session may not use this route")
+                        | not (requestOriginAllowed cfg req) ->
+                            Left (jsonError status403 "origin" "origin is not allowed")
+                        | not (csrfOk req sess) ->
+                            Left (jsonError status403 "csrf" "missing or invalid CSRF token")
+                        | otherwise -> Right (user, slot, CookieSession sess)
+
+invalidBearerToken :: Response
+invalidBearerToken = jsonError status401 "unauthenticated" "invalid bearer token"
+
+{- | A normal session follows the role matrix; a recovery session may only
+finish its own setup; a pending two-factor session may not use the guard at all
+(the passkey endpoints read its cookie directly).
+-}
+sessionScopeAllows :: UserRole -> Text -> Text -> [Text] -> Bool
+sessionScopeAllows role scope method path = case scope of
+    "normal" -> Authz.sessionRoleAllows (authzRole role) method path
+    "recovery" -> Authz.recoverySessionAllows method path
+    _ -> False
+
+authzRole :: UserRole -> Authz.Role
+authzRole role = case role of
+    RoleAdmin -> Authz.RoleAdmin
+    RoleMember -> Authz.RoleMember
+
+{- | The per-user WebAuthn handle. It is generated with the control row; a
+legacy row without one gets a fresh handle stored before the ceremony, so two
+accounts on one server never share a user handle.
+-}
+passkeyHandle :: AppState -> Control.ControlUser -> IO BS.ByteString
+passkeyHandle state user = do
+    ensured <- withControl state $ \control -> Control.ensureCredentialHandle control user
+    pure (fromMaybe "\x01" (cuCredentialHandle ensured))
 
 bearerToken :: Request -> Maybe Text
 bearerToken req =
@@ -1202,15 +2089,6 @@ bearerToken req =
         Just raw ->
             let value = TE.decodeUtf8 raw
              in if "Bearer " `T.isPrefixOf` value then Just (T.drop 7 value) else Nothing
-
-requiresSession :: [Text] -> Bool
-requiresSession path = case path of
-    ("account" : _) -> True
-    ("api" : "v1" : "account" : _) -> True
-    ("api" : "v1" : "tokens" : _) -> True
-    ("api" : "v1" : "rules" : _) -> True
-    ["save"] -> True
-    _ -> False
 
 csrfOk :: Request -> Auth.Session -> Bool
 csrfOk req sess
@@ -1226,29 +2104,44 @@ originAllowed cfg req =
         Nothing -> True
         Just raw -> TE.decodeUtf8 raw `elem` cfgAllowedOrigins cfg
 
-sessionCookieFrom :: Connection -> Text -> Request -> IO (Maybe Auth.Session)
-sessionCookieFrom conn cookieName req =
+cookieValue :: Request -> Text -> Maybe Text
+cookieValue req name =
     case lookup hCookie (requestHeaders req) of
-        Nothing -> pure Nothing
+        Nothing -> Nothing
         Just rawCookie -> do
-            let cookies = Cookie.parseCookies rawCookie
-                rawToken = lookup (TE.encodeUtf8 cookieName) cookies
-            case rawToken of
-                Nothing -> pure Nothing
-                Just token -> Auth.getSession conn (TE.decodeUtf8 token)
+            rawValue <- lookup (TE.encodeUtf8 name) (Cookie.parseCookies rawCookie)
+            pure (TE.decodeUtf8 rawValue)
 
-sessionFromReq :: Connection -> Request -> IO (Maybe Auth.Session)
-sessionFromReq conn = sessionCookieFrom conn Auth.sessionCookieName
+{- | The live browser session named by the session cookie. The cookie value
+carries the user prefix, so this resolves the owning database first.
+-}
+requestSession ::
+    AppState ->
+    Request ->
+    IO (Maybe (Control.ControlUser, UserSlot, Auth.Session))
+requestSession state req =
+    case cookieValue req Auth.sessionCookieName of
+        Nothing -> pure Nothing
+        Just wire -> do
+            resolved <- resolveSession state wire
+            pure (either (const Nothing) id resolved)
 
 {- | The pending cookie that the password step set. Only a live @pending_2fa@
 session resolves; the normal session cookie is not consulted here.
 -}
-pendingSessionFromReq :: Connection -> Request -> IO (Maybe Auth.Session)
-pendingSessionFromReq conn req = do
-    msess <- sessionCookieFrom conn Auth.pendingCookieName req
-    pure $ case msess of
-        Just sess | Auth.sessScope sess == Auth.pendingScope -> Just sess
-        _ -> Nothing
+pendingSession ::
+    AppState ->
+    Request ->
+    IO (Maybe (Control.ControlUser, UserSlot, Auth.Session))
+pendingSession state req =
+    case cookieValue req Auth.pendingCookieName of
+        Nothing -> pure Nothing
+        Just wire -> do
+            resolved <- resolveSession state wire
+            pure $ case resolved of
+                Right (Just (user, slot, sess))
+                    | Auth.sessScope sess == Auth.pendingScope -> Just (user, slot, sess)
+                _ -> Nothing
 
 unauthorized :: Request -> Response
 unauthorized req
@@ -1346,12 +2239,12 @@ clearAuthCookies cfg =
 -- Handlers
 -- ---------------------------------------------------------------------------
 
-health :: ServerDb -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-health db respond = do
-    ok <- withResource (sdbRead db) Db.ping
-    if ok
-        then respond (jsonResponse status200 (object ["status" .= ("ok" :: Text), "version" .= ("0.1.0" :: Text)]))
-        else respond (jsonError status503 "unavailable" "database is unavailable")
+health :: AppState -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+health state respond = do
+    result <- try (withControl state Db.ping) :: IO (Either SomeException Bool)
+    case result of
+        Right True -> respond (jsonResponse status200 (object ["status" .= ("ok" :: Text), "version" .= ("0.1.0" :: Text)]))
+        _ -> respond (jsonError status503 "unavailable" "database is unavailable")
 
 faviconHandler :: Connection -> Request -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 faviconHandler conn req domain respond = do
@@ -1461,8 +2354,8 @@ instance FromJSON ShareCreateBody where
     parseJSON = withObject "ShareCreateBody" $ \o ->
         ShareCreateBody <$> o .: "scope" <*> o .: "target_id" <*> o .:? "include_note" <*> o .:? "expires_in_days"
 
-shareCreateHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-shareCreateHandler cfg conn req respond = do
+shareCreateHandler :: Config -> Control.ControlUser -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+shareCreateHandler cfg user conn req respond = do
     body <- strictRequestBody req
     case eitherDecode body of
         Left err -> respond (jsonError status400 "bad_request" (T.pack err))
@@ -1472,43 +2365,57 @@ shareCreateHandler cfg conn req respond = do
             case result of
                 Left err -> respond (jsonError status400 "bad_request" err)
                 Right (shareId, raw) ->
-                    respond (jsonResponse status201 (object ["id" .= shareId, "url" .= (cfgPublicOrigin cfg <> "/s/" <> raw)]))
+                    respond (jsonResponse status201 (object ["id" .= shareId, "url" .= (cfgPublicOrigin cfg <> "/s/" <> wireShareToken user raw)]))
 
-publicShareHandler :: Connection -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-publicShareHandler conn token respond = do
+{- | A share link is public but still resolves to one account: the token prefix
+names the database to read. A revoked, expired, or wrong-database token gets
+the same unavailable page family as before.
+-}
+publicShareHandler :: AppState -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+publicShareHandler state token respond = do
     let isFeed = T.isSuffixOf ".xml" token
-        raw = if isFeed then T.dropEnd 4 token else token
-    state <- resolveShareState conn raw
-    case state of
-        ShareGone reason ->
-            if isFeed
-                then respond (shareHeaders (jsonError (unavailableStatus reason) "not_found" "share link is not readable"))
-                else respond (shareHeaders (htmlResponseAt (unavailableStatus reason) (shareUnavailablePage reason)))
-        ShareReadable record
-            | srScope record == "bookmark" -> do
-                bookmark <- getBookmark conn (srTargetId record)
-                case bookmark of
-                    Nothing -> respond (shareHeaders (htmlResponseAt status404 (shareUnavailablePage ShareInvalid)))
-                    Just detail
-                        | isFeed -> respond (shareHeaders (jsonError status404 "not_found" "feeds are only available for saved searches"))
-                        | otherwise -> respond (shareHeaders (htmlResponseAt status200 (shareBookmarkPage record detail)))
-            | srScope record == "saved_search" -> do
-                searches <- listSavedSearches conn
-                case [saved | saved <- searches, ssId saved == srTargetId record] of
-                    [] -> respond (shareHeaders (htmlResponseAt status404 (shareUnavailablePage ShareInvalid)))
-                    (saved : _) -> do
-                        page <- listBookmarks conn (defaultListQuery{lqQ = ssQ saved, lqTags = ssTags saved, lqLimit = 100})
-                        if isFeed
-                            then respond (shareHeaders (responseLBS status200 [(hContentType, "application/atom+xml; charset=utf-8")] (LBS.fromStrict (TE.encodeUtf8 (shareSearchFeed saved page)))))
-                            else respond (shareHeaders (htmlResponseAt status200 (shareSearchPage record saved page)))
-            | otherwise -> respond (shareHeaders (htmlResponseAt status404 (shareUnavailablePage ShareInvalid)))
+        wire = if isFeed then T.dropEnd 4 token else token
+    resolved <- resolveShareOwner state wire
+    case resolved of
+        Left _ -> respond shareGone
+        Right Nothing -> respond shareGone
+        Right (Just (_, slot, bare)) -> withDb slot $ \conn -> do
+            shareState <- resolveShareState conn bare
+            case shareState of
+                ShareGone reason ->
+                    if isFeed
+                        then respond (shareHeaders (jsonError (unavailableStatus reason) "not_found" "share link is not readable"))
+                        else respond (shareHeaders (htmlResponseAt (unavailableStatus reason) (shareUnavailablePage reason)))
+                ShareReadable record
+                    | srScope record == "bookmark" -> do
+                        bookmark <- getBookmark conn (srTargetId record)
+                        case bookmark of
+                            Nothing -> respond (shareHeaders (htmlResponseAt status404 (shareUnavailablePage ShareInvalid)))
+                            Just detail
+                                | isFeed -> respond (shareHeaders (jsonError status404 "not_found" "feeds are only available for saved searches"))
+                                | otherwise -> respond (shareHeaders (htmlResponseAt status200 (shareBookmarkPage record detail)))
+                    | srScope record == "saved_search" -> do
+                        searches <- listSavedSearches conn
+                        case [saved | saved <- searches, ssId saved == srTargetId record] of
+                            [] -> respond (shareHeaders (htmlResponseAt status404 (shareUnavailablePage ShareInvalid)))
+                            (saved : _) -> do
+                                page <- listBookmarks conn (defaultListQuery{lqQ = ssQ saved, lqTags = ssTags saved, lqLimit = 100})
+                                if isFeed
+                                    then respond (shareHeaders (responseLBS status200 [(hContentType, "application/atom+xml; charset=utf-8")] (LBS.fromStrict (TE.encodeUtf8 (shareSearchFeed saved page)))))
+                                    else respond (shareHeaders (htmlResponseAt status200 (shareSearchPage record saved page)))
+                    | otherwise -> respond (shareHeaders (htmlResponseAt status404 (shareUnavailablePage ShareInvalid)))
   where
     shareHeaders = mapResponseHeaders (<> [("X-Robots-Tag", "noindex")])
     unavailableStatus ShareInvalid = status404
     unavailableStatus _ = status410
+    shareGone = shareHeaders (htmlResponseAt status404 (shareUnavailablePage ShareInvalid))
 
-snapshotHandler :: Config -> Connection -> Int -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-snapshotHandler cfg conn bid respond = do
+{- | Serve a locally captured snapshot. The path must be inside the account's
+own snapshots directory; the old global @EZA_SNAPSHOT_DIR@ is accepted as a
+second root so snapshots made before the per-user layout keep working.
+-}
+snapshotHandler :: Config -> UserSlot -> Connection -> Int -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+snapshotHandler cfg slot conn bid respond = do
     bookmark <- getBookmark conn bid
     case bookmark of
         Just detail
@@ -1516,11 +2423,11 @@ snapshotHandler cfg conn bid respond = do
                 respond (jsonError status404 "not_found" "no local snapshot for this bookmark")
             | otherwise -> do
                 let rawPath = T.unpack (bdSnapshotPath detail)
-                    root = cfgSnapshotDir cfg
-                resolved <- canonicalizePath rawPath
-                rootResolved <- canonicalizePath root
+                resolvedResult <- try (canonicalizePath rawPath) :: IO (Either SomeException FilePath)
+                roots <- mapM canonicalRoot [usSnapshotDir slot, cfgSnapshotDir cfg]
+                let resolved = either (const rawPath) id resolvedResult
                 exists <- doesFileExist resolved
-                if exists && isPrefixOf rootResolved resolved
+                if exists && any (isUnder resolved) (catMaybes roots)
                     then
                         respond
                             ( responseFile
@@ -1534,6 +2441,15 @@ snapshotHandler cfg conn bid respond = do
                             )
                     else respond (jsonError status404 "not_found" "snapshot file not found")
         Nothing -> respond (jsonError status404 "not_found" "bookmark not found")
+  where
+    canonicalRoot root = do
+        exists <- doesDirectoryExist root
+        if not exists
+            then pure Nothing
+            else do
+                result <- try (canonicalizePath root) :: IO (Either SomeException FilePath)
+                pure (either (const Nothing) Just result)
+    isUnder path root = path == root || (addTrailingPathSeparator root) `isPrefixOf` path
 
 data BulkBody = BulkBody Text [Int] (Maybe [Text]) (Maybe Bool)
 
@@ -1654,6 +2570,100 @@ authErrResponse e =
             Just seconds -> mapResponseHeaders (<> [("Retry-After", BSC.pack (show seconds))]) base
 
 -- ---------------------------------------------------------------------------
+-- Admin API
+-- ---------------------------------------------------------------------------
+
+adminErrorResponse :: Admin.AdminError -> Response
+adminErrorResponse err =
+    jsonError (mkStatus (Admin.adminErrorStatus err) "") (Admin.adminErrorCode err) (Admin.adminErrorMessage err)
+
+adminListUsers :: AppState -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+adminListUsers state respond = do
+    users <- withControl state Control.listUsers
+    respond (jsonResponse status200 (object ["users" .= map Admin.controlUserView users]))
+
+adminCreateUser :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+adminCreateUser state req respond = do
+    body <- jsonBody req
+    case body of
+        Left message -> respond (jsonError status400 "bad_request" message)
+        Right value -> case fromJSON value :: Result UserCreateInput of
+            Error message -> respond (jsonError status400 "bad_request" (T.pack message))
+            Success input -> do
+                created <-
+                    withControl state $ \control ->
+                        Admin.createUserAccount (asConfig state) control (uciUsername input) (uciRole input) (uciPassword input)
+                case created of
+                    Left err -> respond (adminErrorResponse err)
+                    Right (user, codes) ->
+                        respond (jsonResponse status201 (UserCreateResult (Admin.controlUserView user) codes))
+
+adminPatchUser ::
+    AppState ->
+    Control.ControlUser ->
+    Int ->
+    Request ->
+    (Response -> IO ResponseReceived) ->
+    IO ResponseReceived
+adminPatchUser state admin targetId req respond = do
+    body <- jsonBody req
+    case body of
+        Left message -> respond (jsonError status400 "bad_request" message)
+        Right value -> case parseMaybeObj value of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+            Just object' -> do
+                let wantedEnabled = parseMaybe (.: "enabled") object' :: Maybe Bool
+                    wantedRole = parseMaybe (.: "role") object' :: Maybe UserRole
+                case (wantedEnabled, wantedRole) of
+                    (Nothing, Nothing) ->
+                        respond (jsonError status400 "bad_request" "enabled or role is required")
+                    _
+                        | wantedEnabled == Just False && targetId == cuId admin ->
+                            respond (adminErrorResponse Admin.AdminSelfDisable)
+                    _ -> do
+                        roleResult <-
+                            case wantedRole of
+                                Nothing -> pure (Right Nothing)
+                                Just role -> do
+                                    applied <- withControl state $ \control -> Admin.setUserRole control targetId role
+                                    pure (fmap Just applied)
+                        case roleResult of
+                            Left err -> respond (adminErrorResponse err)
+                            Right _ -> do
+                                enabledResult <-
+                                    case wantedEnabled of
+                                        Nothing -> pure (Right Nothing)
+                                        Just enabled -> do
+                                            applied <-
+                                                withControl state $ \control ->
+                                                    Admin.setUserEnabled (asConfig state) control targetId enabled
+                                            pure (fmap Just applied)
+                                case enabledResult of
+                                    Left err -> respond (adminErrorResponse err)
+                                    Right _ -> do
+                                        updated <- withControl state $ \control -> Control.lookupUserById control targetId
+                                        case updated of
+                                            Nothing -> respond (adminErrorResponse Admin.AdminNotFound)
+                                            Just user -> respond (jsonResponse status200 (Admin.controlUserView user))
+
+adminResetPassword :: AppState -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+adminResetPassword state targetId req respond = do
+    body <- jsonBody req
+    case body of
+        Left message -> respond (jsonError status400 "bad_request" message)
+        Right value -> case parseMaybeObj value of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+            Just object' -> case parseMaybe (.: "password") object' of
+                Nothing -> respond (jsonError status400 "bad_request" "password is required")
+                Just password -> do
+                    result <-
+                        withControl state $ \control ->
+                            Admin.resetUserPassword (asConfig state) control targetId password
+                    case result of
+                        Left err -> respond (adminErrorResponse err)
+                        Right () -> respond (jsonResponse status200 (object ["ok" .= True]))
+
+-- ---------------------------------------------------------------------------
 -- Account handlers
 -- ---------------------------------------------------------------------------
 
@@ -1661,8 +2671,8 @@ authErrResponse e =
 return the same shape, so the account page can replace its copy after a
 change without a second request.
 -}
-accountPayload :: Connection -> AuthContext -> IO Value
-accountPayload conn ctx = do
+accountPayload :: Connection -> AuthContext -> Control.UserRole -> IO Value
+accountPayload conn ctx role = do
     creds <- Auth.listCredentials conn
     remaining <- Auth.recoveryCodesRemaining conn
     sessions <- Auth.listSessions conn (case ctx of CookieSession sess -> Just sess; BearerToken _ -> Nothing)
@@ -1674,6 +2684,7 @@ accountPayload conn ctx = do
             , "recovery_codes_remaining" .= remaining
             , "sessions" .= sessions
             , "username" .= Auth.acctUsername account
+            , "role" .= role
             , "has_password" .= Auth.accountHasPassword account
             , "require_passkey" .= Auth.acctRequirePasskey account
             , "account_configured" .= configured
@@ -1683,8 +2694,8 @@ accountPayload conn ctx = do
 {- | Turn optional passkey two-factor on or off. Both directions need the
 current password, and turning it on needs an already-registered passkey.
 -}
-accountTwoFactorHandler :: Config -> Connection -> AuthContext -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-accountTwoFactorHandler cfg conn ctx req respond = do
+accountTwoFactorHandler :: Config -> Connection -> AuthContext -> Control.UserRole -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+accountTwoFactorHandler cfg conn ctx role req respond = do
     body <- jsonBody req
     case body of
         Left e -> respond (jsonError status400 "bad_request" e)
@@ -1698,7 +2709,7 @@ accountTwoFactorHandler cfg conn ctx req respond = do
                     case result of
                         Left err -> respond (authErrResponse err)
                         Right _ -> do
-                            payload <- accountPayload conn ctx
+                            payload <- accountPayload conn ctx role
                             respond (jsonResponse status200 payload)
 
 {- | Change the account password. A current password is required once one
@@ -1743,8 +2754,12 @@ accountPasswordHandler cfg conn ctx req respond = do
                     _ -> respond (jsonError status400 "bad_request" "new_password and confirm are required")
 
 -- | Rename the single account. A password, when set, must be confirmed.
-accountUsernameHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-accountUsernameHandler cfg conn req respond = do
+
+{- | Rename the signed-in account. The control row is the login lookup source,
+so it changes with the user database account name.
+-}
+accountUsernameHandler :: Config -> AppState -> Control.ControlUser -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+accountUsernameHandler cfg state user conn req respond = do
     body <- jsonBody req
     case body of
         Left e -> respond (jsonError status400 "bad_request" e)
@@ -1765,8 +2780,14 @@ accountUsernameHandler cfg conn req respond = do
                             else case validateUsername rawUsername of
                                 Left message -> respond (jsonError status400 "invalid_username" message)
                                 Right username -> do
-                                    Auth.setAccountUsername conn username
-                                    respond (jsonResponse status200 (object ["ok" .= True]))
+                                    renamed <- withControl state $ \control -> Control.setUsername control (cuId user) username
+                                    case renamed of
+                                        Left Control.ControlDuplicateUsername ->
+                                            respond (jsonError status409 "username_taken" "that username is already in use")
+                                        Left err -> respond (jsonError status500 "control" (T.pack (show err)))
+                                        Right () -> do
+                                            Auth.setAccountUsername conn username
+                                            respond (jsonResponse status200 (object ["ok" .= True]))
 
 -- ---------------------------------------------------------------------------
 -- Query parsing
@@ -2032,9 +3053,3 @@ placeholderPage cfg =
 escapeHtml :: Text -> Text
 escapeHtml value =
     T.replace "\"" "&quot;" (T.replace ">" "&gt;" (T.replace "<" "&lt;" (T.replace "&" "&amp;" value)))
-
-withDb :: ServerDb -> (Connection -> IO ResponseReceived) -> IO ResponseReceived
-withDb db = withMVar (sdbWrite db)
-
-withReadDb :: ServerDb -> (Connection -> IO ResponseReceived) -> IO ResponseReceived
-withReadDb db = withResource (sdbRead db)

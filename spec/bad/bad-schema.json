@@ -1,0 +1,11 @@
+{
+  "schema": 2,
+  "slug": "future-view",
+  "name": "Future view",
+  "kind": "ledger",
+  "is_default": false,
+  "definition": {
+    "query": "is:unread",
+    "sort": "created"
+  }
+}

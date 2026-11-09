@@ -1,0 +1,166 @@
+{
+  "schema": 1,
+  "slug": "too-many-groups",
+  "name": "Too many colour groups",
+  "kind": "graph",
+  "is_default": false,
+  "definition": {
+    "query": "",
+    "tags_shown": true,
+    "label_mode": "none",
+    "layout_preset": "airy",
+    "local_depth": 3,
+    "color_groups": [
+      {
+        "name": "Group 1",
+        "query": "tag:group-1",
+        "color": "#111111",
+        "enabled": true
+      },
+      {
+        "name": "Group 2",
+        "query": "tag:group-2",
+        "color": "#222222",
+        "enabled": true
+      },
+      {
+        "name": "Group 3",
+        "query": "tag:group-3",
+        "color": "#333333",
+        "enabled": true
+      },
+      {
+        "name": "Group 4",
+        "query": "tag:group-4",
+        "color": "#444444",
+        "enabled": true
+      },
+      {
+        "name": "Group 5",
+        "query": "tag:group-5",
+        "color": "#555555",
+        "enabled": true
+      },
+      {
+        "name": "Group 6",
+        "query": "tag:group-6",
+        "color": "#666666",
+        "enabled": true
+      },
+      {
+        "name": "Group 7",
+        "query": "tag:group-7",
+        "color": "#777777",
+        "enabled": true
+      },
+      {
+        "name": "Group 8",
+        "query": "tag:group-8",
+        "color": "#888888",
+        "enabled": true
+      },
+      {
+        "name": "Group 9",
+        "query": "tag:group-9",
+        "color": "#999999",
+        "enabled": true
+      },
+      {
+        "name": "Group 10",
+        "query": "tag:group-10",
+        "color": "#aaaaaa",
+        "enabled": true
+      },
+      {
+        "name": "Group 11",
+        "query": "tag:group-11",
+        "color": "#bbbbbb",
+        "enabled": true
+      },
+      {
+        "name": "Group 12",
+        "query": "tag:group-12",
+        "color": "#cccccc",
+        "enabled": true
+      },
+      {
+        "name": "Group 13",
+        "query": "tag:group-13",
+        "color": "#dddddd",
+        "enabled": true
+      },
+      {
+        "name": "Group 14",
+        "query": "tag:group-14",
+        "color": "#eeeeee",
+        "enabled": true
+      },
+      {
+        "name": "Group 15",
+        "query": "tag:group-15",
+        "color": "#000000",
+        "enabled": true
+      },
+      {
+        "name": "Group 16",
+        "query": "tag:group-16",
+        "color": "#111111",
+        "enabled": true
+      },
+      {
+        "name": "Group 17",
+        "query": "tag:group-17",
+        "color": "#222222",
+        "enabled": true
+      },
+      {
+        "name": "Group 18",
+        "query": "tag:group-18",
+        "color": "#333333",
+        "enabled": true
+      },
+      {
+        "name": "Group 19",
+        "query": "tag:group-19",
+        "color": "#444444",
+        "enabled": true
+      },
+      {
+        "name": "Group 20",
+        "query": "tag:group-20",
+        "color": "#555555",
+        "enabled": true
+      },
+      {
+        "name": "Group 21",
+        "query": "tag:group-21",
+        "color": "#666666",
+        "enabled": true
+      },
+      {
+        "name": "Group 22",
+        "query": "tag:group-22",
+        "color": "#777777",
+        "enabled": true
+      },
+      {
+        "name": "Group 23",
+        "query": "tag:group-23",
+        "color": "#888888",
+        "enabled": true
+      },
+      {
+        "name": "Group 24",
+        "query": "tag:group-24",
+        "color": "#999999",
+        "enabled": true
+      },
+      {
+        "name": "Group 25",
+        "query": "tag:group-25",
+        "color": "#aaaaaa",
+        "enabled": true
+      }
+    ]
+  }
+}

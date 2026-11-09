@@ -29,22 +29,24 @@ module Eza.Bookmarks (
     libraryStats,
 ) where
 
-import Control.Monad (forM, forM_)
+import Control.Monad (forM, forM_, when)
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
 import Text.Read (readMaybe)
 
+import Eza.Events (bookmarkEventData, bookmarkEventDataMany, recordEvent)
 import Eza.Links (syncLinks)
 import Eza.Rules (applyRules)
 import Eza.SearchQuery
 import Eza.Types
 import Eza.Undo (recordUndoIds)
 import Eza.Url (dedupeLookupUrls, hostOf, normalizeUrl)
+import Eza.Webhook (EventType (..))
 
 data ListQuery = ListQuery
     { lqQ :: Text
@@ -263,8 +265,32 @@ buildFilter q parsed tags =
         , let n = T.pack (show i)
         ]
 
+    -- Filed-date filters use the same UTC day the accessions page reports.
+    -- Rows with no original save date (created_at = 0) are not a day at all.
+    dateFilters :: [(Text, [NamedParam])]
+    dateFilters =
+        maybe
+            []
+            ( \year ->
+                [ ( "b.created_at > 0 AND CAST(strftime('%Y', b.created_at, 'unixepoch') AS INTEGER) = :year"
+                  , [":year" := year]
+                  )
+                ]
+            )
+            (sqYear parsed)
+            <> maybe
+                []
+                ( \day ->
+                    [ ( "b.created_at > 0 AND date(b.created_at, 'unixepoch') = :day"
+                      , [":day" := day]
+                      )
+                    ]
+                )
+                (sqDay parsed)
+
     parts =
         (case tagFilter of Nothing -> []; Just x -> [x])
+            <> dateFilters
             <> flagFilters
             <> negFilters
             <> linkFilters
@@ -489,6 +515,8 @@ insertBookmarkRow conn url title tags = do
                 (Only tid : _) -> execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (newId, tid)
                 _ -> pure ()
         _ <- applyRules conn newId url title
+        createdData <- bookmarkEventData conn newId
+        forM_ createdData $ \value -> recordEvent conn BookmarkCreated value
         pure newId
 
 {- | Delete one bookmark. The side snapshot recorded first also captures the
@@ -502,8 +530,10 @@ deleteBookmark conn bid = do
         if null exists
             then pure 0
             else do
+                deletedData <- bookmarkEventData conn bid
                 _ <- recordUndoIds conn "delete" [bid]
                 execute conn "DELETE FROM bookmarks WHERE id = ?" (Only bid)
+                forM_ deletedData $ \value -> recordEvent conn BookmarkDeleted value
                 changes conn
     pure (n > 0)
 
@@ -566,7 +596,9 @@ bulkUpdate conn action ids
             pure (length uniqueIds)
         BulkDelete -> do
             let marks = T.intercalate "," (replicate (length uniqueIds) "?")
+            deletedRows <- bookmarkEventDataMany conn uniqueIds
             execute conn (Query ("DELETE FROM bookmarks WHERE id IN (" <> marks <> ")")) uniqueIds
+            forM_ deletedRows $ \value -> recordEvent conn BookmarkDeleted value
             pure (length uniqueIds)
 
 dedupeTextIds :: [Int] -> [Int]
@@ -638,7 +670,13 @@ updateBookmark conn bid mTitle mNote mRead mTags = do
                                 (Only tid : _) -> execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (bid, tid)
                                 _ -> pure ()
                 execute conn "UPDATE bookmarks SET updated_at = ? WHERE id = ?" (now, bid)
+                whenChanged
             pure True
+  where
+    whenChanged =
+        when (isJust mTitle || isJust mNote || isJust mRead || isJust mTags) $ do
+            updatedData <- bookmarkEventData conn bid
+            forM_ updatedData $ \value -> recordEvent conn BookmarkUpdated value
 
 addTagsToBookmark :: Connection -> Int -> [Text] -> IO Int
 addTagsToBookmark conn bid tags = do
@@ -652,7 +690,11 @@ addTagsToBookmark conn bid tags = do
                     execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (bid, tid)
                     changes conn
                 _ -> pure 0
-        pure (sum n)
+        let changed = sum n
+        when (changed > 0) $ do
+            updatedData <- bookmarkEventData conn bid
+            forM_ updatedData $ \value -> recordEvent conn BookmarkUpdated value
+        pure changed
 
 recordOpen :: Connection -> Int -> IO ()
 recordOpen conn bid = do
@@ -763,8 +805,10 @@ pruneApply conn ids =
                 if null found
                     then pure 0
                     else do
+                        prunedRows <- bookmarkEventDataMany conn found
                         _ <- recordUndoIds conn "prune" found
                         execute conn (Query ("DELETE FROM bookmarks WHERE id IN (" <> marks <> ")")) uniqueIds
+                        forM_ prunedRows $ \value -> recordEvent conn BookmarkDeleted value
                         pure (length found)
 
 -- | Summaries for a known id set, ordered by id. See 'bookmarksByIdsLight'.

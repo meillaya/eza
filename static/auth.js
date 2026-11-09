@@ -257,12 +257,17 @@ async function doPasswordSetup(event) {
 async function doRecover() {
   try {
     showError("");
+    const username = $("#recover-username").value.trim();
+    if (!username) {
+      showError("Enter the username to recover.");
+      return;
+    }
     const code = $("#recovery-code").value.trim();
     if (!code) {
       showError("Enter a recovery code.");
       return;
     }
-    const result = await postJSON("/api/recovery/redeem", { code });
+    const result = await postJSON("/api/recovery/redeem", { username, code });
     window.location.href = result.redirect || "/setup";
   } catch (e) {
     showError(e.message || String(e));

@@ -24,7 +24,16 @@ import Eza.Password (PasswordParams (..), defaultPasswordParams)
 
 data Config = Config
   { cfgDataDir :: FilePath
+  -- ^ Root data directory.
+  , cfgControlDbPath :: FilePath
+  -- ^ Control database: accounts and their library database paths.
+  , cfgUsersDir :: FilePath
+  -- ^ Per-user library directories (@users/<id>/eza.db@).
+  , cfgMaxUsers :: Int
+  -- ^ Upper bound on user database paths this process will open.
   , cfgDbPath :: FilePath
+  -- ^ Legacy bootstrap database. Only read at startup to register an existing
+  -- single-user install; request paths never come from here.
   , cfgBind :: String
   , cfgPublicOrigin :: Text
   , cfgRpId :: Text
@@ -62,6 +71,11 @@ loadConfig = do
   createDirectoryIfMissing True dataDir
   dbPath <- fromMaybe (dataDir </> "eza.db") <$> lookupEnv "EZA_DB"
   createDirectoryIfMissing True (takeDirectory dbPath)
+  controlDb <- fromMaybe (dataDir </> "control.db") <$> lookupEnv "EZA_CONTROL_DB"
+  createDirectoryIfMissing True (takeDirectory controlDb)
+  usersDir <- fromMaybe (dataDir </> "users") <$> lookupEnv "EZA_USERS_DIR"
+  createDirectoryIfMissing True usersDir
+  maxUsers <- readIntEnv "EZA_MAX_USERS" 32
   bind <- fromMaybe "127.0.0.1:8080" <$> lookupEnv "EZA_BIND"
   originRaw <- fromMaybe "http://localhost:8080" <$> lookupEnv "PUBLIC_ORIGIN"
   let origin = T.pack (dropTrailingSlash originRaw)
@@ -120,6 +134,9 @@ loadConfig = do
     Config
       { cfgDataDir = dataDir
       , cfgDbPath = dbPath
+      , cfgControlDbPath = controlDb
+      , cfgUsersDir = usersDir
+      , cfgMaxUsers = max 1 maxUsers
       , cfgBind = bind
       , cfgPublicOrigin = origin
       , cfgRpId = rpId

@@ -1,0 +1,6 @@
+{
+  "name": "Archive sink",
+  "url": "https://example.com/hooks/archive",
+  "events": ["bookmark.created", "bookmark.archived"],
+  "enabled": true
+}

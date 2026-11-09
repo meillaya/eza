@@ -13,6 +13,7 @@ import qualified Data.Text as T
 import Miso
 import qualified Miso.CSS as C
 import qualified Miso.Html as H
+import qualified Miso.Html.Event as HE
 import qualified Miso.Html.Property as HP
 
 import Eza.Types (LibraryStats (..))
@@ -36,7 +37,7 @@ accessionsPage m =
                     Nothing -> notLoaded
                     Just stats
                         | lsTotal stats <= 0 -> emptyIndex
-                        | otherwise -> indexView stats
+                        | otherwise -> indexView m stats
                 )
             ]
         ]
@@ -111,11 +112,11 @@ emptyIndex =
         ]
     ]
 
-indexView :: LibraryStats -> [View () () Model Action]
-indexView stats =
+indexView :: Model -> LibraryStats -> [View () () Model Action]
+indexView m stats =
     [ headView stats
     , ruleLine
-    , filingDays stats
+    , filingDays m stats
     , ruleLine
     , lower stats
     , foot stats
@@ -133,6 +134,9 @@ headView stats =
             , H.p_
                 [HP.class_ "acc-lede"]
                 [text "The whole library, set as an index: every year it grew, every source it came from, and every day it was used."]
+            , H.p_
+                [HP.class_ "acc-hint meta"]
+                [text "A year, a filing day or a source opens the ledger filtered to it."]
             ]
         , figures (Just stats)
         ]
@@ -156,8 +160,8 @@ figure label value =
 
 -- ------------------------------------------------------------ filing days ---
 
-filingDays :: LibraryStats -> View () () Model Action
-filingDays stats =
+filingDays :: Model -> LibraryStats -> View () () Model Action
+filingDays m stats =
     H.section_
         [HP.class_ "mc", HP.aria_ "label" "Filing days by year"]
         [ H.div_
@@ -172,7 +176,7 @@ filingDays stats =
             , H.div_ [HP.class_ "mc-axis-months"] monthLabels
             , H.div_ [HP.class_ "mc-axis-tail"] []
             ]
-        , H.div_ [] (map (yearRow stats) (sortOn fst (lsYears stats)))
+        , H.div_ [] (map (yearRow m stats) (sortOn fst (lsYears stats)))
         ]
 
 monthLabels :: [View () () Model Action]
@@ -187,41 +191,74 @@ monthLabels = zipWith monthLabel monthNames monthSpans
         let middle = fromIntegral (start + end) / 2 / 365 * 100
          in H.span_ [C.style_ [C.left (C.pct middle)]] [text name]
 
-yearRow :: LibraryStats -> (Int, Int) -> View () () Model Action
-yearRow stats (year, entries) =
+yearRow :: Model -> LibraryStats -> (Int, Int) -> View () () Model Action
+yearRow m stats (year, entries) =
     H.div_
         [HP.class_ "mc-row"]
-        [ H.span_ [HP.class_ "mc-year"] [text (ms (show year))]
+        [ yearButton
         , H.div_
             [ HP.class_ "mc-track"
             , HP.aria_ "label" (ms (show (length marks) <> " filing days in " <> show year <> ", " <> show entries <> " entries"))
             ]
-            (map markView marks)
+            (map (markView m) marks)
         , H.span_ [HP.class_ "mc-n"] [text (num entries)]
         , H.span_ [HP.class_ "mc-d"] [text (ms (show (length marks) <> " days"))]
         ]
   where
     marks = yearMarks stats year
+    yearText = show year
+    yearButton =
+        H.button_
+            [ HP.class_ "mc-year"
+            , HP.type_ "button"
+            , HP.title_ (ms ("Open the ledger filtered to " <> yearText))
+            , HP.aria_ "label" (ms (yearText <> ", " <> countPhrase entries))
+            , HP.data_ "testid" "accessions-year"
+            , HP.data_ "year" (ms yearText)
+            , HE.onClick (FilterByQuery (T.pack ("year:" <> yearText)))
+            ]
+            [text (ms yearText)]
 
 {- | Position and height of every filing-day mark in one year. Height grows
 with the logarithm of the day's count, as in the printed plate.
 -}
-yearMarks :: LibraryStats -> Int -> [(Double, Int, Int)]
+yearMarks :: LibraryStats -> Int -> [(Text, Double, Int, Int)]
 yearMarks stats year =
-    [ (position, height, count)
+    [ (day, position, height, count)
     | (day, count) <- lsFilingDays stats
     , parsedYear day == Just year
     , let height = 6 + min 12 (round (logBase (10 :: Double) (fromIntegral (count + 1 :: Int) :: Double) * 6))
     , Just position <- [dayPosition day]
     ]
 
-markView :: (Double, Int, Int) -> View () () Model Action
-markView (position, height, count) =
-    H.i_
-        [ C.style_ [C.left (C.pct position), C.height (C.px height)]
-        , HP.title_ (ms (show count <> if count == 1 then " entry" else " entries"))
-        ]
-        []
+{- | A filing-day mark. On a wide screen it is a pointer-only button that
+opens the ledger on that day; below the mobile breakpoint the marks are
+decorative and the year labels carry the taps.
+-}
+markView :: Model -> (Text, Double, Int, Int) -> View () () Model Action
+markView m (day, position, height, count)
+    | mWidth m < 768 =
+        H.i_
+            [ C.style_ [C.left (C.pct position), C.height (C.px height)]
+            , HP.aria_ "hidden" "true"
+            ]
+            []
+    | otherwise =
+        H.button_
+            [ HP.class_ "mc-mark"
+            , HP.type_ "button"
+            , HP.tabindex_ "-1"
+            , C.style_ [C.left (C.pct position), C.height (C.px height)]
+            , HP.title_ tip
+            , HP.data_ "tip" tip
+            , HP.data_ "testid" "accessions-day"
+            , HP.data_ "day" (ms (T.unpack day))
+            , HP.aria_ "label" tip
+            , HE.onClick (FilterByQuery ("day:" <> day))
+            ]
+            []
+  where
+    tip = ms (displayDay day <> ", " <> countPhrase count)
 
 -- ---------------------------------------------------------------- lower ---
 
@@ -254,11 +291,23 @@ rankRow :: Int -> (Text, Int) -> View () () Model Action
 rankRow index (domain, count) =
     H.li_
         []
-        [ H.span_ [HP.class_ "rank-no"] [text (ms (pad2 index))]
-        , H.span_ [HP.class_ "rank-name"] [text (ms (displayDomain domain))]
-        , H.span_ [HP.class_ "lead", HP.aria_ "hidden" "true"] []
-        , H.span_ [HP.class_ "rank-n"] [text (num count)]
+        [ H.button_
+            [ HP.class_ "rank-hit"
+            , HP.type_ "button"
+            , HP.title_ (ms ("Open the ledger filtered to " <> source))
+            , HP.aria_ "label" (ms (source <> ", " <> countPhrase count))
+            , HP.data_ "testid" "accessions-source"
+            , HP.data_ "source" (ms source)
+            , HE.onClick (FilterByQuery (T.pack source))
+            ]
+            [ H.span_ [HP.class_ "rank-no"] [text (ms (pad2 index))]
+            , H.span_ [HP.class_ "rank-name"] [text (ms source)]
+            , H.span_ [HP.class_ "lead", HP.aria_ "hidden" "true"] []
+            , H.span_ [HP.class_ "rank-n"] [text (num count)]
+            ]
         ]
+  where
+    source = displayDomain domain
 
 {- | Two hostnames of one publication appear separately in the database. The
 note is only printed when both are actually ranked, so it never claims more
@@ -327,9 +376,19 @@ busiestRow :: (Text, Int) -> View () () Model Action
 busiestRow (day, count) =
     H.li_
         []
-        [ H.span_ [HP.class_ "meta"] [text (dayStamp day)]
-        , H.span_ [HP.class_ "lead", HP.aria_ "hidden" "true"] []
-        , H.span_ [HP.class_ "mono"] [text (num count)]
+        [ H.button_
+            [ HP.class_ "tail-hit"
+            , HP.type_ "button"
+            , HP.title_ (ms ("Open the ledger filtered to " <> displayDay day))
+            , HP.aria_ "label" (ms (displayDay day <> ", " <> countPhrase count))
+            , HP.data_ "testid" "accessions-busiest"
+            , HP.data_ "day" (ms (T.unpack day))
+            , HE.onClick (FilterByQuery ("day:" <> day))
+            ]
+            [ H.span_ [HP.class_ "meta"] [text (dayStamp day)]
+            , H.span_ [HP.class_ "lead", HP.aria_ "hidden" "true"] []
+            , H.span_ [HP.class_ "mono"] [text (num count)]
+            ]
         ]
 
 -- ------------------------------------------------------------------ foot ---
@@ -439,6 +498,10 @@ pad2 :: Int -> String
 pad2 value
     | value < 10 = '0' : show value
     | otherwise = show value
+
+-- | "3 entries" for a control's accessible name.
+countPhrase :: Int -> String
+countPhrase count = comma count <> " " <> (if count == 1 then "entry" else "entries")
 
 -- | Drop the @www.@ prefix so one hostname ranks as itself.
 displayDomain :: Text -> String

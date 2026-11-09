@@ -23,6 +23,8 @@ jobs:
         run: devenv shell -- cabal test all
       - name: Haskell tests (full import fixture)
         run: EZA_IMPORT_FIXTURE=$PWD/bookmarks_14_08_2026.html devenv shell -- cabal test all
+      - name: Formal spec checks
+        run: devenv shell -- bash scripts/check-specs.sh
       - name: Build server
         run: devenv shell -- cabal build all
       - name: Build Miso client

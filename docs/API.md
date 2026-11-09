@@ -3,10 +3,20 @@
 The server returns JSON for every `/api/*` route. HTML pages for setup,
 login, and recovery are separate routes. All JSON is UTF-8.
 
+Since M3 one instance serves several accounts. The control database
+(`EZA_CONTROL_DB`, default `$EZA_DATA_DIR/control.db`) holds identity and each
+account's library is a separate SQLite file under `EZA_USERS_DIR` (default
+`$EZA_DATA_DIR/users/<id>/eza.db`). A request's session cookie, pending cookie,
+share token, or API token carries the owning account id in its prefix; the
+server resolves that id through the control database before it hashes the
+token. See [architecture.md](architecture.md) for the data layout.
+
 ## Conventions
 
 - Authenticated routes accept the `eza_session` cookie or an
-  `Authorization: Bearer eza_pat_...` API token.
+  `Authorization: Bearer eza_pat_u<id>_...` API token. Cookies and share links
+  use the `u<id>_<random>` form. Treat every token as opaque: the prefix picks
+  the account database, and a rewritten prefix fails the hash check.
 - Cookie requests with unsafe methods (`POST`, `PATCH`, `DELETE`) require
   `X-CSRF-Token` to match the `eza_csrf` cookie. Bearer requests do not use
   CSRF.
@@ -32,9 +42,9 @@ login, and recovery are separate routes. All JSON is UTF-8.
 | 204 | Request completed with no body |
 | 400 | Validation error |
 | 401 | No session, a failed username/password login, or an expired pending two-factor sign-in |
-| 403 | CSRF, origin, session-scope, or recovery-scope failure; retired passkey ceremony |
-| 404 | Row or route missing |
-| 409 | URL, tag, or last-credential conflict; two-factor precondition |
+| 403 | CSRF, origin, session-scope, recovery-scope, or admin-role failure; retired passkey ceremony |
+| 404 | Row or route missing; unknown account |
+| 409 | URL, tag, last-credential, last-admin, self-disable, or username conflict; two-factor precondition |
 | 410 | Share link revoked or expired; passkey setup retired |
 | 413 | Request body too large |
 | 429 | Rate limited; read `Retry-After` |
@@ -42,11 +52,24 @@ login, and recovery are separate routes. All JSON is UTF-8.
 
 ## Auth
 
-The instance has one account: one username and one Argon2id password hash in
-`app_state`. A passkey registered on the account is an optional second factor.
+An account is a username plus an Argon2id password hash in that account's own
+`app_state`, and passkeys are optional second factors scoped to the same
+database. Accounts live in the control database: `id`, `username` (unique,
+case-insensitive), `role` (`admin` or `member`), database path, WebAuthn user
+handle, `disabled_at`, `last_login_at`. A disabled account cannot sign in and
+its live sessions stop resolving.
+
+Startup migration: if the control database has no rows and the legacy
+`EZA_DB` file exists with a claimed account, that file is registered as user 1
+with the admin role, in place, with no copy or move. An unclaimed legacy file
+is left alone. Otherwise the first `POST /api/setup/password` claims a fresh
+account in `$EZA_DATA_DIR/users/<id>/eza.db`.
+
 Passkeys that predate schema v6 are legacy credentials: they sign in only while
-the database has no password. Recovery clears both the password and the
-passkeys.
+the account's database has no password. Recovery clears both the password and
+the passkeys. Each account gets its own WebAuthn user handle from the control
+row, so two passkeys on one server are never registered under a shared user
+id.
 
 ```
 POST   /api/auth/login
@@ -59,10 +82,14 @@ POST   /api/setup/password
 POST   /api/recovery/redeem
 ```
 
-`POST /api/auth/login` takes `{"username":"...","password":"..."}`. A failed
-login returns a generic 401. After `EZA_LOGIN_MAX_ATTEMPTS` failures the
+`POST /api/auth/login` takes `{"username":"...","password":"..."}`. The
+username resolves the control row, then the password is verified against that
+account's database. An unknown or disabled username pays a dummy Argon2 hash
+and returns the same generic 401 as a wrong password; attempts are also capped
+per client host and username. After `EZA_LOGIN_MAX_ATTEMPTS` failures the
 account locks for `EZA_LOGIN_LOCKOUT_SECONDS` and the endpoint returns 429 with
-`Retry-After`; the counters live in `app_state` and survive a restart.
+`Retry-After`; those counters live in that account's `app_state` and survive a
+restart.
 
 A success returns `{"requires_2fa":false,"redirect":"/"}` and sets the session
 and CSRF cookies. Session lifetime is `EZA_SESSION_TTL_SECONDS`.
@@ -85,11 +112,13 @@ The pending cookie is not a session for any other route. It cannot call
 above use it.
 
 `POST /api/setup/password` takes `{"username":"...","password":"...","confirm":"..."}`
-and is available on a fresh database and during a recovery setup. It creates
-the account, marks the database claimed, replaces the recovery codes with ten
-new ones, returns `{"codes":[...],"redirect":"/"}`, and signs the browser in.
-It leaves passkey two-factor off. `POST /api/setup/options` and
-`/api/setup/verify` are retired and return 410.
+and is available on a fresh control database and during a recovery setup. With
+no accounts it creates the first account (admin) and its database; with a
+recovery session it finishes that session's account. Either way it marks the
+database claimed, replaces the recovery codes with ten new ones, returns
+`{"codes":[...],"redirect":"/"}`, and signs the browser in. It leaves passkey
+two-factor off. `POST /api/setup/options` and `/api/setup/verify` are retired
+and return 410.
 
 `POST /api/auth/options` and `POST /api/auth/verify` are the legacy passkey
 ceremony. They work only while the database has passkeys and no password, and
@@ -98,8 +127,9 @@ assertion sets the session and CSRF cookies.
 
 `POST /api/auth/logout` clears the session, CSRF, and pending cookies.
 
-`POST /api/recovery/redeem` takes `{"code":"..."}`. It is rate limited by
-client host. Redemption spends the code, deletes every passkey, clears the
+`POST /api/recovery/redeem` takes `{"username":"...","code":"..."}`. The
+username resolves the control row; an unknown account and a used code share
+the same 400 `bad_code`. It is rate limited by client host. Redemption spends the code, deletes every passkey, clears the
 password and the two-factor flag, revokes every other session, and starts a
 ten-minute recovery session. The session may call only `POST
 /api/setup/password`, `POST /api/auth/logout`, and `GET /api/v1/account`;
@@ -107,9 +137,11 @@ completing the setup writes a new password and rotates the remaining codes
 out.
 
 The password pages are `GET /login`, `GET /setup`, and `GET /recover`.
-`GET /login` renders the password form, the legacy passkey form, or redirects
-to `/setup` on a fresh database. `GET /setup` renders the claim form, or the
-recovery form with the stored username while a recovery session is active.
+`GET /login` renders the password form (or the legacy passkey form when that
+account predates passwords), or redirects to `/setup` while
+the control database has no accounts. `GET /setup` renders the claim form, or
+the recovery form pre-filled with the session account's username while a
+recovery session is active.
 `GET /account/add-passkey` is the passkey registration page for a signed-in
 session.
 
@@ -140,6 +172,12 @@ DELETE /api/v1/bookmarks/{id}
 | `sort` | `created` | `created`, `added`, or `opened` |
 | `offset` | 0 | Row offset |
 | `limit` | 60 | Page size, capped at 200 |
+
+`q` accepts the operators `tag:name`, `is:unread`, `is:dead`,
+`link:target`, `-term`, `year:YYYY`, and `day:YYYY-MM-DD`. Date filters use
+UTC and match the original save date (`created_at`); rows with no save date
+(`created_at` = 0) never match. A filter ANDs with the other operators and the
+`tags`, `is_read`, and `is_dead` columns, and `year_counts` reflects it.
 
 The route returns a `SearchPage`. `POST /api/v1/bookmarks` takes
 `{"url","title","tags"}` and returns 201 `{"id":N}`. It returns 409 when the
@@ -173,7 +211,13 @@ POST   /api/v1/tags/{tag}/rename
 DELETE /api/v1/tags/{tag}
 GET    /api/v1/autocomplete?q=
 GET    /api/v1/bookmarks/{id}/backlinks
-GET    /api/v1/graph?seed=&depth=
+GET    /api/v1/graph
+GET    /api/v1/graph/layout?preset=compact|standard|airy
+GET    /api/v1/views
+POST   /api/v1/views
+GET    /api/v1/views/{slug}
+PATCH  /api/v1/views/{slug}
+DELETE /api/v1/views/{slug}
 GET    /api/v1/saved-searches
 POST   /api/v1/saved-searches
 DELETE /api/v1/saved-searches/{id}
@@ -189,8 +233,75 @@ list, and a notice.
 `GET /api/v1/autocomplete?q=` returns `{"items":[BookmarkSummary]}`.
 `GET /api/v1/bookmarks/{id}/backlinks` returns linked and unlinked mentions.
 
-`GET /api/v1/graph` accepts `seed` (bookmark id), `depth` (1 or 2), and
-the same search filters as the library. It returns `GraphData`.
+`GET /api/v1/graph` takes no parameters and returns the whole library as
+`GraphData`; it is read only. The wire format is compact arrays, not objects:
+
+- `tags` is `[[name, count]]`, ordered by record count descending, then name.
+- `records` is
+  `[[id, title, domain, created_at, is_read, is_dead, [tagIndex]]]`, ordered by
+  id. A record with an empty title carries its domain in the title slot. The
+  tag indexes point into `tags` and ascend within a record, so a tag name is
+  sent once rather than once per member record. `is_dead` feeds the graph
+  matcher and colour groups; the client paints the same shape.
+- `links` is `[[source_id, target_id]]`, sorted and de-duplicated. Only
+  resolved wikilinks are included: both endpoints are records in the payload,
+  so an unresolved target never appears.
+- `revision` is an opaque fingerprint built from the record count, the newest
+  `updated_at`, the tag count, the tag-link count and the resolved link count.
+  It changes when the library changes; clients only compare it, never parse
+  it. A response without it decodes as an empty string.
+
+The graph is whole-library, not a seed neighbourhood: every record and every
+tag is in the response. Pan, zoom, and filtering happen in the browser.
+
+`GET /api/v1/graph/layout?preset=compact|standard|airy` returns the
+server-computed node positions for one layout preset, so the client can hydrate
+a layout instead of running the deterministic builder itself. The default
+preset is `standard`; an unknown preset is a 400. The payload is:
+
+```
+{"schema": 1,
+ "revision": Text,
+ "preset": "compact" | "standard" | "airy",
+ "tags": [[x, y], ...],
+ "records": [[x, y], ...],
+ "bounds": [minx, miny, maxx, maxy]}
+```
+
+`tags` positions are keyed by tag index (the same order as `GraphData.tags`),
+`records` positions by record id. Every coordinate is quantized to 1/100 world
+unit. `revision` is the revision the positions were built from, so a client
+only hydrates when it matches the graph payload it already holds. The server
+caches the payload per database and revision, so only the first request for a
+preset computes and encodes it.
+
+Views are stored documents. `GET /api/v1/views` returns `{"views":[View]}`,
+default first, then graph before ledger, then slug. `POST /api/v1/views` takes
+a `ViewInput` and returns 201 with the created view. `GET
+/api/v1/views/{slug}` returns one view or 404. `PATCH /api/v1/views/{slug}`
+accepts any of `name`, `slug`, `definition`, and `is_default`, and returns the
+updated view. `DELETE /api/v1/views/{slug}` returns 204.
+
+Rules:
+
+- names are required and capped at 80 characters; the server derives a slug
+  from the name unless the input carries one, appends `-2`, `-3`, ... on a
+  collision, and caps a slug at 48 characters;
+- at most 64 views exist per installation, above that a create returns 409
+  `view_limit`;
+- `is_default` is unique per kind. Setting it on one view clears it on the
+  other views of that kind in the same transaction; the boot payload always
+  carries the default graph view because every opened database seeds one when
+  none exists;
+- deleting the current default promotes the lowest-id remaining view of that
+  kind; deleting the last graph view seeds the default graph view again;
+- every stored view object carries `"schema":1` at the wrapper level; an
+  unknown schema is rejected. The graph and ledger definition objects carry no
+  schema of their own, so a definition is
+  `{"query":...,"tags_shown":...,"label_mode":...,"layout_preset":...,"local_depth":...,"color_groups":[...]}`
+  for a graph view and `{"query":...,"sort":...}` for a ledger view;
+- invalid names, definitions, or slugs return 400 with
+  `{"error":{"code":"bad_request","message":...}}`.
 
 ## Maintenance
 
@@ -259,7 +370,7 @@ document with bookmarks, tags, highlights, saved searches, and rules.
 `[date, count]` pairs, oldest first. `top_sources` ranks the 24 busiest
 domains as `[domain, count]` pairs. `sources_once` counts domains that hold
 exactly one bookmark. `GET /api/v1/boot` returns the same figures under
-`stats`.
+`stats`, plus the saved `views`.
 
 ## Highlights and shares
 
@@ -315,15 +426,16 @@ POST   /api/v1/account/recovery/regenerate
 ```
 
 `GET /api/v1/account` returns
-`{"username":Text,"has_password":Bool,"require_passkey":Bool,"account_configured":Bool,"credentials":[CredentialInfo],"recovery_codes_remaining":N,"sessions":[SessionInfo]}`.
-The first four fields describe the single account; `require_passkey` reports
-whether optional passkey two-factor is on. `SessionInfo` carries timestamps and
+`{"username":Text,"role":"admin"|"member","has_password":Bool,"require_passkey":Bool,"account_configured":Bool,"credentials":[CredentialInfo],"recovery_codes_remaining":N,"sessions":[SessionInfo]}`.
+The first five fields describe the signed-in account; `role` comes from the
+control database and `require_passkey` reports whether optional passkey
+two-factor is on. `SessionInfo` carries timestamps and
 a `current` flag for the requesting session. Session ids and hashes are never
 exposed, and pending two-factor sessions never appear in the list.
 
 `POST /api/v1/account/2fa` takes
 `{"required":Bool,"current_password":Text}` and returns the same account
-document as `GET /api/v1/account`. Enabling needs the correct current password
+document as `GET /api/v1/account`, including `role`. Enabling needs the correct current password
 and at least one registered passkey, otherwise the endpoint returns 409 with
 `passkey_required`. Disabling needs the current password. Changing the password
 does not change the two-factor flag; recovery does clear it.
@@ -351,7 +463,108 @@ account also refuses to remove its last credential.
 `POST /api/v1/account/recovery/regenerate` invalidates the unused codes and
 returns ten new codes. `POST /api/v1/tokens` takes
 `{"name","scopes":["read","write","capture"]}` and returns the raw token once
-plus its metadata. Tokens are stored by hash and revoke immediately.
+plus its metadata. The raw token is `eza_pat_u<id>_<random>`: the prefix binds
+it to the issuing account, so it can only be validated against that account's
+database. Tokens are stored by hash and revoke immediately.
+
+## Administration
+
+Session-only, admin role only. A member session gets 403 `session_scope`; a
+bearer token never reaches these routes (403 `session_required`). Responses
+never contain a database path.
+
+```
+GET   /api/v1/admin/users
+POST  /api/v1/admin/users
+PATCH /api/v1/admin/users/{id}
+POST  /api/v1/admin/users/{id}/password
+```
+
+`GET /api/v1/admin/users` returns `{"users":[UserView]}` ordered by id.
+
+`POST /api/v1/admin/users` takes `UserCreateInput`
+(`{"username","password","role":"admin"|"member"}`) and returns 201 with
+`UserCreateResult` (`{"user":UserView,"recovery_codes":[Text]}`). The server
+allocates the control id, creates and migrates `users/<id>/eza.db`, finishes
+the password setup, and prints the recovery codes exactly once. On failure the
+partial account row and database are removed. Duplicate usernames return 409
+`username_taken`; a weak password returns 400 `weak_password`.
+
+`PATCH /api/v1/admin/users/{id}` takes `{"enabled":Bool}` and/or
+`{"role":"admin"|"member"}` and returns the updated `UserView`. Disabling an
+account revokes its sessions and stops its background workers. The server
+refuses to disable the caller's own account (409 `self_disable`) and refuses to
+disable, demote, or delete the last enabled admin (409 `last_admin`).
+
+`POST /api/v1/admin/users/{id}/password` takes `{"password":Text}` (at least
+ten characters), sets a temporary password, clears that account's optional
+passkey second factor, revokes every session of that account, and returns
+`{"ok":true}`. This is the break-glass path for a user who lost their device.
+
+## Extensions and webhooks
+
+```
+GET    /api/v1/webhooks
+POST   /api/v1/webhooks
+GET    /api/v1/webhooks/{id}
+PATCH  /api/v1/webhooks/{id}
+DELETE /api/v1/webhooks/{id}
+POST   /api/v1/webhooks/{id}/test
+GET    /api/v1/webhooks/{id}/deliveries?limit=20
+```
+
+Webhook management is session-only: a bearer token, including a `write` token,
+is rejected with 403 `session_required`. At most 16 subscriptions exist per
+database. `GET /api/v1/webhooks` returns `{"webhooks":[Webhook]}`;
+`POST /api/v1/webhooks` takes a `WebhookInput` and returns 201 with
+`{"webhook":Webhook,"secret":Text}`. The secret is 64 lowercase hex characters
+and is shown only on create. `GET`, `PATCH`, and `DELETE
+/api/v1/webhooks/{id}` read, update, and remove one subscription; `PATCH`
+takes a `WebhookInput` and returns the updated `Webhook`. `POST
+/api/v1/webhooks/{id}/test` posts one synthetic `bookmark.updated` event to
+that subscription and returns `{"ok":Bool,"status":Maybe Int,"error":Text}`.
+`GET /api/v1/webhooks/{id}/deliveries` returns the most recent deliveries as
+`{"deliveries":[DeliveryView]}`, newest first; `limit` defaults to 20 and is
+clamped to 1-100.
+
+A subscription receives one signed HTTP POST per matching event. The request
+carries these headers:
+
+| Header | Value |
+|---|---|
+| `X-Eza-Event` | event type, for example `bookmark.created` |
+| `X-Eza-Delivery` | delivery id |
+| `X-Eza-Timestamp` | POSIX seconds at send time |
+| `X-Eza-Signature` | `sha256=` plus lowercase hex HMAC-SHA256 of `timestamp + "." + body`, keyed with the subscription secret |
+| `Content-Type` | `application/json` |
+
+The body is an `EventEnvelope`:
+
+```
+{"id": "evt-123", "type": "bookmark.created", "occurred_at": 1700000000,
+ "data": {...}}
+```
+
+The v1 event catalog:
+
+- `bookmark.created`, `bookmark.updated`, `bookmark.deleted` carry
+  `{"id","url","title","domain","is_read","is_dead","tags":[Text]}`. The
+  deleted payload is captured before the row is removed.
+- `clip.created` carries `{"capture_id","bookmark_id"}`.
+- Imports do not emit per-row events; the v1 catalog has no
+  `import.completed`.
+
+Writes append their event row in the same transaction, so an event exists if
+and only if the write committed, and a no-op patch or an idempotent clip replay
+records nothing. A background worker fans the outbox out once per matching
+enabled subscription (the persistent cursor plus a UNIQUE guard make that
+idempotent) and posts each delivery with exponential backoff: five attempts
+with a 30 second base (30, 60, 120, 240 seconds), then the delivery is marked
+`failed` and the subscription is disabled. Redirects are not followed, the
+target must pass the same private-network guard as other outbound fetches, the
+request body is capped at 64 KiB, and response bodies are discarded. Delivery
+states are `queued`, `delivering`, `delivered`, and `failed`. Events and
+finished deliveries older than 30 days are purged.
 
 ## Browser clipper
 
@@ -394,7 +607,7 @@ BookmarkSummary {id, url, title, domain, created_at, added_at, favicon_url,
 SearchPage      {items: [BookmarkSummary], total, offset, limit, has_more,
                  year_counts: [[Int, Int]]}
 BootPayload     {version, origin, tags: [TagStat], saved_searches,
-                 initial: SearchPage, stats: LibraryStats}
+                 initial: SearchPage, stats: LibraryStats, views: [View]}
 LibraryStats    {total, tags, tag_links, sources,
                  top_sources: [[Text, Int]], sources_once, first_day, last_day,
                  days, years: [[Int, Int]], filing_days: [[Text, Int]],
@@ -407,11 +620,38 @@ BookmarkDetail  {summary fields except snippet, note_body, extracted_text,
                  last_checked_at, links: [Backlink]}
 Backlink        {source_id, source_title, snippet, line: Maybe Int,
                  resolved: Bool}
+GraphData       {tags: [[Text, Int]],
+                 records: [[Int, Text, Text, Int, Bool, Bool, [Int]]],
+                 links: [[Int, Int]], revision: Text}
+GraphLayout     {schema: 1, revision: Text, preset: Text,
+                 tags: [[Double, Double]], records: [[Double, Double]],
+                 bounds: [Double, Double, Double, Double]}
+View            {schema: 1, id, slug, name, kind: "graph"|"ledger",
+                 is_default, definition: ViewDefinition, created_at,
+                 updated_at}
+ViewInput       {name, kind, definition, slug: Maybe Text}
+ViewDefinition  graph: {query: Text, tags_shown: Bool,
+                 label_mode: "auto"|"tags"|"none",
+                 layout_preset: "compact"|"standard"|"airy",
+                 local_depth: Maybe Int, color_groups: [ColorGroup]}
+                ledger: {query: Text, sort: "created"|"added"|"opened"}
+ColorGroup      {name, query, color: "#rrggbb", enabled: Bool}
 CredentialInfo  {id: Text, nickname: Text, created_at: Int,
                  last_used_at: Maybe Int}
 ImportReport    {found, http_anchors, unique_urls, inserted, existing,
                  duplicate_anchors, skipped_non_http, tags_created,
                  tag_links_added, folders_skipped, untagged, elapsed_ms}
+Webhook         {id, name, url, events: [Text], enabled: Bool, created_at,
+                 last_status: Maybe Int, last_attempt_at: Maybe Int,
+                 last_error: Text, fail_streak: Int}
+WebhookInput    {name, url, events: [Text], enabled: Bool}
+DeliveryView    {id, event: Text, state: Text, attempts: Int,
+                 last_error: Text, created_at: Int}
+EventEnvelope   {id: Text, type: Text, occurred_at: Int, data: Value}
+UserView        {id, username, role: "admin"|"member", created_at,
+                 disabled_at: Maybe Int, last_login_at: Maybe Int}
+UserCreateInput {username, password, role: "admin"|"member"}
+UserCreateResult{user: UserView, recovery_codes: [Text]}
 ```
 
 `created_at` is the original save date from `ADD_DATE` on import.

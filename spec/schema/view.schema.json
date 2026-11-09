@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eza.local/spec/schema/view.schema.json",
+  "title": "eza view",
+  "description": "A declarative graph or ledger view stored in one user database. Extensions v1 stores view definitions as data and never executes them. The wrapper is versioned by the schema field; a graph and a ledger carry different definition shapes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "slug", "name", "kind", "definition"],
+  "properties": {
+    "schema": {
+      "const": 1,
+      "description": "View definition schema version. Only version 1 is defined."
+    },
+    "slug": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 48,
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "Lowercase identifier used in URLs and as the view id."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "description": "Display name."
+    },
+    "kind": {
+      "enum": ["graph", "ledger"],
+      "description": "Which definition shape applies."
+    },
+    "is_default": {
+      "type": "boolean",
+      "default": false,
+      "description": "Default view for its owner and kind. At most one default per (owner, kind)."
+    },
+    "definition": {
+      "description": "The declarative definition. Its shape depends on kind."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"kind": {"const": "graph"}},
+        "required": ["kind"]
+      },
+      "then": {
+        "properties": {
+          "definition": {"$ref": "#/$defs/graphDefinition"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "ledger"}},
+        "required": ["kind"]
+      },
+      "then": {
+        "properties": {
+          "definition": {"$ref": "#/$defs/ledgerDefinition"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "query": {
+      "type": "string",
+      "maxLength": 512,
+      "description": "Search expression. Same syntax as the q parameter of GET /api/v1/bookmarks."
+    },
+    "hexColor": {
+      "type": "string",
+      "pattern": "^#[0-9a-fA-F]{6}$",
+      "description": "Lowercase #rrggbb."
+    },
+    "colorGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "query", "color", "enabled"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 80},
+        "query": {"$ref": "#/$defs/query"},
+        "color": {"$ref": "#/$defs/hexColor"},
+        "enabled": {"type": "boolean"}
+      }
+    },
+    "graphDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "query",
+        "tags_shown",
+        "label_mode",
+        "layout_preset",
+        "local_depth",
+        "color_groups"
+      ],
+      "properties": {
+        "query": {"$ref": "#/$defs/query"},
+        "tags_shown": {
+          "type": "boolean",
+          "description": "Show tag nodes in the neighbourhood."
+        },
+        "label_mode": {
+          "enum": ["auto", "tags", "none"],
+          "description": "Which labels are drawn."
+        },
+        "layout_preset": {
+          "enum": ["compact", "standard", "airy"],
+          "description": "Deterministic layout spacing preset."
+        },
+        "local_depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3,
+          "description": "Neighbourhood depth around the focused record."
+        },
+        "color_groups": {
+          "type": "array",
+          "maxItems": 24,
+          "items": {"$ref": "#/$defs/colorGroup"},
+          "description": "Ordered colour rules. At most 24."
+        }
+      }
+    },
+    "ledgerDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["query", "sort"],
+      "properties": {
+        "query": {"$ref": "#/$defs/query"},
+        "sort": {
+          "enum": ["created", "added", "opened"],
+          "description": "Ledger order. Same values as the sort parameter of GET /api/v1/bookmarks."
+        }
+      }
+    }
+  }
+}

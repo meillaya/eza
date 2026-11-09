@@ -193,6 +193,28 @@
     return false;
   }
 
+  // The graph route owns the arrow and zoom keys while no text field has
+  // focus. Without this, the same press would scroll the panel or zoom the
+  // page as well as moving the plate.
+  function isGraphKeyTarget(key) {
+    if (location.pathname !== "/graph") return false;
+    var active = document.activeElement;
+    if (isEditableTarget(active)) return false;
+    return (
+      key === "ArrowUp" ||
+      key === "ArrowDown" ||
+      key === "ArrowLeft" ||
+      key === "ArrowRight" ||
+      key === "+" ||
+      key === "=" ||
+      key === "-" ||
+      key === "_" ||
+      key === "0" ||
+      key === "f" ||
+      key === "F"
+    );
+  }
+
   function bridgeKeyboard(event) {
     if (event.defaultPrevented || event.isComposing) return;
     var key = event.key;
@@ -203,6 +225,7 @@
     if (withModifier && (key === "k" || key === "K")) intercept = true;
     else if (withModifier && (key === "s" || key === "S")) intercept = true;
     else if (key === "/" && !editable && !withModifier && !event.altKey) intercept = true;
+    else if (!editable && !withModifier && !event.altKey) intercept = isGraphKeyTarget(key);
     // Only the shortcuts the browser itself would act on are cancelled: plain
     // typing, j/k movement and Escape keep their native behaviour.
     if (intercept) event.preventDefault();
@@ -258,9 +281,17 @@
   // Coalesce to one event per animation frame: a scroll gesture fires dozens of
   // events and every one of them would run the Miso update function.
   var ledgerScrollFrame = 0;
+  var ledgerScrollTimer = 0;
 
   function forwardLedgerScroll() {
-    ledgerScrollFrame = 0;
+    if (ledgerScrollFrame) {
+      cancelAnimationFrame(ledgerScrollFrame);
+      ledgerScrollFrame = 0;
+    }
+    if (ledgerScrollTimer) {
+      clearTimeout(ledgerScrollTimer);
+      ledgerScrollTimer = 0;
+    }
     window.dispatchEvent(new Event("scroll"));
   }
 
@@ -269,8 +300,12 @@
     function (event) {
       var target = event.target;
       if (!target || !target.classList || !target.classList.contains("ledger")) return;
-      if (ledgerScrollFrame) return;
+      if (ledgerScrollFrame || ledgerScrollTimer) return;
       ledgerScrollFrame = window.requestAnimationFrame(forwardLedgerScroll);
+      // A throttled or hidden tab can postpone requestAnimationFrame past the
+      // next interaction, which left the saved ledger offset stale. The timer
+      // guarantees one forwarded event within a short window either way.
+      ledgerScrollTimer = setTimeout(forwardLedgerScroll, 50);
     },
     true
   );
@@ -283,9 +318,18 @@
   // clamped by the browser. The second frame runs after the patch has landed.
   window.ezaScrollLedger = function (pixels) {
     var target = Math.max(0, Number(pixels) || 0);
+    var tries = 0;
     function apply() {
       var ledger = document.querySelector(".ledger");
-      if (ledger) ledger.scrollTop = target;
+      if (!ledger) return;
+      if (ledger.scrollTop !== target) ledger.scrollTop = target;
+      // The restore can run before the taller page has been patched into the
+      // DOM, in which case the browser clamps the write. A few frames of
+      // retries let the content land and the offset still apply.
+      tries += 1;
+      if (ledger.scrollTop !== target && tries < 12 && window.requestAnimationFrame) {
+        window.requestAnimationFrame(apply);
+      }
     }
     if (window.requestAnimationFrame) {
       window.requestAnimationFrame(function () {

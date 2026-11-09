@@ -998,6 +998,7 @@ recordExtras detail =
             ( H.button_
                 [ HP.class_ "action"
                 , HP.type_ "button"
+                , HP.data_ "testid" "open-graph"
                 , HE.onClick (OpenGraphAt (bdId detail))
                 ]
                 [text "the graph"]

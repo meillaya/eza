@@ -4,10 +4,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-{- | Authentication: the single-owner username/password account, sessions,
-login rate limiting, recovery codes, passkey management, optional passkey
-two-factor, and the WebAuthn relying-party operations kept for accounts that
-still sign in with a legacy passkey.
+{- | Authentication for one account database: the username/password account
+row, sessions, login rate limiting, recovery codes, passkey management,
+optional passkey two-factor, and the WebAuthn relying-party operations kept
+for accounts that still sign in with a legacy passkey. Multi-user identity
+lives in the control database ("Eza.Control"); this module is unaware of it
+except for the per-user WebAuthn handle that registration callers pass in.
 
 A password is the primary factor. Passkeys registered before schema v6 are
 legacy credentials: they keep working only while no password exists. On a
@@ -598,8 +600,8 @@ consumeChallenge conn purpose = do
 -- Options
 -- ---------------------------------------------------------------------------
 
-registrationOptionsFor :: AuthConfig -> BS.ByteString -> [WA.CredentialDescriptor] -> WA.CredentialOptions 'WA.Registration
-registrationOptionsFor ac challenge exclude =
+registrationOptionsFor :: AuthConfig -> BS.ByteString -> BS.ByteString -> [WA.CredentialDescriptor] -> WA.CredentialOptions 'WA.Registration
+registrationOptionsFor ac handle challenge exclude =
     WA.CredentialOptionsRegistration
         { WA.corRp =
             WA.CredentialRpEntity
@@ -608,7 +610,7 @@ registrationOptionsFor ac challenge exclude =
                 }
         , WA.corUser =
             WA.CredentialUserEntity
-                { WA.cueId = WA.UserHandle "\x01"
+                { WA.cueId = WA.UserHandle handle
                 , WA.cueDisplayName = WA.UserAccountDisplayName "eza"
                 , WA.cueName = WA.UserAccountName "eza"
                 }
@@ -649,8 +651,8 @@ authenticationOptionsFor ac challenge =
         , WA.coaExtensions = Nothing
         }
 
-registrationOptions :: Connection -> AuthConfig -> Bool -> IO (Either AuthError Value)
-registrationOptions conn ac forSetup = do
+registrationOptions :: Connection -> AuthConfig -> BS.ByteString -> Bool -> IO (Either AuthError Value)
+registrationOptions conn ac handle forSetup = do
     allowed <- if forSetup then setupAllowed conn else pure True
     if not allowed
         then pure (Left (authError 403 "setup_unavailable" "setup is not available"))
@@ -658,7 +660,7 @@ registrationOptions conn ac forSetup = do
             challenge <- getRandomBytes 32
             storeChallenge conn "registration" challenge
             excludes <- if forSetup then pure [] else existingDescriptors conn
-            let opts = registrationOptionsFor ac challenge excludes
+            let opts = registrationOptionsFor ac handle challenge excludes
             pure (Right (toJSON (WA.wjEncodeCredentialOptionsRegistration opts)))
 
 existingDescriptors :: Connection -> IO [WA.CredentialDescriptor]
@@ -718,8 +720,8 @@ secondFactorOptions conn ac = do
 account the credential is an optional second factor and an extra way in; on a
 legacy passkey-only account it is the credential the sign-in uses.
 -}
-addPasskeyOptions :: Connection -> AuthConfig -> IO (Either AuthError Value)
-addPasskeyOptions conn ac = registrationOptions conn ac False
+addPasskeyOptions :: Connection -> AuthConfig -> BS.ByteString -> IO (Either AuthError Value)
+addPasskeyOptions conn ac handle = registrationOptions conn ac handle False
 
 -- ---------------------------------------------------------------------------
 -- Verification
@@ -728,8 +730,8 @@ addPasskeyOptions conn ac = registrationOptions conn ac False
 rpHash :: AuthConfig -> WA.RpIdHash
 rpHash ac = WA.RpIdHash (hash (TE.encodeUtf8 (acRpId ac)))
 
-verifyRegistration :: Connection -> AuthConfig -> Bool -> Value -> IO (Either AuthError RegistrationOutcome)
-verifyRegistration conn ac forSetup body =
+verifyRegistration :: Connection -> AuthConfig -> BS.ByteString -> Bool -> Value -> IO (Either AuthError RegistrationOutcome)
+verifyRegistration conn ac handle forSetup body =
     case fromJSON body :: Result WA.WJCredentialRegistration of
         Error _ -> pure (Left (authError 400 "bad_request" "malformed registration response"))
         Success wjCredential ->
@@ -741,7 +743,7 @@ verifyRegistration conn ac forSetup body =
                         Nothing -> pure (Left (authError 400 "challenge" "challenge is unknown, expired, or already used"))
                         Just challenge -> do
                             now <- dateCurrent
-                            let options = registrationOptionsFor ac challenge []
+                            let options = registrationOptionsFor ac handle challenge []
                                 origin = WA.Origin (acOrigin ac)
                             case WA.verifyRegistrationResponse (origin :| []) (rpHash ac) mempty now options cred of
                                 V.Failure _ -> pure (Left (authError 400 "verification" "registration response failed verification"))
@@ -829,9 +831,9 @@ verifySecondFactor conn ac body = do
         then verifyAssertion conn ac "second_factor" body
         else pure (Left (authError 403 "2fa_not_required" "this account does not ask for a passkey at sign-in"))
 
-verifyAddPasskey :: Connection -> AuthConfig -> Value -> IO (Either AuthError ())
-verifyAddPasskey conn ac body = do
-    result <- verifyRegistration conn ac False body
+verifyAddPasskey :: Connection -> AuthConfig -> BS.ByteString -> Value -> IO (Either AuthError ())
+verifyAddPasskey conn ac handle body = do
+    result <- verifyRegistration conn ac handle False body
     pure (() <$ result)
 
 recordCredentialUse :: Connection -> BS.ByteString -> WA.SignatureCounterResult -> IO ()

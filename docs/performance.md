@@ -60,6 +60,92 @@ What the cases measure:
   bounded; counts come from the same grouping pass. After the cleanup the
   grouping drops to 11.1 ms average because 5,677 duplicate rows are gone.
 
+## Graph
+
+The `graph` case issues the four reads behind `GET /api/v1/graph`: tag counts,
+every record, the tag memberships, and the resolved wikilinks. One payload is
+about 950 KB of raw JSON, which the gzip middleware compresses like the other
+JSON responses.
+
+This run used the reference database `data/eza.db` (8,838 records, 77 tags,
+21,848 tag links, 1 resolved wikilink) with
+`eza-bookmarks bench --iterations 10`:
+
+```
+graph: total_ms=204.14 avg_ms=20.41 p50_ms=17.97 p95_ms=34.42 p99_ms=34.42 rows=8915 bytes=949888
+```
+
+`rows` counts the 8,838 records plus the 77 tags. Pan, zoom, and filtering
+happen in the browser; the endpoint takes no parameters. The graph is a
+read-only, whole-library request, so it is heavier than a ledger page and is
+issued once per graph visit.
+
+The cases above were measured on the 14,582-row scratch copy, not on this
+8,838-record reference library, so the graph figures are not directly
+comparable with that table.
+
+The client side was profiled in headless Chromium at 1440x950 (dpr 1)
+against a verified scratch copy of the reference library: 8,838 records, 77
+tags, 21,848 tag memberships and 1 resolved wikilink. The profiling script is
+ad-hoc; the committed `tests/e2e/graph-perf.mjs` measures a synthetic
+9,000-record library, so the two do not produce identical numbers.
+
+The first renderer drew visible primitives on every frame once the zoom passed
+three times the fit scale. On the reference library that path cost 107.8 ms per
+frame at 3.05x zoom (frame p95 133.5 ms) and 33.6 ms per frame at 7.45x, which
+is the lag the whole-library plate showed when zoomed.
+
+The current renderer keeps a cached whole-library bitmap for motion and builds
+a screen-resolution detail plate after the view settles, at most 1,000
+primitives per animation frame. The detail plate and the labels are not redrawn
+per primitive while the reader drags or zooms, the settle work is split across
+frames, and the old per-frame vector path is gone:
+
+```
+drag frames p50 / p95 / max, fit:            16.7 / 16.8 / 16.8 ms
+drag frames p50 / p95 / max, 3.05x zoom:     16.7 / 16.8 / 33.4 ms
+drag frames p50 / p95 / max, 7.45x zoom:     16.7 / 16.7 / 16.8 ms
+detail plate completion after a stop:        about 31 frames at 3.05x
+hover, 7.45x zoom:                     no frame above the 20 ms script pacing
+filter apply:                                223 ms
+tags toggle:                                 328 ms
+cold plate, in-app:                        2,847 ms
+cold plate, full reload:                   2,812 ms
+```
+
+The rare 33 ms frame is one detail chunk landing heavily while the plate
+sharpens after the gesture; it is not part of the continuous pan or zoom path.
+Filtering rebuilds no plate, only the accent overlay. The tags toggle rebuilds
+the world bitmap once. Labels, hover emphasis and selection stay live overlays,
+so they remain crisp at every scale.
+
+Cold load is unchanged from the earlier harness runs: decoding the payload and
+building the deterministic layout dominate, and the settled 1,500 ms budget for
+the in-app cold plate is still missed on this library. The plate skeleton is
+shown while that work runs. The full reload is within its separate 3,000 ms
+budget.
+
+### Layout endpoint
+
+M1 moves the deterministic layout to the server:
+`GET /api/v1/graph/layout?preset=compact|standard|airy` returns one preset's
+node positions quantized to 1/100 world unit, and the client hydrates them
+instead of rebuilding the layout when the layout revision matches its graph
+payload. On the reference `data/eza.db` (8,838 records, 77 tags) the layout work
+behind one preset, which is the build, the quantization and the JSON encoding,
+averages 22.1 ms (p50 19.4 ms, p95 37.7 ms). Over HTTP a first request for one
+preset takes 128-143 ms, which covers the session check, the graph read, the
+layout build and the gzip. A cache hit takes 20-22 ms. The cache holds at most
+three entries, one per preset for the current revision, so a repeat request at
+the same revision reuses the positions and a library change invalidates all
+three.
+
+The graph payload is 1,002,873 bytes on this run; the earlier 949,888-byte
+measurement predates the `is_dead` field on every record and the `revision`
+field. The client compares that revision with the layout revision and falls
+back to its local deterministic builder when they differ or when the request
+fails.
+
 ## Import and duplicate cleanup
 
 Both were measured on the scratch copy of the 14,582-row library.

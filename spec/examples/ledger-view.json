@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "slug": "unread-ledger",
+  "name": "Unread ledger",
+  "kind": "ledger",
+  "is_default": false,
+  "definition": {
+    "query": "is:unread",
+    "sort": "created"
+  }
+}

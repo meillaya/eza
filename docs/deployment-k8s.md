@@ -57,8 +57,10 @@ in SecretSpec's `env` provider (`--file /etc/eza/secretspec.toml --profile
 production`), so either keys or nothing works. See [secrets.md](secrets.md).
 
 `configmap.yaml` carries the non-secret runtime settings, with the same
-defaults as the server: `EZA_ENRICH_WORKERS` (in-process background workers,
-`0` disables), `EZA_FETCH_TIMEOUT_MS`, `EZA_FAVICON_MAX_BYTES`,
+defaults as the server: `EZA_CONTROL_DB` (default
+`$EZA_DATA_DIR/control.db`), `EZA_USERS_DIR` (default `$EZA_DATA_DIR/users`),
+`EZA_MAX_USERS` (default 32), `EZA_ENRICH_WORKERS` (process-wide enrichment
+concurrency, `0` disables), `EZA_FETCH_TIMEOUT_MS`, `EZA_FAVICON_MAX_BYTES`,
 `EZA_FAVICON_TTL_DAYS`, `EZA_SHARE_TTL_DAYS`, `EZA_ALLOW_PRIVATE_FETCH` (SSRF
 guard; keep `0`), and the AI settings `EZA_AI_PROVIDER` (`none` disables AI
 tagging), `EZA_OLLAMA_BASE_URL`, `EZA_AI_MODEL` and `EZA_AI_AUTO_TAG`. Edit the
@@ -136,20 +138,22 @@ writable) and `seccompProfile: RuntimeDefault`.
 
 ## Storage and backups
 
-The PVC is mounted at `/data` and holds `eza.db`, `snapshots/` and
-`backups/`. Because the claim is `ReadWriteOnce`, only one pod can mount it
-at a time: the Recreate strategy guarantees the old pod is gone before the new
-one starts.
+The PVC is mounted at `/data` and holds the control database `control.db`,
+one library per account under `users/<id>/eza.db` (with
+`users/<id>/snapshots/`), and the backup stamps under `backups/`. Because the
+claim is `ReadWriteOnce`, only one pod can mount it at a time: the Recreate
+strategy guarantees the old pod is gone before the new one starts.
 
 Recommended backup: run the server's own backup command inside the running
-pod (`VACUUM INTO` on the live database + integrity check + 14-day prune;
-safe while eza is writing), then copy the result off the PVC:
+pod (`VACUUM INTO` + integrity check + 14-day prune; safe while eza is
+writing). It backs up the control database and every enabled account into one
+stamp directory; `--user alice` narrows it to that account's library:
 
 ```bash
 POD=$(kubectl -n eza get pod -l app.kubernetes.io/name=eza -o jsonpath='{.items[0].metadata.name}')
 kubectl -n eza exec "$POD" -- /bin/eza-bookmarks backup
-# prints: backup: /data/backups/eza-20260101-031700.db
-kubectl -n eza exec "$POD" -- /bin/eza-bookmarks verify
+# prints: backup: /data/backups/20260101-031700
+kubectl -n eza exec "$POD" -- /bin/eza-bookmarks users list
 ```
 
 For scheduled off-cluster backups, use a separate Job/CronJob that mounts the
@@ -162,12 +166,12 @@ the volume from a Job that uses `kubectl exec`-style access or an object-store
 sidecar; the image already ships `rclone` for the upload step:
 
 ```bash
-kubectl -n eza exec "$POD" -- rclone copy /data/backups/<stamp>.db remote:eza-backups
+kubectl -n eza exec "$POD" -- rclone copy /data/backups/<stamp> remote:eza-backups
 ```
 
-Restore: scale the Deployment to zero, mount the PVC from a debug pod, replace
-`/data/eza.db` with the backup, delete stale `eza.db-wal`/`eza.db-shm`, then
-scale back up:
+Restore: scale the Deployment to zero, mount the PVC from a debug pod, copy the
+stamp's `control.db` and `users/<id>.db` files back into place (or restore one
+library on its own), delete stale WAL/SHM sidecars, then scale back up:
 
 ```bash
 kubectl -n eza scale deployment/eza --replicas=0

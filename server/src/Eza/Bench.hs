@@ -6,7 +6,8 @@ Every case is a pure read: the benchmark never writes and never migrates.
 Each invocation prints one parseable line per case with the average and the
 p50/p95/p99 latencies in milliseconds plus the result size, so a run can be
 diffed between commits. Cases measure the queries behind one boot request,
-the two ledger page shapes the UI requests most, and the duplicate scan.
+the two ledger page shapes the UI requests most, the whole-library graph, the
+deterministic client layout for that graph, and the duplicate scan.
 -}
 module Eza.Bench (
     runBench,
@@ -25,7 +26,9 @@ import Database.SQLite.Simple (Connection, query_)
 
 import Eza.Bookmarks
 import Eza.Dedup (dedupCandidates, defaultDedupQuery)
-import Eza.Types (DedupGroup (..), DedupReport (..), SearchPage (..))
+import Eza.Graph (globalGraph, graphLayoutPayload)
+import Eza.GraphLayout (LayoutPreset (..))
+import Eza.Types (DedupGroup (..), DedupReport (..), GraphData (..), SearchPage (..))
 import Eza.Url (dedupeKey)
 
 {- | The size of one case result: rendered rows and the payload bytes a JSON
@@ -83,6 +86,8 @@ benchCases conn =
     , ("all-page2", listCase conn defaultListQuery{lqOffset = 60})
     , ("boot-components", bootComponents conn)
     , ("library-stats", statsCase conn)
+    , ("graph", graphCase conn)
+    , ("layout", layoutCase conn)
     , ("all-tags", tagsCase conn)
     , ("autocomplete", autocompleteCase conn)
     , ("sort-opened", listCase conn defaultListQuery{lqSort = "opened"})
@@ -118,10 +123,35 @@ statsCase conn = do
     stats <- libraryStats conn
     pure (CaseResult 0 (payloadBytes stats))
 
+-- | The whole-library graph request: every record and every tag.
+graphCase :: Connection -> IO CaseResult
+graphCase conn = do
+    graph <- globalGraph conn
+    pure
+        CaseResult
+            { crRows = length (gdRecords graph) + length (gdTags graph)
+            , crBytes = payloadBytes graph
+            }
+
 tagsCase :: Connection -> IO CaseResult
 tagsCase conn = do
     tags <- allTags conn
     pure (CaseResult (length tags) (payloadBytes tags))
+
+{- | The deterministic layout the layout endpoint serves: build the standard
+preset from the graph payload, quantize it and encode the JSON response. This
+is pure CPU work on the graph payload, so the case measures the layout endpoint
+on a cache miss rather than a database read.
+-}
+layoutCase :: Connection -> IO CaseResult
+layoutCase conn = do
+    graph <- globalGraph conn
+    let payload = graphLayoutPayload Standard graph
+    pure
+        CaseResult
+            { crRows = length (gdRecords graph) + length (gdTags graph)
+            , crBytes = payloadBytes payload
+            }
 
 autocompleteCase :: Connection -> IO CaseResult
 autocompleteCase conn = do

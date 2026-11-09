@@ -8,12 +8,12 @@ module Eza.Types (
     TagStat (..),
     SearchPage (..),
     SavedSearch (..),
-    BootPayload (..),
     LibraryStats (..),
     Backlink (..),
     Backlinks (..),
-    GraphNode (..),
-    GraphEdge (..),
+    GraphTag (..),
+    GraphRecord (..),
+    GraphLink (..),
     GraphData (..),
     ImportReport (..),
     CredentialInfo (..),
@@ -24,7 +24,7 @@ module Eza.Types (
     DedupMergeAllReport (..),
 ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON, genericToJSON)
+import Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON, genericToJSON, object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
@@ -155,21 +155,6 @@ instance ToJSON LibraryStats where
 instance FromJSON LibraryStats where
     parseJSON = genericParseJSON (jsonOptions "ls")
 
-data BootPayload = BootPayload
-    { bpVersion :: Text
-    , bpOrigin :: Text
-    , bpTags :: [TagStat]
-    , bpSavedSearches :: [SavedSearch]
-    , bpInitial :: SearchPage
-    , bpStats :: LibraryStats
-    }
-    deriving stock (Show, Eq, Generic)
-
-instance ToJSON BootPayload where
-    toJSON = genericToJSON (jsonOptions "bp")
-instance FromJSON BootPayload where
-    parseJSON = genericParseJSON (jsonOptions "bp")
-
 data Backlink = Backlink
     { blSourceId :: Int
     , blSourceTitle :: Text
@@ -195,43 +180,99 @@ instance ToJSON Backlinks where
 instance FromJSON Backlinks where
     parseJSON = genericParseJSON (jsonOptions "bks")
 
-data GraphNode = GraphNode
-    { gnId :: Int
-    , gnTitle :: Text
-    , gnUrl :: Text
-    , gnTags :: [Text]
-    , gnIsRead :: Bool
-    , gnIndegree :: Int
+{- | One tag node in the whole-library graph. @gtCount@ is the number of
+records that carry the tag, as stored in @bookmark_tags@.
+-}
+data GraphTag = GraphTag
+    { gtName :: Text
+    , gtCount :: Int
     }
-    deriving stock (Show, Eq, Generic)
+    deriving stock (Show, Eq)
 
-instance ToJSON GraphNode where
-    toJSON = genericToJSON (jsonOptions "gn")
-instance FromJSON GraphNode where
-    parseJSON = genericParseJSON (jsonOptions "gn")
+-- | Compact wire encoding: @[name,count]@.
+instance ToJSON GraphTag where
+    toJSON tag = toJSON (gtName tag, gtCount tag)
+instance FromJSON GraphTag where
+    parseJSON value = do
+        (name, count) <- parseJSON value
+        pure (GraphTag name count)
 
-data GraphEdge = GraphEdge
-    { geSource :: Int
-    , geTarget :: Int
-    , geWeight :: Int
+{- | One record node in the whole-library graph. @grTags@ holds indexes into
+'gdTags', not tag names, so the payload does not repeat a name twenty-one
+thousand times. The title falls back to the domain when the record has none.
+-}
+data GraphRecord = GraphRecord
+    { grId :: Int
+    , grTitle :: Text
+    , grDomain :: Text
+    , grCreatedAt :: Int
+    , grIsRead :: Bool
+    , grIsDead :: Bool
+    , grTags :: [Int]
     }
-    deriving stock (Show, Eq, Generic)
+    deriving stock (Show, Eq)
 
-instance ToJSON GraphEdge where
-    toJSON = genericToJSON (jsonOptions "ge")
-instance FromJSON GraphEdge where
-    parseJSON = genericParseJSON (jsonOptions "ge")
+-- | Compact wire encoding: @[id,title,domain,created_at,is_read,is_dead,tags]@.
+instance ToJSON GraphRecord where
+    toJSON record =
+        toJSON
+            ( grId record
+            , grTitle record
+            , grDomain record
+            , grCreatedAt record
+            , grIsRead record
+            , grIsDead record
+            , grTags record
+            )
+instance FromJSON GraphRecord where
+    parseJSON value = do
+        (recordId, title, domain, createdAt, isRead, isDead, tags) <- parseJSON value
+        pure (GraphRecord recordId title domain createdAt isRead isDead tags)
 
+-- | One resolved wikilink between two record nodes.
+data GraphLink = GraphLink
+    { glSource :: Int
+    , glTarget :: Int
+    }
+    deriving stock (Show, Eq)
+
+-- | Compact wire encoding: @[source,target]@.
+instance ToJSON GraphLink where
+    toJSON link = toJSON (glSource link, glTarget link)
+instance FromJSON GraphLink where
+    parseJSON value = do
+        (source, target) <- parseJSON value
+        pure (GraphLink source target)
+
+{- | The whole library as one graph: every record, every tag, and the resolved
+wikilinks between records. Tag membership is expressed by 'grTags'; the only
+two relationship types are that membership and 'gdLinks'.
+-}
 data GraphData = GraphData
-    { gdNodes :: [GraphNode]
-    , gdEdges :: [GraphEdge]
+    { gdTags :: [GraphTag]
+    , gdRecords :: [GraphRecord]
+    , gdLinks :: [GraphLink]
+    , gdRevision :: Text
+    -- ^ Cheap aggregate fingerprint of the library. Clients only compare it;
+    -- they never parse it.
     }
-    deriving stock (Show, Eq, Generic)
+    deriving stock (Show, Eq)
 
 instance ToJSON GraphData where
-    toJSON = genericToJSON (jsonOptions "gd")
+    toJSON graph =
+        object
+            [ "tags" .= gdTags graph
+            , "records" .= gdRecords graph
+            , "links" .= gdLinks graph
+            , "revision" .= gdRevision graph
+            ]
 instance FromJSON GraphData where
-    parseJSON = genericParseJSON (jsonOptions "gd")
+    parseJSON = withObject "GraphData" $ \o ->
+        GraphData
+            <$> o .: "tags"
+            <*> o .: "records"
+            <*> o .: "links"
+            <*> o .:? "revision" .!= ""
 
 data ImportReport = ImportReport
     { irFound :: Int

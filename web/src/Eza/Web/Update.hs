@@ -4,23 +4,34 @@
 -- | The MVU update function: every action's state transition and side effect.
 module Eza.Web.Update (updateModel, subscriptions) where
 
-import Control.Monad (unless, void, when)
-import Data.Aeson (Result (..), Value (..), fromJSON, object, (.=))
+import Control.Monad (join, unless, void, when)
+import Data.Aeson (Result (..), Value (..), encode, fromJSON, object, (.=))
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet as IS
 import Data.List (nub)
 import qualified Data.Map.Strict as M
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 
 import Miso
 import qualified Miso.JSON as MJ
 import Miso.Router (toURI)
 
+import Eza.Boot (BootPayload (..))
+import qualified Eza.GraphMatch as GM
+import Eza.SearchQuery (parseSearchQuery)
+import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..), UserView (..))
+import Eza.Webhook (Webhook (..), WebhookInput (..))
+import qualified Eza.View as EV
 import Eza.Types (
     BookmarkDetail (..),
+    GraphData (..),
+    GraphRecord (..),
     BookmarkSummary (..),
-    BootPayload (..),
     DedupCounts (..),
     DedupGroup (..),
     DedupMergeAllReport (..),
@@ -31,6 +42,7 @@ import Eza.Types (
     SearchPage (..),
  )
 import Eza.Web.Api
+import Eza.Web.Graph
 import Eza.Web.Model
 import Eza.Web.Types (
     AccountInfo (..),
@@ -46,7 +58,7 @@ the virtualized grid, and window resize for the column count.
 -}
 subscriptions :: [Sub Model Action]
 subscriptions =
-    [ routerSub RouteChanged
+    [ uriSub (\uri -> RouteChanged (uriFragment uri) (Right (routeOfUri uri)))
     , windowSub "scroll" emptyDecoder (\() -> Scrolled)
     , windowSub "resize" emptyDecoder (\() -> Resized)
     , -- The keyboard bridge in pwa.js normalises @event.key@ and the modifier
@@ -405,11 +417,12 @@ loadRoute route = do
             fetchBacklinks bookmarkId (BacklinksLoaded epoch) (BacklinksFailed epoch)
             fetchHighlights bookmarkId (HighlightsLoaded epoch) (HighlightsFailed epoch)
             fetchShares (\shares -> SharesLoaded epoch shares) (SharesFailed epoch)
-        Graph -> do
-            current <- get
-            case mGraphSeed current of
-                Nothing -> putModel (\x -> x{mGraph = Nothing, mGraphLoading = False})
-                Just seed -> fetchGraph (Just seed) (mGraphDepth current) GraphLoaded GraphFailed
+        Graph -> enterGraphRoute False Nothing 1
+        GraphLocal rootKey depth -> enterGraphRoute True (Just rootKey) depth
+        Views -> do
+            putModel (\x -> x{mViewsLoading = True, mViewsError = Nothing})
+            fetchViews ViewsLoaded ViewsFailed
+        ViewOpen slug -> openSavedView slug
         Dedup -> dedupFirstPage DedupLoaded DedupFailed
         Tags -> do
             fetchConsolidation ConsolLoaded ConsolFailed
@@ -419,9 +432,10 @@ loadRoute route = do
             fetchAiStatus AiStatusLoaded (\_ -> Noop)
         Maintenance -> fetchPruneCandidates PruneLoaded PruneFailed
         Account -> do
-            putModel (\x -> x{mTokensLoading = True, mSharesLoading = True, mRulesLoading = True})
+            putModel (\x -> x{mTokensLoading = True, mSharesLoading = True, mRulesLoading = True, mWebhooksLoading = True})
             fetchAccount AccountLoaded AccountFailed
             fetchTokens TokensLoaded TokensFailed
+            fetchWebhooks WebhooksLoaded WebhooksFailed
             fetchShares (\shares -> SharesLoaded epoch shares) (SharesFailed epoch)
             fetchRules RulesLoaded RulesFailed
         Accessions -> pure ()
@@ -451,10 +465,6 @@ loadRoute route = do
                         }
                 )
         NotFound -> pure ()
-    when (route == Account) $ withSink $ \sink -> do
-        hash <- readAccountHash
-        sink (AccountTabFromHash hash)
-
 scheduleSearch :: Int -> Effect () () Model Action
 scheduleSearch delayMs = do
     m <- get
@@ -503,18 +513,6 @@ readOrigin = do
 {- | The fragment of the current URL, used to make the account tabs addressable:
 @/account#sessions@ opens the sessions panel directly.
 -}
-readAccountHash :: IO MisoString
-readAccountHash = do
-    window' <- jsg "window"
-    location' <- window' ! "location"
-    raw <- fromJSVal =<< getProperty location' "hash"
-    pure
-        ( maybe
-            ""
-            (ms . (fromMisoString :: MisoString -> String))
-            (raw :: Maybe MisoString)
-        )
-
 {- | Record the selected account tab in the fragment without a history entry,
 so the back button still leaves the page rather than walking the tabs.
 -}
@@ -616,14 +614,18 @@ updateModel = \case
             sink (ConnectivityChanged online)
             sink (WindowOriginKnown origin)
             sink (LayoutChanged width height)
-            sink (RouteChanged (Right (routeOfUri uri)))
-    RouteChanged routeResult -> do
+            sink (RouteChanged (uriFragment uri) (Right (routeOfUri uri)))
+    RouteChanged fragmentText routeResult -> do
         m <- get
         case routeResult of
             Left _ -> loadRoute NotFound
             -- The share-target landing page is a real page now: it renders the
             -- prefilled save form instead of quietly writing a bookmark.
-            Right route ->
+            Right route -> do
+                -- The fragment is applied in the same update as the route, so
+                -- it cannot land after a tab click and undo it.
+                when (route == Account) $
+                    putModel (\x -> x{mAccountTab = accountTabFromSlug fragmentText})
                 if mDirty m && route /= mRoute m && isDetailRoute (mRoute m)
                     then put m{mGuardOpen = True, mPendingRoute = Just route}
                     else loadRoute route
@@ -670,18 +672,35 @@ updateModel = \case
         withSink $ \sink -> do
             measured <- measureGrid
             sink (ScrollMetrics measured)
-    Resized -> withSink $ \sink -> do
-        width <- windowInnerWidth
-        height <- windowInnerHeight
-        measured <- measureGrid
-        sink (LayoutChanged width height)
-        sink (ScrollMetrics measured)
+    Resized -> do
+        withSink $ \sink -> do
+            width <- windowInnerWidth
+            height <- windowInnerHeight
+            measured <- measureGrid
+            sink (LayoutChanged width height)
+            sink (ScrollMetrics measured)
+        m <- get
+        when (isGraphRoute (mRoute m)) (measureGraphCanvas GraphMeasured)
     Scrolled -> withSink $ \sink -> do
         measured <- measureGrid
         sink (ScrollMetrics measured)
     ScrollMetrics Nothing -> pure ()
     ScrollMetrics (Just (scrollY, height, gridTop)) -> do
-        putModel (\m -> m{mScrollY = scrollY, mHeight = height, mGridTop = gridTop, mScrollRestore = Nothing})
+        -- While a return-to-position is still loading pages, the browser fires
+        -- scroll events as the container remounts and clamps the saved offset.
+        -- Those are not the reader scrolling, so they must not cancel the
+        -- restore; only a scroll after the restore has applied may clear it.
+        previous <- get
+        let restoring = isJust (mScrollRestore previous)
+        putModel
+            ( \m ->
+                m
+                    { mScrollY = scrollY
+                    , mHeight = height
+                    , mGridTop = gridTop
+                    , mScrollRestore = if restoring then mScrollRestore m else Nothing
+                    }
+            )
         m <- get
         let content = gridTop + ledgerContentHeight m
         when (mHasMore m && not (mLoading m) && not (mLoadingMore m) && scrollY + height + 600 >= content) $
@@ -692,12 +711,16 @@ updateModel = \case
             editable = keEditable key
             plain = not withModifier && not (keAlt key)
             ledger = isListRoute (mRoute m)
+            graphKeys = mRoute m == Graph && not editable && plain && not (hasModalLayer m)
             runAction action = updateModel action
         -- event.key is upper case for a shifted letter; the shortcut names
         -- below are the unshifted ones.
         case T.toLower (keKey key) of
             -- Escape closes the top layer from any focus, including a field.
-            "escape" -> closeTopLayer m
+            -- On the graph it clears the filter line first, then the selection.
+            "escape"
+                | mRoute m == Graph && not (hasModalLayer m) -> graphEscape m
+                | otherwise -> closeTopLayer m
             -- The command palette is reachable from every screen: the command
             -- mods always, Shift+K outside fields, and a bare k off the ledger
             -- (so the hint on the search line is not the only way in).
@@ -715,6 +738,20 @@ updateModel = \case
             "enter" | not editable && ledger -> openCursorRecord m
             "arrowup" | mPaletteOpen m -> runAction PalettePrev
             "arrowdown" | mPaletteOpen m -> runAction PaletteNext
+            -- The graph keys live on the global bridge so the canvas never
+            -- scrolls the panel while panning; pwa.js cancels the browser
+            -- default for arrows and zoom keys on the graph canvas.
+            "arrowup" | graphKeys -> graphPan 0 (-1) (keShift key)
+            "arrowdown" | graphKeys -> graphPan 0 1 (keShift key)
+            "arrowleft" | graphKeys -> graphPan (-1) 0 (keShift key)
+            "arrowright" | graphKeys -> graphPan 1 0 (keShift key)
+            "+" | graphKeys -> runAction GraphZoomIn
+            "=" | graphKeys -> runAction GraphZoomIn
+            "-" | graphKeys -> runAction GraphZoomOut
+            "_" | graphKeys -> runAction GraphZoomOut
+            "0" | graphKeys -> runAction GraphFit
+            "f" | graphKeys -> runAction GraphFit
+            "enter" | graphKeys -> graphOpenSelected m
             "s" | withModifier && isDetailRoute (mRoute m) -> runAction SaveBookmark
             _ -> pure ()
     Noop -> pure ()
@@ -728,9 +765,18 @@ updateModel = \case
                     , mTags = bpTags payload
                     , mStats = Just (bpStats payload)
                     , mSaved = bpSavedSearches payload
+                    , mViews = bpViews payload
                     , mBootReady = True
                     }
             )
+        -- A cold load of /graph?focus=..&local=1 must keep the URL's scope:
+        -- the route already applied local mode, so the default whole-library
+        -- view must not overwrite it. A plain /graph load still gets it.
+        m0 <- get
+        unless (isLocalGraphRoute (mRoute m0)) $
+            case defaultGraphView (bpViews payload) of
+                Just view -> putModel (applyGraphView view)
+                Nothing -> pure ()
         m <- get
         let page = bpInitial payload
             deferred = mListDeferred m
@@ -785,7 +831,16 @@ updateModel = \case
     AccountTabSelected tab -> do
         putModel (\m -> m{mAccountTab = tab})
         liftSinkIO (setAccountHash (accountTabSlug tab))
-    AccountTabFromHash hash -> putModel (\m -> m{mAccountTab = accountTabFromSlug hash})
+        when (tab == AccountWebhooks) $ do
+            m <- get
+            when (null (mWebhooks m) && not (mWebhooksLoading m)) $ do
+                putModel (\x -> x{mWebhooksLoading = True, mWebhooksError = Nothing})
+                fetchWebhooks WebhooksLoaded WebhooksFailed
+        when (tab == AccountUsers) $ do
+            m <- get
+            when (null (mAdminUsers m) && not (mAdminUsersLoading m)) $ do
+                putModel (\x -> x{mAdminUsersLoading = True, mAdminUsersError = Nothing})
+                fetchAdminUsers AdminUsersLoaded AdminUsersFailed
     -- library ---------------------------------------------------------------
     SearchInput query -> do
         putModel
@@ -1228,41 +1283,613 @@ updateModel = \case
                     ShareCreated
                     ShareCreateFailed
     -- graph ----------------------------------------------------------------
-    GraphLoaded graph -> putModel (\m -> m{mGraph = Just graph, mGraphLoading = False})
+    GraphLoaded graph -> do
+        m <- get
+        case (Just graph == mGraph m, mGraphLayout m) of
+            -- A warm return with the same payload keeps the cached bitmap, the
+            -- layout and the generation: no 30k-primitive repaint.
+            (True, Just _) -> do
+                let scoped = applyGraphScope m
+                    old = mGraphView scoped
+                    view = case (mGraphFocus scoped, activeGraphLayout scoped) of
+                        (Just key, Just layout) ->
+                            focusView layout key (gvWidth old) (gvHeight old) (gvDpr old)
+                        _ -> old
+                putModel
+                    ( \x ->
+                        let upgraded = upgradeWithWire graph x
+                            scopedNow = applyGraphScope (recomputeGraphColors (upgraded{mGraph = Just graph}))
+                         in scopedNow
+                                { mGraphView = view
+                                , mGraphMatches = mGraphMatches scopedNow
+                                , mGraphLoading = False
+                                , mGraphError = Nothing
+                                , mGraphHover = Nothing
+                                , mGraphFocus = if mGraphViewReady x then Nothing else mGraphFocus x
+                                }
+                    )
+                when (view /= old) (markGraphMoving >> scheduleGraphSettle)
+                unless (mGraphViewReady m) (measureGraphCanvas GraphMeasured)
+                focusGraphPlate m
+            _ -> do
+                let generation = mGraphGen m + 1
+                    preset = mGraphPreset m
+                    hydrated = do
+                        (wirePreset, wire) <- mGraphLayoutWire m
+                        if wirePreset == preset then hydrateWire graph wire else Nothing
+                    whole =
+                        case hydrated of
+                            Just layout -> layout{glGen = generation}
+                            Nothing -> buildLayoutWith (presetOptions preset) generation graph
+                    seeded =
+                        m
+                            { mGraph = Just graph
+                            , mGraphLayout = Just whole
+                            , mGraphLayoutSource = if isJust hydrated then "server" else "local"
+                            , mGraphGen = generation
+                            , mGraphLoading = False
+                            , mGraphError = Nothing
+                            , mGraphHover = Nothing
+                            , mGraphSettled = False
+                            , mGraphSettleEpoch = mGraphSettleEpoch m + 1
+                            , mGraphDetailPhase = 0
+                            }
+                    scoped = applyGraphScope seeded
+                    old = mGraphView m
+                    view =
+                        case (mGraphFocus scoped, activeGraphLayout scoped) of
+                            (Just key, Just layout) ->
+                                focusView layout key (gvWidth old) (gvHeight old) (gvDpr old)
+                            (_, Just layout)
+                                | mGraphViewReady m ->
+                                    resizeView layout (gvWidth old) (gvHeight old) (gvDpr old) old
+                                | otherwise ->
+                                    fitView layout (gvWidth old) (gvHeight old) (gvDpr old)
+                            _ -> old
+                putModel
+                    ( \x ->
+                        let seededNow =
+                                x
+                                    { mGraph = Just graph
+                                    , mGraphLayout = Just whole
+                                    , mGraphLayoutSource =
+                                        if isJust hydrated then "server" else "local"
+                                    , mGraphGen = generation
+                                    , mGraphLoading = False
+                                    , mGraphError = Nothing
+                                    , mGraphHover = Nothing
+                                    , mGraphSettled = False
+                                    , mGraphSettleEpoch = mGraphSettleEpoch x + 1
+                                    , mGraphDetailPhase = 0
+                                    }
+                            scopedNow = applyGraphScope (recomputeGraphColors (upgradeWithWire graph seededNow))
+                         in scopedNow
+                                { mGraphView = view
+                                , mGraphSelected = mGraphFocus x
+                                }
+                    )
+                scheduleGraphSettle
+                unless (mGraphViewReady m) (measureGraphCanvas GraphMeasured)
+                focusGraphPlate m
     GraphFailed err -> do
-        putModel (\m -> m{mGraphLoading = False})
-        handleApiError err
-    GraphDepthSelected depth -> do
-        putModel (\m -> m{mGraphDepth = max 1 (min 3 depth), mGraphLoading = True})
         m <- get
-        fetchGraph (mGraphSeed m) (mGraphDepth m) GraphLoaded GraphFailed
-    GraphSeed seed -> do
-        putModel (\m -> m{mGraphSeed = seed, mGraphLoading = True})
-        m <- get
-        fetchGraph (mGraphSeed m) (mGraphDepth m) GraphLoaded GraphFailed
-    GraphZoom zoomPercent -> putModel (\m -> m{mGraphZoom = max 40 (min 260 zoomPercent)})
-    OpenGraphAt bookmarkId -> do
-        putModel (\m -> m{mGraphSeed = Just bookmarkId, mGraphLoading = True})
-        m <- get
-        fetchGraph (mGraphSeed m) (mGraphDepth m) GraphLoaded GraphFailed
-        updateModel (Navigate Graph)
-    GraphQueryChanged query -> do
-        putModel (\m -> m{mGraphQuery = query, mGraphResults = []})
-        if T.null (T.strip (fromMisoString query))
-            then pure ()
-            else fetchAutocomplete query GraphResults (\_ -> Noop)
-    GraphResults results -> putModel (\m -> m{mGraphResults = results})
-    GraphPickSeed bookmarkId -> do
-        putModel (\m -> m{mGraphSeed = Just bookmarkId, mGraphQuery = "", mGraphResults = [], mGraphLoading = True, mGraph = Nothing})
-        m <- get
-        fetchGraph (Just bookmarkId) (mGraphDepth m) GraphLoaded GraphFailed
+        putModel (\x -> x{mGraphLoading = False, mGraphError = Just (ms (aeMessage err))})
+        when (mGraphLayout m == Nothing) (handleApiError err)
     GraphRefresh -> do
         m <- get
-        case mGraphSeed m of
-            Nothing -> notify "Search for a bookmark to seed the graph first." ToastInfo
-            Just _ -> do
+        putModel (\x -> x{mGraphLoading = True, mGraphError = Nothing, mGraphLayoutSource = "local"})
+        fetchGraph GraphLoaded GraphFailed
+        fetchGraphLayout (mGraphPreset m) (GraphLayoutLoaded (mGraphPreset m)) GraphLayoutFailed
+    OpenGraphAt bookmarkId -> do
+        m <- get
+        putModel (\x -> x{mGraphFocus = Just bookmarkId, mGraphSelected = Just bookmarkId, mGraphError = Nothing})
+        case (mGraphLayout m, mGraphViewReady m) of
+            (Just layout, True) -> do
+                let old = mGraphView m
+                    view = focusView layout bookmarkId (gvWidth old) (gvHeight old) (gvDpr old)
+                putModel
+                    ( \x ->
+                        x
+                            { mGraphView = view
+                            , mGraphFocus = Nothing
+                            , mGraphSettled = False
+                            , mGraphSettleEpoch = mGraphSettleEpoch x + 1
+                            , mGraphDetailPhase = 0
+                            }
+                    )
+                scheduleGraphSettle
+                when (not (isGraphRoute (mRoute m))) (updateModel (Navigate Graph))
+            _ -> do
                 putModel (\x -> x{mGraphLoading = True})
-                fetchGraph (mGraphSeed m) (mGraphDepth m) GraphLoaded GraphFailed
+                when (not (isGraphRoute (mRoute m))) (updateModel (Navigate Graph))
+    GraphMeasured width height dpr -> do
+        m <- get
+        case activeGraphLayout m of
+            Nothing -> pure ()
+            Just layout
+                | width < 40 || height < 40 -> pure ()
+                | not (mGraphViewReady m) -> do
+                    let view = case mGraphFocus m of
+                            Just key -> focusView layout key width height dpr
+                            Nothing -> fitView layout width height dpr
+                    putModel
+                        ( \x ->
+                            x
+                                { mGraphView = view
+                                , mGraphViewReady = True
+                                , mGraphFocus = Nothing
+                                , mGraphSettled = False
+                                , mGraphSettleEpoch = mGraphSettleEpoch x + 1
+                                , mGraphDetailPhase = 0
+                                }
+                        )
+                    scheduleGraphSettle
+                | gvWidth (mGraphView m) /= width
+                    || gvHeight (mGraphView m) /= height
+                    || gvDpr (mGraphView m) /= dpr -> do
+                    let view = resizeView layout width height dpr (mGraphView m)
+                    putModel
+                        ( \x ->
+                            x
+                                { mGraphView = view
+                                , mGraphSettled = False
+                                , mGraphSettleEpoch = mGraphSettleEpoch x + 1
+                                , mGraphDetailPhase = 0
+                                }
+                        )
+                    scheduleGraphSettle
+                | otherwise -> pure ()
+    GraphPointerDown x y ->
+        putModel (\m -> m{mGraphDrag = Just (GraphDrag (x, y) (x, y) False), mGraphHover = Nothing})
+    GraphPointerMove x y -> do
+        m <- get
+        case mGraphDrag m of
+            Just drag -> do
+                let (lastX, lastY) = gdLast drag
+                    view = panView (x - lastX, y - lastY) (mGraphView m)
+                    moved =
+                        gdMoved drag
+                            || abs (x - fst (gdStart drag)) > 3
+                            || abs (y - snd (gdStart drag)) > 3
+                putModel
+                    ( \model ->
+                        model
+                            { mGraphDrag = Just drag{gdLast = (x, y), gdMoved = moved}
+                            , mGraphView = view
+                            , mGraphHover = Nothing
+                            , mGraphSettled = False
+                            , mGraphSettleEpoch = mGraphSettleEpoch model + 1
+                            , mGraphDetailPhase = 0
+                            }
+                    )
+            Nothing -> case activeGraphLayout m of
+                Nothing -> pure ()
+                Just layout ->
+                    let hovered = visibleHit m (nodeAt layout (mGraphView m) (x, y))
+                     in unless (hovered == mGraphHover m) $
+                            putModel (\model -> model{mGraphHover = hovered})
+    GraphPointerUp x y -> do
+        m <- get
+        case mGraphDrag m of
+            Nothing -> pure ()
+            Just drag -> do
+                putModel (\model -> model{mGraphDrag = Nothing})
+                when (gdMoved drag) scheduleGraphSettle
+                unless (gdMoved drag) (graphClick m x y)
+    GraphPointerLeave -> do
+        m <- get
+        putModel (\x -> x{mGraphDrag = Nothing, mGraphHover = Nothing})
+        when (isJust (mGraphDrag m)) scheduleGraphSettle
+    GraphWheel x y delta -> do
+        m <- get
+        case activeGraphLayout m of
+            Nothing -> pure ()
+            Just layout -> do
+                let factor = max 0.5 (min 2 (exp (negate delta * 0.0015)))
+                    view = zoomViewAt layout (mGraphView m) (x, y) factor
+                putModel
+                    ( \model ->
+                        model
+                            { mGraphView = view
+                            , mGraphHover = Nothing
+                            , mGraphSettled = False
+                            , mGraphSettleEpoch = mGraphSettleEpoch model + 1
+                            , mGraphDetailPhase = 0
+                            }
+                    )
+                scheduleGraphSettle
+    GraphZoomIn -> graphZoom 1.25
+    GraphZoomOut -> graphZoom 0.8
+    GraphFit -> do
+        m <- get
+        case activeGraphLayout m of
+            Nothing -> pure ()
+            Just layout -> do
+                let old = mGraphView m
+                    view = fitView layout (gvWidth old) (gvHeight old) (gvDpr old)
+                putModel
+                    ( \model ->
+                        model
+                            { mGraphView = view
+                            , mGraphHover = Nothing
+                            , mGraphSettled = False
+                            , mGraphSettleEpoch = mGraphSettleEpoch model + 1
+                            , mGraphDetailPhase = 0
+                            }
+                    )
+                scheduleGraphSettle
+    GraphFilterChanged query -> do
+        m <- get
+        case mGraphFilterTimer m of
+            Just oldTimer -> liftSinkIO (void (jsgf "clearTimeout" (oldTimer :: Int)))
+            Nothing -> pure ()
+        putModel (\x -> x{mGraphFilter = query, mGraphMatches = emptyMatches, mGraphFilterTimer = Nothing})
+        withSink $ \sink -> do
+            timer <- fromJSValUnchecked =<< jsgf "setTimeout" (asyncCallback1 (\_ -> sink GraphFilterSettled), 120 :: Int)
+            sink (GraphFilterArmed (timer :: Int))
+    GraphFilterArmed timer -> putModel (\x -> x{mGraphFilterTimer = Just timer})
+    GraphFilterSettled -> do
+        m <- get
+        case activeGraphLayout m of
+            Nothing -> putModel (\x -> x{mGraphFilterTimer = Nothing})
+            Just layout ->
+                putModel
+                    ( \x ->
+                        x
+                            { mGraphMatches = matchGraph (T.strip (fromMisoString (mGraphFilter x))) layout
+                            , mGraphFilterTimer = Nothing
+                            }
+                    )
+    GraphSettled epoch -> do
+        m <- get
+        case activeGraphLayout m of
+            Just layout
+                | isGraphRoute (mRoute m)
+                , epoch == mGraphSettleEpoch m
+                , not (mGraphSettled m)
+                , mGraphDetailPhase m == 0 ->
+                    let view = mGraphView m
+                        atFit = gvScale view <= 1.1 * gvFit view
+                        chunks = detailChunkCount layout
+                     in if mGraphLocal m || atFit || chunks <= 0
+                            then putModel (\x -> x{mGraphSettled = True})
+                            else do
+                                putModel
+                                    ( \x ->
+                                        x
+                                            { mGraphSettled = False
+                                            , mGraphDetailPhase = 1
+                                            , mGraphDetailChunks = chunks
+                                            }
+                                    )
+                                scheduleGraphDetailStep epoch 1
+            _ -> pure ()
+    GraphDetailStep epoch expected -> do
+        m <- get
+        when
+            ( isGraphRoute (mRoute m)
+                && isJust (activeGraphLayout m)
+                && not (mGraphLocal m)
+                && epoch == mGraphSettleEpoch m
+                && mGraphDetailPhase m == expected
+            )
+            ( if expected >= mGraphDetailChunks m
+                then putModel (\x -> x{mGraphSettled = True, mGraphDetailPhase = 0})
+                else do
+                    putModel (\x -> x{mGraphDetailPhase = expected + 1})
+                    scheduleGraphDetailStep epoch (expected + 1)
+            )
+    GraphTagsToggled -> do
+        putModel
+            ( \m ->
+                m
+                    { mGraphTagsShown = not (mGraphTagsShown m)
+                    , mGraphSettled = False
+                    , mGraphSettleEpoch = mGraphSettleEpoch m + 1
+                    , mGraphDetailPhase = 0
+                    }
+            )
+        scheduleGraphSettle
+    GraphLayoutLoaded preset wire -> do
+        putModel (\x -> x{mGraphLayoutWire = Just (preset, wire)})
+        m <- get
+        when (preset == mGraphPreset m) $
+            case mGraph m of
+                Nothing -> pure ()
+                Just graph -> case hydrateWire graph wire of
+                    Just hydrated -> do
+                        let generation = mGraphGen m + 1
+                            layout = hydrated{glGen = generation}
+                            old = mGraphView m
+                            view =
+                                if mGraphViewReady m
+                                    then resizeView layout (gvWidth old) (gvHeight old) (gvDpr old) old
+                                    else fitView layout (gvWidth old) (gvHeight old) (gvDpr old)
+                        putModel
+                            ( \x ->
+                                let seeded =
+                                        x
+                                            { mGraphLayout = Just layout
+                                            , mGraphGen = generation
+                                            , mGraphLayoutSource = "server"
+                                            , mGraphView = view
+                                            , mGraphHover = Nothing
+                                            , mGraphSettled = False
+                                            , mGraphSettleEpoch = mGraphSettleEpoch x + 1
+                                            , mGraphDetailPhase = 0
+                                            }
+                                 in applyGraphScope (recomputeGraphColors seeded)
+                            )
+                        scheduleGraphSettle
+                    Nothing -> putModel (\x -> x{mGraphLayoutSource = "local"})
+    GraphLayoutFailed _ ->
+        putModel (\x -> x{mGraphLayoutSource = "local", mGraphLayoutWire = Nothing})
+    -- views ---------------------------------------------------------------
+    ViewsLoaded views -> do
+        putModel (\x -> x{mViews = views, mViewsLoading = False, mViewsError = Nothing})
+        m <- get
+        when (mGraphViewId m == Nothing) $
+            case defaultGraphView views of
+                Just view -> putModel (applyGraphView view)
+                Nothing -> pure ()
+        putModel recomputeGraphColors
+    ViewsFailed err ->
+        putModel (\x -> x{mViewsLoading = False, mViewsError = Just (ms (aeMessage err))})
+    ViewSaved view -> do
+        notify "View saved" ToastOk
+        putModel
+            ( \x ->
+                let ui = mViewUi x
+                    isGraph = EV.vKind view == EV.GraphKind
+                    viewsAfter = upsertView view (mViews x)
+                    viewsFinal
+                        | EV.vIsDefault view =
+                            [ if EV.vKind candidate == EV.vKind view && EV.vSlug candidate /= EV.vSlug view
+                                then candidate{EV.vIsDefault = False}
+                                else candidate
+                            | candidate <- viewsAfter
+                            ]
+                        | otherwise = viewsAfter
+                 in x
+                        { mViews = viewsFinal
+                        , mViewsLoading = False
+                        , mViewsError = Nothing
+                        , mViewUi = ui{vuSaveOpen = False, vuBusy = False, vuError = Nothing}
+                        , mGraphViewId = if isGraph then Just (EV.vId view) else mGraphViewId x
+                        , mGraphViewRev = if isGraph then EV.vUpdatedAt view else mGraphViewRev x
+                        , mGraphColorGroups = if isGraph then mGraphGroupDrafts x else mGraphColorGroups x
+                        , mGraphGroupDirty = if isGraph then False else mGraphGroupDirty x
+                        , mGraphGroupEditor = if isGraph then False else mGraphGroupEditor x
+                        }
+            )
+        putModel recomputeGraphColors
+    ViewSaveFailed err ->
+        putModel
+            ( \x ->
+                let ui = mViewUi x
+                 in x{mViewUi = ui{vuBusy = False, vuError = Just (ms (aeMessage err))}}
+            )
+    ViewDeleted slug -> do
+        notify "View deleted" ToastOk
+        putModel (\x -> x{mViews = [view | view <- mViews x, EV.vSlug view /= slug], mViewsLoading = False})
+    ViewDeleteFailed err ->
+        putModel (\x -> x{mViewsError = Just (ms (aeMessage err))})
+    ViewOpenView slug -> openSavedView slug
+    ViewFetched view -> openSavedViewNow view
+    ViewFetchFailed err ->
+        putModel (\x -> x{mViewsError = Just (ms (aeMessage err))})
+    ViewDefaultView slug -> do
+        putModel (\x -> x{mViewUi = (mViewUi x){vuBusy = True, vuError = Nothing}})
+        patchView slug (ViewPatch Nothing Nothing Nothing (Just True)) ViewSaved ViewSaveFailed
+    ViewDeleteView slug -> deleteView slug (ViewDeleted slug) ViewDeleteFailed
+    ViewExportView slug -> do
+        m <- get
+        case findViewBySlug slug (mViews m) of
+            Just view ->
+                putModel
+                    ( \x ->
+                        let ui = mViewUi x
+                         in x{mViewUi = ui{vuExport = Just (TE.decodeUtf8 (BL.toStrict (encode view)))}}
+                    )
+            Nothing -> pure ()
+    ViewExportClose ->
+        putModel (\x -> x{mViewUi = (mViewUi x){vuExport = Nothing}})
+    ViewRenameStart slug -> do
+        m <- get
+        case findViewBySlug slug (mViews m) of
+            Just view ->
+                putModel
+                    ( \x ->
+                        let ui = mViewUi x
+                         in x{mViewUi = ui{vuRename = Just (EV.vSlug view, ms (T.unpack (EV.vName view)))}}
+                    )
+            Nothing -> pure ()
+    ViewRenameInput name ->
+        putModel
+            ( \x ->
+                let ui = mViewUi x
+                 in x{mViewUi = ui{vuRename = fmap (\(slug, _) -> (slug, name)) (vuRename ui)}}
+            )
+    ViewRenameSubmit -> do
+        m <- get
+        case vuRename (mViewUi m) of
+            Just (slug, name)
+                | not (T.null (T.strip (fromMisoString name))) -> do
+                    putModel (\x -> x{mViewUi = (mViewUi x){vuBusy = True, vuError = Nothing}})
+                    patchView slug (ViewPatch (Just (T.strip (fromMisoString name))) Nothing Nothing Nothing) ViewSaved ViewSaveFailed
+            _ -> pure ()
+    ViewDuplicateView slug -> do
+        m <- get
+        case findViewBySlug slug (mViews m) of
+            Just view -> do
+                notify "Duplicating view" ToastInfo
+                createView
+                    ( EV.ViewInput
+                        (EV.vName view <> " copy")
+                        (EV.vKind view)
+                        (EV.vDefinition view)
+                        Nothing
+                    )
+                    ViewSaved
+                    ViewSaveFailed
+            Nothing -> pure ()
+    ViewSaveOpen kind ->
+        putModel
+            ( \x ->
+                let ui = mViewUi x
+                 in x{mViewUi = ui{vuSaveOpen = True, vuSaveKind = kind, vuSaveName = "", vuError = Nothing, vuBusy = False}}
+            )
+    ViewSaveNameInput name ->
+        putModel (\x -> x{mViewUi = (mViewUi x){vuSaveName = name}})
+    ViewSaveKindSelected kind ->
+        putModel (\x -> x{mViewUi = (mViewUi x){vuSaveKind = kind, vuError = Nothing}})
+    ViewRenameCancel ->
+        putModel (\x -> x{mViewUi = (mViewUi x){vuRename = Nothing}})
+    ViewSaveSubmit -> do
+        m <- get
+        let ui = mViewUi m
+            name = T.strip (fromMisoString (vuSaveName ui))
+            definition = case vuSaveKind ui of
+                EV.GraphKind -> currentGraphDefinition m
+                EV.LedgerKind -> currentLedgerDefinition m
+        if T.null name
+            then putModel (\x -> x{mViewUi = (mViewUi x){vuError = Just "a name is required"}})
+            else do
+                putModel (\x -> x{mViewUi = (mViewUi x){vuBusy = True, vuError = Nothing}})
+                createView (EV.ViewInput name (vuSaveKind ui) definition Nothing) ViewSaved ViewSaveFailed
+    ViewSaveCancel ->
+        putModel (\x -> x{mViewUi = (mViewUi x){vuSaveOpen = False, vuBusy = False, vuError = Nothing}})
+    ViewImportOpen ->
+        putModel (\x -> x{mViewUi = (mViewUi x){vuImportOpen = True, vuImportText = "", vuError = Nothing}})
+    ViewImportTextInput rawText ->
+        putModel (\x -> x{mViewUi = (mViewUi x){vuImportText = rawText}})
+    ViewImportSubmit -> do
+        m <- get
+        let ui = mViewUi m
+            raw = TE.encodeUtf8 (T.pack (fromMisoString (vuImportText ui)))
+        case Aeson.eitherDecodeStrict' raw :: Either String EV.ViewInput of
+            Left message ->
+                putModel (\x -> x{mViewUi = (mViewUi x){vuError = Just (ms message)}})
+            Right input -> do
+                putModel (\x -> x{mViewUi = (mViewUi x){vuBusy = True, vuError = Nothing}})
+                createView input ViewSaved ViewSaveFailed
+    ViewImportCancel ->
+        putModel (\x -> x{mViewUi = (mViewUi x){vuImportOpen = False, vuError = Nothing}})
+    ViewGroupEditorToggle ->
+        putModel (\x -> x{mGraphGroupEditor = not (mGraphGroupEditor x)})
+    ViewGroupAdd -> do
+        m <- get
+        when (length (mGraphGroupDrafts m) < EV.maxColorGroups) $ do
+            let group = EV.ColorGroup "group" "" "#C98A3E" True
+            putModel
+                ( \x ->
+                    x
+                        { mGraphGroupDrafts = mGraphGroupDrafts x ++ [group]
+                        , mGraphGroupDirty = True
+                        }
+                )
+            putModel recomputeGraphColors
+    ViewGroupRemove index -> do
+        putModel (\x -> x{mGraphGroupDrafts = removeAt index (mGraphGroupDrafts x), mGraphGroupDirty = True, mGraphGroupEditor = True})
+        putModel recomputeGraphColors
+    ViewGroupField index field value -> do
+        let fieldText = fromMisoString value
+            update group = case field of
+                GroupName -> group{EV.cgName = fieldText}
+                GroupQuery -> group{EV.cgQuery = fieldText}
+                GroupColor -> group{EV.cgColor = fieldText}
+        putModel (\x -> x{mGraphGroupDrafts = setAt index update (mGraphGroupDrafts x), mGraphGroupDirty = True, mGraphGroupEditor = True})
+        putModel recomputeGraphColors
+    ViewGroupToggleEnabled index -> do
+        putModel (\x -> x{mGraphGroupDrafts = setAt index (\group -> group{EV.cgEnabled = not (EV.cgEnabled group)}) (mGraphGroupDrafts x), mGraphGroupDirty = True, mGraphGroupEditor = True})
+        putModel recomputeGraphColors
+    ViewGroupsSave -> do
+        m <- get
+        saveCurrentGraphView m
+    ViewGroupsCancel -> do
+        putModel
+            ( \x ->
+                x
+                    { mGraphGroupDrafts = mGraphColorGroups x
+                    , mGraphGroupDirty = False
+                    , mGraphGroupEditor = False
+                    }
+            )
+        putModel recomputeGraphColors
+    ViewSaveGraph -> do
+        m <- get
+        saveCurrentGraphView m
+    GraphLabelModeSelected mode -> putModel (\m -> m{mGraphLabelMode = mode})
+    GraphPresetSelected preset -> do
+        m <- get
+        putModel (\x -> x{mGraphPreset = preset})
+        case mGraph m of
+            Nothing -> pure ()
+            Just graph -> do
+                -- TODO(M1/task-13): carry the preset through the active view.
+                let generation = mGraphGen m + 1
+                    whole = buildLayoutWith (presetOptions preset) generation graph
+                putModel
+                    ( \x ->
+                        let seeded =
+                                x
+                                    { mGraphLayout = Just whole
+                                    , mGraphGen = generation
+                                    , mGraphHover = Nothing
+                                    , mGraphFocus = Nothing
+                                    , mGraphSettled = False
+                                    , mGraphSettleEpoch = mGraphSettleEpoch x + 1
+                                    , mGraphDetailPhase = 0
+                                    }
+                         in fitActiveView (applyGraphScope seeded)
+                    )
+                scheduleGraphSettle
+                fetchGraphLayout preset (GraphLayoutLoaded preset) GraphLayoutFailed
+    GraphScopeToggled -> do
+        putModel
+            ( \x ->
+                x
+                    { mGraphLocal = not (mGraphLocal x)
+                    , mGraphHover = Nothing
+                    , mGraphFocus = Nothing
+                    , mGraphSettled = False
+                    , mGraphSettleEpoch = mGraphSettleEpoch x + 1
+                    , mGraphDetailPhase = 0
+                    }
+            )
+        putModel (\x -> fitActiveView (applyGraphScope x))
+    GraphLocalDepthSelected depth -> do
+        putModel
+            ( \x ->
+                x
+                    { mGraphLocal = True
+                    , mGraphLocalDepth = max 1 (min 3 depth)
+                    , mGraphHover = Nothing
+                    , mGraphSettled = False
+                    , mGraphSettleEpoch = mGraphSettleEpoch x + 1
+                    , mGraphDetailPhase = 0
+                    }
+            )
+        putModel (\x -> fitActiveView (applyGraphScope x))
+    GraphLocalAt root depth -> do
+        putModel
+            ( \x ->
+                x
+                    { mGraphLocal = True
+                    , mGraphLocalRoot = Just root
+                    , mGraphLocalDepth = max 1 (min 3 depth)
+                    , mGraphHover = Nothing
+                    , mGraphSettled = False
+                    , mGraphSettleEpoch = mGraphSettleEpoch x + 1
+                    , mGraphDetailPhase = 0
+                    }
+            )
+        putModel (\x -> fitActiveView (applyGraphScope x))
+        measureGraphCanvas GraphMeasured
+    GraphSelect key ->
+        putModel (\m -> m{mGraphSelected = Just key, mGraphFocus = Nothing})
+    GraphClearSelection ->
+        putModel (\m -> m{mGraphSelected = Nothing, mGraphFocus = Nothing})
     -- dedup ----------------------------------------------------------------
     DedupLoaded report -> do
         putModel
@@ -1487,6 +2114,23 @@ updateModel = \case
     FilterByTag tag -> do
         putModel (\m -> m{mTagsFilter = [tag]})
         updateModel (Navigate Index)
+    -- Open the ledger on an explicit query (an accessions year, day or
+    -- source, or a tag from the graph). The query replaces the old one so
+    -- the total matches the figure the reader clicked.
+    FilterByQuery query -> do
+        m <- get
+        putModel
+            ( \x ->
+                x
+                    { mQ = ms (T.unpack query)
+                    , mTagsFilter = []
+                    , mUnreadOnly = False
+                    , mSort = "created"
+                    }
+            )
+        if mRoute m == Index
+            then reloadList
+            else updateModel (Navigate Index)
     TagMerged -> do
         putModel
             ( \m ->
@@ -1629,7 +2273,7 @@ updateModel = \case
         putModel (\m -> m{mMaintBusy = False})
         handleApiError err
     -- account --------------------------------------------------------------
-    AccountLoaded info ->
+    AccountLoaded info -> do
         putModel
             ( \m ->
                 m
@@ -1642,8 +2286,11 @@ updateModel = \case
                             then ms (aiUsername info)
                             else mSecurityUsername m
                     , mSecurity2faWanted = aiRequirePasskey info
+                    , mAdminUsersLoading = null (mAdminUsers m)
                     }
             )
+        m0 <- get
+        when (mAdminUsersLoading m0) (fetchAdminUsers AdminUsersLoaded AdminUsersFailed)
     AccountFailed err -> do
         putModel (\m -> m{mAccountLoading = False, mAccountError = Just (ms (aeMessage err))})
         handleApiError err
@@ -1968,6 +2615,236 @@ updateModel = \case
                 (if copied then "Token copied" else "Copy failed. Select the text instead")
                 (if copied then ToastOk else ToastError)
             )
+    -- admin users ----------------------------------------------------------
+    AdminUsersLoaded users ->
+        putModel
+            ( \m ->
+                m
+                    { mAdminUsers = users
+                    , mAdminUsersAllowed = True
+                    , mAdminUsersLoading = False
+                    , mAdminUsersError = Nothing
+                    }
+            )
+    AdminUsersFailed err -> do
+        putModel
+            ( \m ->
+                m
+                    { mAdminUsersLoading = False
+                    , mAdminUsersAllowed = False
+                    , mAdminUsersError = if mAccountTab m == AccountUsers then Just (ms (aeMessage err)) else Nothing
+                    }
+            )
+        when (aeStatus err == Just 401) (handleApiError err)
+    UserNameInput value -> putModel (\m -> m{mUserName = value, mUserFormError = Nothing})
+    UserPasswordInput value -> putModel (\m -> m{mUserPassword = value, mUserFormError = Nothing})
+    UserRoleSelected role -> putModel (\m -> m{mUserRole = role})
+    UserCreate -> do
+        m <- get
+        let input =
+                UserCreateInput
+                    { uciUsername = T.strip (fromMisoString (mUserName m))
+                    , uciPassword = fromMisoString (mUserPassword m)
+                    , uciRole = mUserRole m
+                    }
+        putModel (\x -> x{mUserBusy = True, mUserFormError = Nothing})
+        createAdminUser input UserCreated UserCreateFailed
+    UserCreated result -> do
+        notify "User created. Copy the recovery codes now." ToastOk
+        putModel
+            ( \m ->
+                m
+                    { mAdminUsers = upsertUser (ucrUser result) (mAdminUsers m)
+                    , mAdminUsersLoading = False
+                    , mAdminUsersError = Nothing
+                    , mUserBusy = False
+                    , mUserFormError = Nothing
+                    , mUserName = ""
+                    , mUserPassword = ""
+                    , mUserRole = RoleMember
+                    , mUserRecovery = Just (uvUsername (ucrUser result), ucrRecoveryCodes result)
+                    }
+            )
+    UserCreateFailed err -> do
+        putModel (\m -> m{mUserBusy = False, mUserFormError = Just (ms (aeMessage err))})
+        when (aeStatus err == Just 401) (handleApiError err)
+    UserToggleEnabled user ->
+        patchAdminUser
+            (uvId user)
+            (Just (not (isUserEnabled user)))
+            Nothing
+            UserUpdated
+            UserUpdateFailed
+    UserRoleChange user ->
+        patchAdminUser
+            (uvId user)
+            Nothing
+            (Just (if uvRole user == RoleAdmin then RoleMember else RoleAdmin))
+            UserUpdated
+            UserUpdateFailed
+    UserUpdated user -> do
+        notify "User updated" ToastOk
+        putModel
+            ( \m ->
+                m
+                    { mAdminUsers = upsertUser user (mAdminUsers m)
+                    , mUserActionError = Nothing
+                    }
+            )
+    UserUpdateFailed err ->
+        putModel (\m -> m{mUserActionError = Just (ms (aeMessage err))})
+    UserResetOpen userId ->
+        putModel (\m -> m{mUserReset = Just userId, mUserResetPassword = "", mUserActionError = Nothing})
+    UserResetPasswordInput value -> putModel (\m -> m{mUserResetPassword = value})
+    UserResetSubmit -> do
+        m <- get
+        case mUserReset m of
+            Nothing -> pure ()
+            Just userId ->
+                let password = fromMisoString (mUserResetPassword m)
+                 in if T.null (T.strip password)
+                        then putModel (\x -> x{mUserActionError = Just "a temporary password is required"})
+                        else resetAdminPassword userId password (UserResetDone userId password) UserResetFailed
+    UserResetDone userId password -> do
+        notify "Temporary password set. The user's sessions were revoked." ToastOk
+        putModel
+            ( \m ->
+                let username = case [uvUsername user | user <- mAdminUsers m, uvId user == userId] of
+                        (name : _) -> name
+                        [] -> T.pack (show userId)
+                 in m
+                        { mUserReset = Nothing
+                        , mUserResetPassword = ""
+                        , mUserResetShown = Just (username, password)
+                        , mUserActionError = Nothing
+                        }
+            )
+    UserResetCancel -> putModel (\m -> m{mUserReset = Nothing, mUserResetPassword = "", mUserActionError = Nothing})
+    UserResetFailed err ->
+        putModel (\m -> m{mUserActionError = Just (ms (aeMessage err))})
+    UserRecoveryCopied raw -> withSink $ \sink -> do
+        copiedValue <- jsgf "ezaCopy" (ms raw)
+        copied <- fromMaybe False <$> (fromJSVal copiedValue :: IO (Maybe Bool))
+        sink
+            ( ToastAdd
+                (if copied then "Recovery codes copied" else "Copy failed. Select the text instead")
+                (if copied then ToastOk else ToastError)
+            )
+    UserRecoveryDismiss -> putModel (\m -> m{mUserRecovery = Nothing})
+    UserResetShownDismiss -> putModel (\m -> m{mUserResetShown = Nothing})
+    -- webhooks -------------------------------------------------------------
+    WebhooksLoaded webhooks ->
+        putModel (\m -> m{mWebhooks = webhooks, mWebhooksLoading = False, mWebhooksError = Nothing})
+    WebhooksFailed err -> do
+        putModel (\m -> m{mWebhooksLoading = False, mWebhooksError = Just (ms (aeMessage err))})
+        handleApiError err
+    WebhookNameInput value -> putModel (\m -> m{mWebhookName = value})
+    WebhookUrlInput value -> putModel (\m -> m{mWebhookUrl = value})
+    WebhookEventToggled eventType ->
+        putModel
+            ( \m ->
+                m
+                    { mWebhookEvents =
+                        if eventType `elem` mWebhookEvents m
+                            then filter (/= eventType) (mWebhookEvents m)
+                            else mWebhookEvents m ++ [eventType]
+                    , mWebhookFormError = Nothing
+                    }
+            )
+    WebhookEnabledToggled -> putModel (\m -> m{mWebhookEnabled = not (mWebhookEnabled m)})
+    WebhookCreate -> do
+        m <- get
+        let input =
+                WebhookInput
+                    { wiName = T.strip (fromMisoString (mWebhookName m))
+                    , wiUrl = T.strip (fromMisoString (mWebhookUrl m))
+                    , wiEvents = mWebhookEvents m
+                    , wiEnabled = mWebhookEnabled m
+                    }
+        putModel (\x -> x{mWebhookBusy = True, mWebhookFormError = Nothing})
+        createWebhook input (\(webhook, secret) -> WebhookCreated webhook secret) WebhookCreateFailed
+    WebhookCreated webhook secret -> do
+        notify "Webhook created. Copy the signing secret now." ToastOk
+        putModel
+            ( \m ->
+                m
+                    { mWebhooks = upsertWebhook webhook (mWebhooks m)
+                    , mWebhooksLoading = False
+                    , mWebhooksError = Nothing
+                    , mWebhookBusy = False
+                    , mWebhookFormError = Nothing
+                    , mWebhookSecret = Just secret
+                    , mWebhookName = ""
+                    , mWebhookUrl = ""
+                    , mWebhookEvents = []
+                    , mWebhookEnabled = True
+                    }
+            )
+    WebhookCreateFailed err -> do
+        putModel
+            ( \m ->
+                m
+                    { mWebhookBusy = False
+                    , mWebhookFormError = Just (ms (aeMessage err))
+                    }
+            )
+        when (aeStatus err == Just 401) (handleApiError err)
+    WebhookToggle webhook ->
+        updateWebhook
+            (whId webhook)
+            ( WebhookInput
+                (whName webhook)
+                (whUrl webhook)
+                (whEvents webhook)
+                (not (whEnabled webhook))
+            )
+            WebhookToggled
+            WebhookToggleFailed
+    WebhookToggled webhook -> do
+        notify "Webhook updated" ToastOk
+        putModel (\m -> m{mWebhooks = upsertWebhook webhook (mWebhooks m)})
+    WebhookToggleFailed err -> handleApiError err
+    WebhookTestRequest webhookId -> do
+        putModel (\m -> m{mWebhookTest = Nothing, mWebhookTestError = Nothing})
+        testWebhook webhookId (WebhookTested webhookId) WebhookTestFailed
+    WebhookTested webhookId result ->
+        putModel (\m -> m{mWebhookTest = Just (webhookId, result), mWebhookTestError = Nothing})
+    WebhookTestFailed err -> do
+        putModel (\m -> m{mWebhookTest = Nothing, mWebhookTestError = Just (ms (aeMessage err))})
+        when (aeStatus err == Just 401) (handleApiError err)
+    WebhookDelete webhookId ->
+        deleteWebhook webhookId (WebhookDeleted webhookId) WebhookDeleteFailed
+    WebhookDeleted webhookId -> do
+        notify "Webhook deleted" ToastOk
+        putModel
+            ( \m ->
+                m
+                    { mWebhooks = filter ((/= webhookId) . whId) (mWebhooks m)
+                    , mWebhookDeliveries = case mWebhookDeliveries m of
+                        Just (showId, _) | showId == webhookId -> Nothing
+                        other -> other
+                    , mWebhookTest = case mWebhookTest m of
+                        Just (showId, _) | showId == webhookId -> Nothing
+                        other -> other
+                    }
+            )
+    WebhookDeleteFailed err -> handleApiError err
+    WebhookSecretDismiss -> putModel (\m -> m{mWebhookSecret = Nothing})
+    WebhookSecretCopied raw -> withSink $ \sink -> do
+        copiedValue <- jsgf "ezaCopy" (ms raw)
+        copied <- fromMaybe False <$> (fromJSVal copiedValue :: IO (Maybe Bool))
+        sink
+            ( ToastAdd
+                (if copied then "Webhook secret copied" else "Copy failed. Select the text instead")
+                (if copied then ToastOk else ToastError)
+            )
+    WebhookDeliveriesOpen webhookId -> do
+        putModel (\m -> m{mWebhookDeliveriesError = Nothing})
+        fetchWebhookDeliveries webhookId (WebhookDeliveriesLoaded webhookId) (WebhookDeliveriesFailed webhookId)
+    WebhookDeliveriesLoaded webhookId deliveries ->
+        putModel (\m -> m{mWebhookDeliveries = Just (webhookId, deliveries), mWebhookDeliveriesError = Nothing})
+    WebhookDeliveriesFailed _webhookId err ->
+        putModel (\m -> m{mWebhookDeliveries = Nothing, mWebhookDeliveriesError = Just (ms (aeMessage err))})
     -- highlights -----------------------------------------------------------
     HighlightsLoaded epoch highlights -> sameEpoch epoch $ do
         m <- get
@@ -2331,8 +3208,14 @@ updateModel = \case
             || isJust (mTagPrompt m)
             || mConfirmBulkDelete m
             || isJust (mConfirmDelete m)
+            || vuSaveOpen (mViewUi m)
+            || vuImportOpen (mViewUi m)
+            || isJust (vuExport (mViewUi m))
 
     closeTopLayer m
+        | vuSaveOpen (mViewUi m) = putModel (\x -> x{mViewUi = (mViewUi x){vuSaveOpen = False, vuError = Nothing}})
+        | vuImportOpen (mViewUi m) = putModel (\x -> x{mViewUi = (mViewUi x){vuImportOpen = False, vuError = Nothing}})
+        | isJust (vuExport (mViewUi m)) = putModel (\x -> x{mViewUi = (mViewUi x){vuExport = Nothing}})
         | mConfirmLogout m = putModel (\x -> x{mConfirmLogout = False})
         | mHighlightNoteOpen m = putModel (\x -> x{mHighlightNoteOpen = False, mHighlightNote = ""})
         | isJust (mHighlightEdit m) = putModel (\x -> x{mHighlightEdit = Nothing, mHighlightEditNote = ""})
@@ -2524,3 +3407,492 @@ updateModel = \case
                             , dcTitleRecords = max 0 (dcTitleRecords counts - size)
                             }
                 | otherwise -> Just counts
+
+-- -------------------------------------------------------------- graph glue --
+
+graphZoom :: Double -> Effect () () Model Action
+graphZoom factor = do
+    m <- get
+    case activeGraphLayout m of
+        Nothing -> pure ()
+        Just layout -> do
+            let view = zoomViewCenter layout (mGraphView m) factor
+            putModel
+                ( \model ->
+                    model
+                        { mGraphView = view
+                        , mGraphSettled = False
+                        , mGraphSettleEpoch = mGraphSettleEpoch model + 1
+                        , mGraphDetailPhase = 0
+                        }
+                )
+            scheduleGraphSettle
+
+-- | A pointer that went down and up without moving is a click: a record
+-- selects, a tag opens the ledger filtered by @tag:@, and empty plate clears.
+graphClick :: Model -> Double -> Double -> Effect () () Model Action
+graphClick m x y =
+    case activeGraphLayout m of
+        Nothing -> pure ()
+        Just layout -> case visibleHit m (nodeAt layout (mGraphView m) (x, y)) of
+            Nothing ->
+                putModel (\model -> model{mGraphSelected = Nothing, mGraphFocus = Nothing})
+            Just key
+                | isTagKey key -> case IM.lookup key (glTags layout) of
+                    Just (name, _) -> updateModel (FilterByQuery ("tag:" <> name))
+                    Nothing -> pure ()
+                | otherwise ->
+                    updateModel (Navigate (Bookmark key))
+
+-- | Focus the plate once it has painted, so the keyboard shortcuts work
+-- immediately after a visit. @preventScroll@ keeps the panel from jumping to
+-- the canvas on a phone, where focus() would otherwise scroll the title and the
+-- filter line out of view.
+focusGraphPlate :: Model -> Effect () () Model Action
+focusGraphPlate m =
+    when
+        (mRoute m == Graph && T.null (T.strip (fromMisoString (mGraphFilter m))))
+        (liftSinkIO focusGraphCanvas)
+
+focusGraphCanvas :: IO ()
+focusGraphCanvas = do
+    _ <- jsgf "setTimeout" (asyncCallback (focusWithoutScroll "graph-canvas"), 60 :: Int)
+    pure ()
+
+focusWithoutScroll :: MisoString -> IO ()
+focusWithoutScroll domId = do
+    document <- jsg ("document" :: MisoString)
+    element <- (document # ("getElementById" :: MisoString)) domId
+    missing <- isNull element
+    unless missing $ do
+        options <- create
+        setField options ("preventScroll" :: MisoString) True
+        _ <- (element # ("focus" :: MisoString)) [options]
+        pure ()
+
+-- | A hit on a tag node only counts while the tag layer is shown; otherwise a
+-- click could open a ledger for a node the reader cannot see.
+visibleHit :: Model -> Maybe Int -> Maybe Int
+visibleHit _ Nothing = Nothing
+visibleHit m (Just key)
+    | not (mGraphTagsShown m) && isTagKey key = Nothing
+    | otherwise = Just key
+
+{- | Validate and hydrate a server layout. The revision and the two position
+arrays must line up with the graph payload, otherwise the caller keeps the
+local fallback.
+-}
+hydrateWire :: GraphData -> LayoutWire -> Maybe GraphLayout
+hydrateWire graph wire
+    | lwRevision wire /= gdRevision graph = Nothing
+    | length (lwTags wire) /= length (gdTags graph) = Nothing
+    | length (lwRecords wire) /= length (gdRecords graph) = Nothing
+    | otherwise =
+        Just
+            ( hydrateLayout
+                graph
+                LayoutPositions
+                    { -- Core hydrates tag positions by tag index and record
+                      -- positions by bookmark id, so apply the node-key mapping
+                      -- only there, never twice.
+                      lpTagPositions = IM.fromList (zip [0 :: Int ..] (lwTags wire))
+                    , lpRecordPositions =
+                        IM.fromList
+                            [ (recordKeyOf (grId record), point)
+                            | (record, point) <- zip (gdRecords graph) (lwRecords wire)
+                            ]
+                    , lpBounds = lwBounds wire
+                    }
+            )
+
+-- | Replace a local fallback with a pending server layout for the same preset.
+upgradeWithWire :: GraphData -> Model -> Model
+upgradeWithWire graph m =
+    case (mGraphLayoutWire m, mGraphLayoutSource m) of
+        (Just (preset, wire), "local")
+            | preset == mGraphPreset m
+            , Just hydrated <- hydrateWire graph wire ->
+                let generation = mGraphGen m + 1
+                 in m
+                        { mGraphLayout = Just hydrated{glGen = generation}
+                        , mGraphGen = generation
+                        , mGraphLayoutSource = "server"
+                        }
+        _ -> m
+
+-- ------------------------------------------------------------- views glue --
+
+findViewBySlug :: Text -> [EV.View] -> Maybe EV.View
+findViewBySlug slug views =
+    case [view | view <- views, EV.vSlug view == slug] of
+        (view : _) -> Just view
+        [] -> Nothing
+
+defaultGraphView :: [EV.View] -> Maybe EV.View
+defaultGraphView views =
+    case [view | view <- views, EV.vKind view == EV.GraphKind, EV.vIsDefault view] of
+        (view : _) -> Just view
+        [] -> case [view | view <- views, EV.vKind view == EV.GraphKind] of
+            (view : _) -> Just view
+            [] -> Nothing
+
+-- | Apply a graph view definition to the graph state. Color maps are rebuilt
+-- from the graph data by 'recomputeGraphColors'.
+applyGraphView :: EV.View -> Model -> Model
+applyGraphView view m = case EV.vDefinition view of
+    EV.GraphDefinition definition ->
+        m
+            { mGraphViewId = Just (EV.vId view)
+            , mGraphViewRev = EV.vUpdatedAt view
+            , mGraphFilter = ms (T.unpack (EV.gvdQuery definition))
+            , mGraphTagsShown = EV.gvdTagsShown definition
+            , mGraphLabelMode = EV.gvdLabelMode definition
+            , mGraphPreset = EV.gvdLayoutPreset definition
+            , mGraphLocal = isJust (EV.gvdLocalDepth definition)
+            , mGraphLocalDepth = fromMaybe 1 (EV.gvdLocalDepth definition)
+            , mGraphLocalRoot = Nothing
+            , mGraphColorGroups = EV.gvdColorGroups definition
+            , mGraphGroupDrafts = EV.gvdColorGroups definition
+            , mGraphGroupDirty = False
+            , mGraphGroupEditor = False
+            }
+    _ -> m
+
+-- | The current graph state as a view definition, ready to PATCH or POST.
+currentGraphDefinition :: Model -> EV.ViewDefinition
+currentGraphDefinition m =
+    EV.GraphDefinition
+        EV.GraphViewDefinition
+            { EV.gvdQuery = fromMisoString (mGraphFilter m)
+            , EV.gvdTagsShown = mGraphTagsShown m
+            , EV.gvdLabelMode = mGraphLabelMode m
+            , EV.gvdLayoutPreset = mGraphPreset m
+            , EV.gvdLocalDepth = if mGraphLocal m then Just (mGraphLocalDepth m) else Nothing
+            , EV.gvdColorGroups = mGraphGroupDrafts m
+            }
+
+currentLedgerDefinition :: Model -> EV.ViewDefinition
+currentLedgerDefinition m =
+    EV.LedgerDefinition
+        EV.LedgerViewDefinition
+            { EV.lvdQuery = fromMisoString (mQ m)
+            , EV.lvdSort = case mSort m of
+                "added" -> EV.SortAdded
+                "opened" -> EV.SortOpened
+                _ -> EV.SortCreated
+            }
+
+-- | Build the record and tag color maps once per graph/view/groups change.
+recomputeGraphColors :: Model -> Model
+recomputeGraphColors m =
+    case mGraph m of
+        Nothing -> m{mGraphColors = Nothing, mGraphGroupCounts = []}
+        Just graph ->
+            let groups = mGraphGroupDrafts m
+                assignment = GM.assignGroupColors groups graph
+                countFor group
+                    | not (EV.cgEnabled group) = 0
+                    | otherwise =
+                        length
+                            [ ()
+                            | record <- gdRecords graph
+                            , GM.matchesQueryRecord (parseSearchQuery (EV.cgQuery group)) graph record
+                            ]
+             in m
+                    { mGraphColors = Just assignment
+                    , mGraphGroupCounts = map countFor groups
+                    }
+
+upsertView :: EV.View -> [EV.View] -> [EV.View]
+upsertView view views =
+    view : [existing | existing <- views, EV.vSlug existing /= EV.vSlug view]
+
+-- | Open a saved view: graph views switch the graph route to the definition,
+-- ledger views load the ledger with the saved query and sort.
+openSavedView :: Text -> Effect () () Model Action
+openSavedView slug = do
+    m <- get
+    case findViewBySlug slug (mViews m) of
+        Just view -> openSavedViewNow view
+        Nothing -> fetchView slug ViewFetched ViewFetchFailed
+
+openSavedViewNow :: EV.View -> Effect () () Model Action
+openSavedViewNow view = case EV.vDefinition view of
+    EV.GraphDefinition definition -> do
+        putModel (applyGraphView view)
+        m <- get
+        when (isJust (mGraphLayout m)) $
+            updateModel (GraphPresetSelected (EV.gvdLayoutPreset definition))
+        putModel recomputeGraphColors
+        updateModel (Navigate Graph)
+    EV.LedgerDefinition definition -> do
+        putModel
+            ( \x ->
+                x
+                    { mQ = ms (T.unpack (EV.lvdQuery definition))
+                    , mSort = EV.ledgerSortText (EV.lvdSort definition)
+                    , mTagsFilter = []
+                    , mUnreadOnly = False
+                    }
+            )
+        updateModel (Navigate Index)
+
+-- | PATCH the active (or default) graph view with the current state.
+saveCurrentGraphView :: Model -> Effect () () Model Action
+saveCurrentGraphView m =
+    case graphTarget of
+        Nothing -> updateModel (ViewSaveOpen EV.GraphKind)
+        Just view -> do
+            putModel (\x -> x{mViewUi = (mViewUi x){vuBusy = True, vuError = Nothing}})
+            patchView
+                (EV.vSlug view)
+                ( ViewPatch
+                    Nothing
+                    Nothing
+                    (Just (currentGraphDefinition m))
+                    (Just (EV.vIsDefault view))
+                )
+                ViewSaved
+                ViewSaveFailed
+  where
+    graphTarget = case mGraphViewId m of
+        Just viewId -> case [view | view <- mViews m, EV.vId view == viewId] of
+            (view : _) -> Just view
+            [] -> defaultGraphView (mViews m)
+        Nothing -> defaultGraphView (mViews m)
+
+setAt :: Int -> (a -> a) -> [a] -> [a]
+setAt index update list = [if position == index then update value else value | (position, value) <- zip [0 :: Int ..] list]
+
+removeAt :: Int -> [a] -> [a]
+removeAt index list = [value | (position, value) <- zip [0 :: Int ..] list, position /= index]
+
+-- | The definition of the active saved graph view, when one is selected.
+activeGraphDefinition :: Model -> Maybe EV.GraphViewDefinition
+activeGraphDefinition m = do
+    viewId <- mGraphViewId m
+    view <- case [candidate | candidate <- mViews m, EV.vId candidate == viewId] of
+        (candidate : _) -> Just candidate
+        [] -> Nothing
+    case EV.vDefinition view of
+        EV.GraphDefinition definition -> Just definition
+        _ -> Nothing
+
+isLocalGraphRoute :: Route -> Bool
+isLocalGraphRoute route = case route of
+    GraphLocal{} -> True
+    _ -> False
+
+isUserEnabled :: UserView -> Bool
+isUserEnabled user = isNothing (uvDisabledAt user)
+
+upsertUser :: UserView -> [UserView] -> [UserView]
+upsertUser user users =
+    user : [existing | existing <- users, uvId existing /= uvId user]
+
+upsertWebhook :: Webhook -> [Webhook] -> [Webhook]
+upsertWebhook webhook webhooks =
+    webhook : [existing | existing <- webhooks, whId existing /= whId webhook]
+
+-- | Load the graph route. Whole mode keeps the cached view; local mode
+-- rebuilds the neighbourhood and fits it before the first paint.
+enterGraphRoute :: Bool -> Maybe Int -> Int -> Effect () () Model Action
+enterGraphRoute localMode root depth = do
+    m <- get
+    let viewLocalDepth = EV.gvdLocalDepth <$> activeGraphDefinition m
+        viewLocal = maybe False isJust viewLocalDepth
+        effectiveLocal = localMode || viewLocal
+        effectiveDepth = if localMode then max 1 (min 3 depth) else fromMaybe (max 1 (min 3 depth)) (join viewLocalDepth)
+    putModel
+        ( \x ->
+            x
+                { mGraphLoading = isNothing (mGraphLayout x)
+                , mGraphError = Nothing
+                , mGraphLocal = effectiveLocal
+                , mGraphLocalDepth = effectiveDepth
+                , mGraphLocalRoot = root
+                , mGraphDetailPhase = 0
+                , mGraphSettled = False
+                , mGraphSettleEpoch = mGraphSettleEpoch x + 1
+                , mGraphHover = Nothing
+                }
+        )
+    putModel
+        ( \x ->
+            x
+                { mGraphLayoutWire = Nothing
+                , mGraphLayoutSource = "local"
+                }
+        )
+    putModel (\x -> if effectiveLocal then fitActiveView (applyGraphScope x) else applyGraphScope x)
+    current <- get
+    fetchGraph GraphLoaded GraphFailed
+    fetchGraphLayout (mGraphPreset current) (GraphLayoutLoaded (mGraphPreset current)) GraphLayoutFailed
+    measureGraphCanvas GraphMeasured
+
+{- | Resolve the row that roots local mode: the explicit root when it still
+exists, else the selected record, else the focused record, else the
+highest-degree record in the whole layout.
+-}
+resolveLocalRoot :: Model -> GraphLayout -> Maybe Int
+resolveLocalRoot m whole =
+    case [key | Just key <- [mGraphLocalRoot m, mGraphSelected m, mGraphFocus m], usable key] of
+        (key : _) -> Just key
+        []
+            | (key : _) <- glRecordOrder whole
+            , not (isTagKey key) ->
+                Just key
+            | otherwise -> Nothing
+  where
+    usable key = not (isTagKey key) && IM.member key (glPos whole)
+
+{- | Rebuild the active derived layout after the scope, root or depth changed.
+The whole layout is never rebuilt here, so the 2,500-node local cap is the
+only work local mode adds.
+-}
+applyGraphScope :: Model -> Model
+applyGraphScope m =
+    case mGraphLayout m of
+        Nothing -> m
+        Just whole
+            | not (mGraphLocal m) ->
+                m
+                    { mGraphLocalLayout = Nothing
+                    , mGraphLocalCapped = False
+                    , mGraphMatches = matchOn whole
+                    }
+            | otherwise ->
+                case resolveLocalRoot m whole of
+                    Just root ->
+                        case localLayout whole root (mGraphLocalDepth m) of
+                            Just (local, capped) ->
+                                m
+                                    { mGraphLocalRoot = Just root
+                                    , mGraphLocalLayout = Just local
+                                    , mGraphLocalCapped = capped
+                                    , mGraphMatches = matchOn local
+                                    }
+                            Nothing -> emptyScope m
+                    Nothing -> emptyScope m
+  where
+    matchOn layout = matchGraph (T.strip (fromMisoString (mGraphFilter m))) layout
+    emptyScope model =
+        model
+            { mGraphLocalLayout = Nothing
+            , mGraphLocalCapped = False
+            , mGraphMatches = emptyMatches
+            }
+
+-- | Fit the plate to the active layout. Used when the scope, root, depth or
+-- preset changes; not on interaction frames.
+fitActiveView :: Model -> Model
+fitActiveView m =
+    case activeGraphLayout m of
+        Nothing -> m
+        Just layout ->
+            let old = mGraphView m
+             in m
+                    { mGraphView = fitView layout (gvWidth old) (gvHeight old) (gvDpr old)
+                    , mGraphHover = Nothing
+                    , mGraphSettled = False
+                    , mGraphSettleEpoch = mGraphSettleEpoch m + 1
+                    , mGraphDetailPhase = 0
+                    }
+
+{- | The view is moving: the plate keeps blitting the world bitmap, and the
+screen-resolution detail plate is stale until the gesture stops.
+-}
+markGraphMoving :: Effect () () Model Action
+markGraphMoving =
+    putModel
+        ( \m ->
+            m
+                { mGraphSettled = False
+                , mGraphSettleEpoch = mGraphSettleEpoch m + 1
+                , mGraphDetailPhase = 0
+                }
+        )
+
+{- | Arm a settle check for the current view epoch. Timers are never cancelled:
+a stale epoch is ignored, so only the timer armed for the last view can build
+the detail plate. One timer per gesture event is cheap.
+-}
+scheduleGraphSettle :: Effect () () Model Action
+scheduleGraphSettle = do
+    m <- get
+    let epoch = mGraphSettleEpoch m
+    withSink $ \sink -> do
+        _ <- jsgf "setTimeout" (asyncCallback1 (\_ -> sink (GraphSettled epoch)), 150 :: Int)
+        pure ()
+
+{- | Draw one chunk of the settle plate per animation frame. Chunking keeps
+each frame short: the plate sharpens over a handful of frames instead of
+blocking one long task after the gesture stops.
+-}
+scheduleGraphDetailStep :: Int -> Int -> Effect () () Model Action
+scheduleGraphDetailStep epoch phase =
+    withSink $ \sink -> do
+        callback <- asyncCallback1 (\_ -> sink (GraphDetailStep epoch phase))
+        _ <- jsgf "requestAnimationFrame" callback
+        pure ()
+
+-- | Escape clears an active filter first, then the selection. The filter is
+-- the more specific state, so it goes first.
+graphEscape :: Model -> Effect () () Model Action
+graphEscape m
+    | not (T.null (T.strip (fromMisoString (mGraphFilter m)))) = do
+        updateModel (GraphFilterChanged "")
+        updateModel GraphFilterSettled
+    | otherwise = updateModel GraphClearSelection
+
+-- | Pan the graph from the global keyboard bridge. The canvas is a tab stop,
+-- but the shortcuts run from any non-editable focus on the graph route, so the
+-- panel does not need to keep DOM focus on the canvas to be keyboard driven.
+graphPan :: Double -> Double -> Bool -> Effect () () Model Action
+graphPan deltaX deltaY accelerated = do
+    m <- get
+    case mGraphLayout m of
+        Nothing -> pure ()
+        Just _ -> do
+            let step = if accelerated then 160 else 48
+            putModel
+                ( \model ->
+                    model
+                        { mGraphView = panView (deltaX * step, deltaY * step) (mGraphView model)
+                        , mGraphSettled = False
+                        , mGraphSettleEpoch = mGraphSettleEpoch model + 1
+                        , mGraphDetailPhase = 0
+                        }
+                )
+            scheduleGraphSettle
+
+-- | Enter on the graph opens the selected record, matching a click.
+graphOpenSelected :: Model -> Effect () () Model Action
+graphOpenSelected m =
+    case mGraphSelected m of
+        Just key | not (isTagKey key) -> updateModel (Navigate (Bookmark key))
+        _ -> pure ()
+
+-- | Read the canvas box after a render. The element only exists once the graph
+-- layout has painted, so a few short retries cover the first frame.
+measureGraphCanvas :: (Double -> Double -> Double -> Action) -> Effect () () Model Action
+measureGraphCanvas onMeasured = withSink $ \sink -> measureWith sink 0
+  where
+    measureWith :: Sink Action -> Int -> IO ()
+    measureWith sink attempt = do
+        document <- jsg ("document" :: MisoString)
+        element <- document # ("querySelector" :: MisoString) $ (".g-canvas-el" :: MisoString)
+        missing <- isNull element
+        if missing
+            then retry sink attempt
+            else do
+                width <- (fromJSValUnchecked =<< element ! ("clientWidth" :: MisoString)) :: IO Double
+                height <- (fromJSValUnchecked =<< element ! ("clientHeight" :: MisoString)) :: IO Double
+                dpr <- (fromJSValUnchecked =<< jsg ("devicePixelRatio" :: MisoString)) :: IO Double
+                if width < 40 || height < 40
+                    then retry sink attempt
+                    else sink (onMeasured width height (min 2 dpr))
+    retry :: Sink Action -> Int -> IO ()
+    retry sink attempt =
+        when (attempt < 4) $
+            void $ jsgf "setTimeout" (asyncCallback (measureWith sink (attempt + 1)), 80 :: Int)

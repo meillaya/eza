@@ -20,8 +20,8 @@ import Test.Hspec
 
 import Eza.Bookmarks
 import Eza.Db
-import Eza.Graph (graphNeighborhood)
-import Eza.Types (BookmarkSummary (..), GraphData (..), GraphEdge (..), GraphNode (..), LibraryStats (..), SearchPage (..))
+import Eza.Graph (globalGraph)
+import Eza.Types (BookmarkSummary (..), GraphData (..), GraphLink (..), GraphRecord (..), GraphTag (..), LibraryStats (..), SearchPage (..))
 
 spec :: Spec
 spec = do
@@ -135,8 +135,8 @@ spec = do
                     [] -> expectationFailure "expected the FTS query to find the bookmark"
                 close conn
 
-    describe "migration v9" $ do
-        it "migrates a v8 database to v9 and creates the performance indexes" $
+    describe "migration v9 and v10" $ do
+        it "migrates a v8 database through v9 to v10 and creates the performance indexes" $
             withSystemTempDirectory "eza-perf-migrate" $ \dir -> do
                 let path = dir </> "test.db"
                 bracket (Sqlite.open path) Sqlite.close $ \conn -> do
@@ -148,7 +148,7 @@ spec = do
                 migrated <- openDb path
                 version <- schemaVersion migrated
                 version `shouldBe` targetSchemaVersion
-                version `shouldBe` 9
+                version `shouldBe` 11
                 books <- queryScalar migrated "SELECT COUNT(*) FROM bookmarks"
                 books `shouldBe` 1
                 tags <- queryScalar migrated "SELECT COUNT(*) FROM tags"
@@ -174,27 +174,32 @@ spec = do
                 plan `shouldSatisfy` any (T.isInfixOf "idx_bookmarks_opened")
                 close migrated
 
-    describe "graphNeighborhood" $ do
-        it "groups shared tags into weighted edges in the legacy order" $
+    describe "globalGraph" $ do
+        it "returns every record and tag, plus the resolved links only" $
             withSystemTempDirectory "eza-perf-graph" $ \dir -> do
                 conn <- openDb (dir </> "test.db")
                 first <- insertSeed conn (seedBookmark "https://g.test/a" "A" "g.test" 1700000000 0 0 Nothing "")
                 second <- insertSeed conn (seedBookmark "https://g.test/b" "B" "g.test" 1700000000 0 0 Nothing "")
-                third <- insertSeed conn (seedBookmark "https://g.test/c" "C" "g.test" 1700000000 0 0 Nothing "")
-                fourth <- insertSeed conn (seedBookmark "https://g.test/d" "D" "g.test" 1700000000 0 0 Nothing "")
                 addTag conn first "one"
-                addTag conn first "two"
                 addTag conn second "one"
-                addTag conn second "two"
-                addTag conn third "one"
-                addTag conn fourth "three"
-                result <- graphNeighborhood conn first 2
-                case result of
-                    Nothing -> expectationFailure "expected a graph neighbourhood"
-                    Just graph -> do
-                        gdEdges graph `shouldBe` [GraphEdge first second 2, GraphEdge first third 1, GraphEdge second third 1]
-                        map gnId (gdNodes graph) `shouldBe` [first, second, third]
-                        map gnIndegree (gdNodes graph) `shouldBe` [2, 2, 1]
+                Sqlite.execute
+                    conn
+                    "INSERT INTO links (source_id, target_id, target_title) VALUES (?,?, '')"
+                    (first, Just second :: Maybe Int)
+                Sqlite.execute
+                    conn
+                    "INSERT INTO links (source_id, target_id, target_title) VALUES (?,NULL,'unresolved')"
+                    (Only first)
+                graph <- globalGraph conn
+                gdTags graph `shouldBe` [GraphTag "one" 2]
+                map grId (gdRecords graph) `shouldBe` [first, second]
+                gdLinks graph `shouldBe` [GraphLink first second]
+                close conn
+
+        it "returns an empty graph for an empty database" $
+            withSystemTempDirectory "eza-perf-graph-empty" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                globalGraph conn `shouldReturn` GraphData [] [] [] "0:0:0:0:0"
                 close conn
 
     describe "bookmarksByIdsLight" $ do

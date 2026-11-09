@@ -16,6 +16,8 @@ module Eza.Web.Model (
     accountTabSlug,
     accountTabFromSlug,
     TagDialog (..),
+    ViewUi (..),
+    ColorGroupField (..),
     LedgerEntry (..),
     ledgerEntries,
     ledgerContentHeight,
@@ -31,6 +33,8 @@ module Eza.Web.Model (
     paletteEntries,
     isSelected,
     selectedCount,
+    isGraphRoute,
+    activeGraphLayout,
 ) where
 
 import Data.Aeson (Value)
@@ -43,11 +47,12 @@ import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8')
 import Text.Read (readMaybe)
 
+import Eza.Boot (BootPayload)
+import Eza.Web.Api (LayoutWire (..), WebhookTest (..))
 import Eza.Types (
     Backlink,
     BookmarkDetail,
     BookmarkSummary (..),
-    BootPayload,
     DedupCounts,
     DedupGroup (..),
     DedupMergeAllReport,
@@ -60,9 +65,46 @@ import Eza.Types (
     SearchPage,
     TagStat,
  )
+import Eza.Web.Graph (
+    GraphDrag,
+    GraphLayout,
+    GraphMatches,
+    GraphView,
+    LayoutPreset (..),
+    emptyMatches,
+    initialGraphView,
+ )
+import Eza.GraphMatch (ColorAssignment)
+import Eza.User (UserCreateResult, UserRole (..), UserView (..))
+import Eza.Webhook (DeliveryView, EventType, Webhook (..))
+import Eza.View (
+    ColorGroup (..),
+    LabelMode (..),
+    View (..),
+    ViewKind (..),
+ )
+
 import Eza.Web.Types (AccountInfo, AiStatus, ApiError, ConsolGroup, ReaderSelection, Rule (..), SessionInfo, ShareView, TagSuggestion, TokenView)
-import Miso
+import Miso hiding (View)
 import Miso.Router (Router (..), RoutingError (..), Token (..), parseURI, routes, toCapture, toPath, toQueryParam)
+
+-- | Which color-group field an editor keystroke changes.
+data ColorGroupField = GroupName | GroupQuery | GroupColor
+    deriving (Eq, Show)
+
+-- | Transient state for the views manager and the save/import dialogs.
+data ViewUi = ViewUi
+    { vuSaveOpen :: Bool
+    , vuSaveName :: MisoString
+    , vuSaveKind :: ViewKind
+    , vuImportOpen :: Bool
+    , vuImportText :: MisoString
+    , vuExport :: Maybe Text
+    , vuRename :: Maybe (Text, MisoString)
+    , vuError :: Maybe MisoString
+    , vuBusy :: Bool
+    }
+    deriving (Eq, Show)
 
 -- | Application routes.  @Bookmark@ carries the numeric bookmark id.
 data Route
@@ -70,6 +112,9 @@ data Route
     | Bookmark Int
     | Inbox
     | Graph
+    | GraphLocal Int Int
+    | Views
+    | ViewOpen Text
     | Dedup
     | Tags
     | AiTags
@@ -89,6 +134,14 @@ instance Router Route where
         Bookmark bid -> [toPath "bookmark", toCapture bid]
         Inbox -> [toPath "inbox"]
         Graph -> [toPath "graph"]
+        GraphLocal rootKey depth ->
+            [ toPath "graph"
+            , toQueryParam "focus" (T.pack (show rootKey))
+            , toQueryParam "depth" (T.pack (show depth))
+            , toQueryParam "local" ("1" :: Text)
+            ]
+        Views -> [toPath "views"]
+        ViewOpen slug -> [toPath "views", toPath (ms (T.unpack slug))]
         Dedup -> [toPath "dedup"]
         Tags -> [toPath "tags"]
         AiTags -> [toPath "tags", toPath "ai"]
@@ -166,7 +219,13 @@ classifyRoute uri = case splitPath (fromMisoString (uriPath uri)) of
     [] -> Index
     ["bookmark", n] -> maybe NotFound Bookmark (readMaybe n)
     ["inbox"] -> Inbox
-    ["graph"] -> Graph
+    ["graph"]
+        | queryText "local" == Just "1"
+        , Just focusKey <- query "focus" >>= readMaybe . T.unpack ->
+            GraphLocal focusKey (clampDepth (query "depth" >>= readMaybe . T.unpack))
+        | otherwise -> Graph
+    ["views"] -> Views
+    ["views", slug] -> ViewOpen (fromMisoString (ms slug :: MisoString))
     ["dedup"] -> Dedup
     ["tags"] -> Tags
     ["tags", "ai"] -> AiTags
@@ -180,6 +239,9 @@ classifyRoute uri = case splitPath (fromMisoString (uriPath uri)) of
     query key =
         fmap (percentDecode . (fromMisoString :: MisoString -> Text))
             =<< M.lookup key (uriQueryString uri)
+    queryText key = query key
+    clampDepth (Just depth) = max 1 (min 3 depth)
+    clampDepth Nothing = 1
 
 routeOfUri :: URI -> Route
 routeOfUri uri =
@@ -187,12 +249,28 @@ routeOfUri uri =
         Right r -> r
         Left _ -> NotFound
 
+-- | The layout the plate is showing: the local neighbourhood when local mode
+-- is on, otherwise the whole-library layout.
+activeGraphLayout :: Model -> Maybe GraphLayout
+activeGraphLayout m
+    | mGraphLocal m = mGraphLocalLayout m
+    | otherwise = mGraphLayout m
+
+-- | Both graph routes share the plate and the graph keyboard handling.
+isGraphRoute :: Route -> Bool
+isGraphRoute Graph = True
+isGraphRoute GraphLocal{} = True
+isGraphRoute _ = False
+
 routeTitle :: Route -> MisoString
 routeTitle = \case
     Index -> "Library"
     Bookmark _ -> "Bookmark"
     Inbox -> "Inbox"
     Graph -> "Graph"
+    GraphLocal _ _ -> "Graph"
+    Views -> "Views"
+    ViewOpen _ -> "View"
     Dedup -> "Duplicates"
     Tags -> "Tags"
     AiTags -> "AI tags"
@@ -207,7 +285,10 @@ routeSubtitle = \case
     Index -> "Search, filter, and open anything in one keystroke."
     Bookmark _ -> "Read, annotate, and connect this bookmark."
     Inbox -> "Everything you saved but have not read yet."
-    Graph -> "Explore the neighbourhood around a bookmark."
+    Graph -> "Every record and tag in the library, joined by wikilinks and tags."
+    GraphLocal _ depth -> "A local neighbourhood, " <> ms (show depth) <> " hop" <> (if depth == 1 then "" else "s") <> " from the root record."
+    Views -> "Saved graph and ledger views, with their color groups and saved searches."
+    ViewOpen _ -> "Opening a saved view."
     Dedup -> "Review near-identical saves before merging them."
     Tags -> "Consolidate, rename, and prune your tag vocabulary."
     AiTags -> "Advisory tag suggestions. Nothing is written without you."
@@ -239,6 +320,8 @@ data AccountTab
     | AccountRecovery
     | AccountSessions
     | AccountTokens
+    | AccountWebhooks
+    | AccountUsers
     | AccountShares
     | AccountRules
     | AccountImport
@@ -255,6 +338,8 @@ accountTabSlug = \case
     AccountRecovery -> "recovery"
     AccountSessions -> "sessions"
     AccountTokens -> "tokens"
+    AccountWebhooks -> "webhooks"
+    AccountUsers -> "users"
     AccountShares -> "shares"
     AccountRules -> "rules"
     AccountImport -> "import"
@@ -270,6 +355,8 @@ accountTabFromSlug raw =
         "recovery" -> AccountRecovery
         "sessions" -> AccountSessions
         "tokens" -> AccountTokens
+        "webhooks" -> AccountWebhooks
+        "users" -> AccountUsers
         "shares" -> AccountShares
         "rules" -> AccountRules
         "import" -> AccountImport
@@ -315,7 +402,7 @@ data KeyEvent = KeyEvent
 data Action
     = -- lifecycle / routing
       Mounted
-    | RouteChanged (Either RoutingError Route)
+    | RouteChanged MisoString (Either RoutingError Route)
     | Navigate Route
     | ThemeToggled
     | LayoutChanged Int Int
@@ -331,7 +418,6 @@ data Action
     | DrawerOpen Int
     | DrawerClose
     | AccountTabSelected AccountTab
-    | AccountTabFromHash MisoString
     | Noop
     | -- boot
       BootLoaded BootPayload
@@ -433,14 +519,68 @@ data Action
     | -- graph
       GraphLoaded GraphData
     | GraphFailed ApiError
-    | GraphDepthSelected Int
-    | GraphZoom Int
-    | GraphSeed (Maybe Int)
-    | GraphQueryChanged MisoString
-    | GraphResults [BookmarkSummary]
-    | GraphPickSeed Int
-    | OpenGraphAt Int
     | GraphRefresh
+    | OpenGraphAt Int
+    | GraphMeasured Double Double Double
+    | GraphPointerDown Double Double
+    | GraphPointerMove Double Double
+    | GraphPointerUp Double Double
+    | GraphPointerLeave
+    | GraphWheel Double Double Double
+    | GraphZoomIn
+    | GraphZoomOut
+    | GraphFit
+    | GraphFilterChanged MisoString
+    | GraphFilterArmed Int
+    | GraphFilterSettled
+    | GraphTagsToggled
+    | GraphSelect Int
+    | GraphClearSelection
+    | GraphSettled Int
+    | GraphDetailStep Int Int
+    | GraphLayoutLoaded LayoutPreset LayoutWire
+    | GraphLayoutFailed ApiError
+    | GraphLabelModeSelected LabelMode
+    | GraphPresetSelected LayoutPreset
+    | GraphScopeToggled
+    | GraphLocalDepthSelected Int
+    | GraphLocalAt Int Int
+    | -- views
+      ViewsLoaded [View]
+    | ViewsFailed ApiError
+    | ViewSaved View
+    | ViewSaveFailed ApiError
+    | ViewDeleted Text
+    | ViewDeleteFailed ApiError
+    | ViewFetched View
+    | ViewFetchFailed ApiError
+    | ViewOpenView Text
+    | ViewDefaultView Text
+    | ViewDeleteView Text
+    | ViewExportView Text
+    | ViewExportClose
+    | ViewRenameStart Text
+    | ViewRenameInput MisoString
+    | ViewRenameSubmit
+    | ViewDuplicateView Text
+    | ViewSaveOpen ViewKind
+    | ViewSaveNameInput MisoString
+    | ViewSaveKindSelected ViewKind
+    | ViewRenameCancel
+    | ViewSaveSubmit
+    | ViewSaveCancel
+    | ViewImportOpen
+    | ViewImportTextInput MisoString
+    | ViewImportSubmit
+    | ViewImportCancel
+    | ViewGroupEditorToggle
+    | ViewGroupAdd
+    | ViewGroupRemove Int
+    | ViewGroupField Int ColorGroupField MisoString
+    | ViewGroupToggleEnabled Int
+    | ViewGroupsSave
+    | ViewGroupsCancel
+    | ViewSaveGraph
     | -- dedup (two independently paged sections)
       DedupLoaded DedupReport
     | DedupFailed ApiError
@@ -465,6 +605,7 @@ data Action
     | TagMerge [Text] Text
     | TagMerged
     | FilterByTag Text
+    | FilterByQuery Text
     | TagRenamed Text MisoString
     | TagDeleted Text
     | TagDialogOpen TagDialog
@@ -598,6 +739,52 @@ data Action
     | -- ai status
       AiStatusLoaded AiStatus
     | AiStatusFailed ApiError
+    | -- admin users
+      AdminUsersLoaded [UserView]
+    | AdminUsersFailed ApiError
+    | UserNameInput MisoString
+    | UserPasswordInput MisoString
+    | UserRoleSelected UserRole
+    | UserCreate
+    | UserCreated UserCreateResult
+    | UserCreateFailed ApiError
+    | UserToggleEnabled UserView
+    | UserRoleChange UserView
+    | UserUpdated UserView
+    | UserUpdateFailed ApiError
+    | UserResetOpen Int
+    | UserResetPasswordInput MisoString
+    | UserResetSubmit
+    | UserResetCancel
+    | UserResetDone Int Text
+    | UserResetFailed ApiError
+    | UserRecoveryCopied Text
+    | UserRecoveryDismiss
+    | UserResetShownDismiss
+    | -- webhooks
+      WebhooksLoaded [Webhook]
+    | WebhooksFailed ApiError
+    | WebhookNameInput MisoString
+    | WebhookUrlInput MisoString
+    | WebhookEventToggled EventType
+    | WebhookEnabledToggled
+    | WebhookCreate
+    | WebhookCreated Webhook Text
+    | WebhookCreateFailed ApiError
+    | WebhookToggle Webhook
+    | WebhookToggled Webhook
+    | WebhookToggleFailed ApiError
+    | WebhookTestRequest Int
+    | WebhookTested Int WebhookTest
+    | WebhookTestFailed ApiError
+    | WebhookDelete Int
+    | WebhookDeleted Int
+    | WebhookDeleteFailed ApiError
+    | WebhookSecretCopied Text
+    | WebhookSecretDismiss
+    | WebhookDeliveriesOpen Int
+    | WebhookDeliveriesLoaded Int [DeliveryView]
+    | WebhookDeliveriesFailed Int ApiError
     | -- rules
       RulesLoaded [Rule]
     | RulesFailed ApiError
@@ -750,14 +937,50 @@ data Model = Model
     , mGuardOpen :: Bool
     , mPendingRoute :: Maybe Route
     , mConfirmLogout :: Bool
-    , -- graph
-      mGraph :: Maybe GraphData
+    , -- graph: the fields a drag, hover, zoom or keystroke changes come
+      -- first, so the derived Eq for Model short-circuits here instead of
+      -- walking the heavy layout and payload at the end of the record
+      mGraphView :: GraphView
+    , mGraphViewReady :: Bool
+    , mGraphHover :: Maybe Int
+    , mGraphSelected :: Maybe Int
+    , mGraphFocus :: Maybe Int
+    , mGraphDrag :: Maybe GraphDrag
+    , mGraphMatches :: GraphMatches
+    , mGraphFilter :: MisoString
+    , mGraphFilterTimer :: Maybe Int
+    , -- TODO(M1/task-13): the label mode comes from the active graph view.
+      mGraphLabelMode :: LabelMode
+    , mGraphPreset :: LayoutPreset
+    , mGraphLayoutWire :: Maybe (LayoutPreset, LayoutWire)
+    , mGraphLayoutSource :: MisoString
+    , mViews :: [View]
+    , mViewsLoading :: Bool
+    , mViewsError :: Maybe MisoString
+    , mViewUi :: ViewUi
+    , mGraphViewId :: Maybe Int
+    , mGraphViewRev :: Int
+    , mGraphColorGroups :: [ColorGroup]
+    , mGraphGroupDrafts :: [ColorGroup]
+    , mGraphGroupDirty :: Bool
+    , mGraphGroupEditor :: Bool
+    , mGraphLocal :: Bool
+    , mGraphLocalDepth :: Int
+    , mGraphLocalRoot :: Maybe Int
+    , mGraphLocalCapped :: Bool
+    , mGraphSettled :: Bool
+    , mGraphSettleEpoch :: Int
+    , mGraphDetailPhase :: Int
+    , mGraphDetailChunks :: Int
+    , mGraphTagsShown :: Bool
     , mGraphLoading :: Bool
-    , mGraphDepth :: Int
-    , mGraphZoom :: Int
-    , mGraphSeed :: Maybe Int
-    , mGraphQuery :: MisoString
-    , mGraphResults :: [BookmarkSummary]
+    , mGraphError :: Maybe MisoString
+    , mGraphGen :: Int
+    , mGraphLayout :: Maybe GraphLayout
+    , mGraphLocalLayout :: Maybe GraphLayout
+    , mGraphColors :: Maybe ColorAssignment
+    , mGraphGroupCounts :: [Int]
+    , mGraph :: Maybe GraphData
     , -- dedup: exact counts plus two independently paged sections
       mDedupCounts :: Maybe DedupCounts
     , mDedupUrlGroups :: [DedupGroup]
@@ -801,6 +1024,34 @@ data Model = Model
     , mTokens :: [TokenView]
     , mTokensLoading :: Bool
     , mTokensError :: Maybe MisoString
+    , mWebhooks :: [Webhook]
+    , mWebhooksLoading :: Bool
+    , mWebhooksError :: Maybe MisoString
+    , mWebhookName :: MisoString
+    , mWebhookUrl :: MisoString
+    , mWebhookEvents :: [EventType]
+    , mWebhookEnabled :: Bool
+    , mWebhookSecret :: Maybe Text
+    , mWebhookFormError :: Maybe MisoString
+    , mWebhookBusy :: Bool
+    , mWebhookTest :: Maybe (Int, WebhookTest)
+    , mWebhookTestError :: Maybe MisoString
+    , mWebhookDeliveries :: Maybe (Int, [DeliveryView])
+    , mWebhookDeliveriesError :: Maybe MisoString
+    , mAdminUsers :: [UserView]
+    , mAdminUsersAllowed :: Bool
+    , mAdminUsersLoading :: Bool
+    , mAdminUsersError :: Maybe MisoString
+    , mUserName :: MisoString
+    , mUserPassword :: MisoString
+    , mUserRole :: UserRole
+    , mUserFormError :: Maybe MisoString
+    , mUserBusy :: Bool
+    , mUserRecovery :: Maybe (Text, [Text])
+    , mUserReset :: Maybe Int
+    , mUserResetPassword :: MisoString
+    , mUserResetShown :: Maybe (Text, Text)
+    , mUserActionError :: Maybe MisoString
     , mTokenName :: MisoString
     , mTokenScopes :: [Text]
     , mTokenSecret :: Maybe (Text, TokenView)
@@ -935,13 +1186,46 @@ initialModel =
         , mGuardOpen = False
         , mPendingRoute = Nothing
         , mConfirmLogout = False
-        , mGraph = Nothing
+        , mGraphView = initialGraphView
+        , mGraphViewReady = False
+        , mGraphHover = Nothing
+        , mGraphSelected = Nothing
+        , mGraphFocus = Nothing
+        , mGraphDrag = Nothing
+        , mGraphMatches = emptyMatches
+        , mGraphFilter = ""
+        , mGraphFilterTimer = Nothing
+        , mGraphLabelMode = LabelAuto
+        , mGraphPreset = Standard
+        , mGraphLayoutWire = Nothing
+        , mGraphLayoutSource = "local"
+        , mViews = []
+        , mViewsLoading = False
+        , mViewsError = Nothing
+        , mViewUi = ViewUi False "" GraphKind False "" Nothing Nothing Nothing False
+        , mGraphViewId = Nothing
+        , mGraphViewRev = 0
+        , mGraphColorGroups = []
+        , mGraphGroupDrafts = []
+        , mGraphGroupDirty = False
+        , mGraphGroupEditor = False
+        , mGraphLocal = False
+        , mGraphLocalDepth = 1
+        , mGraphLocalRoot = Nothing
+        , mGraphLocalCapped = False
+        , mGraphSettled = False
+        , mGraphSettleEpoch = 0
+        , mGraphDetailPhase = 0
+        , mGraphDetailChunks = 0
+        , mGraphTagsShown = True
         , mGraphLoading = False
-        , mGraphDepth = 1
-        , mGraphZoom = 100
-        , mGraphSeed = Nothing
-        , mGraphQuery = ""
-        , mGraphResults = []
+        , mGraphError = Nothing
+        , mGraphGen = 0
+        , mGraphLayout = Nothing
+        , mGraphLocalLayout = Nothing
+        , mGraphColors = Nothing
+        , mGraphGroupCounts = []
+        , mGraph = Nothing
         , mDedupCounts = Nothing
         , mDedupUrlGroups = []
         , mDedupTitleGroups = []
@@ -981,6 +1265,34 @@ initialModel =
         , mTokens = []
         , mTokensLoading = False
         , mTokensError = Nothing
+        , mWebhooks = []
+        , mWebhooksLoading = False
+        , mWebhooksError = Nothing
+        , mWebhookName = ""
+        , mWebhookUrl = ""
+        , mWebhookEvents = []
+        , mWebhookEnabled = True
+        , mWebhookSecret = Nothing
+        , mWebhookFormError = Nothing
+        , mWebhookBusy = False
+        , mWebhookTest = Nothing
+        , mWebhookTestError = Nothing
+        , mWebhookDeliveries = Nothing
+        , mWebhookDeliveriesError = Nothing
+        , mAdminUsers = []
+        , mAdminUsersAllowed = False
+        , mAdminUsersLoading = False
+        , mAdminUsersError = Nothing
+        , mUserName = ""
+        , mUserPassword = ""
+        , mUserRole = RoleMember
+        , mUserFormError = Nothing
+        , mUserBusy = False
+        , mUserRecovery = Nothing
+        , mUserReset = Nothing
+        , mUserResetPassword = ""
+        , mUserResetShown = Nothing
+        , mUserActionError = Nothing
         , mTokenName = ""
         , mTokenScopes = ["read", "write"]
         , mTokenSecret = Nothing
@@ -1077,7 +1389,7 @@ paletteEntries m = filter matches (commands ++ savedSearches ++ bookmarks)
         , ("Toggle theme", "appearance", ThemeToggled)
         , ("Library", "all bookmarks", Navigate Index)
         , ("Inbox", "unread", Navigate Inbox)
-        , ("Graph", "neighbourhood", Navigate Graph)
+        , ("Graph", "whole library", Navigate Graph)
         , ("Duplicates", "dedup", Navigate Dedup)
         , ("Tags", "consolidate", Navigate Tags)
         , ("AI tags", "suggestions", Navigate AiTags)

@@ -64,39 +64,125 @@ fixed optical size so every browser draws the same letterforms.
 | `/` | The ledger: masthead, facets, year dividers, rows, field drawer, selection |
 | `/inbox` | Unread ledger with mark all above read |
 | `/bookmark/:id` | Record: reading column, catalogue record, note, see also, actions |
-| `/accessions` | The archive as an index: filing days per year, ranked sources, long tail |
-| `/graph` | Tag neighbourhood around a seed bookmark |
+| `/accessions` | The archive as an index: filing days per year, ranked sources, long tail; a year, day or source opens the ledger filtered |
+| `/graph` | The whole library or a local neighbourhood as a canvas: records, tags, resolved wikilinks and tag memberships, layout presets, label modes and colour groups, with pan, zoom, fit, hover preview, click to open, filter and tags toggle |
+| `/views` | Saved graph and ledger views: open, set default, rename, duplicate, export and import |
 | `/dedup` | Duplicate groups: paged same-URL groups with a one-shot merge, and advisory same-title groups |
 | `/tags` | Tag table, case duplicates, near-duplicate pairs |
 | `/tags/ai` | Advisory tag suggestions, applied one bookmark at a time |
 | `/maintenance` | Dead-link sweep, prune candidates, undo |
-| `/account` | Username, password, optional passkey second factor, recovery, sessions, tokens, share links, rules, import, capture |
+| `/account` | Username and role, password, optional passkey second factor, recovery, sessions, tokens, share links, webhooks, rules, import, capture; admins also get a users tab |
 | `/save` | Quick save from the PWA share target or bookmarklet |
 | `/login`, `/setup`, `/recover`, `/account/add-passkey` | Username/password sign-in, optional passkey second factor, first claim, recovery reset |
 | `/s/:token` | Read-only share page for a bookmark or saved search |
 
-One username and one Argon2id password hash open the library. The setup page
-chooses them and shows ten recovery codes once. A recovery code clears the
-password and passkeys and opens a password-reset setup page. A password
-account can register passkeys and turn on a second factor from Account >
-security; with it on, a normal password login yields a short-lived pending
-session and then a WebAuthn assertion. A library claimed before passwords
-kept its passkey sign-in until a password was set. The auth pages explain the
-secure origin rule, the IP-literal RP-ID restriction, and the `set-password`
-CLI alternative. Sign-in attempts are rate-limited and locked out in the
-database.
+Each account has one Argon2id password hash and its own private library
+database. The first claim creates the admin account and shows ten recovery
+codes once. The admin can add members from Account > users, set a temporary
+password, disable or enable an account, and change a role; a member sees no
+users tab and cannot read another account's library. A recovery code clears
+that account's password and passkeys and opens a password-reset setup page.
+A password account can register passkeys and turn on a second factor from
+Account > security; with it on, a normal password login yields a short-lived
+pending session and then a WebAuthn assertion. A library claimed before
+passwords kept its passkey sign-in until a password was set. The auth pages
+explain the secure origin rule, the IP-literal RP-ID restriction, and the
+`set-password` CLI alternative. Sign-in attempts are rate-limited and locked
+out in the database.
+
+Account > webhooks subscribes a URL to signed library events. The signing
+secret is shown once when the subscription is created; later visits show the
+event, status, last error and recent delivery states, with a test delivery
+control. Session-only management means a bearer token cannot change a
+subscription. Account > users is visible to admins only and lists username,
+role, creation time, last login and disabled state, with add, enable, disable,
+role and temporary-password actions.
 
 The masthead carries the wordmark, the provenance line, the search line and the
-section links. A sign-out control sits at the end of the section links and in
-the mobile bar, and every account tab repeats it in the page head. The
-command palette also offers "Sign out"; an unsaved note asks for confirmation
-first. The ledger's facet rail lists sources with leader dots, tags in two
-columns, status, filing activity and the accessions link.
+section links: ledger, inbox, graph, views, duplicates, tags, ai tags,
+maintenance, accessions and account. A sign-out control sits at the end of the
+section links and in the mobile bar, and every account tab repeats it in the
+page head. The command palette also offers "Sign out"; an unsaved note asks for
+confirmation first. The ledger's facet rail lists sources with leader dots, tags
+in two columns, status, filing activity and the accessions link.
 
 States are part of the design: fresh library, filtered to nothing, loading, API
 error, no extraction, enrichment queued and failed, dead link, no note, no
 backlinks, empty inbox, never-run sweep, empty account panels, expired share
 link. Every one has copy.
+
+## Graph and accessions
+
+`/graph` draws the whole library on one canvas: a node for every record and
+every tag, and a line for each resolved wikilink and each tag membership. The
+canvas pans by drag and by the arrow keys, zooms on the wheel and on the `+`
+and `-` buttons, and `fit` frames the whole graph; the readout beside the
+buttons gives the scale as a percentage, and a hint line below the plate names
+the drag, wheel and click actions. Hovering a node opens a preview card: a
+record shows its title, domain, filed date, tags and the counts of its
+wikilinks and tagged records, and a tag shows its record count. A click on a
+record opens the record, a click on a tag opens the ledger filtered by
+`tag:<name>`, as do the top tags in the aside, and a click on the empty plate
+clears the selection. The filter line narrows the graph by text, the tags
+toggle shows or hides the tag nodes, their membership lines and their click
+targets, and `Esc` clears the filter line first, then the selection. The status
+line counts the records, tags and wikilinks, prints the label count and the
+layout source, and under a filter reports the matching records. A record's
+graph action opens the same canvas with that record in focus and its preview
+pinned. The plate blits a cached overview while it is moving and redraws a
+sharp copy at the display resolution once the view settles, so pan and zoom
+stay at the refresh rate and the still plate stays crisp.
+
+The graph settings control the scope, the layout and the labels. Scope is the
+whole library or a local neighbourhood rooted at a focused record, one to three
+hops deep; the local status names the depth, the root record title sits beside
+the scope buttons, and the deeplink `/graph?focus=<id>&depth=2&local=1` opens a
+local graph directly. The layout control switches the compact, standard and
+airy presets, and a preset change refetches only the layout. The labels follow
+the `auto`, `tags` and `none` modes from the active view, and the status line
+prints how many labels the current view and zoom draw. The first plate takes
+each preset's positions from the server: the client asks
+`/api/v1/graph/layout` for the active preset, hydrates the positions when the
+layout revision matches the graph payload it holds, and falls back to its own
+deterministic builder when it does not.
+
+The accessions index turns its marks into the search line: a year opens
+`year:2025`, a filing day or busiest-day row opens `day:2025-11-03`, and a
+source opens the ledger filtered by that domain. The date operators read the
+UTC filing date, and the chips above the ledger name the operators and can be
+removed one at a time.
+
+On touch screens the graph pans by drag and zooms with the buttons; pinch does
+not zoom the canvas. Below 768 px the filing-day marks are decorative rather
+than buttons, and the year, source and busiest-day rows keep the 44 px touch
+target that opens the filtered ledger.
+
+## Views and colour groups
+
+Graph settings and ledger searches are saved as declarative views. A graph view
+stores the query, the tags toggle, the label mode, the layout preset, the local
+depth and the colour groups; a ledger view stores the query and the sort. The
+server validates and stores the document, and the client renders it, so no
+extension code runs. [extensions.md](extensions.md) is the contract for the
+view and webhook surfaces.
+
+Every database seeds a default graph view. `save` writes the current graph state
+to the active view and `save as` creates a named view; the ledger rail also
+offers save as view for the current search. `/views` lists the saved documents
+with a default badge and open, set default, rename, duplicate, export and import
+actions. Opening a graph view lands on `/graph`; opening a ledger view lands on
+`/` with its query and sort applied. Exactly one default exists per kind;
+setting a new default clears the old one in the same transaction, deleting the
+default promotes the lowest-id remaining view of that kind, and deleting the
+last graph view seeds the default graph view again.
+
+A graph view carries up to 24 ordered colour groups. Each group is a name, a
+search query, a `#rrggbb` colour and an enabled flag, evaluated against the same
+record and tag fields as the graph filter, and the first enabled match wins. The
+aside legend shows a swatch, the group name, the matching record count and an
+on/off control; the group editor adds, edits, enables and removes groups with a
+live preview, and saving the view persists them. A disabled group paints
+nothing.
 
 ## Keyboard
 
@@ -106,12 +192,17 @@ link. Every one has copy.
 | `Shift+K`, `Cmd+K`, `Ctrl+K` | Open the command palette from any screen (`Ctrl/Cmd+K` works while the search line has focus) |
 | `j`, `k` | Move the ledger cursor and open its field drawer; bare `k` opens the palette away from the ledger and inbox |
 | `Enter` | Open the record under the cursor, or run the palette item |
-| `Esc` | Close the top layer (palette, drawer or dialog) from any focus |
+| `+`, `-` | Zoom the graph in and out |
+| `0`, `f` | Fit the whole graph in the canvas |
+| Arrow keys | Pan the graph |
+| `Esc` | Close the top layer (palette, drawer or dialog) from any focus; on the graph, clear the filter and selection |
 | `Cmd+S`, `Ctrl+S` | Save the note on the record page |
 
 The hint under the search line is a `⇧K` button and opens the palette. Bare `k`
 moves the ledger cursor on the ledger and inbox; on every other screen it opens
-the palette too.
+the palette too. The graph focuses its canvas when the page opens, so `+`, `-`,
+`0`, `f` and the arrow keys work without tabbing first; `Esc` works from any
+focus and clears the graph filter line before the selection.
 
 ## Accessibility
 
@@ -122,6 +213,13 @@ text and 3:1 for large text in both themes; the audit in the design package
 checks every screen and theme. Status is never carried by colour alone: the word
 accompanies the mark. Landmarks are used for the masthead, sections, ledger,
 rail, record and dialogs. `prefers-reduced-motion` disables every transition.
+The graph canvas is backed by an accessible results list of the top matching
+records and by the top-tag buttons in the aside. The canvas pans, zooms and
+fits from the keyboard. The scope, depth and layout controls are labelled
+button groups with a pressed state, and the colour legend repeats each group as
+a name and a count beside its swatch, so a group is never conveyed by colour
+alone. The views manager actions are buttons, and its save, import and export
+dialogs trap focus like every other dialog.
 
 ## Quiet surfaces
 
@@ -141,9 +239,12 @@ border. The palette shows labels only; its hints stay as tooltips.
 Opening a record stores the ledger offset. Returning refetches the first page,
 then loads further pages until the saved offset is reachable and restores it;
 the first paint starts at the top so the ledger is never blank while that
-happens. A manual scroll cancels a pending restore. Moving between list routes
-that are already mounted keeps the live offset. `tests/e2e/navigation-smoke.mjs`
-covers the deep case (a 4,000px return that needs extra pages).
+happens. Scroll events from the container remounting do not cancel the restore,
+and the seek retries for a few frames until the taller page has been patched,
+so a clamped write cannot strand the ledger at the top. Moving between list
+routes that are already mounted keeps the live offset.
+`tests/e2e/navigation-smoke.mjs` covers the deep case (a 4,000px return that
+needs extra pages).
 
 ## About
 

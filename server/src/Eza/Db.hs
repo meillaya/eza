@@ -21,6 +21,8 @@ module Eza.Db
   , schemaV7
   , schemaV8
   , schemaV9
+  , schemaV10
+  , schemaV11
   , DbError (..)
   ) where
 
@@ -37,6 +39,7 @@ import System.Environment (lookupEnv)
 import System.FilePath (takeDirectory, (</>))
 
 import Eza.Clip (clipSchema)
+import Eza.Views (seedDefaultViews)
 
 newtype DbError = DbError Text
   deriving (Show)
@@ -44,9 +47,11 @@ newtype DbError = DbError Text
 instance Exception DbError
 
 targetSchemaVersion :: Int
-targetSchemaVersion = 9
+targetSchemaVersion = 11
 
--- | Open the database and bring the schema up to date.
+-- | Open the database and bring the schema up to date. Every open also makes
+-- sure the default graph view exists, so a fresh or migrated database always
+-- has something the graph screen can open.
 openDb :: FilePath -> IO Sqlite.Connection
 openDb path = do
   createDirectoryIfMissing True (takeDirectory path)
@@ -54,6 +59,7 @@ openDb path = do
   mapM_ (Sqlite.execute_ conn) pragmas
   checkFts conn
   migrate path conn
+  seedDefaultViews conn
   pure conn
 
 initDb :: FilePath -> IO ()
@@ -149,7 +155,7 @@ pragmas =
   ]
 
 migrations :: [(Int, [Query])]
-migrations = [(1, schemaV1), (2, schemaV2), (3, schemaV3), (4, schemaV4), (5, schemaV5), (6, schemaV6), (7, schemaV7), (8, schemaV8), (9, schemaV9)]
+migrations = [(1, schemaV1), (2, schemaV2), (3, schemaV3), (4, schemaV4), (5, schemaV5), (6, schemaV6), (7, schemaV7), (8, schemaV8), (9, schemaV9), (10, schemaV10), (11, schemaV11)]
 
 schemaV1 :: [Query]
 schemaV1 =
@@ -285,4 +291,41 @@ schemaV9 =
   , "CREATE INDEX IF NOT EXISTS idx_bookmarks_unread ON bookmarks(created_at DESC, id DESC) WHERE is_read = 0"
   , "CREATE INDEX IF NOT EXISTS idx_bookmarks_dead ON bookmarks(created_at DESC, id DESC) WHERE is_dead = 1"
   , "CREATE INDEX IF NOT EXISTS idx_bookmarks_year ON bookmarks(CAST(strftime('%Y', created_at, 'unixepoch') AS INTEGER))"
+  ]
+
+{- | v10 adds the declarative views table. A view is user data (name, kind,
+definition JSON, default flag), never schema: the client renders only the
+fields it knows and the server validates every definition before storing it.
+
+The partial unique index keeps at most one default per kind, which is what the
+graph screen relies on when it opens the default view. Rows are seeded by
+'Eza.Views.seedDefaultViews' after the migration, not by this step, so a
+database that migrates and a fresh database take the same path.
+-}
+schemaV10 :: [Query]
+schemaV10 =
+  [ "CREATE TABLE IF NOT EXISTS views (     id INTEGER PRIMARY KEY AUTOINCREMENT,     slug TEXT NOT NULL UNIQUE,     name TEXT NOT NULL,     kind TEXT NOT NULL CHECK(kind IN ('graph','ledger')),     definition_json TEXT NOT NULL,     is_default INTEGER NOT NULL DEFAULT 0,     created_at INTEGER NOT NULL,     updated_at INTEGER NOT NULL     )"
+  , "CREATE UNIQUE INDEX IF NOT EXISTS idx_views_one_default ON views(kind) WHERE is_default = 1"
+  ]
+
+{- | v11 adds the M2 extension platform: the durable event outbox, the webhook
+subscriptions, and the delivery queue.
+
+The outbox row exists only when the write that produced it committed, because
+writes call 'Eza.Events.recordEvent' inside their own transaction. The
+delivery queue has a UNIQUE(webhook_id, event_id) guard so fan-out is
+idempotent, and @app_state.event_cursor@ is the persistent per-database
+dispatcher cursor: events up to that id have been fanned out.
+
+Note that @webhook_deliveries.event_id@ deliberately has no foreign key: events
+are purged after 30 days while their delivery history is kept.
+-}
+schemaV11 :: [Query]
+schemaV11 =
+  [ "CREATE TABLE IF NOT EXISTS event_log (     id INTEGER PRIMARY KEY AUTOINCREMENT,     kind TEXT NOT NULL,     payload_json TEXT NOT NULL,     created_at INTEGER NOT NULL     )"
+  , "CREATE INDEX IF NOT EXISTS idx_event_log_created ON event_log(created_at)"
+  , "CREATE TABLE IF NOT EXISTS webhooks (     id INTEGER PRIMARY KEY AUTOINCREMENT,     name TEXT NOT NULL,     url TEXT NOT NULL,     secret TEXT NOT NULL,     events_json TEXT NOT NULL,     enabled INTEGER NOT NULL DEFAULT 1,     created_at INTEGER NOT NULL,     last_status INTEGER,     last_attempt_at INTEGER,     last_error TEXT NOT NULL DEFAULT '',     fail_streak INTEGER NOT NULL DEFAULT 0     )"
+  , "CREATE TABLE IF NOT EXISTS webhook_deliveries (     id INTEGER PRIMARY KEY AUTOINCREMENT,     webhook_id INTEGER NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,     event_id INTEGER NOT NULL,     state TEXT NOT NULL DEFAULT 'queued',     attempts INTEGER NOT NULL DEFAULT 0,     available_at INTEGER NOT NULL,     last_error TEXT NOT NULL DEFAULT '',     created_at INTEGER NOT NULL,     UNIQUE(webhook_id, event_id)     )"
+  , "CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_ready ON webhook_deliveries(state, available_at)"
+  , "ALTER TABLE app_state ADD COLUMN event_cursor INTEGER NOT NULL DEFAULT 0"
   ]

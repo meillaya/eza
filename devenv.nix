@@ -25,6 +25,8 @@ in
     pkgs.jq
     pkgs.fourmolu
     pkgs.hlint
+    # TLA+ model checker (tlc) for the spec/ checks.
+    pkgs.tlaplus
     pkgs.pkg-config
     pkgs.zlib
     pkgs.openssl
@@ -53,7 +55,7 @@ in
     echo "eza dev shell"
     echo "  ghc:  $(ghc --numeric-version 2>/dev/null || echo missing)"
     echo "  wasm: $(wasm32-wasi-ghc --numeric-version 2>/dev/null || echo missing)"
-    echo "  commands: dev web build test lint e2e bench import verify"
+    echo "  commands: dev web build test lint spec e2e bench import verify"
   '';
 
   scripts = {
@@ -62,6 +64,7 @@ in
     build.exec = "cabal build all && scripts/build-web.sh";
     test.exec = "cabal test all";
     lint.exec = "fourmolu --mode check core server web && hlint core server web";
+    spec.exec = "bash scripts/check-specs.sh";
     fmt.exec = "fourmolu --mode inplace core server web";
     e2e.exec = "bash scripts/e2e.sh";
     bench.exec = "cabal run eza-bookmarks -- bench --iterations 100";

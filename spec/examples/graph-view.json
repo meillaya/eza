@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "slug": "reading-graph",
+  "name": "Reading graph",
+  "kind": "graph",
+  "is_default": true,
+  "definition": {
+    "query": "is:unread tag:reading",
+    "tags_shown": true,
+    "label_mode": "auto",
+    "layout_preset": "standard",
+    "local_depth": 2,
+    "color_groups": [
+      {"name": "Reading", "query": "tag:reading", "color": "#3b6ea5", "enabled": true},
+      {"name": "Reference", "query": "tag:reference", "color": "#8a5a2b", "enabled": true},
+      {"name": "Inbox", "query": "tag:inbox", "color": "#4a7c59", "enabled": false}
+    ]
+  }
+}

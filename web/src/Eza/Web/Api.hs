@@ -20,6 +20,26 @@ module Eza.Web.Api (
     fetchBacklinks,
     fetchAutocomplete,
     fetchGraph,
+    LayoutWire (..),
+    fetchGraphLayout,
+    fetchViews,
+    fetchView,
+    WebhookTest (..),
+    fetchWebhooks,
+    fetchWebhook,
+    createWebhook,
+    updateWebhook,
+    deleteWebhook,
+    testWebhook,
+    fetchWebhookDeliveries,
+    fetchAdminUsers,
+    createAdminUser,
+    patchAdminUser,
+    resetAdminPassword,
+    ViewPatch (..),
+    createView,
+    patchView,
+    deleteView,
     fetchSavedSearches,
     fetchDedupReport,
     fetchConsolidation,
@@ -80,8 +100,9 @@ module Eza.Web.Api (
     notesExportUrl,
 ) where
 
-import Data.Aeson (FromJSON, ToJSON, Value (..), object, toJSON, withObject, (.!=), (.:?), (.=))
+import Data.Aeson (FromJSON, ToJSON, Value (..), object, toJSON, withObject, (.!=), (.:), (.:?), (.=))
 import qualified Data.Aeson as A
+import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.Char (chr, isAlphaNum, ord)
@@ -94,17 +115,19 @@ import qualified Data.Text as T
 import Miso
 import qualified Miso.JSON as MJ
 
+import Eza.Boot (BootPayload)
+import Eza.GraphLayout (LayoutPositions (..), LayoutPreset (..))
+import qualified Eza.View as EV
+import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..), UserView (..))
+import Eza.Webhook (DeliveryView, Webhook, WebhookInput (..))
 import Eza.Types (
     Backlink (..),
     Backlinks (..),
     BookmarkDetail,
     BookmarkSummary,
-    BootPayload,
     DedupMergeAllReport,
     DedupReport,
     GraphData (..),
-    GraphEdge (..),
-    GraphNode (..),
     Highlight,
     LibraryStats (..),
     SavedSearch,
@@ -459,34 +482,268 @@ fetchAutocomplete q onOk onErr =
         onErr
 
 fetchGraph ::
-    Maybe Int ->
-    Int ->
     (GraphData -> action) ->
     (ApiError -> action) ->
     Eff model action
-fetchGraph seed depth onOk onErr =
-    getValue url [] (\value -> onOk (decodeGraph value)) onErr
-  where
-    url =
-        "/api/v1/graph?depth="
-            <> ms (show depth)
-            <> maybe "" (\sid -> "&seed=" <> ms (show sid)) seed
+fetchGraph onOk onErr =
+    getValue "/api/v1/graph" [] (\value -> either onErr onOk (decode value)) onErr
 
-    -- The shared DTO always carries the edge weight, but a server from
-    -- before tag-weighted edges does not. Fall back to a lenient read that
-    -- defaults the weight and keeps the plate drawable.
-    decodeGraph :: Value -> GraphData
-    decodeGraph value = case (MJ.fromJSON value :: MJ.Result GraphData) of
-        MJ.Success graph -> graph
-        MJ.Error _ ->
-            GraphData
-                (fieldList "nodes" value :: [GraphNode])
-                [ GraphEdge
-                    (fieldInt "source" edge)
-                    (fieldInt "target" edge)
-                    (max 1 (fieldInt "weight" edge))
-                | edge <- fieldList "edges" value
-                ]
+{- | The server-built layout for one preset. The payload is the server's
+compact form: @{schema, revision, preset, tags, records, bounds}@ with integer
+positions quantized to 1/100 world unit. The client validates the revision
+against 'gdRevision' before hydrating.
+-}
+data LayoutWire = LayoutWire
+    { lwRevision :: Text
+    , lwTags :: [(Double, Double)]
+    , lwRecords :: [(Double, Double)]
+    , lwBounds :: ((Double, Double), (Double, Double))
+    }
+    deriving (Eq, Show)
+
+fetchGraphLayout ::
+    LayoutPreset ->
+    (LayoutWire -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+fetchGraphLayout preset onOk onErr =
+    getValue ("/api/v1/graph/layout?preset=" <> presetSlug preset) [] (\value -> either onErr onOk (decodeLayoutWire value)) onErr
+
+presetSlug :: LayoutPreset -> MisoString
+presetSlug preset = case preset of
+    Compact -> "compact"
+    Standard -> "standard"
+    Airy -> "airy"
+
+decodeLayoutWire :: Value -> Either ApiError LayoutWire
+decodeLayoutWire value =
+    case parseEither parseWire value of
+        Left message -> Left (mkApiError Nothing (Just (T.pack message)))
+        Right wire -> Right wire
+  where
+    parseWire = withObject "graph layout" $ \o -> do
+        schema <- o .: "schema" :: Parser Int
+        if schema /= (1 :: Int)
+            then fail ("unsupported graph layout schema " <> show schema)
+            else pure ()
+        revision <- o .: "revision"
+        tags <- o .: "tags" >>= traverse pairOf
+        records <- o .: "records" >>= traverse pairOf
+        bounds <- o .: "bounds" >>= boundsOf
+        pure (LayoutWire revision tags records bounds)
+    pairOf [x, y] = pure (x, y)
+    pairOf _ = fail "graph layout positions must be [x,y] pairs"
+    boundsOf [minX, minY, maxX, maxY] = pure ((minX, minY), (maxX, maxY))
+    boundsOf _ = fail "graph layout bounds must be [minx,miny,maxx,maxy]"
+
+{- | The user's declarative views. @GET /api/v1/views@ answers
+@{"views":[...]}@; create and patch answer the stored view object.
+-}
+data ViewPatch = ViewPatch
+    { vpName :: Maybe Text
+    , vpSlug :: Maybe Text
+    , vpDefinition :: Maybe EV.ViewDefinition
+    , vpIsDefault :: Maybe Bool
+    }
+    deriving (Eq, Show)
+
+instance ToJSON ViewPatch where
+    toJSON patch =
+        object
+            [ "name" .= vpName patch
+            , "slug" .= vpSlug patch
+            , "definition" .= vpDefinition patch
+            , "is_default" .= vpIsDefault patch
+            ]
+
+fetchViews :: ([EV.View] -> action) -> (ApiError -> action) -> Eff model action
+fetchViews onOk onErr =
+    getValue "/api/v1/views" [] (\value -> onOk (fieldList "views" value)) onErr
+
+fetchView :: Text -> (EV.View -> action) -> (ApiError -> action) -> Eff model action
+fetchView slug onOk onErr =
+    getValue ("/api/v1/views/" <> percentEncode (ms (T.unpack slug))) [] (\value -> either onErr onOk (decode value)) onErr
+
+createView :: EV.ViewInput -> (EV.View -> action) -> (ApiError -> action) -> Eff model action
+createView input onOk onErr =
+    sendValue
+        "POST"
+        "/api/v1/views"
+        (Just (toJSON input))
+        []
+        JSON
+        (\value -> either onErr onOk (decode value))
+        onErr
+
+patchView :: Text -> ViewPatch -> (EV.View -> action) -> (ApiError -> action) -> Eff model action
+patchView slug patch onOk onErr =
+    sendValue
+        "PATCH"
+        ("/api/v1/views/" <> percentEncode (ms (T.unpack slug)))
+        (Just (toJSON patch))
+        []
+        JSON
+        (\value -> either onErr onOk (decode value))
+        onErr
+
+deleteView :: Text -> action -> (ApiError -> action) -> Eff model action
+deleteView slug =
+    apiDelete ("/api/v1/views/" <> percentEncode (ms (T.unpack slug)))
+
+{- | Account webhooks. Management is session-only on the server; a bearer
+token gets 403 @session_required@. The create response is the only place the
+64-hex secret ever appears.
+-}
+data WebhookTest = WebhookTest
+    { wtOk :: Bool
+    , wtStatus :: Maybe Int
+    , wtError :: Text
+    }
+    deriving (Eq, Show)
+
+fetchWebhooks :: ([Webhook] -> action) -> (ApiError -> action) -> Eff model action
+fetchWebhooks onOk onErr =
+    getValue "/api/v1/webhooks" [] (\value -> onOk (fieldList "webhooks" value)) onErr
+
+fetchWebhook :: Int -> (Webhook -> action) -> (ApiError -> action) -> Eff model action
+fetchWebhook webhookId onOk onErr =
+    getValue (webhookUrl webhookId) [] (\value -> either onErr onOk (decode value)) onErr
+
+createWebhook ::
+    WebhookInput ->
+    ((Webhook, Text) -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+createWebhook input onOk onErr =
+    sendValue
+        "POST"
+        "/api/v1/webhooks"
+        (Just (toJSON input))
+        []
+        JSON
+        ( \value -> case (fieldObject "webhook" value :: Maybe Value) of
+            Nothing -> onErr (mkApiError Nothing (Just "the create response had no webhook object"))
+            Just raw -> case decode raw of
+                Right webhook -> onOk (webhook, fieldText "secret" value)
+                Left err -> onErr err
+        )
+        onErr
+
+updateWebhook ::
+    Int ->
+    WebhookInput ->
+    (Webhook -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+updateWebhook webhookId input onOk onErr =
+    sendValue
+        "PATCH"
+        (webhookUrl webhookId)
+        (Just (toJSON input))
+        []
+        JSON
+        (\value -> either onErr onOk (decode value))
+        onErr
+
+deleteWebhook :: Int -> action -> (ApiError -> action) -> Eff model action
+deleteWebhook webhookId = apiDelete (webhookUrl webhookId)
+
+testWebhook :: Int -> (WebhookTest -> action) -> (ApiError -> action) -> Eff model action
+testWebhook webhookId onOk onErr =
+    sendValue
+        "POST"
+        (webhookUrl webhookId <> "/test")
+        (Nothing :: Maybe Value)
+        []
+        JSON
+        ( \value ->
+            onOk
+                ( WebhookTest
+                    (fieldBool "ok" value)
+                    (fieldObject "status" value)
+                    (fieldText "error" value)
+                )
+        )
+        onErr
+
+fetchWebhookDeliveries :: Int -> ([DeliveryView] -> action) -> (ApiError -> action) -> Eff model action
+fetchWebhookDeliveries webhookId onOk onErr =
+    getValue
+        (webhookUrl webhookId <> "/deliveries?limit=20")
+        []
+        (\value -> onOk (fieldList "deliveries" value))
+        onErr
+
+webhookUrl :: Int -> MisoString
+webhookUrl webhookId = "/api/v1/webhooks/" <> ms (show webhookId)
+
+{- | Admin user management. The server admits only admin browser sessions
+(Authz AdminClass); members get 403 @forbidden@ and bearer tokens 403
+@session_required@. Recovery codes are revealed once on create.
+-}
+fetchAdminUsers :: ([UserView] -> action) -> (ApiError -> action) -> Eff model action
+fetchAdminUsers onOk onErr =
+    getValue "/api/v1/admin/users" [] (\value -> onOk (fieldList "users" value)) onErr
+
+createAdminUser ::
+    UserCreateInput ->
+    (UserCreateResult -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+createAdminUser input onOk onErr =
+    sendValue
+        "POST"
+        "/api/v1/admin/users"
+        (Just (toJSON input))
+        []
+        JSON
+        ( \value ->
+            case (fieldObject "user" value :: Maybe Value) of
+                Nothing -> onErr (mkApiError Nothing (Just "the create response had no user object"))
+                Just rawUser -> case decode rawUser of
+                    Right user ->
+                        onOk
+                            ( UserCreateResult
+                                user
+                                (fieldList "recovery_codes" value)
+                            )
+                    Left err -> onErr err
+        )
+        onErr
+
+-- | Enable/disable or change a role. Absent fields keep their current value.
+patchAdminUser ::
+    Int ->
+    Maybe Bool ->
+    Maybe UserRole ->
+    (UserView -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+patchAdminUser userId enabled role onOk onErr =
+    sendValue
+        "PATCH"
+        ("/api/v1/admin/users/" <> ms (show userId))
+        (Just (object (["enabled" .= value | Just value <- [enabled]] ++ ["role" .= value | Just value <- [role]])))
+        []
+        JSON
+        (\value -> either onErr onOk (decode value))
+        onErr
+
+-- | Break-glass temporary password. The server clears the target's 2FA flag
+-- and revokes that user's sessions.
+resetAdminPassword ::
+    Int ->
+    Text ->
+    action ->
+    (ApiError -> action) ->
+    Eff model action
+resetAdminPassword userId password onOk onErr =
+    apiWrite
+        "POST"
+        ("/api/v1/admin/users/" <> ms (show userId) <> "/password")
+        (Just (object ["password" .= password]))
+        onOk
+        onErr
 
 fetchSavedSearches ::
     ([SavedSearch] -> action) ->

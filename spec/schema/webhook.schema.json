@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eza.local/spec/schema/webhook.schema.json",
+  "title": "eza webhook",
+  "description": "A webhook stored in one user database. Delivery is at least once, signed with HMAC, retried, and disabled after a terminal failure. The URL is data; extensions v1 never executes webhook-provided code.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "url", "events", "enabled"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "description": "Display name."
+    },
+    "url": {
+      "type": "string",
+      "format": "uri",
+      "maxLength": 2048,
+      "pattern": "^https?://[^\\s]+$",
+      "description": "Absolute http or https delivery URL."
+    },
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "bookmark.created",
+          "bookmark.updated",
+          "bookmark.deleted",
+          "clip.created"
+        ]
+      },
+      "description": "Event kinds this webhook subscribes to."
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "Delivery is attempted only while enabled."
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Inbox bridge",
+  "url": "https://example.com/hooks/eza",
+  "events": ["bookmark.created", "clip.created"],
+  "enabled": true
+}

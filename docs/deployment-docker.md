@@ -71,8 +71,11 @@ WebAuthn passkeys require a **secure origin**, so plain
 
 | Variable | Image default | Purpose |
 |---|---|---|
-| `EZA_DATA_DIR` | `/data` | Data root: `eza.db`, `snapshots/`, `backups/`. |
-| `EZA_DB` | `$EZA_DATA_DIR/eza.db` | Database file override. |
+| `EZA_DATA_DIR` | `/data` | Data root: `control.db`, `users/`, `backups/`. |
+| `EZA_CONTROL_DB` | `$EZA_DATA_DIR/control.db` | Account registry (identity, roles, per-account database paths). |
+| `EZA_USERS_DIR` | `$EZA_DATA_DIR/users` | Per-account library root: `users/<id>/eza.db` and `users/<id>/snapshots/`. |
+| `EZA_MAX_USERS` | `32` | Cap on user databases this process opens at once. |
+| `EZA_DB` | `$EZA_DATA_DIR/eza.db` | Legacy single-user database, read only at startup to register an existing claimed install as user 1. |
 | `EZA_BIND` | `0.0.0.0:8080` | Listen address. |
 | `PUBLIC_ORIGIN` | `http://localhost:8080` | Browser-visible origin; passkeys are bound to it. Set this. |
 | `EZA_RP_ID` | host of origin | WebAuthn relying-party ID (host only, no scheme/port). |
@@ -83,12 +86,12 @@ WebAuthn passkeys require a **secure origin**, so plain
 | `EZA_SESSION_TTL_SECONDS` | `2592000` | Session lifetime. |
 | `EZA_SECURE_COOKIES` | derived from origin | Force Secure cookies on/off. |
 | `EZA_STATIC_DIR` | `<webAssets>/share/eza/static` | Web bundle location (already set in the image). |
-| `EZA_SNAPSHOT_DIR` | `$EZA_DATA_DIR/snapshots` | Snapshot storage. |
+| `EZA_SNAPSHOT_DIR` | `$EZA_DATA_DIR/snapshots` | Legacy snapshot root, accepted read-only so snapshots captured before the per-account layout still serve; new captures go to `users/<id>/snapshots/`. |
 | `EZA_BACKUP_DIR` | `$EZA_DATA_DIR/backups` | Default backup directory. |
-| `EZA_BACKUP_OFFSITE` | unset | Optional local directory: `eza-bookmarks backup` copies each backup there. |
+| `EZA_BACKUP_OFFSITE` | unset | Optional local directory: `eza-bookmarks backup` copies each `<stamp>/` tree there. |
 | `EZA_MONOLITH` | `monolith` | Snapshot tool (on PATH in the image). |
 | `EZA_LOG_LEVEL` | `info` | debug/info/warn/error. |
-| `EZA_ENRICH_WORKERS` | `2` | In-process background enrichment workers; `0` disables them. |
+| `EZA_ENRICH_WORKERS` | `2` | Process-wide enrichment concurrency; `0` disables the per-account enrichment loop. |
 | `EZA_FETCH_TIMEOUT_MS` | `8000` | Timeout per outbound fetch (server clamps below 1000). |
 | `EZA_FAVICON_MAX_BYTES` | `65536` | Maximum favicon download size. |
 | `EZA_FAVICON_TTL_DAYS` | `90` | Favicon cache lifetime. |
@@ -157,39 +160,62 @@ provider setups are in [secrets.md](secrets.md).
 
 ## Data, backup and restore
 
-All state is in the volume:
-
-    /data/eza.db          SQLite database (WAL)
-    /data/snapshots/      full-page HTML snapshots
-    /data/backups/        online backups
-
-Online backup (safe while the server runs; no downtime). It uses the
-server's own `backup` command (`VACUUM INTO` + integrity check + 14-day prune):
-
-```bash
-docker compose exec eza /bin/eza-bookmarks backup
-# prints: backup: /data/backups/eza-20260101-031700.db
-docker compose exec eza /bin/eza-bookmarks verify
+```
+/data/
+    control.db            accounts, roles, per-account database paths
+    users/
+        1/eza.db          one account's library
+        1/snapshots/      that account's captured pages
+        2/eza.db
+    backups/
+        20260101-031700/
+            control.db
+            users/1.db
+            users/2.db
 ```
 
-Restore (stop the service first so nothing writes to the database):
+Online backup (safe while the server runs; no downtime). It uses the server's
+own `backup` command (`VACUUM INTO` plus integrity check, 14-day prune). It
+backs up the control database and every enabled account; `--user` narrows the
+run to one account's library (the control database is always included):
+
+```bash
+# every enabled account, all in one verified stamp directory
+docker compose exec eza /bin/eza-bookmarks backup
+# prints: backup: /data/backups/20260101-031700
+#         user alice -> /data/backups/20260101-031700/users/1.db
+
+docker compose exec eza /bin/eza-bookmarks backup --user alice
+```
+
+List accounts (with role, state, database size, and snapshot count) before or
+after a backup:
+
+```bash
+docker compose exec eza /bin/eza-bookmarks users list
+```
+
+Restore (stop the service first so nothing writes to the databases). A stamp
+restores the whole installation; a single `users/<id>.db` can be restored on
+its own:
 
 ```bash
 docker compose stop eza
-docker compose run --rm --entrypoint sh eza -c 'cp /data/backups/<stamp>.db /data/eza.db && rm -f /data/eza.db-wal /data/eza.db-shm'
+docker compose run --rm --entrypoint sh eza -c '
+  rm -rf /data/control.db /data/control.db-wal /data/control.db-shm /data/users
+  cp -a /data/backups/<stamp>/control.db /data/control.db
+  cp -a /data/backups/<stamp>/users /data/users
+'
 docker compose start eza
-docker compose exec eza /bin/eza-bookmarks healthcheck
 ```
 
 Copy a backup off the host:
 
 ```bash
-docker run --rm -v eza-data:/data -v "$PWD:/out" alpine \
-  cp /data/backups/<stamp>.db /out/
+docker cp eza:/data/backups/<stamp> /out/
+docker compose exec eza rclone copy /data/backups/<stamp> remote:eza-backups
 ```
 
-The image ships `rclone`, so a one-shot offsite copy is
-`docker compose exec eza rclone copy /data/backups/<stamp>.db remote:eza-backups`.
 
 ## Bind-mount (host directory) instead of a named volume
 
