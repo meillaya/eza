@@ -902,6 +902,15 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
 }
 .ledg-act:hover { color: var(--accent); border-color: var(--accent); }
 .ledg-act--quiet { color: var(--muted); border-color: transparent; }
+/* The field card is an overlay on the right edge. Its width must not swallow
+   the selection-bar and ledger-foot actions: those two bars keep their content
+   clear of the card while the rows underneath may still pass behind it. */
+@media (min-width: 768px) {
+  .ledger-wrap[data-drawer="true"] .ledg-selbar,
+  .ledger-wrap[data-drawer="true"] .ledger-foot {
+    padding-right: calc(var(--drawer) + 24px);
+  }
+}
 .ledg-app .ledger[data-bulk="true"] .lh { position: static; }
 .ledg-app .ledger[data-bulk="true"] { --cols: 116px minmax(0, 1fr) 198px 82px 144px; }
 

@@ -84,6 +84,8 @@ the same two controls as separate text buttons. A selection is capped at
 10,000 records, and the bar is dismissed with `clear` or `Esc`. Each source
 cell shows a cached 16px favicon when the domain has one and a printed
 monogram otherwise; the icon is one cached asset per domain, not per row.
+The field card overlays the right edge of the ledger; the selection bar and
+ledger foot keep their actions clear of it, wrapping when the card is open.
 
 Each account has one Argon2id password hash and its own private library
 database. The first claim creates the admin account and shows ten recovery

@@ -200,7 +200,8 @@ accepts at most 10,000 ids, writes an undo snapshot first, and returns
 domain. Icons are stored per domain, not per bookmark: the background
 `EZA_FAVICON_BACKFILL` loop fills one icon for a domain and applies it to every
 record on that domain with one update, so a site with hundreds of links costs
-one request. A domain with no cached icon redirects to the static fallback;
+one request. It tries the conventional icon paths first and parses the
+homepage once only if they all miss. A domain with no cached icon redirects to the static fallback;
 checksum-busted `?v=` links are used by the ledger rows.
 
 `GET /api/v1/bookmarks/{id}` returns a `BookmarkDetail`, including

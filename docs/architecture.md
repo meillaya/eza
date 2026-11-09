@@ -63,9 +63,11 @@ Background work is per account. Opening an account database starts its
 enrichment claimers, webhook delivery worker (each database has its own
 outbox and cursor), and one favicon backfill loop. The favicon loop works
 per source domain, not per bookmark: cached domains are applied with one
-`UPDATE bookmarks SET favicon_url = ... WHERE domain = ?`, and a domain with
-no cached icon costs at most a few conventional icon fetches, so a site with
-500 links costs one lookup. Domains with the most unfilled bookmarks go first,
+`UPDATE bookmarks SET favicon_url = ... WHERE domain = ?`. A domain with no
+cached icon is probed at the conventional `/favicon.ico`, `/favicon.png` and
+`/apple-touch-icon.png` locations; only when all miss is the homepage fetched
+once to read a declared `<link rel="icon">`. Either way a site with 500 links
+costs one lookup, not 500. Domains with the most unfilled bookmarks go first,
 icon bodies are size-capped and sniffed, and three failures park a domain.
 `EZA_ENRICH_WORKERS` is a process-wide semaphore shared by both loops;
 `EZA_FAVICON_BACKFILL=0` disables the icon loop. A disabled account's workers

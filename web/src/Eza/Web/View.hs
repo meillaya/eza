@@ -440,7 +440,9 @@ ledgerMain m =
         ]
         ( [H.aside_ [HP.class_ "rail", HP.aria_ "label" "Filters"] (railView m) | not (isInbox m)]
             ++ [ H.div_
-                    [HP.class_ "ledger-wrap"]
+                    [ HP.class_ "ledger-wrap"
+                    , HP.data_ "drawer" (if isJust (mDrawer m >>= findBookmark m) then "true" else "false")
+                    ]
                     [ H.div_
                         [ HP.class_ "ledger"
                         , HP.data_ "bulk" (if selectedCount m > 0 then "true" else "false")

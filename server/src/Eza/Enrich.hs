@@ -302,27 +302,51 @@ backfillRemoteFavicon manager cfg conn = do
                                     (iconUrlFor domain hashText, domain)
                             pure True
 
-{- | Try the conventional icon locations for a domain. Both schemes are tried:
-a bookmark saved from an https page may still be the only row for a host that
-only serves icons over http. The body is sniffed, so an HTML 404 page is not
-stored as an icon.
+{- | Find one icon for a domain, cheapest path first. Conventional locations
+cover most sites with zero page parsing; when they all miss, one homepage fetch
+(and, if that fails, the sampled bookmark page) can still expose a declared
+@<link rel="icon">@. This stays a per-domain cost: the icon is then cached and
+applied to every bookmark on the domain.
 -}
 fetchDomainIcon :: Manager -> Config -> Text -> IO (Maybe (Text, ByteString, Text))
-fetchDomainIcon manager cfg sampleUrl =
-    case dedupe (concatMap fallbackCandidates (schemeVariants sampleUrl)) of
-        [] -> pure Nothing
-        candidates -> tryCandidates candidates
+fetchDomainIcon manager cfg sampleUrl = do
+    conventional <- tryIcons (dedupe (concatMap fallbackCandidates (schemeVariants sampleUrl)))
+    case conventional of
+        Just icon -> pure (Just icon)
+        Nothing -> fetchDeclared
   where
     options = iconFetchOptions manager cfg
-    tryCandidates [] = pure Nothing
-    tryCandidates (url : rest) = do
+
+    tryIcons [] = pure Nothing
+    tryIcons (url : rest) = do
         result <- fetchUrl options url
         case result of
-            Left _ -> tryCandidates rest
+            Left _ -> tryIcons rest
             Right page ->
                 case sniffImage (fpBody page) of
-                    Nothing -> tryCandidates rest
+                    Nothing -> tryIcons rest
                     Just mime -> pure (Just (mime, fpBody page, url))
+
+    -- The homepage is the canonical place for a declared icon; the sampled
+    -- bookmark URL is a fallback for sites whose root is a redirect or shell.
+    fetchDeclared = go (dedupe [originOf sampleUrl, sampleUrl])
+      where
+        go [] = pure Nothing
+        go (pageUrl : rest) = do
+            pageResult <- fetchUrl (pageFetchOptions manager cfg) pageUrl
+            case pageResult of
+                Left _ -> go rest
+                Right page -> do
+                    let html = decodeBody (fpCharset page) (fpBody page)
+                        finalUrl = if T.null (fpFinalUrl page) then pageUrl else fpFinalUrl page
+                    declared <- tryIcons (take 4 (parseIconLinks html finalUrl))
+                    case declared of
+                        Just icon -> pure (Just icon)
+                        Nothing -> go rest
+
+    originOf url = case fallbackCandidates url of
+        (candidate : _) -> T.dropEnd (T.length ("/favicon.ico" :: Text)) candidate
+        [] -> url
 
     schemeVariants url
         | "https://" `T.isPrefixOf` url = [url, "http://" <> T.drop 8 url]

@@ -21,6 +21,15 @@ const { page, errors } = await launchPage(browser, { viewport: { width: 1440, he
 const { check, report } = newChecker();
 const api = makeApi(page);
 
+// The preset buttons are driven by the client state, which can land a frame
+// after the layout response the test waits on. Poll the attribute instead of
+// reading it once, so a slow frame does not read as a product failure.
+const waitPressed = async (selector) => {
+  await page
+    .waitForFunction((sel) => document.querySelector(sel)?.getAttribute("aria-pressed") === "true", selector, { timeout: 10000 })
+    .catch(() => {});
+};
+
 const layoutRequests = [];
 const graphRequests = [];
 page.on("response", (response) => {
@@ -301,6 +310,7 @@ try {
   });
   await page.click(SEL.graphPresetCompact);
   await compactLayout;
+  await waitPressed(SEL.graphPresetCompact);
   check("the compact preset asks for its layout", layoutRequests.length > layoutsBeforePreset, JSON.stringify(layoutRequests.slice(-3)));
   check("a preset change does not refetch the graph", graphRequests.length === graphFetchesBeforePreset, String(graphRequests.length - graphFetchesBeforePreset));
   check("the compact preset button is pressed", (await page.locator(SEL.graphPresetCompact).getAttribute("aria-pressed")) === "true", String(await page.locator(SEL.graphPresetCompact).getAttribute("aria-pressed")));
@@ -311,6 +321,7 @@ try {
   });
   await page.click(SEL.graphPresetAiry);
   await airyLayout;
+  await waitPressed(SEL.graphPresetAiry);
   check("the airy preset button is pressed", (await page.locator(SEL.graphPresetAiry).getAttribute("aria-pressed")) === "true", String(await page.locator(SEL.graphPresetAiry).getAttribute("aria-pressed")));
   const compactAgain = page.waitForResponse((response) => {
     const url = new URL(response.url());
@@ -329,6 +340,7 @@ try {
   await page.reload({ waitUntil: "domcontentloaded" });
   await waitForGraph();
   await reloadedLayout.catch(() => {});
+  await waitPressed(SEL.graphPresetCompact);
   check("the preset survives a reload", (await page.locator(SEL.graphPresetCompact).getAttribute("aria-pressed")) === "true", String(await page.locator(SEL.graphPresetCompact).getAttribute("aria-pressed")));
 
   // ------------------------------------------------------- local graph ---

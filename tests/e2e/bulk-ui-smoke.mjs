@@ -209,6 +209,40 @@ try {
   await page.getByRole("button", { name: /^clear$/i }).click();
   await page.waitForTimeout(300);
   check("clear after keyboard selection", (await page.locator(SEL.selectionBar).count()) === 0);
+
+  // The open field card must not cover the bulk bar: its actions used to run
+  // under the 320px drawer, leaving "clear" unreachable.
+  await page.locator(SEL.row).first().hover();
+  await page.locator(SEL.rowSelect).first().click();
+  await waitSelection(1);
+  await page.locator(SEL.row).first().locator(".c-src").click();
+  await page.waitForSelector(SEL.drawer, { timeout: 10000 });
+  await page.waitForTimeout(400);
+  const drawerClearance = await page.evaluate(() => {
+    const drawer = document.querySelector('[data-testid="drawer"]');
+    const acts = [...document.querySelectorAll('[data-testid="selection-bar"] .ledg-act')];
+    if (!drawer || acts.length === 0) return null;
+    const drawerLeft = drawer.getBoundingClientRect().left;
+    return Math.max(...acts.map((act) => Math.round(act.getBoundingClientRect().right - drawerLeft)));
+  });
+  check(
+    "bulk bar actions stay clear of the open drawer",
+    drawerClearance !== null && drawerClearance <= 0,
+    "max action-to-drawer overlap=" + drawerClearance
+  );
+  await page.getByRole("button", { name: /^clear$/i }).click();
+  await page.waitForTimeout(500);
+  check("clear works while the drawer is open", (await page.locator(SEL.selectionBar).count()) === 0);
+  // With the selection gone the ledger foot is back, and it must be clear of
+  // the still-open drawer too.
+  const footClearance = await page.evaluate(() => {
+    const drawer = document.querySelector('[data-testid="drawer"]');
+    const acts = [...document.querySelectorAll('.ledger-foot .ledg-foot-act')];
+    if (!drawer || acts.length === 0) return null;
+    const drawerLeft = drawer.getBoundingClientRect().left;
+    return Math.max(...acts.map((act) => Math.round(act.getBoundingClientRect().right - drawerLeft)));
+  });
+  check("ledger foot actions stay clear of the open drawer", footClearance !== null && footClearance <= 0, "max overlap=" + footClearance);
 } catch (error) {
   check("unexpected error", false, String(error && error.stack ? error.stack : error));
 } finally {
