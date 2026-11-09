@@ -378,8 +378,7 @@ async function prepareFeature() {
   const linkTitle = linked?.title || "The Case of Blackness";
   const noteBody =
     "Filed while re-reading. The argument returns to [[".concat(linkTitle, "]] more than once, ") +
-    "and the catalogue record is the better place to keep the thread.\n\n" +
-    "The three marks below are the passages worth coming back to.";
+    "and the catalogue record is the better place to keep the thread.";
   const patch = await postJson("/api/v1/bookmarks/" + FEATURE_ID, { note_body: noteBody }, "PATCH");
   if (patch.status !== 200) console.log("note patch", patch.status);
 
@@ -467,6 +466,13 @@ try {
   await shot("dark");
 
   // share.png: a server-rendered read-only share page for the featured record.
+  // The share page is rendered by the server but inherits the stored theme;
+  // return to paper so the public page is shown in the default theme.
+  await page.evaluate(() => {
+    try {
+      window.localStorage.setItem("eza-theme", "light");
+    } catch (_) {}
+  });
   const shareResponse = await postJson("/api/v1/share-links", {
     scope: "bookmark",
     target_id: FEATURE_ID,
