@@ -42,11 +42,14 @@ server-rendered pages keep are used directly. Shared selectors live in
 | `[data-testid="dialog-add"]`, `#add-url`, `#add-title`, `#add-tags` | file-a-record dialog |
 | `#save-url`, `#save-title`, `#save-tags` | quick-save page fields |
 
-Selection bar actions are text buttons: `add tag`, `remove tag`, `mark read`,
-`mark unread`, `delete`, `clear`. The ledger foot has `select page` and
-`select all matching`. The Direction B ledger does not implement Shift-click
-range selection or an in-ledger undo button; `bulk-ui-smoke.mjs` documents both
-as non-mapping steps and undo stays covered by `undo-smoke.mjs` and
+Selection bar actions are text buttons: `select page`, `select all matching`,
+`add tag`, `remove tag`, `mark read`, `mark unread`, `delete`, `clear`; the
+first two stay available after a first pick so a selection can be extended to
+the whole filtered result set. The ledger foot shows `select page` and
+`select all matching` while nothing is selected, with a visible gap between
+the two controls. The Direction B ledger does not implement Shift-click range
+selection or an in-ledger undo button; `bulk-ui-smoke.mjs` documents both as
+non-mapping steps and undo stays covered by `undo-smoke.mjs` and
 `prune-undo-smoke.mjs`.
 
 ## Bookmark record

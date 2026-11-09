@@ -876,7 +876,9 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
   z-index: 6;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 18px;
+  row-gap: 6px;
   min-height: 44px;
   padding: 6px 0;
   background: var(--paper);
@@ -908,6 +910,13 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
   padding: 1px 0;
 }
 .ledg-foot-act:hover { color: var(--accent); border-color: var(--accent); }
+.ledg-foot-actions {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+}
 
 /* loading skeleton */
 .ledg-skel {

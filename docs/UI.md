@@ -76,6 +76,13 @@ fixed optical size so every browser draws the same letterforms.
 | `/login`, `/setup`, `/recover`, `/account/add-passkey` | Username/password sign-in, optional passkey second factor, first claim, recovery reset |
 | `/s/:token` | Read-only share page for a bookmark or saved search |
 
+Ledger rows expose a tick control once the row is hovered or focused. The
+sticky selection bar then shows the count and the bulk actions, and keeps
+`select page` and `select all matching` available so a selection can be
+extended after the first pick. With nothing selected, the ledger foot offers
+the same two controls as separate text buttons. A selection is capped at
+10,000 records, and the bar is dismissed with `clear` or `Esc`.
+
 Each account has one Argon2id password hash and its own private library
 database. The first claim creates the admin account and shows ten recovery
 codes once. The admin can add members from Account > users, set a temporary

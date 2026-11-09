@@ -982,25 +982,38 @@ selectionBar m =
         , HP.aria_ "label" "Bulk actions"
         , HP.data_ "testid" "selection-bar"
         ]
-        [ H.span_
-            [ HP.class_ "ledg-selcount mono"
-            , HP.aria_ "live" "polite"
-            , HP.data_ "testid" "selection-count"
-            ]
-            [text (formatCount (selectedCount m)), text " selected"]
-        , H.span_ [HP.class_ "ledg-selspacer", HP.aria_ "hidden" "true"] []
-        , selAct "add tag" (BulkTagPromptOpen True)
-        , selAct "remove tag" (BulkTagPromptOpen False)
-        , selAct "mark read" (BulkMark True)
-        , selAct "mark unread" (BulkMark False)
-        , selAct "delete" BulkDeleteRequest
-        , H.button_
-            [HP.class_ "ledg-act ledg-act--quiet", HP.type_ "button", HE.onClick SelectClear]
-            [text "clear"]
-        ]
+        ( [ H.span_
+                [ HP.class_ "ledg-selcount mono"
+                , HP.aria_ "live" "polite"
+                , HP.data_ "testid" "selection-count"
+                ]
+                [text (formatCount (selectedCount m)), text " selected"]
+          , if mSelectingAll m
+                then
+                    H.span_
+                        [HP.class_ "ledg-selcount meta", HP.aria_ "live" "polite", HP.data_ "testid" "selection-loading"]
+                        [text "selecting all matching…"]
+                else H.span_ [] []
+          , H.span_ [HP.class_ "ledg-selspacer", HP.aria_ "hidden" "true"] []
+          , selAct "select page" SelectAllLoaded
+          , selAct "select all matching" SelectAllMatchingStart
+          , selAct "add tag" (BulkTagPromptOpen True)
+          , selAct "remove tag" (BulkTagPromptOpen False)
+          , selAct "mark read" (BulkMark True)
+          , selAct "mark unread" (BulkMark False)
+          , selAct "delete" BulkDeleteRequest
+          , H.button_
+                [HP.class_ "ledg-act ledg-act--quiet", HP.type_ "button", HE.onClick SelectClear]
+                [text "clear"]
+          ]
+        )
   where
     selAct label action =
-        H.button_ [HP.class_ "ledg-act", HP.type_ "button", HE.onClick action] [text label]
+        H.button_
+            ( [HP.class_ "ledg-act", HP.type_ "button", HE.onClick action]
+                ++ disabledAttr (mSelectingAll m)
+            )
+            [text label]
 
 -- ---------------------------------------------------------------- drawer ---
 

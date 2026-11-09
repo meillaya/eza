@@ -53,6 +53,19 @@ try {
   check("api returned ids", ids.length >= 3, JSON.stringify(ids));
   check("one select control per row", (await page.locator(SEL.rowSelect).count()) > 0);
 
+  // The two ledger-foot selection actions must read as separate controls, not
+  // run together as "select pageselect all matching".
+  const footGap = await page.evaluate(() => {
+    const buttons = Array.from(document.querySelectorAll(".ledg-foot-act"));
+    const pageButton = buttons.find((button) => /^select page$/i.test(button.textContent.trim()));
+    const allButton = buttons.find((button) => /^select all matching$/i.test(button.textContent.trim()));
+    if (!pageButton || !allButton) return null;
+    const pageRect = pageButton.getBoundingClientRect();
+    const allRect = allButton.getBoundingClientRect();
+    return Math.round(allRect.left - pageRect.right);
+  });
+  check("ledger foot selection actions are visually separated", footGap !== null && footGap >= 8, "gap=" + footGap);
+
   // Single selection.
   await selectRow(ids[0]);
   await waitSelection(1);
@@ -142,6 +155,36 @@ try {
   await page.getByRole("button", { name: /^clear$/i }).click();
   await page.waitForTimeout(400);
   check("clear hides the bar", (await page.locator(SEL.selectionBar).count()) === 0);
+
+  // The bulk bar keeps the select controls reachable after a first pick: a
+  // user who has started selecting must still be able to extend to all
+  // matching records without clearing and starting over.
+  await page.locator(SEL.row).first().hover();
+  await page.locator(SEL.rowSelect).first().click();
+  await waitSelection(1);
+  const bulkSelectPage = page.locator(SEL.selectionBar).getByRole("button", { name: /^select page$/i });
+  const bulkSelectAll = page.locator(SEL.selectionBar).getByRole("button", { name: /^select all matching$/i });
+  check("bulk bar offers select page", (await bulkSelectPage.count()) === 1, "buttons=" + (await bulkSelectPage.count()));
+  check("bulk bar offers select all matching", (await bulkSelectAll.count()) === 1, "buttons=" + (await bulkSelectAll.count()));
+  await bulkSelectAll.click();
+  await page
+    .waitForFunction(
+      ({ selector, expected }) => {
+        const element = document.querySelector(selector);
+        return Boolean(element && element.textContent.includes(String(expected) + " selected"));
+      },
+      { selector: SEL.selectionCount, expected: matchCount },
+      { timeout: 30000 }
+    )
+    .catch(() => {});
+  const bulkAllText = await selectedText();
+  check(
+    "bulk bar select all matching selects the full result set",
+    matchCount > 0 && bulkAllText.includes(String(matchCount) + " selected"),
+    bulkAllText + " (api total " + matchCount + ")"
+  );
+  await page.getByRole("button", { name: /^clear$/i }).click();
+  await page.waitForTimeout(400);
 
   // Keyboard: focus a row select control and toggle it with Space.
   await page.fill(SEL.search, "");
