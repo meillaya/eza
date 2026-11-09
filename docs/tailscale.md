@@ -112,8 +112,7 @@ set, and turns on Secure cookies automatically for `https://` origins.
   release them for a different origin.
 - Pick a name you can keep: the machine name in the tailnet, a Tailscale
   custom domain, or a real domain via Caddy. Changing it later means
-  re-enrolling passkeys. The one-time recovery codes is exactly what the **one-time recovery codes**
-  are for.
+  re-enrolling passkeys; the one-time recovery codes are the way back in.
 - The recovery codes are shown **once**, by the first-run setup page. Save them
   in a password manager. If a passkey is lost, a recovery code opens a scoped
   re-enrollment flow; if the passkey *and* the codes are lost, there is no

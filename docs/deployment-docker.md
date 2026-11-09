@@ -88,9 +88,13 @@ WebAuthn passkeys require a **secure origin**, so plain
 | `EZA_STATIC_DIR` | `<webAssets>/share/eza/static` | Web bundle location (already set in the image). |
 | `EZA_SNAPSHOT_DIR` | `$EZA_DATA_DIR/snapshots` | Legacy snapshot root, accepted read-only so snapshots captured before the per-account layout still serve; new captures go to `users/<id>/snapshots/`. |
 | `EZA_BACKUP_DIR` | `$EZA_DATA_DIR/backups` | Default backup directory. |
+| `EZA_BACKUP_KEEP_DAYS` | `14` | Backup stamp directories older than this are pruned by `backup`. |
+| `EZA_SNAPSHOT_MAX_BYTES` | `52428800` | Upper bound on one captured page snapshot file. |
+| `EZA_MAX_BODY_BYTES` | `8388608` | Limit for authenticated JSON request bodies; oversize returns 413. |
+| `EZA_IMPORT_MAX_BYTES` | `33554432` | Limit for one import upload (Netscape HTML or eza JSON). |
 | `EZA_BACKUP_OFFSITE` | unset | Optional local directory: `eza-bookmarks backup` copies each `<stamp>/` tree there. |
 | `EZA_MONOLITH` | `monolith` | Snapshot tool (on PATH in the image). |
-| `EZA_LOG_LEVEL` | `info` | debug/info/warn/error. |
+| `EZA_LOG_LEVEL` | `info` | `debug` logs a development request line, `info` one access line per request, `warn`/`error` disable access logging (error lines still reach stderr). |
 | `EZA_ENRICH_WORKERS` | `2` | Process-wide enrichment concurrency; `0` disables the per-account enrichment loop. |
 | `EZA_FETCH_TIMEOUT_MS` | `8000` | Timeout per outbound fetch (server clamps below 1000). |
 | `EZA_FAVICON_MAX_BYTES` | `65536` | Maximum favicon download size. |
@@ -99,8 +103,8 @@ WebAuthn passkeys require a **secure origin**, so plain
 | `EZA_ALLOW_PRIVATE_FETCH` | `0` | Set `1` to allow fetching private/RFC1918 URLs (lifts the SSRF guard). |
 | `EZA_AI_PROVIDER` | `none` | AI tagging: `none`, `ollama`, `openai`, `openai-compatible`, `anthropic`. |
 | `EZA_OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama endpoint for the `ollama` provider. |
-| `EZA_AI_MODEL` | `llama3.2` | Model used for AI tagging. |
-| `EZA_AI_AUTO_TAG` | `0` | Automatic AI tagging of newly added bookmarks. |
+| `EZA_AI_MODEL` | empty | AI model; empty selects the provider default (Ollama `llama3.2`, OpenAI `gpt-4o-mini`, Anthropic `claude-haiku-4-5`). |
+
 | `EZA_OPENAI_BASE_URL` | unset | OpenAI-compatible base URL for self-hosted LLM endpoints. |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | unset | Optional AI-tagging keys; empty disables key-based providers. |
 
@@ -170,20 +174,24 @@ provider setups are in [secrets.md](secrets.md).
     backups/
         20260101-031700/
             control.db
-            users/1.db
-            users/2.db
+            manifest.json accounts captured by this run
+            users/1/eza.db
+            users/2/eza.db
 ```
 
 Online backup (safe while the server runs; no downtime). It uses the server's
-own `backup` command (`VACUUM INTO` plus integrity check, 14-day prune). It
-backs up the control database and every enabled account; `--user` narrows the
-run to one account's library (the control database is always included):
+own `backup` command (`VACUUM INTO` plus integrity check, stamp directories
+older than `EZA_BACKUP_KEEP_DAYS` pruned). It backs up the control database and
+every account, disabled ones included; `--user` narrows the run to one
+account's library (the control database is always included). Page snapshots
+under `users/<id>/snapshots/` are not part of a stamp - back up the volume for
+those.
 
 ```bash
-# every enabled account, all in one verified stamp directory
+# every account, all in one verified stamp directory
 docker compose exec eza /bin/eza-bookmarks backup
 # prints: backup: /data/backups/20260101-031700
-#         user alice -> /data/backups/20260101-031700/users/1.db
+#         user alice -> /data/backups/20260101-031700/users/1/eza.db
 
 docker compose exec eza /bin/eza-bookmarks backup --user alice
 ```
@@ -195,19 +203,22 @@ after a backup:
 docker compose exec eza /bin/eza-bookmarks users list
 ```
 
-Restore (stop the service first so nothing writes to the databases). A stamp
-restores the whole installation; a single `users/<id>.db` can be restored on
-its own:
+Restore (stop the service first so nothing writes to the databases). The
+`restore` command validates the stamp, takes a fresh backup of the current
+installation, copies each library to its configured path, and rewrites the
+control rows, so a moved data root also works:
 
 ```bash
 docker compose stop eza
-docker compose run --rm --entrypoint sh eza -c '
-  rm -rf /data/control.db /data/control.db-wal /data/control.db-shm /data/users
-  cp -a /data/backups/<stamp>/control.db /data/control.db
-  cp -a /data/backups/<stamp>/users /data/users
-'
+docker compose run --rm eza /bin/eza-bookmarks restore /data/backups/<stamp> --yes
 docker compose start eza
 ```
+
+Add `--dry-run` to inspect the plan without writing. A stamp written by the
+first multi-user layout (`users/<id>.db`, no manifest) is accepted; accounts
+whose library is missing from the stamp keep their current copy. Restoring an
+enabled account whose library predates the schema upgrade is safe: the restored
+database migrates on open.
 
 Copy a backup off the host:
 

@@ -5,6 +5,9 @@ metadata:
   name: eza-config
 data:
   EZA_DATA_DIR: /data
+  # Account cap (EZA_MAX_USERS in Eza.Config; the server also sizes its
+  # per-account slot pool from it).
+  EZA_MAX_USERS: "32"
   EZA_BIND: 0.0.0.0:8080
   # Browser-visible origin — MUST be the URL users open (https in production).
   # Passkeys are bound to this origin; changing it after enrollment breaks them.
@@ -19,10 +22,14 @@ data:
   EZA_FAVICON_MAX_BYTES: "65536"
   EZA_FAVICON_TTL_DAYS: "90"
   EZA_SHARE_TTL_DAYS: "7"
+  EZA_MAX_BODY_BYTES: "8388608"
+  EZA_IMPORT_MAX_BYTES: "33554432"
+  EZA_SNAPSHOT_MAX_BYTES: "52428800"
+  EZA_BACKUP_KEEP_DAYS: "14"
   # SSRF guard: private/RFC1918 fetches stay disabled unless opted in.
   EZA_ALLOW_PRIVATE_FETCH: "0"
   # AI tagging: "none" disables it; "ollama" needs no API key.
   EZA_AI_PROVIDER: "none"
   EZA_OLLAMA_BASE_URL: "http://127.0.0.1:11434"
-  EZA_AI_MODEL: "llama3.2"
-  EZA_AI_AUTO_TAG: "0"
+  # Empty selects the provider default model.
+  EZA_AI_MODEL: ""

@@ -1,26 +1,45 @@
 # Import browser bookmarks
 
-The importer reads the Netscape `bookmarks.html` format that Firefox,
-Chromium, Safari, and browser-extension exporters write.
+The importer reads two formats: the Netscape `bookmarks.html` export that
+Firefox, Chromium, Safari, and browser-extension exporters write, and the
+versioned eza JSON export written by `eza-bookmarks export --json` (or the
+Account > About download links).
 
 ## Before you start
 
-- Initialise the database with `eza-bookmarks init`, or let the server create
-  it on first start.
-- Keep the server stopped while a large import runs. The importer opens the
-  same SQLite file, and one writer keeps the transaction simple.
+- Claim the first account at `/setup` (or create one with
+  `eza-bookmarks users add`) before importing. An import into an installation
+  that has no accounts lands in the legacy `EZA_DB` file, which the server only
+  adopts when it is an already-claimed single-user database; a fresh unclaimed
+  file would be ignored and the records would look lost.
+- `eza-bookmarks init` is optional and only initialises the control schema.
+- The server can stay running: the importer opens the same SQLite file and the
+  one writer serialises the transaction with web requests. Stop the server only
+  for a very large import if you want to keep latency predictable.
 - Save the source file outside `EZA_DATA_DIR`; the importer reads it once.
 
 ## Run the import
 
 ```bash
-eza-bookmarks import bookmarks_14_08_2026.html > dist/import.json
+eza-bookmarks import bookmarks.html > dist/import.json
 ```
 
 The command exits 0 after the transaction commits. The report file contains the
 same `ImportReport` JSON that the API returns. Run `eza-bookmarks verify` to
 compare `bookmarks` and `bookmarks_fts`; it exits non-zero when the counts
 differ.
+
+For a portable archive, import an eza JSON export instead (CLI or the Account
+> import panel, which accepts `.html` and `.json`):
+
+```bash
+eza-bookmarks import --json eza-export.json --user river > dist/import.json
+```
+
+The JSON format carries bookmarks, highlights (including their prefix/suffix
+anchors), captures, saved searches, rules, views, and clip templates; webhook
+secret rows are deliberately not exported. Version 1 exports are still
+accepted.
 
 A second run reports `inserted=0`, `existing=8905`, and
 `tag_links_added=0`. The importer matches rows by a canonical key: the scheme
@@ -99,6 +118,8 @@ collapsed after normalization: the first non-empty title wins, the tag sets
 are unioned, and the earliest `ADD_DATE` becomes `created_at`.
 
 Imported rows are unread by default. Pass `--mark-read` to mark them read.
-The importer does not fetch pages or run extraction. Run
-`eza-bookmarks enrich --all` when the import finishes (or `enrich --limit N`
-for a first batch) to fetch pages, write metadata, and build the reading copy.
+Newly inserted rows are queued for the background extraction worker, so titles,
+metadata and the reading copy fill in without another command. If the worker is
+disabled (`EZA_ENRICH_WORKERS=0`), run `eza-bookmarks enrich --all` (or
+`enrich --limit N` for a first batch) when the server is stopped. Matched rows
+that already existed keep their enrichment state.

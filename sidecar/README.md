@@ -2,14 +2,14 @@
 
 A small Node 22 worker that turns saved-page HTML into clean Markdown and
 plain text with [Defuddle](https://github.com/kepano/defuddle). The eza server
-may spawn it to extract pages that the user clipped in the browser extension
-or that the importer saved without text. It is deliberately boring: one JSON
-object per line in, one JSON object per line out, no network, no state, no
-database.
+spawns it, one process per extraction, when `EZA_DEFUDDLE_CMD` is configured;
+it extracts pages that the user clipped in the browser extension or that the
+importer saved without text. It is deliberately boring: one JSON object per
+line in, one JSON object per line out, no network, no state, no database.
 
-The Haskell modules `Eza.Clip` and `Eza.ClipTemplates` do not call this
-process. The Lead wires the process call in `Eza.Server`/`Eza.Enrich`; this
-document is the protocol those callers need.
+The server calls this process from `Eza.Sidecar`, through `Eza.Enrich`, and
+falls back to the in-process Haskell extractor on any error. This document is
+the protocol the server implements.
 
 ## Requirements
 
@@ -131,19 +131,18 @@ state between requests.
   the HTML with linkedom and uses `turndown` only if Defuddle returns HTML but
   no Markdown.
 
-## Wiring from Haskell
+## How the server calls it
 
-Suggested shape for the caller (Lead owns this code; it is not in `Eza.Clip`):
+`Eza.Enrich` runs one sidecar extraction per page fetch when
+`EZA_DEFUDDLE_CMD` is set. `Eza.Sidecar` executes the configured command
+through `sh -c`, writes one JSON request line to stdin, and reads one response
+line from stdout under a 20-second outer timeout. Any failure — missing
+command, timeout, non-zero exit, malformed response, or empty text — falls back
+to the in-process Haskell extractor, so the sidecar never blocks enrichment.
+The server ignores stderr and never logs the HTML body.
 
-1. One long-lived process per server (`createProcess`, `std_in = CreatePipe`,
-   `std_out = CreatePipe`, `std_err = Inherit`), restarted lazily if it exits.
-2. Write one JSON object per line (aeson `encode` + `\n`) with a fresh
-   `id` (e.g. the bookmark id plus an attempt counter).
-3. Read exactly one line, decode it, and drop/respawn the process on timeout
-   (use `System.Timeout.timeout` around the read). The sidecar's own timeout
-   is a backstop; the caller still needs an outer bound so a wedged pipe cannot
-   block a worker thread.
-4. Log stderr only. Never log the HTML body.
+The sidecar's own `EZA_SIDECAR_TIMEOUT_MS` is a backstop; the server's outer
+timeout is the bound that protects a worker.
 
 ## License
 

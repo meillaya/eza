@@ -351,16 +351,21 @@ keeper prefers the https address of its page. Title matches are excluded by
 design. The command-line equivalent is
 `eza-bookmarks dedupe --all --dry-run` and `eza-bookmarks dedupe --all --yes`.
 
-`POST /api/v1/import` accepts a multipart body with one `file` field in the
-Netscape format. It returns an `ImportReport`. Rows are de-duplicated against
-the library by the canonical URL key before anything is inserted, so a re-run,
-an overlapping export, or an http/https copy of a filed page merges tags onto
-the existing record instead of creating a second row. `POST
-/api/v1/import/json` takes a versioned eza JSON document and uses the same
-canonical key.
+`POST /api/v1/import` accepts either a multipart body with one `file` field in
+the Netscape format (or an eza JSON export) or an `application/json` body with
+a versioned eza JSON document. Both answer with an `ImportReport` shape (the
+JSON path adds `json_report` with per-kind counts); `POST /api/v1/import/json`
+is the dedicated JSON-only route. Rows are de-duplicated against the library
+by the canonical URL key before anything is inserted, so a re-run, an
+overlapping export, or an http/https copy of a filed page merges tags onto the
+existing record instead of creating a second row. Newly inserted rows are
+queued for background extraction.
 
-`GET /api/v1/export` returns Netscape HTML. Add `?format=json` for a JSON
-document with bookmarks, tags, highlights, saved searches, and rules.
+`GET /api/v1/export` returns Netscape HTML. Add `?format=json` for version 2
+of the portable JSON document: bookmarks (with their enrichment fields),
+highlights including prefix/suffix anchors, captures, saved searches, rules,
+views, and clip templates. Webhook subscription secrets are deliberately not
+exported. The version 1 document is still accepted by the importer.
 
 `GET /api/v1/stats` returns library counts: `bookmarks`, `tags`,
 `bookmark_tags`, `links`, `sources`, `top_sources`, `sources_once`, `first_day`,
@@ -478,6 +483,7 @@ GET   /api/v1/admin/users
 POST  /api/v1/admin/users
 PATCH /api/v1/admin/users/{id}
 POST  /api/v1/admin/users/{id}/password
+DELETE /api/v1/admin/users/{id}
 ```
 
 `GET /api/v1/admin/users` returns `{"users":[UserView]}` ordered by id.
@@ -499,7 +505,15 @@ disable, demote, or delete the last enabled admin (409 `last_admin`).
 `POST /api/v1/admin/users/{id}/password` takes `{"password":Text}` (at least
 ten characters), sets a temporary password, clears that account's optional
 passkey second factor, revokes every session of that account, and returns
-`{"ok":true}`. This is the break-glass path for a user who lost their device.
+`{"ok":true}`. This is the break-glass path for a user who lost their device;
+it does not read the library, but it can hand the account to the caller. The
+target should be told out of band.
+
+`DELETE /api/v1/admin/users/{id}` takes `{"confirm":true,"delete_db":Bool}`
+and returns `{"ok":true}`. The control row is always removed; the library
+database and snapshots are removed only when `delete_db` is true. The server
+refuses the caller's own account (409 `self_disable`) and the last enabled
+admin (409 `last_admin`).
 
 ## Extensions and webhooks
 

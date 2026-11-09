@@ -404,9 +404,16 @@
             UNIT
             grep -Fq 'User=eza' $out/eza-backup.service
             grep -Fq 'Type=oneshot' $out/eza-backup.service
+            grep -Fq 'WorkingDirectory=/var/lib/eza' $out/eza-backup.service
+            grep -Fq 'EZA_DATA_DIR=/var/lib/eza' $out/eza-backup.service
+            grep -Fq 'EZA_BACKUP_DIR=/var/lib/eza/backups' $out/eza-backup.service
+            grep -Fq 'EZA_BACKUP_KEEP_DAYS=14' $out/eza-backup.service
             backup_script=$(sed -n 's/^ExecStart=//p' $out/eza-backup.service | sed 's/[[:space:]]*$//')
             test -x "$backup_script"
             grep -Fq 'eza-bookmarks backup' "$backup_script"
+            # The command owns retention and writes a stamp directory; the unit
+            # must not run a second find-based retention pass.
+            ! grep -Fq -- '-mtime' "$backup_script"
 
             touch $out/ok
           '';
@@ -438,12 +445,20 @@
               machine.wait_for_unit("eza.service")
               machine.wait_for_open_port(8080)
               machine.succeed("curl -fsS http://127.0.0.1:8080/healthz")
-              machine.succeed("test -f /var/lib/eza/eza.db")
+              # Multi-user layout: the control database owns identity and the
+              # per-account libraries live under users/<id>/eza.db. A fresh
+              # install has no accounts until /setup is claimed.
+              machine.succeed("test -f /var/lib/eza/control.db")
+              machine.succeed("test -d /var/lib/eza/users")
               machine.succeed("systemctl show eza.service -p User --value | grep -qx eza")
               machine.succeed("systemctl show eza.service -p NoNewPrivileges --value | grep -qx yes")
+              # The backup oneshot writes one stamp directory per run holding
+              # control.db and the users/ subtree.
               machine.succeed("systemctl start eza-backup.service")
-              machine.succeed("find /var/lib/eza/backups -name 'eza-*.db' | grep -q .")
-              machine.succeed("sqlite3 $(find /var/lib/eza/backups -name 'eza-*.db' | head -n1) 'PRAGMA integrity_check;' | grep -qx ok")
+              machine.succeed("find /var/lib/eza/backups -mindepth 1 -maxdepth 1 -type d | grep -q .")
+              machine.succeed("test -f $(find /var/lib/eza/backups -mindepth 1 -maxdepth 1 -type d | head -n1)/control.db")
+              machine.succeed("test -d $(find /var/lib/eza/backups -mindepth 1 -maxdepth 1 -type d | head -n1)/users")
+              machine.succeed("sqlite3 $(find /var/lib/eza/backups -mindepth 1 -maxdepth 1 -type d | head -n1)/control.db 'PRAGMA integrity_check;' | grep -qx ok")
             '';
           };
         }

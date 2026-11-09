@@ -22,10 +22,10 @@ not appear in the public image:
 ## Capture a new set
 
 1. Initialise a clean capture database (a fresh import keeps the provenance
-   line exact) and start a scratch server on it:
+   line exact) and start a scratch server on it. Run these commands from
+   `devenv shell`:
 
    ```
-   source .devenv/shell-env.sh
    EZA_DATA_DIR=.eza-scratch-shots EZA_DB=.eza-scratch-shots/eza.db \
      cabal run eza-bookmarks -- init
    EZA_DATA_DIR=.eza-scratch-shots EZA_DB=.eza-scratch-shots/eza.db \
@@ -34,7 +34,8 @@ not appear in the public image:
    cabal run eza-bookmarks -- serve
    ```
 
-2. Run the capture script against it, pointing at the same SQLite file:
+2. Run the capture script against it from the same shell, pointing at the same
+   SQLite file:
 
    ```
    EZA_BASE=http://localhost:8100 EZA_DB=.eza-scratch-shots/eza.db \
@@ -60,7 +61,7 @@ not appear in the public image:
 ## What the script seeds
 
 The script creates the scratch account with a username and password, then
-POSTs `bookmarks_14_08_2026.html` as multipart form data to
+POSTs a local `bookmarks.html` export as multipart form data to
 `/api/v1/import`. When the export is missing it falls back to a 14-bookmark
 demo set.
 

@@ -332,16 +332,11 @@ in
 
     aiModel = mkOption {
       type = types.str;
-      default = "llama3.2";
-      description = "Model name used for AI tagging (EZA_AI_MODEL), e.g. for Ollama or an OpenAI-compatible endpoint.";
-    };
-
-    aiAutoTag = mkOption {
-      type = types.bool;
-      default = false;
+      default = "";
       description = ''
-        Enable automatic AI tagging of newly added bookmarks
-        (EZA_AI_AUTO_TAG). Off by default: AI suggestions are only requested
+        Model name used for AI tagging (EZA_AI_MODEL). Empty selects the
+        provider default: `llama3.2` for Ollama, `gpt-4o-mini` for OpenAI,
+        `claude-haiku-4-5` for Anthropic. AI suggestions are always requested
         explicitly from the UI.
       '';
     };
@@ -454,10 +449,9 @@ in
         type = types.int;
         default = 14;
         description = ''
-          Backups older than this many days are pruned from the backup
-          directory by the module's retention pass. Note that
-          `eza-bookmarks backup` itself also prunes backups older than 14 days
-          (fixed policy), so values above 14 cannot retain longer yet.
+          Passed to `eza-bookmarks backup` as `EZA_BACKUP_KEEP_DAYS`. The
+          command prunes backup stamp directories older than this many days;
+          the systemd oneshot only performs the backup and the offsite copy.
         '';
       };
 
@@ -511,6 +505,10 @@ in
         {
           assertion = cfg.shareTtlDays >= 1;
           message = "services.eza.shareTtlDays must be at least 1.";
+        }
+        {
+          assertion = cfg.backup.keepDays >= 1;
+          message = "services.eza.backup.keepDays must be at least 1.";
         }
       ];
 
@@ -580,7 +578,6 @@ in
               "EZA_AI_PROVIDER=${cfg.aiProvider}"
               "EZA_OLLAMA_BASE_URL=${cfg.ollamaBaseUrl}"
               "EZA_AI_MODEL=${cfg.aiModel}"
-              "EZA_AI_AUTO_TAG=${boolToEnv cfg.aiAutoTag}"
               "HOME=${dataDir}"
             ];
             EnvironmentFile = optional (cfg.environmentFile != null) cfg.environmentFile;
@@ -634,15 +631,15 @@ in
       };
 
       # ---------------------------------------------------------------------
-      # Backups: the server's own backup command (VACUUM INTO + integrity
-      # check) plus module-level retention and offsite copy.
+      # Backups: the server's own backup command (per-database VACUUM INTO +
+      # integrity check), plus the module's offsite copy. Retention is owned by
+      # the command (EZA_BACKUP_KEEP_DAYS), not by a second find pass here.
       # ---------------------------------------------------------------------
       systemd.services.eza-backup = mkIf cfg.backup.enable {
         description = "Online backup of the eza database";
         after = [ "eza.service" ];
         path = [
           pkgs.coreutils
-          pkgs.findutils
         ] ++ optional (cfg.backup.offsite != null && !lib.hasPrefix "/" cfg.backup.offsite) pkgs.rclone;
         serviceConfig = mkMerge [
           stateDirConfig
@@ -652,6 +649,12 @@ in
             User = "eza";
             Group = "eza";
             UMask = "0077";
+            WorkingDirectory = dataDir;
+            Environment = [
+              "EZA_DATA_DIR=${dataDir}"
+              "EZA_BACKUP_DIR=${dataDir}/backups"
+              "EZA_BACKUP_KEEP_DAYS=${toString cfg.backup.keepDays}"
+            ];
             ReadWritePaths =
               extraReadWritePaths
               ++ optional (cfg.backup.offsite != null && lib.hasPrefix "/" cfg.backup.offsite) cfg.backup.offsite;
@@ -662,11 +665,14 @@ in
           backup_dir="${dataDir}/backups"
           mkdir -p "$backup_dir"
 
-          # eza-bookmarks backup: consistent online copy of the live database
-          # (VACUUM INTO), integrated integrity check and its own 14-day prune.
+          # eza-bookmarks backup: consistent online copy of the control database
+          # and every enabled account database (VACUUM INTO) with an integrity
+          # check, followed by stamp-directory retention driven by
+          # EZA_BACKUP_KEEP_DAYS (see Environment above).
           backup_line="$(${cfg.package}/bin/eza-bookmarks backup)"
-          dest="$(printf '%s\n' "$backup_line" | sed 's/^backup: //')"
           echo "$backup_line"
+          first_line="$(printf '%s\n' "$backup_line" | head -n 1)"
+          dest="''${first_line#backup: }"
           case "$dest" in
             /*) ;;
             *)
@@ -674,24 +680,22 @@ in
               exit 1
               ;;
           esac
-
-          # services.eza.backup.keepDays retention pass.
-          find "$backup_dir" -maxdepth 1 -name 'eza-*.db' -type f -mtime +${toString cfg.backup.keepDays} -print -delete
-        ''
-        + optionalString (cfg.backup.keepDays > 14) ''
-          echo "eza-backup: note: eza-bookmarks backup also prunes >14 days itself, so keepDays=${toString cfg.backup.keepDays} cannot retain longer than 14 days yet" >&2
+          if [ ! -d "$dest" ]; then
+            echo "eza-backup: backup stamp directory does not exist: $dest" >&2
+            exit 1
+          fi
         ''
         + optionalString (cfg.backup.offsite != null) ''
           offsite=${lib.escapeShellArg cfg.backup.offsite}
           case "$offsite" in
             /*)
               mkdir -p "$offsite"
-              cp -p "$dest" "$offsite/"
+              cp -a "$dest" "$offsite/"
               echo "eza-backup: copied $dest to $offsite/"
               ;;
             *:*)
-              rclone copy "$dest" "$offsite"
-              echo "eza-backup: rclone copy $dest -> $offsite"
+              rclone copy "$dest" "$offsite/$(basename "$dest")"
+              echo "eza-backup: rclone copy $dest -> $offsite/$(basename "$dest")"
               ;;
             *)
               echo "eza-backup: services.eza.backup.offsite must be an absolute path or an rclone remote (name:path)" >&2

@@ -56,16 +56,17 @@ missing key instead of failing. The deployment command already wraps the server
 in SecretSpec's `env` provider (`--file /etc/eza/secretspec.toml --profile
 production`), so either keys or nothing works. See [secrets.md](secrets.md).
 
-`configmap.yaml` carries the non-secret runtime settings, with the same
-defaults as the server: `EZA_CONTROL_DB` (default
-`$EZA_DATA_DIR/control.db`), `EZA_USERS_DIR` (default `$EZA_DATA_DIR/users`),
-`EZA_MAX_USERS` (default 32), `EZA_ENRICH_WORKERS` (process-wide enrichment
-concurrency, `0` disables), `EZA_FETCH_TIMEOUT_MS`, `EZA_FAVICON_MAX_BYTES`,
+`configmap.yaml` carries the non-secret runtime settings: `EZA_DATA_DIR`,
+`EZA_BIND`, `PUBLIC_ORIGIN`, `EZA_RP_ID`, `EZA_RP_NAME`, `EZA_LOG_LEVEL`,
+`EZA_ENRICH_WORKERS`, `EZA_FETCH_TIMEOUT_MS`, `EZA_FAVICON_MAX_BYTES`,
 `EZA_FAVICON_TTL_DAYS`, `EZA_SHARE_TTL_DAYS`, `EZA_ALLOW_PRIVATE_FETCH` (SSRF
-guard; keep `0`), and the AI settings `EZA_AI_PROVIDER` (`none` disables AI
-tagging), `EZA_OLLAMA_BASE_URL`, `EZA_AI_MODEL` and `EZA_AI_AUTO_TAG`. Edit the
-ConfigMap and let the Deployment roll; the workers stay inside the single pod,
-so `replicas: 1` is still required.
+guard; keep `0`), `EZA_MAX_BODY_BYTES`, `EZA_IMPORT_MAX_BYTES`,
+`EZA_SNAPSHOT_MAX_BYTES`, `EZA_BACKUP_KEEP_DAYS`, and the AI settings
+`EZA_AI_PROVIDER` (`none` disables AI tagging), `EZA_OLLAMA_BASE_URL`, and
+`EZA_AI_MODEL` (empty selects the provider default). `EZA_CONTROL_DB` and
+`EZA_USERS_DIR` default below `EZA_DATA_DIR`; `EZA_MAX_USERS` defaults to 32.
+Edit the ConfigMap and let the Deployment roll; the workers stay inside the
+single pod, so `replicas: 1` is still required.
 
 ## 3. Apply
 
@@ -169,23 +170,29 @@ sidecar; the image already ships `rclone` for the upload step:
 kubectl -n eza exec "$POD" -- rclone copy /data/backups/<stamp> remote:eza-backups
 ```
 
-Restore: scale the Deployment to zero, mount the PVC from a debug pod, copy the
-stamp's `control.db` and `users/<id>.db` files back into place (or restore one
-library on its own), delete stale WAL/SHM sidecars, then scale back up:
+Restore: scale the Deployment to zero, run a one-shot pod that mounts the same
+PVC and invokes the `restore` command (it validates the stamp, backs up the
+current installation, copies each library to the control row's path, and
+rewrites paths when the data root moved), then scale back up:
 
 ```bash
 kubectl -n eza scale deployment/eza --replicas=0
 kubectl -n eza run eza-restore --rm -it --restart=Never \
   --image=registry.example.com/eza:0.1.0.0 --overrides='
   {"spec":{"containers":[{"name":"eza-restore","image":"registry.example.com/eza:0.1.0.0",
-  "command":["sh","-c","cp /data/backups/<stamp>.db /data/eza.db && rm -f /data/eza.db-wal /data/eza.db-shm"],
+  "command":["/bin/eza-bookmarks","restore","/data/backups/<stamp>","--yes"],
+  "env":[{"name":"EZA_DATA_DIR","value":"/data"}],
   "volumeMounts":[{"name":"data","mountPath":"/data"}]}],
   "volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"eza-data"}}]}}'
 kubectl -n eza scale deployment/eza --replicas=1
 ```
 
-(Adjust the `--overrides` JSON to your registry/tag; running as uid 10001 is
-required for the PVC permissions.)
+Add `--dry-run` instead of `--yes` to print the plan. A stamp from the first
+multi-user layout (`users/<id>.db`, no manifest) also restores; accounts whose
+library is missing from the stamp keep their current copy. Page snapshots are
+not part of a stamp, so copy `users/<id>/snapshots/` separately when they
+matter. (Adjust the `--overrides` JSON to your registry/tag; running as uid
+10001 is required for the PVC permissions.)
 
 ## Upgrades
 

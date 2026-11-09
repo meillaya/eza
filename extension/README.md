@@ -6,28 +6,39 @@ clipper extracts the readable article and its metadata in the browser, then
 
 There is no build step to try it: load `extension/` unpacked. A build step
 copies that same tree into `dist/` and optionally adds a bundled Defuddle
-extractor for higher-quality extraction.
+extractor for higher-quality extraction. The extension is not published in a
+browser store yet, so loading it unpacked is the only install path.
 
 ## Install (load unpacked)
 
-1. Open `chrome://extensions` and turn on **Developer mode**.
-2. Click **Load unpacked** and choose:
-   - `extension/` for the no-dependency build (built-in DOM extractor), or
-   - `extension/dist/` after `npm install && npm run build:defuddle` for the
-     Defuddle-backed build.
+1. Open `chrome://extensions` (or `edge://extensions`) and turn on **Developer
+   mode**.
+2. Press **Load unpacked** and choose one of:
+   - `extension/` for the no-build version, which uses the built-in DOM
+     extractor and has no dependencies;
+   - `extension/dist/` after building it, for the Defuddle-backed extraction.
+     From the repository root:
+
+     ```bash
+     bash scripts/build-extension.sh --with-defuddle
+     ```
 3. Pin the extension so the toolbar button stays visible.
 
-The extension needs Chromium/Chrome 116 or newer. It is Manifest V3, has no
-remote code, and makes no network request except to the eza server you
-configure.
+The extension needs Chromium/Chrome 116 or newer (Edge follows the same
+manifest). It is Manifest V3, has no remote code, and makes no network request
+except to the eza server you configure.
 
 ### Optional Defuddle bundle
 
+With `--with-defuddle` the build bundles `dist/vendor/defuddle-page.js` and
+writes `dist/vendor/THIRD-PARTY-NOTICES.txt`, which carries Defuddle's MIT
+license text. The plain build copies only the extension's own files.
+
 ```bash
-cd extension
-npm install
-npm run build:defuddle   # copies to dist/ and bundles vendor/defuddle-page.js
-npm test                 # manifest, version pins, syntax, security checks
+# from the repository root
+bash scripts/build-extension.sh                 # copy build, no Defuddle
+bash scripts/build-extension.sh --with-defuddle # bundle Defuddle
+cd extension && npm test                        # manifest, syntax, security checks
 ```
 
 With the bundle, the clipper runs Defuddle (`0.19.6`) in the page's main world
@@ -37,7 +48,7 @@ fall back automatically.
 
 ## Configure
 
-1. In eza, open **Account → Tokens**, create a token named e.g. `Browser
+1. In eza, open **Account → api tokens**, create a token named e.g. `Browser
    clipper`, and tick the **capture** scope. Copy the raw token once; the
    server never shows it again.
 2. Open the extension's **Options** page.
@@ -140,10 +151,11 @@ The options page test connection will show the 403 if this is missing.
 | `scripting` | Inject the extractor into that tab. |
 | `storage` | Keep the server address, token, and default template in this profile. |
 | `contextMenus` | The right-click **Save** entries. |
-| `commands` | The two keyboard shortcuts. |
 | `optional_host_permissions` (`http(s)://*/*`) | Ask for access to the one configured server origin at runtime; no static host permission. |
 
-There are no content scripts and no `<all_urls>` permission.
+There are no content scripts and no `<all_urls>` permission. The two keyboard
+shortcuts are declared under the manifest's `commands` key rather than
+requested as a permission; rebind them at `chrome://extensions/shortcuts`.
 
 ## Security notes
 
@@ -189,17 +201,20 @@ extension/
 against the extractor fixture:
 
 ```bash
-cd extension
-npm run build:defuddle
-# load dist/ unpacked, open sidecar/test/fixtures/article.html over http(s),
+# from the repository root
+bash scripts/build-extension.sh --with-defuddle
+# load extension/dist/ unpacked, open sidecar/test/fixtures/article.html over http(s),
 # click the toolbar button, confirm the Title/Template/Save flow.
 ```
 
-`node --check` covers every JavaScript file through `npm test`.
+`node --check` covers every JavaScript file through `npm test`. The root script
+`scripts/build-extension.sh` installs the dependencies when `node_modules` is
+missing and passes its arguments to `build.mjs` (`--with-defuddle`, `--out`).
 
 ## License
 
-Apache-2.0 for this extension, the same license as eza. Bundled Defuddle
-(`defuddle` 0.19.6) is MIT licensed; its license text is included by the
-bundler in `dist/vendor/defuddle-page.js` only when you build with
-`--with-defuddle`.
+Apache-2.0 for this extension, the same license as eza. The checked-in source
+ships no third-party code. Building with `--with-defuddle` bundles Defuddle
+(`defuddle` 0.19.6, MIT); the build writes Defuddle's license text to
+`dist/vendor/THIRD-PARTY-NOTICES.txt`, and the repository-level
+[THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md) records the version.

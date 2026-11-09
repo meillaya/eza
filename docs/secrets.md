@@ -45,15 +45,15 @@ secret:
 | `EZA_AI_PROVIDER` | Needs | Notes |
 |---|---|---|
 | `none` (default) | nothing | AI tagging is disabled; AI endpoints answer with an empty suggestion list and a notice. |
-| `ollama` | nothing | Talks to `EZA_OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`) with `EZA_AI_MODEL` (default `llama3.2`); no API key leaves the host. |
-| `openai` | `OPENAI_API_KEY` | Uses the OpenAI endpoint; select the model with `EZA_AI_MODEL`. |
+| `ollama` | nothing | Talks to `EZA_OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`); `EZA_AI_MODEL` defaults to `llama3.2`. No API key leaves the host. |
+| `openai` | `OPENAI_API_KEY` | Uses the OpenAI endpoint; `EZA_AI_MODEL` defaults to `gpt-4o-mini`. |
 | `openai-compatible` | `OPENAI_API_KEY` | Self-hosted/OpenAI-compatible endpoint; also set `EZA_OPENAI_BASE_URL`. |
-| `anthropic` | `ANTHROPIC_API_KEY` | Anthropic Messages API. |
+| `anthropic` | `ANTHROPIC_API_KEY` | Anthropic Messages API; `EZA_AI_MODEL` defaults to `claude-haiku-4-5`. |
 
-`EZA_AI_AUTO_TAG=0` (default) keeps tagging on explicit requests only; set it
-to `1` to tag newly added bookmarks automatically. With a key-based provider
-selected but no key configured, the server starts normally and the AI
-endpoints report that the key is missing instead of failing.
+AI suggestions are always requested explicitly from the record UI; there is no
+automatic tagging switch. With a key-based provider selected but no key
+configured, the server starts normally and the AI endpoints report that the key
+is missing instead of failing.
 
 ## Development (devenv shell, env provider)
 

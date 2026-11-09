@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build a self-contained eza release tarball:
 #   dist/eza-<version>-x86_64-linux.tar.gz
-# with bin/eza-bookmarks, share/eza/static, and the SecretSpec manifest.
+# with bin/eza-bookmarks, share/eza/static, the SecretSpec manifest, and the
+# licence/notice files the Apache-2.0 binary distribution must carry.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,6 +23,8 @@ mkdir -p "$OUT/bin" "$OUT/share/eza"
 cp "$BIN" "$OUT/bin/eza-bookmarks"
 cp -a static "$OUT/share/eza/static"
 cp secretspec.toml "$OUT/share/eza/secretspec.toml"
+cp LICENSE "$OUT/share/eza/LICENSE"
+cp THIRD-PARTY-NOTICES.md "$OUT/share/eza/THIRD-PARTY-NOTICES.md"
 
 if [ -d extension ]; then
   mkdir -p "$OUT/share/eza/extension"

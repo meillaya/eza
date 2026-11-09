@@ -23,6 +23,9 @@ in
     pkgs.sqlite
     pkgs.curl
     pkgs.jq
+    # python3 with Draft 2020-12 JSON-Schema validation (pulled in as
+    # python3Packages.jsonschema) for scripts/check-specs.sh.
+    (pkgs.python3.withPackages (ps: [ ps.jsonschema ]))
     pkgs.fourmolu
     pkgs.hlint
     # TLA+ model checker (tlc) for the spec/ checks.

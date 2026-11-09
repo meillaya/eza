@@ -283,10 +283,13 @@ Every event is an envelope:
 
 `id` is stable for one outbox event and `occurred_at` is POSIX seconds. The
 event row is written in the same transaction as the library change, so an event
-exists if and only if the write committed. A no-op patch and an idempotent clip
-replay record nothing, and imports do not emit per-row events. The v1 catalog
-has no `import.completed`. A clip emits `clip.created` and does not re-emit its
-bookmark side as `bookmark.created`.
+exists if and only if the write committed. Merge and merge-all emit
+`bookmark.updated` for each keeper and `bookmark.deleted` for each absorbed row;
+bulk tag and read changes emit `bookmark.updated` per affected row. A no-op
+patch and an idempotent clip replay record nothing, and imports do not emit
+per-row events. The v1 catalog has no `import.completed`. A clip emits
+`clip.created` and does not re-emit its bookmark side as
+`bookmark.created`.
 
 ### Delivery request
 
@@ -392,8 +395,10 @@ The design targets multiple accounts. In that design each account's views,
 webhooks, events and deliveries live in that account's database; a view or
 webhook write is recorded against its owner; a webhook receives events only
 from its owner's database; a disabled webhook receives nothing; and each
-(owner, kind) pair has at most one default view. An admin can create and
-disable accounts but cannot read another account's library content. Those
+(owner, kind) pair has at most one default view. An admin can create, disable,
+reset, and delete accounts but cannot read another account's library content
+without taking the account over; an admin password reset is a deliberate
+break-glass path and should only be used for account recovery. Those
 rules are enforced by the server's per-account database routing and are
 exercised by the multi-user browser and API tests; the formal models in
 [../spec/README.md](../spec/README.md) are the bounded design check behind
@@ -409,6 +414,14 @@ What an extension cannot do in v1:
   unless the operator lifts the guard;
 - make the server follow a redirect;
 - recover a webhook secret after creation.
+
+Snapshot capture is a separate egress path: `POST
+/api/v1/bookmarks/{id}/snapshot` checks the stored bookmark URL against the
+same public-address policy before it spawns `monolith`, and the captured file
+is size-capped. `monolith` itself is a general-purpose fetcher; its own
+redirect and subresource fetches are outside the guard. An operator hosting
+untrusted members should set `EZA_MONOLITH` to a disabled command or accept
+that risk.
 
 The formal models are bounded design checks, not a proof about the Haskell
 server or the Miso client. The models treat transactions, HTTP and

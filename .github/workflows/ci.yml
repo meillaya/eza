@@ -21,14 +21,22 @@ jobs:
         run: nix profile install nixpkgs#devenv
       - name: Haskell tests
         run: devenv shell -- cabal test all
-      - name: Haskell tests (full import fixture)
-        run: EZA_IMPORT_FIXTURE=$PWD/bookmarks_14_08_2026.html devenv shell -- cabal test all
+      # The full 4.5 MB export used by the opt-in EZA_IMPORT_FIXTURE test is
+      # deliberately not committed (see .gitignore). CI relies on the tracked
+      # fixtures under tests/fixtures/ instead.
       - name: Formal spec checks
         run: devenv shell -- bash scripts/check-specs.sh
-      - name: Build server
-        run: devenv shell -- cabal build all
+      - name: Formatting and lint
+        run: devenv shell -- bash -c 'fourmolu --mode check core server web && hlint core server web'
+      # -Werror only rebuilds the local packages: dependencies come from the
+      # cabal store built by the test step above, so third-party warnings do
+      # not fail this gate.
+      - name: GHC warnings gate (-Wall, tests included)
+        run: devenv shell -- cabal build all --ghc-options=-Werror
       - name: Build Miso client
         run: devenv shell -- bash scripts/build-web.sh
+      - name: Install browser-test dependencies
+        run: devenv shell -- bun install --frozen-lockfile
       - name: Sidecar checks
         run: cd sidecar && npm ci && npm test
       - name: Extension checks

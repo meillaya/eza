@@ -221,12 +221,18 @@ json_bad "$bad_dir/too-many-groups.json" '(.definition.color_groups | length) <=
 json_bad "$bad_dir/webhook-unknown-event.json" 'all(.events[]; . == "bookmark.created" or . == "bookmark.updated" or . == "bookmark.deleted" or . == "clip.created")' 'an unknown event kind'
 
 # ---------------------------------------------------------------------------
-# Full JSON-Schema validation when a validator is available (best effort)
+# Full JSON-Schema validation (required)
 # ---------------------------------------------------------------------------
 
-if command -v python3 >/dev/null 2>&1 && python3 -c 'from jsonschema import Draft202012Validator' >/dev/null 2>&1; then
-    log "jsonschema available: full draft 2020-12 validation"
-    python3 - "$schema_dir/view.schema.json" "$schema_dir/webhook.schema.json" \
+# The schemas are part of the published extension contract, so a missing
+# validator is a broken environment, not a reason to pass with less coverage.
+command -v python3 >/dev/null 2>&1 \
+    || die "python3 not found; run inside 'devenv shell' (devenv.nix provides python3 with jsonschema)"
+python3 -c 'from jsonschema import Draft202012Validator' >/dev/null 2>&1 \
+    || die "python3 jsonschema not found; run inside 'devenv shell' (devenv.nix provides python3Packages.jsonschema)"
+
+log "jsonschema available: full draft 2020-12 validation"
+python3 - "$schema_dir/view.schema.json" "$schema_dir/webhook.schema.json" \
         "$examples_dir/graph-view.json" "$examples_dir/ledger-view.json" \
         "$examples_dir/webhook.json" \
         "$bad_dir/unknown-kind.json" "$bad_dir/bad-schema.json" \
@@ -261,8 +267,5 @@ for path in invalid_documents:
     if validator.is_valid(document):
         sys.exit(f"{path}: expected invalid but the schema accepted it")
 PY
-else
-    log "jsonschema not available: skipping full JSON-Schema validation (jq checks ran)"
-fi
 
 log "all spec checks passed"

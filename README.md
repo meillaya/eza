@@ -18,9 +18,9 @@
 eza keeps bookmarks in SQLite and serves searchable private libraries from one
 Haskell process. A control database holds the account list, and every account
 has its own SQLite library, username, password, optional passkeys and API
-tokens. The reference library holds 8,988 bookmarks across 4,283 sources, filed
-on 543 days between 2022 and 2026. Search runs on FTS5 and the client is Miso
-compiled to WebAssembly.
+tokens. The historical reference database holds 8,988 bookmarks across 4,283
+sources, filed on 543 days between 2022 and 2026. Search runs on FTS5 and the
+client is Miso compiled to WebAssembly.
 
 The interface reads as a catalogue: a ledger of numbered accessions, a printed
 record page for reading and notes, and an index page that counts the archive.
@@ -33,7 +33,7 @@ server already computes.
 
 | Area | What it does |
 |---|---|
-| **Search** | `tag:`, `is:unread`, `is:dead`, `link:`, `year:`, `day:`, and `-term` operators over FTS5. The date operators use the UTC filing date. Results order by bm25, then save date. |
+| **Search** | `tag:`, `is:unread`, `is:dead`, `link:`, `year:`, `day:`, and `-term` operators over FTS5; free-text terms also match tag names. The date operators use the UTC filing date. Results order by bm25, then save date. |
 | **Ledger** | Year dividers, a provenance line, source and tag facets, a field drawer, bulk selection, and keyboard movement on `j` and `k`. |
 | **Record** | Extracted reading copy, highlights with notes, markdown notes with `[[wikilinks]]`, backlinks, and a sandboxed snapshot viewer. |
 | **Accessions** | The archive as an index: one mark per filing day, sources ranked with leader dots, and an honest long tail. A year, day or source opens the ledger filtered with `year:2025`, `day:2025-11-03`, or the source domain. |
@@ -99,9 +99,11 @@ The same binary runs the import and the maintenance commands:
 eza-bookmarks init
 printf '%s\n' "$EZA_USER_PASSWORD" | eza-bookmarks users add --username river --role member --password-stdin
 eza-bookmarks users list
-eza-bookmarks import bookmarks_14_08_2026.html --user river > dist/import.json
+eza-bookmarks import bookmarks.html --user river > dist/import.json
+eza-bookmarks import --json eza-backup.json --user other > dist/json-import.json
 eza-bookmarks verify --user river
 eza-bookmarks backup
+eza-bookmarks restore /path/to/backups/<stamp> --yes
 eza-bookmarks export --user river > bookmarks.html
 eza-bookmarks export --json --user river > eza-backup.json
 eza-bookmarks enrich --all --user river
@@ -111,7 +113,11 @@ eza-bookmarks users disable river
 
 The import is idempotent: a second run reports `inserted=0`, and `--user`
 picks one account's library (a single-account installation falls back to its
-only enabled account). The 2026-08-14
+only enabled account). `backup` writes a verified stamp directory mirroring the
+live layout (`control.db`, `manifest.json`, `users/<id>/eza.db`, disabled
+accounts included). `restore STAMP --yes` runs with the server stopped, validates
+the stamp, backs up the current installation first, restores every library, and
+rewrites the control paths; page snapshots are not part of a stamp. The 2026-08-14
 export contains 9,457 anchors; the importer skips 4 non-http anchors, collapses
 548 anchors that normalize to the same URL, and writes 8,905 bookmarks, 74
 tags, and 9,016 tag links in one transaction with the default leaf tag mode.
@@ -149,28 +155,29 @@ and components live in `static/eza.css`; the decisions are recorded in
 
 ## Performance
 
-Measured on an AMD Ryzen 7 5700X with GHC 9.10.3 and `-O1`, against the
-8,988-row database:
+Measured on an AMD Ryzen 7 5700X with GHC 9.10.3 and `-O1`, against a
+14,582-row scratch copy of a library:
 
 | Query | p95 |
 |---|---|
-| `all` | 3.99 ms |
-| `fts-rust` | 0.85 ms |
-| `fts-github` | 1.53 ms |
-| `tag-imported` | 13.86 ms |
-| `tag-imported-books` | 12.04 ms |
+| `all` | 1.39 ms |
+| `fts-rust` | 0.92 ms |
+| `fts-github` | 2.00 ms |
+| `tag-imported` | 13.34 ms |
+| `tag-imported-books` | 11.15 ms |
 
 The ledger needs per year counts, so the page query also groups the filtered
-rows by year in the same pass that produces the total. Search stays below
-2 ms at p95; the slowest measured query is a tag filter over 8,790 records.
-Run the same benchmark:
+rows by year in the same pass that produces the total. FTS search stays at or
+under 2 ms p95; the slowest measured query is a tag-filtered page at 13.34 ms
+p95 over 14,582 rows. Run the same benchmark:
 
 ```bash
 EZA_DATA_DIR=$PWD/data \
   cabal run eza-bookmarks -- bench --iterations 20 --user NAME
 ```
 
-The method and raw output are in [docs/performance.md](docs/performance.md).
+The method, the dataset and the raw output are in
+[docs/performance.md](docs/performance.md).
 
 ---
 

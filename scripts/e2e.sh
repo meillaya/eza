@@ -7,16 +7,35 @@
 # the exception: they start from an empty control database and claim the first
 # account through /setup themselves.
 #
-# The WASM bundle must have been built first (scripts/build-web.sh). Override
-# EZA_BIN or EZA_E2E_SCRIPTS to narrow a local run, and set EZA_E2E_SEED=none
-# to skip the fixture import.
+# The WASM bundle must have been built first (scripts/build-web.sh), and the
+# root dev dependencies (@playwright/test) must be installed. CI does both
+# before this script runs; locally run
+#   bun install --frozen-lockfile && bash scripts/build-web.sh
+# Override EZA_BIN or EZA_E2E_SCRIPTS to narrow a local run, and set
+# EZA_E2E_SEED=none to skip the fixture import.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Fail with an actionable message instead of a module-resolution stack trace.
+if ! node -e "import('@playwright/test').then(() => process.exit(0), () => process.exit(1))" >/dev/null 2>&1; then
+  echo "e2e dependencies are missing: '@playwright/test' is not installed." >&2
+  echo "Run 'bun install --frozen-lockfile' (or 'npm install') at the repo root first." >&2
+  exit 1
+fi
+
 if [[ ! -f static/app/app.wasm ]]; then
   echo "static/app/app.wasm is missing; run bash scripts/build-web.sh first" >&2
+  exit 1
+fi
+
+# The client bundle is a build output: refuse to test a snapshot older than the
+# client sources it was supposed to be built from.
+stale_source="$(find core/src web/src cabal.project.wasm core/eza-core.cabal web/eza-web.cabal \
+  -type f -newer static/app/app.wasm -print -quit 2>/dev/null || true)"
+if [[ -n "$stale_source" ]]; then
+  echo "static/app/app.wasm is older than $stale_source; run bash scripts/build-web.sh first" >&2
   exit 1
 fi
 

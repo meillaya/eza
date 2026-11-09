@@ -10,16 +10,20 @@ server can also use a Node/Defuddle sidecar for pages that arrive without text.
 Build the optional Defuddle bundle and load the unpacked extension:
 
 ```bash
-cd extension
-npm ci
-npm run build:defuddle   # writes dist/ and vendor/defuddle-page.js
+bash scripts/build-extension.sh --with-defuddle
 ```
+
+The script installs the extension's npm dependencies when missing, runs
+`extension/build.mjs`, and writes the bundle plus generated third-party
+notices under `extension/dist/`. A plain `bash scripts/build-extension.sh`
+builds the extension without the bundled Defuddle extractor (the built-in DOM
+extractor remains the fallback).
 
 Open `chrome://extensions`, enable developer mode, choose **Load unpacked**,
 and select `extension/dist`. Open the extension options and set:
 
 - **server URL**: e.g. `http://localhost:8000` or the public https origin;
-- **capture token**: an API token created in Account > API tokens with the
+- **capture token**: an API token created in Account > api tokens with the
   `capture` scope;
 - **default template**: optional id or name; blank uses trigger/default.
 

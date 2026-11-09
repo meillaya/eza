@@ -96,7 +96,9 @@ event, status, last error and recent delivery states, with a test delivery
 control. Session-only management means a bearer token cannot change a
 subscription. Account > users is visible to admins only and lists username,
 role, creation time, last login and disabled state, with add, enable, disable,
-role and temporary-password actions.
+role, temporary-password and delete actions. Delete asks for the account name
+and offers a separate "also delete the library and snapshots" checkbox that is
+off by default.
 
 The masthead carries the wordmark, the provenance line, the search line and the
 section links: ledger, inbox, graph, views, duplicates, tags, ai tags,
@@ -248,9 +250,11 @@ needs extra pages).
 
 ## About
 
-The About panel is the one place that names the software behind the library:
-the repository, the release page, the Apache-2.0 license, the third-party
-notices and the main libraries and typefaces, each an external link. The
+The About panel names the software behind the library (the repository, the
+release page, the Apache-2.0 license, third-party notices, and the main
+libraries and typefaces) and carries the data-ownership links: export the
+library as Netscape HTML (`bookmarks.html`) or as the versioned eza JSON
+document (`eza-export.json`). Both download through the browser session. The
 notices file at the repository root is the canonical list, including the
 dependency versions and the SIL Open Font License files under `static/fonts/`.
 ## Voice

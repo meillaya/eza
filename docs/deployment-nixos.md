@@ -130,7 +130,7 @@ All options live under `services.eza`:
 | `publicOrigin` | `https://<caddy.hostname>` or `http://localhost:<port>` | Browser-visible origin (`PUBLIC_ORIGIN`). Passkeys are bound to it. |
 | `rpId` | host of `publicOrigin` | WebAuthn relying-party ID (`EZA_RP_ID`); host only, no scheme/port. |
 | `rpName` | `eza` | Relying-party display name (`EZA_RP_NAME`). |
-| `logLevel` | `info` | `EZA_LOG_LEVEL` (debug/info/warn/error). |
+| `logLevel` | `info` | `EZA_LOG_LEVEL`: `debug` logs a development request line, `info` one access line per request, `warn`/`error` disable access logging. |
 | `allowPrivateFetch` | `false` | `EZA_ALLOW_PRIVATE_FETCH`; permits fetching private/RFC1918 URLs. Leave off (SSRF guard). |
 | `enrichWorkers` | `2` | `EZA_ENRICH_WORKERS`: in-process background enrichment workers; 0 disables them. |
 | `fetchTimeoutMs` | `8000` | `EZA_FETCH_TIMEOUT_MS`: timeout per outbound fetch (server clamps below 1000). |
@@ -139,8 +139,7 @@ All options live under `services.eza`:
 | `shareTtlDays` | `7` | `EZA_SHARE_TTL_DAYS`: public share-link lifetime. |
 | `aiProvider` | `none` | `EZA_AI_PROVIDER`: `none`, `ollama`, `openai`, `openai-compatible`, `anthropic`. |
 | `ollamaBaseUrl` | `http://127.0.0.1:11434` | `EZA_OLLAMA_BASE_URL` for the `ollama` provider. |
-| `aiModel` | `llama3.2` | `EZA_AI_MODEL` used by AI tagging. |
-| `aiAutoTag` | `false` | `EZA_AI_AUTO_TAG`: automatic AI tagging of new bookmarks. |
+| `aiModel` | empty | `EZA_AI_MODEL`; empty selects the provider default (`llama3.2` Ollama, `gpt-4o-mini` OpenAI, `claude-haiku-4-5` Anthropic). |
 | `environmentFile` | `null` | Optional systemd EnvironmentFile path string (non-secret settings). |
 | `staticDir` | `null` | Override `EZA_STATIC_DIR`; defaults to `webAssets`' `share/eza/static`. |
 | `secretspecFile` | flake `secretspec.toml` | SecretSpec manifest; declares secrets, never values. |
@@ -153,7 +152,7 @@ All options live under `services.eza`:
 | `caddy.hostname` | `null` | Caddy site hostname; required when Caddy is enabled. |
 | `backup.enable` | `false` | Daily SQLite backup timer. |
 | `backup.schedule` | `*-*-* 03:17:00` | systemd `OnCalendar` for the timer. |
-| `backup.keepDays` | `14` | Prune backups older than this. |
+| `backup.keepDays` | `14` | Passed to `backup` as `EZA_BACKUP_KEEP_DAYS`; stamp directories older than this are pruned by the command. |
 | `backup.offsite` | `null` | Absolute local path or rclone remote (`remote:path`) for an offsite copy. |
 
 ## What the unit does
@@ -162,18 +161,20 @@ All options live under `services.eza`:
 so the SQLite file keeps a stable owner) with `StateDirectory=eza` →
 `/var/lib/eza`, mode 0750. The data directory holds:
 
-    /var/lib/eza/eza.db       SQLite database (WAL mode)
-    /var/lib/eza/snapshots/   full-page HTML snapshots
+    /var/lib/eza/control.db   account registry (identity and library paths)
+    /var/lib/eza/snapshots/   legacy global snapshot root (new captures live per account)
     /var/lib/eza/users/       one library database per account
     /var/lib/eza/backups/     verified backup stamps from the timer
 
 Environment: `EZA_DATA_DIR`, `EZA_CONTROL_DB`, `EZA_USERS_DIR`,
 `EZA_MAX_USERS`, `EZA_DB` (legacy migration path only), `EZA_BIND`, `PUBLIC_ORIGIN`,
 `EZA_RP_ID`, `EZA_RP_NAME`, `EZA_STATIC_DIR`, `EZA_SNAPSHOT_DIR`,
-`EZA_BACKUP_DIR`, `EZA_LOG_LEVEL`, `EZA_ALLOW_PRIVATE_FETCH`,
-`EZA_ENRICH_WORKERS`, `EZA_FETCH_TIMEOUT_MS`, `EZA_FAVICON_MAX_BYTES`,
-`EZA_FAVICON_TTL_DAYS`, `EZA_SHARE_TTL_DAYS`, `EZA_AI_PROVIDER`,
-`EZA_OLLAMA_BASE_URL`, `EZA_AI_MODEL`, `EZA_AI_AUTO_TAG`, `HOME`.
+`EZA_BACKUP_DIR`, `EZA_BACKUP_KEEP_DAYS`, `EZA_LOG_LEVEL`,
+`EZA_ALLOW_PRIVATE_FETCH`, `EZA_ENRICH_WORKERS`, `EZA_FETCH_TIMEOUT_MS`,
+`EZA_FAVICON_MAX_BYTES`, `EZA_FAVICON_TTL_DAYS`, `EZA_SHARE_TTL_DAYS`,
+`EZA_AI_PROVIDER`, `EZA_OLLAMA_BASE_URL`, `EZA_AI_MODEL`, `HOME`. The
+body-size and snapshot caps (`EZA_MAX_BODY_BYTES`, `EZA_IMPORT_MAX_BYTES`,
+`EZA_SNAPSHOT_MAX_BYTES`) can be added through `environmentFile`.
 
 ExecStart is wrapped by SecretSpec:
 
@@ -223,43 +224,48 @@ AI tagging is off by default (`aiProvider = "none"`): the AI endpoints still
 answer, returning an empty suggestion list with a notice. `ollama` talks to
 `ollamaBaseUrl` and needs no API key; `openai` / `openai-compatible` use the
 `OPENAI_API_KEY` credential and `anthropic` uses `ANTHROPIC_API_KEY` (see
-[secrets.md](secrets.md)). `aiModel` selects the model; `aiAutoTag` enables
-automatic tagging of newly added bookmarks (explicit AI-tag actions work
-regardless).
+[secrets.md](secrets.md)). `aiModel` selects the model (empty means the
+provider default); AI suggestions are always requested explicitly from the
+record UI.
 
 ## Backups and restore
 
 `backup.enable = true` installs `eza-backup.service` + `eza-backup.timer`
 (daily at 03:17 by default). One run:
 
-1. runs `eza-bookmarks backup` as the `eza` user: `VACUUM INTO` copies the
-   control database and every enabled account library into one verified stamp
-   directory (`<backups>/<stamp>/control.db` and
-   `<backups>/<stamp>/users/<id>.db`, safe while eza is writing);
-2. prunes stamp directories older than `backup.keepDays`;
-3. optionally copies the newest stamp to `backup.offsite` (absolute local path
-   or rclone remote).
+1. runs `eza-bookmarks backup` as the `eza` user with `EZA_DATA_DIR`,
+   `EZA_BACKUP_DIR`, and `EZA_BACKUP_KEEP_DAYS` set: `VACUUM INTO` copies the
+   control database and every account library (disabled accounts included)
+   into one verified stamp directory (`<backups>/<stamp>/control.db`,
+   `manifest.json`, and `<backups>/<stamp>/users/<id>/eza.db`, safe while eza
+   is writing); the command prunes stamp directories older than
+   `backup.keepDays`;
+2. optionally copies the stamp to `backup.offsite` (absolute local path or
+   rclone remote). Page snapshots are not part of a stamp; include
+   `users/<id>/snapshots/` in the volume backup when they matter.
 
 A single account can be backed up with
 `eza-bookmarks backup --user <name|id>` (the control database is always
 included). `eza-bookmarks users list` shows the accounts, their roles, states,
 database sizes, and snapshot counts.
 
-Restore with the service stopped (so nothing is writing):
+Restore with the service stopped (so nothing is writing). The command
+validates the stamp, backs up the current installation first, restores each
+library to the path in the control database, and rewrites those paths when the
+data root moved:
 
 ```bash
 sudo systemctl stop eza
-sudo rm -rf /var/lib/eza/control.db /var/lib/eza/control.db-wal \
-  /var/lib/eza/control.db-shm /var/lib/eza/users
-sudo cp -a /var/lib/eza/backups/<stamp>/control.db /var/lib/eza/control.db
-sudo cp -a /var/lib/eza/backups/<stamp>/users /var/lib/eza/users
-sudo chown -R eza:eza /var/lib/eza/control.db /var/lib/eza/users
+BIN="$(nix build --no-link --print-out-paths .#eza-bookmarks)/bin/eza-bookmarks"
+sudo -u eza "$BIN" restore /var/lib/eza/backups/<stamp> --yes
 sudo systemctl start eza
 ```
 
-Restoring only one library is the same operation for that
-`users/<id>.db` file. Snapshots live outside the database; copy
-`users/<id>/snapshots/` from a volume backup when the snapshot pages matter.
+`--dry-run` prints the plan without writing. A stamp from the first multi-user
+layout (`users/<id>.db`, no `manifest.json`) still restores; accounts whose
+library is missing from the stamp keep their current copy. Page snapshots are
+not in a stamp: copy `users/<id>/snapshots/` from a volume backup when the
+snapshot pages matter.
 
 Run a backup on demand: `sudo systemctl start eza-backup.service` and check
 `journalctl -u eza-backup`.
