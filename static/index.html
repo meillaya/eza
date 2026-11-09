@@ -6,11 +6,8 @@
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#F2EDE3" />
     <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#10141F" />
-    <meta
-      name="description"
-      content="A private catalogue of saved links: search, tags, and a reading copy, kept in one SQLite file on your own server."
-    />
-    <title>eza, the catalogue</title>
+    <meta name="description" content="eza, a bookmark library." />
+    <title>eza</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
     <link rel="alternate icon" href="/assets/favicon-fallback.svg" type="image/svg+xml" />
@@ -34,24 +31,8 @@
       <div class="boot-stage" role="status">
         <div class="boot-card">
           <div class="boot-brand">eza</div>
-          <div class="boot-rule" aria-hidden="true"></div>
-          <p class="boot-kicker">The catalogue</p>
-          <h1 class="boot-title">Opening the catalogue.</h1>
-          <p class="boot-copy">
-            The client is reading the index from the server. The records live in one SQLite file;
-            nothing is uploaded and no copy is kept in the browser.
-          </p>
           <div class="boot-progress" aria-hidden="true"><i></i></div>
-          <p class="boot-status">
-            <span>reading the index</span>
-            <span class="boot-sep" aria-hidden="true">/</span>
-            <span>from the server</span>
-          </p>
-          <p class="boot-foot">
-            <span>one SQLite file</span>
-            <span class="boot-sep" aria-hidden="true">/</span>
-            <span>the figures come from the library</span>
-          </p>
+          <p class="boot-status"><span>reading the library</span></p>
         </div>
       </div>
     </div>
@@ -62,23 +43,12 @@
       <div class="boot-stage" role="alert">
         <div class="boot-card">
           <div class="boot-brand">eza</div>
-          <div class="boot-rule" aria-hidden="true"></div>
-          <p class="boot-kicker">The catalogue</p>
-          <h1 class="boot-title">The catalogue did not open.</h1>
-          <p class="boot-copy">
-            The client could not reach the server, so no record was read and nothing was changed.
-            The library in SQLite is untouched on the server.
-          </p>
+          <h1 class="boot-title">The library did not open.</h1>
           <p class="boot-error-line" id="boot-error-message">The WebAssembly client failed to load.</p>
           <div class="boot-actions">
             <a class="btn btn--strong" href="/">try again</a>
             <a class="btn" href="/login">sign in</a>
           </div>
-          <p class="boot-foot">
-            <span>the library is unchanged</span>
-            <span class="boot-sep" aria-hidden="true">/</span>
-            <span>the server did not answer</span>
-          </p>
         </div>
       </div>
     </div>
@@ -92,19 +62,8 @@
       <div class="boot-stage">
         <div class="boot-card">
           <div class="boot-brand">eza</div>
-          <div class="boot-rule" aria-hidden="true"></div>
-          <p class="boot-kicker">The catalogue</p>
-          <h1 class="boot-title">The catalogue needs JavaScript.</h1>
-          <p class="boot-copy">
-            eza's client is a WebAssembly module, so with scripting off the browser cannot read the
-            library. Your records are untouched on the server.
-          </p>
-          <p class="boot-error-line">scripting is off in this browser</p>
-          <p class="boot-foot">
-            <span>the library is unchanged</span>
-            <span class="boot-sep" aria-hidden="true">/</span>
-            <span>the client needs scripting</span>
-          </p>
+          <h1 class="boot-title">The library needs JavaScript.</h1>
+          <p class="boot-error-line">Enable scripting, then reload.</p>
         </div>
       </div>
     </noscript>

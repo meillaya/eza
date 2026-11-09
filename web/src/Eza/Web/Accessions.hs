@@ -1,4 +1,4 @@
-{- | Accessions: the whole archive set as a printed index.
+{- | Accessions: the archive by year, source and filing day.
 
 The page reads 'Eza.Types.LibraryStats' only. Every figure, mark and row is
 cut from the library's own database: no sample data, no estimated numbers.
@@ -20,7 +20,7 @@ import Eza.Types (LibraryStats (..))
 import Eza.Web.Model
 
 {- | The printed index page: archive figures, one mark per filing day per
-year, sources ranked with leader dots, the long tail and a colophon.
+year, sources ranked with leader dots, the long tail and a date span.
 -}
 accessionsPage :: Model -> View () () Model Action
 accessionsPage m =
@@ -49,72 +49,41 @@ of printing zeroes that would read as an empty library.
 -}
 notLoaded :: [View () () Model Action]
 notLoaded =
-    [ H.header_
-        [HP.class_ "acc-head"]
-        [ H.div_
-            [HP.class_ "acc-head-left"]
-            [ H.h1_ [HP.class_ "acc-title"] [text "Accessions by year"]
-            , H.p_
-                [HP.class_ "acc-lede"]
-                [text "The whole library, set as an index: every year it grew, every source it came from, and every day it was used."]
-            ]
-        , figures Nothing
-        ]
-    , ruleLine
+    [ headShell []
     , H.div_
         [HP.class_ "empty"]
-        [ H.p_ [HP.class_ "empty-kicker meta"] [text "figures not loaded"]
-        , H.h2_ [HP.class_ "empty-title display"] [text "The index is not set yet."]
-        , H.p_
-            [HP.class_ "empty-body"]
-            [text "The archive figures arrive with the client's boot payload. Nothing is printed here until the library has answered."]
-        ]
+        [H.p_ [HP.class_ "empty-body"] [text "The figures have not loaded."]]
     ]
 
-{- | A library with no records yet: the index has real zeroes but nothing to
-set, so it says that instead of printing an empty chart that looks like a
-result.
+{- | A library with no records yet: there is no index to set, so the page says
+that instead of printing an empty chart that looks like a result.
 -}
 emptyIndex :: [View () () Model Action]
 emptyIndex =
-    [ H.header_
-        [HP.class_ "acc-head"]
-        [ H.div_
-            [HP.class_ "acc-head-left"]
-            [ H.h1_ [HP.class_ "acc-title"] [text "Accessions by year"]
-            , H.p_
-                [HP.class_ "acc-lede"]
-                [text "The whole library, set as an index: every year it grew, every source it came from, and every day it was used."]
-            ]
-        , H.dl_
-            [HP.class_ "acc-figures"]
-            [ figure "entries" "0"
-            , figure "sources" "0"
-            , figure "filing days" "0"
-            ]
-        ]
-    , ruleLine
+    [ headShell []
     , H.div_
         [HP.class_ "empty"]
-        [ H.p_ [HP.class_ "empty-kicker meta"] [text "no entries"]
-        , H.h2_ [HP.class_ "empty-title display"] [text "The index has nothing to set yet."]
-        , H.p_
-            [HP.class_ "empty-body"]
-            [text "This library holds no records, so no year has filing days to print. File a record or import a bookmarks file and the index fills itself from the database."]
-        ]
+        [H.p_ [HP.class_ "empty-body"] [text "No records yet."]]
     ]
 
 indexView :: Model -> LibraryStats -> [View () () Model Action]
 indexView m stats =
     [ headView stats
-    , ruleLine
     , filingDays m stats
-    , ruleLine
     , lower stats
     , foot stats
     ]
 
 -- ------------------------------------------------------------------ head ---
+
+headShell :: [View () () Model Action] -> View () () Model Action
+headShell extras =
+    H.header_
+        [HP.class_ "acc-head"]
+        [ H.div_
+            [HP.class_ "acc-head-left"]
+            ([H.h1_ [HP.class_ "acc-title"] [text "Accessions by year"]] <> extras)
+        ]
 
 headView :: LibraryStats -> View () () Model Action
 headView stats =
@@ -124,27 +93,20 @@ headView stats =
             [HP.class_ "acc-head-left"]
             [ H.h1_ [HP.class_ "acc-title"] [text "Accessions by year"]
             , H.p_
-                [HP.class_ "acc-lede"]
-                [text "The whole library, set as an index: every year it grew, every source it came from, and every day it was used."]
-            , H.p_
                 [HP.class_ "acc-hint meta"]
                 [text "A year, a filing day or a source opens the ledger filtered to it."]
             ]
-        , figures (Just stats)
+        , figures stats
         ]
 
-figures :: Maybe LibraryStats -> View () () Model Action
+figures :: LibraryStats -> View () () Model Action
 figures stats =
     H.dl_
         [HP.class_ "acc-figures"]
-        [ figure "entries" (statOf lsTotal)
-        , figure "sources" (statOf lsSources)
-        , figure "filing days" (statOf lsDays)
+        [ figure "entries" (num (lsTotal stats))
+        , figure "sources" (num (lsSources stats))
+        , figure "filing days" (num (lsDays stats))
         ]
-  where
-    statOf field = case stats of
-        Nothing -> "not yet"
-        Just s -> num (field s)
 
 figure :: MisoString -> MisoString -> View () () Model Action
 figure label value =
@@ -160,7 +122,6 @@ filingDays m stats =
             [HP.class_ "mc-head"]
             [ H.h2_ [HP.class_ "sc"] [text "Filing days"]
             , H.span_ [HP.class_ "mc-note meta"] [text "one mark per filing day"]
-            , H.span_ [HP.class_ "mc-note meta"] [text "a taller mark, a fuller day"]
             ]
         , H.div_
             [HP.class_ "mc-axis"]
@@ -274,7 +235,6 @@ ranked stats =
                 [text (ms ("top " <> show (min 16 (length sources)) <> " of " <> comma (lsSources stats)))]
             ]
         , H.ul_ [HP.class_ "rank-list"] (zipWith rankRow [1 :: Int ..] (take 16 sources))
-        , rankNote sources
         ]
   where
     sources = lsTopSources stats
@@ -301,27 +261,13 @@ rankRow index (domain, count) =
   where
     source = displayDomain domain
 
-{- | Two hostnames of one publication appear separately in the database. The
-note is only printed when both are actually ranked, so it never claims more
-than the data shows.
--}
-rankNote :: [(Text, Int)] -> View () () Model Action
-rankNote sources
-    | youtubePair = H.p_ [HP.class_ "rank-note meta"] [text "youtube.com and m.youtube.com are one publication under two hostnames."]
-    | otherwise = H.span_ [] []
-  where
-    names = map (displayDomain . fst) sources
-    youtubePair = ("youtube.com" `elem` names) && ("m.youtube.com" `elem` names)
-
 longTail :: LibraryStats -> View () () Model Action
 longTail stats =
     H.section_
         [HP.class_ "acc-tail"]
         [ H.div_
             [HP.class_ "sec-head"]
-            [ H.h2_ [HP.class_ "sc"] [text "The long tail"]
-            , H.span_ [HP.class_ "meta"] [text "every source, counted"]
-            ]
+            [H.h2_ [HP.class_ "sc"] [text "The long tail"]]
         , H.p_
             [HP.class_ "tail-fig"]
             [ H.span_ [HP.class_ "big"] [text (num (lsSourcesOnce stats))]
@@ -330,17 +276,17 @@ longTail stats =
                 [text (ms ("of " <> comma (lsSources stats) <> " sources are filed exactly once."))]
             ]
         , H.p_ [HP.class_ "tail-body"] [text (ms (habitSentence stats))]
+        , H.p_ [HP.class_ "tail-label meta"] [text "busiest days"]
         , H.ul_ [HP.class_ "tail-days"] (map busiestRow (busiestDays stats))
         , H.p_ [HP.class_ "tail-body"] [text (ms (typicalSentence stats))]
         ]
 
 habitSentence :: LibraryStats -> String
 habitSentence stats =
-    "The rest are habits: "
-        <> displayDomain topDomain
+    displayDomain topDomain
         <> " holds "
         <> comma topCount
-        <> " entries, and the ten busiest sources hold "
+        <> " entries; the ten busiest sources hold "
         <> comma topTen
         <> "."
   where
@@ -357,7 +303,7 @@ typicalSentence stats =
         <> comma (lsDays stats)
         <> " of the "
         <> comma (spanDays stats)
-        <> " days were used at all."
+        <> " days have one."
   where
     median = medianOf (map snd (lsFilingDays stats))
 
@@ -391,19 +337,15 @@ foot stats =
         [HP.class_ "acc-foot"]
         [ H.span_
             [HP.class_ "acc-colophon"]
-            [ H.span_ [HP.class_ "meta"] [text "compiled from the library's own sqlite file"]
-            , H.span_ [HP.class_ "meta"] [text (ms ("last accession " <> displayDay (lsLastDay stats)))]
-            , H.span_
-                [HP.class_ "meta"]
-                [text (ms (displayDay (lsFirstDay stats) <> " to " <> displayDay (lsLastDay stats)))]
-            ]
-        , H.span_ [HP.class_ "acc-proof"] [text "eza"]
+            [H.span_ [HP.class_ "meta"] [text (ms (filedSpan (lsFirstDay stats) (lsLastDay stats)))]]
         ]
 
--- --------------------------------------------------------------- helpers ---
+filedSpan :: Text -> Text -> String
+filedSpan first last_
+    | first == last_ = "filed " <> displayDay first
+    | otherwise = "filed " <> displayDay first <> " to " <> displayDay last_
 
-ruleLine :: View () () Model Action
-ruleLine = H.div_ [HP.class_ "rule", HP.aria_ "hidden" "true"] []
+-- --------------------------------------------------------------- helpers ---
 
 -- | Split an ISO day (2025-09-24) into a year and a day of year.
 parsedYear :: Text -> Maybe Int

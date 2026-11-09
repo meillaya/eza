@@ -181,19 +181,14 @@ shareBookmarkPage record bookmark =
         ( T.unlines
             [ shareStageOpen
             , "  <article class=\"share-page\" data-testid=\"share-page\">"
-            , shareTop
-            , "    <div class=\"rule\" aria-hidden=\"true\"></div>"
-            , "    <p class=\"share-kicker sc\">shared record</p>"
-            , "    <p class=\"share-acc mono\">" <> accessionNo (bdId bookmark) <> "</p>"
+            , shareTop "read only"
             , "    <h1 class=\"share-title\">" <> escape (bdTitle bookmark) <> "</h1>"
             , "    <p class=\"share-src\">" <> escape (bdDomain bookmark) <> sep <> "filed " <> dateDot (bdCreatedAt bookmark) <> "</p>"
             , if srIncludeNote record then shareNote (bdNoteBody bookmark) else ""
             , shareTags (bdTags bookmark)
             , "    <a class=\"share-open\" href=\"" <> escape (bdUrl bookmark) <> "\" rel=\"noopener noreferrer\">read the page</a>"
             , shareMeta record
-            , "    <p class=\"share-colophon\">" <> colophon <> "</p>"
             , "  </article>"
-            , quoteStageNote
             , shareStageClose
             ]
         )
@@ -205,20 +200,14 @@ shareSearchPage record saved page =
         ( T.unlines
             [ shareStageOpen
             , "  <article class=\"share-page\" data-testid=\"share-page\">"
-            , shareTop
-            , "    <div class=\"rule\" aria-hidden=\"true\"></div>"
-            , "    <p class=\"share-kicker sc\">shared search</p>"
+            , shareTop "read only"
             , "    <h1 class=\"share-title\">" <> escape (ssName saved) <> "</h1>"
             , "    <p class=\"share-src\"><span class=\"mono\">" <> escape (searchText saved) <> "</span>" <> sep <> "<span>" <> countText (spTotal page) <> " entries</span></p>"
             , "    <ol class=\"share-results\">"
             , T.concat (map shareResult (spItems page))
             , "    </ol>"
-            , "    <p class=\"share-more meta\">" <> resultSummary page <> "</p>"
-            , "    <p class=\"share-open share-open--quiet\">This saved search is shared from eza. The keeper chooses the query; the entries stay theirs.</p>"
             , shareMeta record
-            , "    <p class=\"share-colophon\">" <> colophon <> "</p>"
             , "  </article>"
-            , quoteStageNote
             , shareStageClose
             ]
         )
@@ -230,34 +219,26 @@ shareUnavailablePage unavailable =
         ( T.unlines
             [ shareStageOpen
             , "  <article class=\"share-page\" data-testid=\"share-unavailable\">"
-            , shareTop
-            , "    <div class=\"rule\" aria-hidden=\"true\"></div>"
-            , "    <p class=\"share-kicker sc\">share link</p>"
+            , shareTop ""
             , "    <h1 class=\"share-title\">" <> heading <> "</h1>"
             , "    <p class=\"share-note\"><span>" <> note <> "</span></p>"
-            , "    <p class=\"share-more meta\">" <> more <> "</p>"
-            , "    <p class=\"share-colophon\">" <> colophon <> "</p>"
             , "  </article>"
-            , quoteStageNote
             , shareStageClose
             ]
         )
   where
-    (heading, note, more) = case unavailable of
+    (heading, note) = case unavailable of
         ShareRevoked ->
             ( "This link was revoked."
-            , "Its keeper has revoked it. Ask them for a new link if the record should still be readable."
-            , "Nothing on this page is public once a link is revoked."
+            , "Ask the person who shared it for a new link."
             )
         ShareExpired expires ->
             ( "This link has expired."
-            , "Share links carry an expiry date. This one ended on <span class=\"mono\">" <> dateDot expires <> "</span>."
-            , "The keeper can make a new link from the account page."
+            , "It ended on <span class=\"mono\">" <> dateDot expires <> "</span>."
             )
         ShareInvalid ->
             ( "This link does not exist."
-            , "No share link matches this address. It may have been mistyped, or it may never have been made."
-            , "Share links are made from the account page."
+            , "Check the address."
             )
 
 shareSearchFeed :: SavedSearch -> SearchPage -> Text
@@ -314,12 +295,12 @@ shareStageOpen = "<div class=\"share-stage\">"
 shareStageClose :: Text
 shareStageClose = "</div>"
 
-shareTop :: Text
-shareTop =
+shareTop :: Text -> Text
+shareTop imprint =
     T.unlines
         [ "    <div class=\"share-top\">"
         , "      <a class=\"share-word\" href=\"/login\">eza</a>"
-        , "      <span class=\"share-readonly meta\">read only</span>"
+        , "      <span class=\"share-readonly meta\">" <> imprint <> "</span>"
         , "    </div>"
         ]
 
@@ -336,7 +317,7 @@ shareNote :: Text -> Text
 shareNote body
     | T.null (T.strip body) = ""
     | otherwise =
-        "    <div class=\"share-note\"><p class=\"share-note-label sc\">note</p>"
+        "    <div class=\"share-note\"><p class=\"sc\">note</p>"
             <> T.concat ["<p>" <> escape paragraph <> "</p>" | paragraph <- paragraphs]
             <> "</div>"
   where
@@ -379,27 +360,8 @@ shareResult bookmark =
         , "      </li>"
         ]
 
-resultSummary :: SearchPage -> Text
-resultSummary page
-    | shown >= total = "All " <> countText total <> " entries from the keeper's catalogue."
-    | otherwise = "Showing " <> countText shown <> " of " <> countText total <> " entries from the keeper's catalogue."
-  where
-    shown = length (spItems page)
-    total = spTotal page
-
 searchText :: SavedSearch -> Text
 searchText saved = T.strip (T.unwords ([ssQ saved] <> ["tag:" <> tag | tag <- ssTags saved]))
-
-quoteStageNote :: Text
-quoteStageNote = "  <p class=\"share-stage-note meta\">a share page is served without the app; the keeper's data is never listed or synced here.</p>"
-
-colophon :: Text
-colophon =
-    "shared from eza "
-        <> sep
-        <> " a private bookmark library "
-        <> sep
-        <> " this page is read-only"
 
 sep :: Text
 sep = "<span class=\"account-sep\" aria-hidden=\"true\"></span>"
