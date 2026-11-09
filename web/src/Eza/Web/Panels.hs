@@ -1323,7 +1323,7 @@ dedupUrlSection :: Model -> View () () Model Action
 dedupUrlSection m =
     H.section_
         [HP.class_ "dd-sec", HP.data_ "testid" "dedup-url-section"]
-        ( [secHead "Same URL" (Just countLine)]
+        ( [secHead "Same URL" (if urlGroups == 0 then Nothing else Just countLine)]
             ++ ( if null (mDedupUrlGroups m)
                     then
                         [ H.p_

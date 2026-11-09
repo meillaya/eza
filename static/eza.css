@@ -729,6 +729,7 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
   align-items: baseline;
   gap: 6px;
 }
+.ledg-sep { color: var(--rule); margin: 0 1px; font-family: var(--mono); font-size: 12px; }
 .ledg-controls {
   display: flex;
   align-items: baseline;
@@ -2562,11 +2563,17 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
 /* ============================================================
    AI TAGS
    ============================================================ */
-.ai-banner{border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);padding:12px 0 13px;margin:14px 0 4px}
+.ai-banner{padding:10px 0 13px;margin:16px 0 4px}
 .ai-banner-lead{font-family:var(--read);font-size:16px;line-height:25px;margin:0 0 8px;max-width:780px;color:var(--ink)}
 .ai-banner-lead strong{font-weight:600}
 .ai-picker{padding:14px 0 4px}
-.ai-chips{display:flex;flex-wrap:wrap;gap:8px 10px;padding:2px 0 6px}
+.ai-chips{
+  display:flex;flex-wrap:wrap;gap:8px 10px;padding:2px 8px 6px 0;
+  max-height:220px;overflow-y:auto;overscroll-behavior:contain;
+  scrollbar-width:thin;scrollbar-color:var(--rule) transparent;
+  -webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 22px),transparent);
+  mask-image:linear-gradient(to bottom,#000 calc(100% - 22px),transparent);
+}
 .ai-chip{
   display:inline-flex;align-items:baseline;gap:6px;font-family:var(--mono);font-size:12px;line-height:16px;
   border:1px solid var(--rule);border-radius:2px;background:var(--card);padding:4px 9px 3px;color:var(--ink);min-height:28px;
@@ -3031,8 +3038,8 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
 }
 .account-recovery { margin: 4px 0 0; }
 .account-rec-row {
-  display: flex; align-items: baseline; justify-content: space-between; gap: 24px;
-  padding: 6px 0; border-bottom: 1px solid var(--rule-soft);
+  display: flex; align-items: baseline; justify-content: flex-start; gap: 14px;
+  padding: 6px 0;
 }
 .account-rec-value { color: var(--ink); font-size: 12px; line-height: 18px; }
 .account-reveal { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--accent); }

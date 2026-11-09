@@ -187,10 +187,14 @@ metaRight m
                     ( HP.class_ "ledg-controls"
                         : [C.styleInline_ "flex-basis:auto;flex-wrap:nowrap;gap:10px" | mobile]
                     )
-                    (sortControl m ++ [themeToggle m])
+                    (sortControl m ++ [metaSep] ++ [themeToggle m])
                ]
     | otherwise = [H.div_ [HP.class_ "ledg-controls"] [themeToggle m]]
   where
+    metaSep =
+        H.span_
+            [HP.class_ "ledg-sep", HP.aria_ "hidden" "true"]
+            [text "·"]
     mobile = mWidth m < 768
 
 countGroup :: Model -> [View () () Model Action]
@@ -213,9 +217,7 @@ countGroup m =
             [ H.span_ [HP.class_ "result-count"] [text (formatCount (mTotal model))]
             , H.span_ [HP.class_ "result-unit meta"] [text " unread"]
             ]
-        | otherwise =
-            [ H.span_ [HP.class_ "meta"] [text (formatCount libraryTotal <> " entries")]
-            ]
+        | otherwise = []
     libraryTotal = maybe (mTotal m) lsTotal (mStats m)
 
 sortControl :: Model -> [View () () Model Action]
@@ -1832,7 +1834,7 @@ logoutDialog =
             [ dialogHead "Sign out"
             , H.div_
                 [HP.class_ "dialog__body", HP.data_ "testid" "dialog-body"]
-                [H.p_ [] [text "Signing out discards your unsaved edits."]]
+                [H.p_ [] [text "Your edits have not been saved. Signing out discards them."]]
             , H.div_
                 [HP.class_ "dialog__foot"]
                 [ H.span_ [HP.class_ "spacer"] []

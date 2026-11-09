@@ -1,13 +1,14 @@
 # Screenshots
 
-The screenshots come from the real server and the built WASM client. The
-library is the 2026-08-14 Netscape export (9,457 anchors, 8,905 records,
-4,260 sources), imported through the public API; it is not a mockup and no
-record is invented for the pictures.
+The screenshots come from the real server and the built WASM client, against a
+scratch copy of the live library (9,236 records, 4,470 sources, filed since
+2022.08.07); it is not a mockup and no record is invented for the pictures. The
+detail and share shots use a real record with real extracted text, a note and
+three marks.
 
-The set is seven PNGs at 1440x900 with a device pixel ratio of 2; the
-accessions shot is cropped above the ranked-source list so private sources do
-not appear in the public image:
+The set is seven PNGs at 1440x900 with a device pixel ratio of 2; the accessions
+shot is cropped above the ranked-source list so private sources do not appear in
+the public image:
 
 | File | Screen |
 |---|---|

@@ -51,19 +51,22 @@ fixed optical size so every browser draws the same letterforms.
 - The ledger is a five column grid: accession number 72 px, title flexible,
   source 210 px, filed date 82 px, tags 152 px. Rows are 52 px tall and 72 px on
   mobile, with year dividers every few dozen rows.
-- The record page is a 588 px reading column beside a 300 px catalogue record,
-  with a crumb and accession rule above and a note editor below the record.
+- The record page is a 588 px bounded reading window beside a 300 px
+  catalogue record: the extracted text scrolls inside a rounded card while the
+  page stays composed. A crumb carries the return path, and the note editor
+  sits below the window.
 - Panels use a running head with the section links, a page head with the title
   and figures, and then a table or ledger body.
-- Auth and share pages are centred printed cards: wordmark, one rule, one action.
+- Auth and share pages are centred printed cards: wordmark, one heading, the
+  fields and one action; one quiet secondary link is the only other copy.
 
 ## Screens
 
 | Route | Screen |
 |---|---|
 | `/` | The ledger: masthead, facets, year dividers, rows, field drawer, selection |
-| `/inbox` | Unread ledger with mark all above read |
-| `/bookmark/:id` | Record: reading column, catalogue record, note, see also, actions |
+| `/inbox` | Unread ledger with mark loaded unread read |
+| `/bookmark/:id` | Record: bounded reading window, catalogue record, note, see also, actions |
 | `/accessions` | The archive as an index: filing days per year, ranked sources, long tail; a year, day or source opens the ledger filtered |
 | `/graph` | The whole library or a local neighbourhood as a canvas: records, tags, resolved wikilinks and tag memberships, layout presets, label modes and colour groups, with pan, zoom, fit, hover preview, click to open, filter and tags toggle |
 | `/views` | Saved graph and ledger views: open, set default, rename, duplicate, export and import |
@@ -96,10 +99,9 @@ that account's password and passkeys and opens a password-reset setup page.
 A password account can register passkeys and turn on a second factor from
 Account > security; with it on, a normal password login yields a short-lived
 pending session and then a WebAuthn assertion. A library claimed before
-passwords kept its passkey sign-in until a password was set. The auth pages
-explain the secure origin rule, the IP-literal RP-ID restriction, and the
-`set-password` CLI alternative. Sign-in attempts are rate-limited and locked
-out in the database.
+passwords kept its passkey sign-in until a password was set. Sign-in attempts
+are rate-limited and locked out in the database; the auth pages keep the flow
+itself and leave the deployment rules to the deployment documents.
 
 Account > webhooks subscribes a URL to signed library events. The signing
 secret is shown once when the subscription is created; later visits show the
@@ -116,8 +118,9 @@ section links: ledger, inbox, graph, views, duplicates, tags, ai tags,
 maintenance, accessions and account. A sign-out control sits at the end of the
 section links and in the mobile bar, and every account tab repeats it in the
 page head. The command palette also offers "Sign out"; an unsaved note asks for
-confirmation first. The ledger's facet rail lists sources with leader dots, tags
-in two columns, status, filing activity and the accessions link.
+confirmation first. The ledger's facet rail lists the top sources and tags, saved
+searches, the unread and dead counts and a weekly filing sparkline; all sources
+opens the accessions index.
 
 States are part of the design: fresh library, filtered to nothing, loading, API
 error, no extraction, enrichment queued and failed, dead link, no note, no
@@ -281,9 +284,15 @@ repository root is the canonical list, including the dependency versions and
 the SIL Open Font License files under `static/fonts/`.
 ## Voice
 
-Dry, first person, specific. Numbers are exact and grouped: 8,988 entries, 4,283
-sources, 543 filing days. Dates are `2025.11.03` in data contexts and `03 nov
-2025` in prose. Empty and error states say what happened and what the reader can
-do next. There is no marketing copy, no exclamation marks and no emoji. Every
-number in the interface comes from the database; a surface that has never run a
-check says so instead of showing a zero that looks like a result.
+Dry, specific, lowercase for controls. Numbers are exact and grouped: 8,988
+entries, 4,283 sources, 543 filing days. Dates are `2025.11.03` in data contexts
+and `03 nov 2025` in prose. Empty and error states say what happened and what
+the reader can do next in one line; a surface that has never run a check says so
+instead of showing a zero that looks like a result.
+
+Copy earns its place: it states a fact the reader cannot already see, asks for a
+decision, or names a control. Explanatory paragraphs about how the software
+works, colophon lines, marketing words and repeated figures are left out. The
+structural vocabulary of the catalogue stays (ledger, filed, record, accessions,
+marks) because it names the interface, not because it decorates it. There is no
+exclamation mark and no emoji.
