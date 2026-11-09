@@ -284,21 +284,21 @@ routeTitle = \case
 
 routeSubtitle :: Route -> MisoString
 routeSubtitle = \case
-    Index -> "Search, filter, and open anything in one keystroke."
-    Bookmark _ -> "Read, annotate, and connect this bookmark."
-    Inbox -> "Everything you saved but have not read yet."
-    Graph -> "Every record and tag in the library, joined by wikilinks and tags."
-    GraphLocal _ depth -> "A local neighbourhood, " <> ms (show depth) <> " hop" <> (if depth == 1 then "" else "s") <> " from the root record."
-    Views -> "Saved graph and ledger views, with their color groups and saved searches."
-    ViewOpen _ -> "Opening a saved view."
-    Dedup -> "Review near-identical saves before merging them."
-    Tags -> "Consolidate, rename, and prune your tag vocabulary."
-    AiTags -> "Advisory tag suggestions. Nothing is written without you."
-    Maintenance -> "Dead-link sweeps, prune candidates, and undo."
-    Account -> "Username, password, passkeys, sessions, and tokens."
-    Accessions -> "The whole archive, set as an index."
-    Save _ _ _ -> "Saving a shared link to the catalogue."
-    NotFound -> "That page does not exist."
+    Index -> "All records, newest first."
+    Bookmark _ -> "One record."
+    Inbox -> "Unread records."
+    Graph -> "Records and tags, as a graph."
+    GraphLocal _ depth -> "A local graph, " <> ms (show depth) <> " hop" <> (if depth == 1 then "" else "s") <> " deep."
+    Views -> "Saved views."
+    ViewOpen _ -> "A saved view."
+    Dedup -> "Same address, same title."
+    Tags -> "The tag vocabulary."
+    AiTags -> "Tag suggestions."
+    Maintenance -> "Dead links, prune, undo."
+    Account -> "Account settings."
+    Accessions -> "Filing by year and source."
+    Save _ _ _ -> "File a record."
+    NotFound -> "Not found."
 
 data Theme = ThemeLight | ThemeDark
     deriving (Eq, Show)
@@ -1394,28 +1394,14 @@ match the current palette query.  Kept in the model layer so both the view
 and the update function agree on what Enter selects.
 -}
 paletteEntries :: Model -> [(MisoString, MisoString, Action)]
-paletteEntries m = filter matches (commands ++ savedSearches ++ bookmarks)
+paletteEntries m = filter matches (fileRecord ++ savedSearches ++ bookmarks ++ sections ++ accountActions)
   where
     needle = T.toLower (T.strip (toTextLow (mPaletteQ m)))
     matches (label, hint, _) =
         T.null needle
             || needle `T.isInfixOf` T.toLower (toTextLow label <> " " <> toTextLow hint)
 
-    commands =
-        [ ("Add bookmark", "POST", AddOpen)
-        , ("Sign out", "session", LogoutRequest)
-        , ("Toggle theme", "appearance", ThemeToggled)
-        , ("Library", "all bookmarks", Navigate Index)
-        , ("Inbox", "unread", Navigate Inbox)
-        , ("Graph", "whole library", Navigate Graph)
-        , ("Duplicates", "dedup", Navigate Dedup)
-        , ("Tags", "consolidate", Navigate Tags)
-        , ("AI tags", "suggestions", Navigate AiTags)
-        , ("Maintenance", "dead links + prune", Navigate Maintenance)
-        , ("Account", "security", Navigate Account)
-        , ("Import bookmarks", "Netscape HTML", ImportStart)
-        , ("Export bookmarks", "Netscape HTML", ExportClicked)
-        ]
+    fileRecord = [("file a record", "add", AddOpen)]
 
     savedSearches =
         [ (ms (ssName saved), "saved search", SavedSearchApply saved)
@@ -1425,6 +1411,26 @@ paletteEntries m = filter matches (commands ++ savedSearches ++ bookmarks)
     bookmarks =
         [ (ms (bsTitle b), ms (bsDomain b), Navigate (Bookmark (bsId b)))
         | b <- take 12 (mItems m)
+        ]
+
+    sections =
+        [ ("ledger", "all records", Navigate Index)
+        , ("inbox", "unread", Navigate Inbox)
+        , ("graph", "records and tags", Navigate Graph)
+        , ("views", "saved views", Navigate Views)
+        , ("duplicates", "same address", Navigate Dedup)
+        , ("tags", "vocabulary", Navigate Tags)
+        , ("ai tags", "suggestions", Navigate AiTags)
+        , ("maintenance", "dead links and prune", Navigate Maintenance)
+        , ("accessions", "by year", Navigate Accessions)
+        , ("account", "security", Navigate Account)
+        ]
+
+    accountActions =
+        [ ("import bookmarks", "Netscape HTML", ImportStart)
+        , ("export bookmarks", "Netscape HTML", ExportClicked)
+        , ("toggle theme", "appearance", ThemeToggled)
+        , ("sign out", "session", LogoutRequest)
         ]
 
     toTextLow :: MisoString -> Text

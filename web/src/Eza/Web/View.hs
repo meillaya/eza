@@ -95,12 +95,10 @@ mast m =
 
 provenance :: Model -> View () () Model Action
 provenance m = H.p_ [HP.class_ "prov meta"] $ case mStats m of
-    Nothing -> [H.span_ [HP.class_ "prov-item"] [text "the catalogue is opening"]]
+    Nothing -> []
     Just s ->
         [ provItem (formatCount (lsTotal s)) " entries"
-        , provRule
         , provItem (formatCount (lsSources s)) " sources"
-        , provRule
         , H.span_
             [HP.class_ "prov-item"]
             [text "filed since ", H.span_ [HP.class_ "n"] [text (yearOfDay (lsFirstDay s))]]
@@ -108,7 +106,6 @@ provenance m = H.p_ [HP.class_ "prov meta"] $ case mStats m of
   where
     provItem n suffix =
         H.span_ [HP.class_ "prov-item"] [H.span_ [HP.class_ "n"] [text n], text suffix]
-    provRule = H.span_ [HP.class_ "prov-rule", HP.aria_ "hidden" "true"] []
 
 yearOfDay :: Text -> MisoString
 yearOfDay day = ms (T.unpack (T.take 4 day))
@@ -122,11 +119,11 @@ queryLine m =
                 [ HP.id_ "search-input"
                 , HP.class_ "query-input"
                 , HP.type_ "search"
-                , HP.placeholder_ "search the catalogue"
+                , HP.placeholder_ "search the library"
                 , HP.value_ (mQ m)
                 , HP.autocomplete_ "off"
                 , HP.spellcheck_ False
-                , HP.aria_ "label" "Search the catalogue"
+                , HP.aria_ "label" "Search the library"
                 , HE.onInput SearchInput
                 , HE.onKeyDown commitOnEnter
                 ]
@@ -204,22 +201,21 @@ countGroup m =
         , HP.aria_ "live" "polite"
         , HP.data_ "testid" "result-count-live"
         ]
-        ( if hasActiveFilters m
-            then
-                [ H.span_ [HP.class_ "result-count"] [text (formatCount (mTotal m))]
-                , H.span_
-                    [HP.class_ "result-unit meta"]
-                    [text (if mTotal m == 1 then "entry" else "entries")]
-                , H.span_ [HP.class_ "meta"] [text ("of " <> formatCount libraryTotal <> " in all")]
-                ]
-            else
-                [ H.span_
-                    [HP.class_ "meta"]
-                    [text (formatCount (length (mItems m)) <> " / " <> formatCount libraryTotal)]
-                ]
-        )
+        (countBody m)
     ]
   where
+    countBody model
+        | hasActiveFilters model =
+            [ H.span_ [HP.class_ "result-count"] [text (formatCount (mTotal model))]
+            , H.span_ [HP.class_ "result-unit meta"] [text (" of " <> formatCount libraryTotal)]
+            ]
+        | isInbox model =
+            [ H.span_ [HP.class_ "result-count"] [text (formatCount (mTotal model))]
+            , H.span_ [HP.class_ "result-unit meta"] [text " unread"]
+            ]
+        | otherwise =
+            [ H.span_ [HP.class_ "meta"] [text (formatCount libraryTotal <> " entries")]
+            ]
     libraryTotal = maybe (mTotal m) lsTotal (mStats m)
 
 sortControl :: Model -> [View () () Model Action]
@@ -350,14 +346,14 @@ routePath = \case
 statusBanners :: Model -> [View () () Model Action]
 statusBanners m =
     [ banner
-        "Live updates are paused"
-        "The server is unreachable. The catalogue you see was read earlier; nothing you change is saved until the connection returns."
+        "Offline"
+        "Changes are not saved until the connection returns."
         [H.a_ [HP.class_ "offline-banner-action", HP.href_ "/"] [text "reload"]]
     | not (mOnline m)
     ]
         ++ [ banner
                 "Signed out"
-                "Your session expired. Sign in again to keep editing the catalogue."
+                "Sign in to continue."
                 [H.a_ [HP.class_ "offline-banner-action", HP.href_ "/login"] [text "sign in"]]
            | mSignedOut m
            ]
@@ -410,11 +406,10 @@ notFoundPage =
                 [HP.class_ "empty"]
                 [ H.div_
                     [HP.class_ "empty-note"]
-                    [ H.span_ [HP.class_ "empty-kicker sc"] [text "404"]
-                    , H.h2_ [HP.class_ "empty-title"] [text "That page is not in the catalogue."]
+                    [ H.h2_ [HP.class_ "empty-title"] [text "That page is not in the catalogue."]
                     , H.p_
                         [HP.class_ "empty-body"]
-                        [text "The address does not match a record, a year or a section. The ledger is still here, and the catalogue behind it is unchanged."]
+                        [text "The address does not match a record or a section."]
                     , H.p_
                         [HP.class_ "empty-try"]
                         [ H.a_
@@ -531,7 +526,7 @@ railView m =
               ]
         )
     ]
-        ++ [savedSearchesBlock m | not (null (mSaved m)) || hasActiveFilters m]
+        ++ [savedSearchesBlock m]
         ++ [ H.div_
                 [HP.class_ "rail-block"]
                 [ railHead "Status" ""
@@ -543,7 +538,7 @@ railView m =
                 , sparkline m
                 , H.p_
                     [HP.class_ "spark-cap"]
-                    [H.span_ [] [text (filingTotals m)]]
+                    [H.span_ [] [text "last 52 weeks"]]
                 ]
            ]
   where
@@ -563,27 +558,33 @@ savedSearchesBlock :: Model -> View () () Model Action
 savedSearchesBlock m =
     H.div_
         [HP.class_ "rail-block"]
-        [ railHead "Saved searches" (formatCount (length (mSaved m)))
-        , H.ul_ [HP.class_ "facet-list"] (map savedRow (mSaved m))
-        , H.button_
-            [ HP.class_ "facet-all"
-            , HP.type_ "button"
-            , HE.onClick SavedSearchSave
-            ]
-            [text "save this search"]
-        , H.button_
-            [ HP.class_ "facet-all"
-            , HP.type_ "button"
-            , HP.data_ "testid" "view-save-current"
-            , HE.onClick (ViewSaveOpen LedgerKind)
-            ]
-            [text "save as view"]
-        ]
+        ( railHead (if null (mSaved m) then "" else formatCount (length (mSaved m)))
+            : [H.ul_ [HP.class_ "facet-list"] (map savedRow (mSaved m))]
+            ++ [ H.div_
+                    [HP.class_ "rail-actions"]
+                    [ H.button_
+                        [ HP.class_ "facet-all"
+                        , HP.type_ "button"
+                        , HE.onClick SavedSearchSave
+                        ]
+                        [text "save this search"]
+                    , H.button_
+                        [ HP.class_ "facet-all"
+                        , HP.type_ "button"
+                        , HP.data_ "testid" "view-save-current"
+                        , HE.onClick (ViewSaveOpen LedgerKind)
+                        ]
+                        [text "save as view"]
+                    ]
+               ]
+        )
   where
-    railHead title right =
+    railHead right =
         H.div_
             [HP.class_ "rail-head"]
-            [H.h2_ [HP.class_ "rail-title"] [text title], H.span_ [HP.class_ "rail-n"] [text right]]
+            [ H.h2_ [HP.class_ "rail-title"] [text "Saved searches"]
+            , H.span_ [HP.class_ "rail-n"] [text right]
+            ]
     savedRow saved =
         H.li_
             [HP.class_ "facet"]
@@ -658,11 +659,6 @@ statusRows m =
         (maybe "–" (formatCount . lsDead) (mStats m))
         (hasTerm m "is:dead")
         (SearchInput (toggleTerm m "is:dead"))
-    , statusRow
-        "queued"
-        (maybe "–" (formatCount . lsQueued) (mStats m))
-        False
-        (Navigate Maintenance)
     ]
 
 statusRow :: MisoString -> MisoString -> Bool -> Action -> View () () Model Action
@@ -692,15 +688,6 @@ sparkline m =
                 )
             ]
             []
-
--- | The archive totals behind the window: filing days since the first save.
-filingTotals :: Model -> MisoString
-filingTotals m = case mStats m of
-    Nothing -> ""
-    Just s ->
-        formatCount (lsDays s)
-            <> " filing days since "
-            <> formatFiled (fromMaybe 0 (dayNumber (lsFirstDay s)) * 86400)
 
 {- | Count filing days in each of the last 52 weeks, ending on the last filing
 day in the library.
@@ -1129,11 +1116,7 @@ freshEmpty =
         [HP.class_ "empty"]
         [ H.div_
             [HP.class_ "empty-note"]
-            [ H.span_ [HP.class_ "empty-kicker sc"] [text "no entries"]
-            , H.h2_ [HP.class_ "empty-title"] [text "The catalogue is empty."]
-            , H.p_
-                [HP.class_ "empty-body"]
-                [text "A fresh eza instance holds no records. File the first one from the browser toolbar, or import the bookmarks file you already keep; the ledger fills as the library grows."]
+            [ H.h2_ [HP.class_ "empty-title"] [text "No records yet."]
             , H.p_
                 [HP.class_ "empty-try"]
                 [ H.button_
@@ -1147,47 +1130,20 @@ freshEmpty =
         ]
 
 filteredEmpty :: Model -> View () () Model Action
-filteredEmpty m =
+filteredEmpty _ =
     H.div_
         [HP.class_ "empty"]
         [ H.div_
             [HP.class_ "empty-note"]
-            [ H.span_ [HP.class_ "empty-kicker sc"] [text "0 entries"]
-            , H.h2_ [HP.class_ "empty-title"] [text "Nothing is filed under this query."]
-            , H.p_
-                [HP.class_ "empty-body"]
-                [ text "The catalogue holds "
-                , text (formatCount (maybe 0 lsTotal (mStats m)))
-                , text " entries and "
-                , text (formatCount (maybe 0 lsSources (mStats m)))
-                , text " sources, but no record answers every part of the query. The search language is literal: "
-                , H.span_ [HP.class_ "mono"] [text "tag:"]
-                , text " needs an existing tag, "
-                , H.span_ [HP.class_ "mono"] [text "link:"]
-                , text " needs a note that links to a record, a leading "
-                , H.span_ [HP.class_ "mono"] [text "−"]
-                , text " excludes. The "
-                , H.span_ [HP.class_ "mono"] [text "year:"]
-                , text " operator takes YYYY and "
-                , H.span_ [HP.class_ "mono"] [text "day:"]
-                , text " takes YYYY-MM-DD."
-                ]
+            [ H.h2_ [HP.class_ "empty-title"] [text "Nothing is filed under this query."]
             , H.p_
                 [HP.class_ "empty-try"]
-                ( H.span_ [HP.class_ "try-label meta"] [text "try"]
-                    : map tryLink ["tag:books", "is:unread", "link:Determinate", "year:2025", "day:2025-11-03"]
-                    ++ [ H.button_
-                            [HP.class_ "try-link", HP.type_ "button", HE.onClick ClearFilters]
-                            [text "clear the query"]
-                       ]
-                )
+                [ H.button_
+                    [HP.class_ "try-link", HP.type_ "button", HE.onClick ClearFilters]
+                    [text "clear the query"]
+                ]
             ]
         ]
-  where
-    tryLink label =
-        H.button_
-            [HP.class_ "try-link", HP.type_ "button", HE.onClick (SearchInput (msText label))]
-            [text (msText label)]
 
 inboxEmpty :: Model -> View () () Model Action
 inboxEmpty _ =
@@ -1195,19 +1151,12 @@ inboxEmpty _ =
         [HP.class_ "empty"]
         [ H.div_
             [HP.class_ "empty-note"]
-            [ H.span_ [HP.class_ "empty-kicker sc"] [text "inbox clear"]
-            , H.h2_ [HP.class_ "empty-title"] [text "The inbox is clear."]
-            , H.p_
-                [HP.class_ "empty-body"]
-                [text "Every record in this list has been read. New saves arrive here unread and leave it when they are marked read; nothing else changes in the catalogue."]
+            [ H.h2_ [HP.class_ "empty-title"] [text "The inbox is clear."]
             , H.p_
                 [HP.class_ "empty-try"]
                 [ H.a_
                     [HP.class_ "try-link", HP.href_ "/", HE.onClickPrevent (Navigate Index)]
                     [text "go to the ledger"]
-                , H.button_
-                    [HP.class_ "try-link", HP.type_ "button", HE.onClick AddOpen]
-                    [text "file a record"]
                 ]
             ]
         ]
@@ -1218,23 +1167,16 @@ errorState m =
         [HP.class_ "empty ledg-error"]
         [ H.div_
             [HP.class_ "empty-note", HP.role_ "alert"]
-            [ H.span_ [HP.class_ "empty-kicker sc"] [text "read failed"]
-            , H.h2_ [HP.class_ "empty-title"] [text "The ledger could not be read."]
+            [ H.h2_ [HP.class_ "empty-title"] [text "The ledger could not be read."]
             , H.p_
                 [HP.class_ "empty-body"]
-                [text "The server did not answer the list request. The library in SQLite is untouched; retry, or open maintenance to see which query failed."]
+                [text "The server did not answer the list request."]
             , H.p_ [HP.class_ "ledg-error-code mono"] [text (fromMaybe "" (mError m))]
             , H.p_
                 [HP.class_ "ledg-error-actions"]
                 [ H.button_
                     [HP.class_ "btn", HP.type_ "button", HE.onClick SearchCommit]
                     [text "retry"]
-                , H.a_
-                    [ HP.class_ "btn btn--ghost"
-                    , HP.href_ "/maintenance"
-                    , HE.onClickPrevent (Navigate Maintenance)
-                    ]
-                    [text "open maintenance"]
                 ]
             ]
         ]
@@ -1250,8 +1192,7 @@ invalidHint m = case invalidFlags (qText m) of
         let (suffix, body) = droppedCopy bad
          in [ H.div_
                 [HP.class_ "srch-hint"]
-                [ H.p_ [HP.class_ "srch-hint-kicker sc"] [text "dropped token"]
-                , H.p_
+                [ H.p_
                     [HP.class_ "srch-hint-title"]
                     [H.span_ [HP.class_ "mono"] [text (msText bad)], text suffix]
                 , H.p_ [HP.class_ "srch-hint-body"] [text body]
@@ -1262,13 +1203,9 @@ invalidHint m = case invalidFlags (qText m) of
 droppedCopy :: Text -> (MisoString, MisoString)
 droppedCopy bad
     | isMalformedDate bad =
-        ( " is not a complete date and was dropped."
-        , "The parser drops a year: or day: token that is not a full date; it is not an error. Use year:YYYY or day:YYYY-MM-DD. Other flags are is:unread and is:dead."
-        )
+        (" is not a complete date.", "Use year:YYYY or day:YYYY-MM-DD.")
     | otherwise =
-        ( " is not a search flag."
-        , "The parser ignores an unknown is: value; it is not an error. The list below is what remains of the query. Known flags: is:unread, is:dead, year:YYYY and day:YYYY-MM-DD."
-        )
+        (" is not a search flag.", "Known flags are is:unread, is:dead, year:YYYY and day:YYYY-MM-DD.")
 
 invalidFlags :: Text -> [Text]
 invalidFlags query =
@@ -1303,16 +1240,11 @@ ledgerFoot m =
         , H.span_ [HP.class_ "ledg-foot-actions"] (footActions m)
         ]
   where
-    footCount model
-        | hasActiveFilters model =
-            "showing "
-                <> formatCount (length (mItems model))
-                <> " of "
-                <> formatCount (mTotal model)
-        | otherwise =
-            formatCount (length (mItems model))
-                <> " / "
-                <> formatCount (maybe (length (mItems model)) lsTotal (mStats model))
+    footCount model =
+        formatCount (length (mItems model))
+            <> " of "
+            <> formatCount (if hasActiveFilters model then mTotal model else maybe (length (mItems model)) lsTotal (mStats model))
+            <> " entries"
     footActions model
         | isInbox model =
             [ H.button_
@@ -1362,7 +1294,7 @@ mobileNav m =
             , HP.aria_ "label" "Sign out"
             , HE.onClick LogoutRequest
             ]
-            [text "out"]
+            [text "sign out"]
         , H.button_
             [ HP.class_ "m-nav-a m-nav-a--plus"
             , HP.type_ "button"
@@ -1404,16 +1336,13 @@ savePage m =
                     [ H.h2_ [HP.class_ "save-title"] [text "File a record"]
                     , H.p_
                         [HP.class_ "save-lede"]
-                        [text "Prefilled from the page you were reading. Adjust the title, tags or note before filing; the address is kept exactly as it arrived."]
+                        [text "The record keeps the page address as it arrived."]
                     ]
                 , H.div_
                     [HP.class_ "save-fields"]
                     ( [ saveField "address" "save-url" "url" (mAddUrl m) AddUrlInput False
                       , saveField "title" "save-title" "text" (mAddTitle m) AddTitleInput True
                       , saveField "tags" "save-tags" "text" (mAddTags m) AddTagsInput False
-                      , H.p_
-                            [HP.class_ "save-hint"]
-                            [text "A new name creates a new tag in the catalogue."]
                       , H.div_
                             [HP.class_ "save-field"]
                             [ H.label_ [HP.class_ "save-label", HP.for_ "save-note"] [text "note"]
@@ -1445,16 +1374,7 @@ savePage m =
                         )
                         [text (if mAddBusy m then "filing" else "file it")]
                     ]
-                , H.p_
-                    [HP.class_ "save-status meta"]
-                    [ text
-                        ( if mAddBusy m
-                            then "filing: the record is written first, then the note"
-                            else "the address is checked against the library when you file"
-                        )
-                    ]
                 ]
-            , saveNotes m
             ]
         ]
 
@@ -1473,17 +1393,15 @@ duplicateNote m = case duplicateId m of
     Just bid ->
         H.div_
             [HP.class_ "save-warning"]
-            [ H.span_ [HP.class_ "save-warning-kicker sc"] [text "already filed"]
-            , H.p_
+            [ H.p_
                 [HP.class_ "save-warning-body"]
-                [ text "This address is already in the catalogue as "
+                [ text "Already in your library as "
                 , H.a_
                     [ HP.class_ "save-warning-no"
                     , HP.href_ (routePath (Bookmark bid))
                     , HE.onClickPrevent (Navigate (Bookmark bid))
                     ]
                     [text (accessionNo bid)]
-                , text ". Filing a second copy is not supported; open the record instead."
                 ]
             ]
 
@@ -1502,35 +1420,6 @@ saveField label domId inputType value onInput wide =
             , HE.onInput onInput
             ]
         ]
-
-saveNotes :: Model -> View () () Model Action
-saveNotes m =
-    H.aside_
-        [HP.class_ "save-notes", HP.aria_ "label" "What filing does"]
-        [ H.h2_ [HP.class_ "save-notes-title sc"] [text "What filing does"]
-        , H.dl_
-            [HP.class_ "save-rules"]
-            ( map
-                (\(term, detail) -> H.div_ [HP.class_ "save-rule"] [H.dt_ [] [text term], H.dd_ [] [text detail]])
-                [ ("accession", "one number, reserved at filing")
-                , ("duplicates", "checked against normalised addresses")
-                , ("tags", "literal; a new name makes a new tag")
-                , ("writes", "the record first, then the note when one is supplied")
-                ]
-            )
-        , H.p_
-            [HP.class_ "save-note"]
-            [text "The quick save path is the same write the bookmarklet and the installed share target use. Filing stores the address; fetching and extraction are separate jobs."]
-        , H.p_ [HP.class_ "save-colophon meta"] [text (saveColophon m)]
-        ]
-
--- | The colophon only names years the library actually reports.
-saveColophon :: Model -> MisoString
-saveColophon m = case mStats m of
-    Just stats
-        | not (T.null (T.strip (lsFirstDay stats))) ->
-            "eza · " <> yearOfDay (lsFirstDay stats) <> " to " <> yearOfDay (lsLastDay stats)
-    _ -> "eza"
 
 isNothingMaybe :: Maybe a -> Bool
 isNothingMaybe Nothing = True
@@ -1558,7 +1447,7 @@ paletteView m =
                         [ HP.id_ "palette-input"
                         , HP.class_ "slip-input"
                         , HP.type_ "text"
-                        , HP.placeholder_ "a command, a query, an accession"
+                        , HP.placeholder_ "search or type a command"
                         , HP.aria_ "label" "Search commands and records"
                         , HP.autofocus_ True
                         , HP.value_ (mPaletteQ m)
@@ -1570,9 +1459,7 @@ paletteView m =
                     ]
                 , H.div_
                     [HP.class_ "slip-body"]
-                    ( H.div_ [HP.class_ "slip-sec meta"] [text "Commands and entries"]
-                        : zipWith (paletteRow m) [0 ..] (paletteEntries m)
-                    )
+                    (zipWith (paletteRow m) [0 ..] (paletteEntries m))
                 , H.div_
                     [HP.class_ "slip-foot meta"]
                     [ H.span_ [] [H.kbd_ [] [text "↑"], text " ", H.kbd_ [] [text "↓"], text " move"]
@@ -1660,24 +1547,14 @@ savedSearchShareDialog m = case mSavedShare m of
                         ]
                   , H.p_
                         [HP.class_ "dshare-copy"]
-                        [ text
-                            ( ms
-                                ( "A read-only page of “"
-                                    <> ssName saved
-                                    <> "” and an Atom feed at the same address. The link is unguessable and can be revoked here."
-                                )
-                            )
-                        ]
+                        [text "A read-only page and Atom feed at one address."]
                   ]
                     ++ savedSearchShareLinkRow m
                     ++ [ savedSearchShareFields m
                        , savedSearchShareLinks m saved
                        , H.div_
                             [HP.class_ "dshare-foot"]
-                            [ H.p_
-                                [HP.class_ "dshare-note"]
-                                [text "The recipient does not need an account, and this does not make the library public."]
-                            , H.button_
+                            [ H.button_
                                 [HP.class_ "btn", HP.type_ "button", HE.onClick SavedSearchShareClose]
                                 [text "done"]
                             ]
@@ -1832,9 +1709,6 @@ addDialog m =
                                 [ H.div_
                                     [HP.class_ "bar"]
                                     [H.i_ [C.styleInline_ "width:60%"] []]
-                                , H.p_
-                                    [HP.class_ "add-progress-note meta"]
-                                    [text "filing: one write, no network call"]
                                 ]
                            | mAddBusy m
                            ]
@@ -1892,17 +1766,16 @@ duplicateBlock m = case duplicateId m of
     Just bid ->
         H.div_
             [HP.class_ "add-dup"]
-            [ H.p_ [HP.class_ "add-dup-title sc"] [text "already filed"]
+            [ H.p_ [HP.class_ "add-dup-title sc"] [text "Already in your library"]
             , H.p_
                 [HP.class_ "add-dup-body"]
-                [ text "This address is already in the catalogue as "
+                [ text "Filed as "
                 , H.a_
                     [ HP.class_ "add-dup-link"
                     , HP.href_ (routePath (Bookmark bid))
                     , HE.onClickPrevent (Navigate (Bookmark bid))
                     ]
                     [text (accessionNo bid)]
-                , text ". Filing a second copy is not supported; open the record instead."
                 ]
             , H.div_
                 [HP.class_ "add-dup-actions"]
@@ -1930,7 +1803,7 @@ guardDialog _ =
             [ dialogHead "Unsaved changes"
             , H.div_
                 [HP.class_ "dialog__body", HP.data_ "testid" "dialog-body"]
-                [H.p_ [] [text "Your note or title edits have not been saved yet. Leave anyway?"]]
+                [H.p_ [] [text "Leaving discards your unsaved edits."]]
             , H.div_
                 [HP.class_ "dialog__foot"]
                 [ H.span_ [HP.class_ "spacer"] []
@@ -1959,10 +1832,7 @@ logoutDialog =
             [ dialogHead "Sign out"
             , H.div_
                 [HP.class_ "dialog__body", HP.data_ "testid" "dialog-body"]
-                [ H.p_
-                    []
-                    [text "The note or title edits on this record have not been saved yet. Signing out leaves them behind."]
-                ]
+                [H.p_ [] [text "Signing out discards your unsaved edits."]]
             , H.div_
                 [HP.class_ "dialog__foot"]
                 [ H.span_ [HP.class_ "spacer"] []
@@ -2005,7 +1875,7 @@ tagPromptDialog m =
                     [HP.class_ "meta"]
                     ( text (formatCount (selectedCount m))
                         : [ text
-                                ( " bookmark"
+                                ( " record"
                                     <> (if selectedCount m == 1 then "" else "s")
                                     <> " will be updated."
                                 )
@@ -2022,8 +1892,8 @@ tagPromptDialog m =
         ]
   where
     title
-        | mTagPrompt m == Just True = "Add tags to selection"
-        | otherwise = "Remove tags from selection"
+        | mTagPrompt m == Just True = "Add tags"
+        | otherwise = "Remove tags"
     enterSubmits (KeyCode 13) = BulkTagSubmit
     enterSubmits _ = Noop
 
@@ -2047,9 +1917,9 @@ bulkDeleteDialog m =
                     [ text
                         ( "Delete "
                             <> formatCount (selectedCount m)
-                            <> " selected record"
+                            <> " record"
                             <> (if selectedCount m == 1 then "" else "s")
-                            <> "? A snapshot is kept, so this can be undone from maintenance."
+                            <> "? A snapshot is kept, so this can be undone."
                         )
                     ]
                 ]
