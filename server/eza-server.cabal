@@ -126,6 +126,7 @@ test-suite eza-test
                     ClipSpec
                     CliSpec
                     IsolationSpec
+                    LedgerSpec
                     TestHarness
                     WorkerSpec
                     ControlSpec

@@ -50,6 +50,8 @@ import Text.Read (readMaybe)
 
 import Eza.Boot (BootPayload)
 import Eza.GraphMatch (ColorAssignment)
+import Eza.Ledger (LedgerEntry (..))
+import qualified Eza.Ledger as Ledger
 import Eza.Types (
     Backlink,
     BookmarkDetail,
@@ -1338,34 +1340,18 @@ isoDay t =
     pad :: Int -> String
     pad n = if n < 10 then '0' : show n else show n
 
--- | One line of the ledger: a year divider or a record row.
-data LedgerEntry
-    = LedgerYear Int (Maybe Int)
-    | LedgerRow Int BookmarkSummary
+{- | One line of the ledger: a year divider or a record row.
 
-{- | Group the loaded records into year dividers plus rows. The order the API
-returned is kept inside each year and the first appearance of a year decides
-where its divider sits, so a title sort still reads as one ledger.
+The type and the pure grouping live in "Eza.Ledger" so the native test
+suite can cover the divider order.
+-}
+
+{- | Group the loaded records into one year section per filed year, in the
+order each year first appears in the loaded results. The grouping itself is
+'Eza.Ledger.ledgerEntries'; the model only supplies the per-year match counts.
 -}
 ledgerEntries :: Model -> [LedgerEntry]
-ledgerEntries m =
-    let here = M.fromList (mYearHere m)
-        rows = mItems m
-        years = orderedYears rows
-        block year =
-            LedgerYear year (M.lookup year here)
-                : [ LedgerRow idx b
-                  | (idx, b) <- zip [0 ..] rows
-                  , bsCreatedAt b > 0
-                  , yearOf (bsCreatedAt b) == year
-                  ]
-     in concatMap block years
-  where
-    orderedYears [] = []
-    orderedYears (b : rest) =
-        let y = yearOf (bsCreatedAt b)
-            restYears = orderedYears rest
-         in if y `elem` restYears then restYears else y : restYears
+ledgerEntries m = Ledger.ledgerEntries (mYearHere m) (mItems m)
 
 -- | Pixel height of the whole ledger at the current width.
 ledgerContentHeight :: Model -> Int

@@ -43,7 +43,8 @@ What the cases measure:
 - `all` and `all-page2`: one ledger page (list query plus its tag query) at
   offset 0 and 60. Year counts are part of the first page only; later pages
   derive the total from one count.
-- `fts-rust`, `fts-github`: the FTS5 `MATCH` join with rank ordering.
+- `fts-rust`, `fts-github`: the FTS5 `MATCH` join, with the requested sort
+  (the rank only separates text hits from tag-name fallback matches).
 - `tag-imported`, `tag-imported-books`: the tag filter, still the most
   expensive list shape because the filtered id set is materialised before the
   year-count scan.

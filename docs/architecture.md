@@ -145,7 +145,8 @@ leave stale terms behind.
 The parser in `Eza.SearchQuery` splits a query into a text part and a set of
 filters. Free-text terms match the FTS index and, as a fallback, tag names, so
 `rust` finds records filed under the `rust` tag even when no indexed field
-contains the word; FTS hits rank first:
+contains the word; rows that matched the index come first, then the selected
+sort orders both groups:
 
 ```
 tag:<name>       exact tag filter
