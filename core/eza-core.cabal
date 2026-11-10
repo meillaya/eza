@@ -18,6 +18,7 @@ library
                     Eza.GraphLayout
                     Eza.GraphMatch
                     Eza.Json
+                    Eza.Ledger
                     Eza.SearchQuery
                     Eza.Time
                     Eza.TokenPrefix

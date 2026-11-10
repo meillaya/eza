@@ -42,6 +42,7 @@ import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), GraphData (..), Gra
 import Eza.Url (dedupeKey, dedupeLookupUrls, normalizeUrl)
 import qualified GraphLayoutSpec
 import qualified IsolationSpec
+import qualified LedgerSpec
 import qualified PerfSpec
 import qualified SecuritySpec
 import qualified ViewContractSpec
@@ -458,6 +459,53 @@ main = hspec $ do
                 case spItems page of
                     (item : _) -> bsSnippet item `shouldSatisfy` maybe False (T.isInfixOf "rustacean")
                     [] -> expectationFailure "expected the dated search to find the bookmark"
+                close conn
+
+    describe "searched list ordering" $ do
+        it "orders full-text matches by created_at, not by rank" $
+            withSystemTempDirectory "eza-search-sort-created" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                old <- insertFiledBookmark conn "https://s.test/old" "Rust old" "s.test" 1672531200 0
+                middle <- insertFiledBookmark conn "https://s.test/middle" "Rust middle" "s.test" 1700000000 0
+                recent <- insertFiledBookmark conn "https://s.test/recent" "Rust recent" "s.test" 1717200000 0
+                page <- listBookmarks conn (defaultListQuery{lqQ = "Rust"})
+                map bsId (spItems page) `shouldBe` [recent, middle, old]
+                close conn
+
+        it "orders a searched list by added_at when asked" $
+            withSystemTempDirectory "eza-search-sort-added" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                first <- insertFiledBookmark conn "https://s.test/a" "Rust a" "s.test" 1700000000 0
+                second <- insertFiledBookmark conn "https://s.test/b" "Rust b" "s.test" 1700000001 0
+                third <- insertFiledBookmark conn "https://s.test/c" "Rust c" "s.test" 1700000002 0
+                setAddedAt conn first 300
+                setAddedAt conn second 100
+                setAddedAt conn third 200
+                page <- listBookmarks conn (defaultListQuery{lqQ = "Rust", lqSort = "added"})
+                map bsId (spItems page) `shouldBe` [first, third, second]
+                close conn
+
+        it "orders a searched list by last_opened_at when asked" $
+            withSystemTempDirectory "eza-search-sort-opened" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                first <- insertFiledBookmark conn "https://s.test/a" "Rust a" "s.test" 1700000000 0
+                second <- insertFiledBookmark conn "https://s.test/b" "Rust b" "s.test" 1700000001 0
+                third <- insertFiledBookmark conn "https://s.test/c" "Rust c" "s.test" 1700000002 0
+                setLastOpenedAt conn first 100
+                setLastOpenedAt conn third 200
+                page <- listBookmarks conn (defaultListQuery{lqQ = "Rust", lqSort = "opened"})
+                map bsId (spItems page) `shouldBe` [third, first, second]
+                close conn
+
+        it "keeps tag-name fallback matches after the full-text hits" $
+            withSystemTempDirectory "eza-search-sort-fallback" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                textHit <- insertFiledBookmark conn "https://s.test/text" "Rust notes" "s.test" 1672531200 0
+                fallback <- insertFiledBookmark conn "https://s.test/tag" "Unrelated record" "s.test" 1790000000 0
+                attachTag conn fallback "rust"
+                page <- listBookmarks conn (defaultListQuery{lqQ = "rust"})
+                spTotal page `shouldBe` 2
+                map bsId (spItems page) `shouldBe` [textHit, fallback]
                 close conn
 
     describe "global graph" $ do
@@ -968,6 +1016,7 @@ main = hspec $ do
 
     DataIntegritySpec.spec
     DedupSpec.spec
+    LedgerSpec.spec
     GraphLayoutSpec.spec
     AuthzSpec.authzSpec
     CoreViewSpec.coreViewSpec
@@ -1070,6 +1119,16 @@ insertFiledBookmark conn url title domain createdAt isRead = do
         "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at,is_read) VALUES (?,?,?,?,?,?,?)"
         (url, title, domain, createdAt, createdAt, createdAt, isRead)
     fromIntegral <$> Sqlite.lastInsertRowId conn
+
+-- | Move a bookmark's added date, for the searched-sort tests.
+setAddedAt :: Sqlite.Connection -> Int -> Int -> IO ()
+setAddedAt conn bid value =
+    Sqlite.execute conn "UPDATE bookmarks SET added_at = ? WHERE id = ?" (value, bid)
+
+-- | Move a bookmark's last-opened date, for the searched-sort tests.
+setLastOpenedAt :: Sqlite.Connection -> Int -> Int -> IO ()
+setLastOpenedAt conn bid value =
+    Sqlite.execute conn "UPDATE bookmarks SET last_opened_at = ? WHERE id = ?" (value, bid)
 
 -- | Create the tag when needed and attach it to the bookmark.
 attachTag :: Sqlite.Connection -> Int -> Text -> IO ()

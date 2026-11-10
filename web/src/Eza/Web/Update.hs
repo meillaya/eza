@@ -886,7 +886,10 @@ updateModel = \case
                 m
                     { mItems = fresh
                     , mTotal = spTotal page
-                    , mYearHere = spYearCounts page
+                    , -- The server computes the per-year match counts on the
+                      -- first page only; keeping them on append stops the
+                      -- "/ N here" figure vanishing on the first scroll.
+                      mYearHere = if append then mYearHere m else spYearCounts page
                     , mHasMore = spHasMore page
                     , mLoading = False
                     , mLoadingMore = False

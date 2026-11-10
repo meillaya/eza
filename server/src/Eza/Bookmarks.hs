@@ -209,11 +209,17 @@ buildFilter q parsed tags =
     joinSql = case sqFts parsed of
         -- LEFT JOIN so a tag-name match can surface a row the text index did
         -- not match; the combined filter below accepts either source.
-        Just _ -> " LEFT JOIN (SELECT rowid, rank FROM bookmarks_fts WHERE bookmarks_fts MATCH :fts) f ON f.rowid = b.id "
+        Just _ -> " LEFT JOIN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH :fts) f ON f.rowid = b.id "
         Nothing -> ""
     orderSql = case sqFts parsed of
+        -- The selected sort is the contract for every list request, searches
+        -- included. The rank only decides which rows are full-text hits: rows
+        -- that matched only through the tag-name fallback come after the ones
+        -- the text index matched, and the sort (then the id) orders each
+        -- group. Rank-first ordering would silently turn the ledger sort into
+        -- a no-op for every search.
         Just _ ->
-            " ORDER BY CASE WHEN f.rowid IS NULL THEN 1 ELSE 0 END, f.rank ASC, "
+            " ORDER BY CASE WHEN f.rowid IS NULL THEN 1 ELSE 0 END, "
                 <> sortClause
         Nothing -> " ORDER BY " <> sortClause
     sortClause = case T.toLower (T.strip (lqSort q)) of
