@@ -86,6 +86,7 @@ ezaKeyDecoder =
                 <*> (o MJ..:? "metaKey" MJ..!= False)
                 <*> (o MJ..:? "altKey" MJ..!= False)
                 <*> (o MJ..:? "editable" MJ..!= False)
+                <*> (o MJ..:? "row")
 
 -- ---------------------------------------------------------------- helpers --
 
@@ -261,6 +262,9 @@ reloadList = do
               mSelection = IS.empty
             , mSelectAnchor = Nothing
             , mSelectingAll = False
+            , mSelectFetched = 0
+            , mSelectEpoch = mSelectEpoch m + 1
+            , mSelectParams = Nothing
             , mConfirmMarkAll = False
             , mBulkBusy = False
             , mConfirmBulkDelete = False
@@ -396,6 +400,12 @@ loadRoute route = do
             , mSelection = IS.empty
             , mSelectAnchor = Nothing
             , mSelectingAll = False
+            , mSelectFetched = 0
+            , mSelectEpoch = mSelectEpoch m + 1
+            , mSelectParams = Nothing
+            , mReadRequest = mReadRequest m + 1
+            , mReadPending = False
+            , mGuardFromHistory = False
             , mBulkBusy = False
             , mTagPrompt = Nothing
             , mTagPromptValue = ""
@@ -628,15 +638,25 @@ updateModel = \case
                 when (route == Account) $
                     putModel (\x -> x{mAccountTab = accountTabFromSlug fragmentText})
                 if mDirty m && route /= mRoute m && isDetailRoute (mRoute m)
-                    then put m{mGuardOpen = True, mPendingRoute = Just route}
-                    else loadRoute route
+                    then
+                        -- The browser already changed the address before the
+                        -- subscription delivered this route. Remember that so
+                        -- cancelling can put the address back and discarding
+                        -- can avoid a duplicate history entry.
+                        put m{mGuardOpen = True, mPendingRoute = Just route, mGuardFromHistory = True}
+                    else do
+                        -- A history navigation that lands on the rendered
+                        -- route (e.g. Forward while the guard is open) closes
+                        -- the guard instead of re-deriving it.
+                        putModel (\x -> x{mGuardOpen = False, mPendingRoute = Nothing, mGuardFromHistory = False})
+                        loadRoute route
     Navigate route -> do
         m <- get
         if route == mRoute m
             then pure ()
             else
                 if mDirty m && isDetailRoute (mRoute m)
-                    then put m{mGuardOpen = True, mPendingRoute = Just route}
+                    then put m{mGuardOpen = True, mPendingRoute = Just route, mGuardFromHistory = False}
                     else withSink $ \_ -> pushRoute route
     ThemeToggled -> withSink $ \sink -> do
         holder <- jsg "EzaTheme"
@@ -660,14 +680,7 @@ updateModel = \case
     CopyBookmarklet bookmarklet
         | T.null (T.strip (fromMisoString bookmarklet)) ->
             notify "Bookmarklet unavailable." ToastInfo
-        | otherwise -> withSink $ \sink -> do
-            copiedValue <- jsgf "ezaCopy" (bookmarklet :: MisoString)
-            copied <- fromMaybe False <$> (fromJSVal copiedValue :: IO (Maybe Bool))
-            sink
-                ( ToastAdd
-                    (if copied then "Bookmarklet copied" else "Copy failed. Drag the link instead")
-                    (if copied then ToastOk else ToastError)
-                )
+        | otherwise -> copyText bookmarklet "Bookmarklet copied" "Copy failed. Drag the link instead"
     LayoutChanged width height -> do
         putModel (\m -> m{mWidth = width, mHeight = height})
         withSink $ \sink -> do
@@ -713,7 +726,11 @@ updateModel = \case
             editable = keEditable key
             plain = not withModifier && not (keAlt key)
             ledger = isListRoute (mRoute m)
-            graphKeys = isGraphRoute (mRoute m) && not editable && plain && not (hasModalLayer m)
+            -- A dialog owns the keyboard: no page shortcut below runs while a
+            -- modal layer is open, so Enter on a dialog button cannot also
+            -- open the record behind it.
+            modal = hasModalLayer m
+            graphKeys = isGraphRoute (mRoute m) && not editable && plain && not modal
             runAction action = updateModel action
         -- event.key is upper case for a shifted letter; the shortcut names
         -- below are the unshifted ones.
@@ -721,25 +738,32 @@ updateModel = \case
             -- Escape closes the top layer from any focus, including a field.
             -- On the graph it clears the filter line first, then the selection.
             "escape"
-                | isGraphRoute (mRoute m) && not (hasModalLayer m) -> graphEscape m
+                | isGraphRoute (mRoute m) && not modal -> graphEscape m
                 | otherwise -> closeTopLayer m
+            -- The palette keeps the keys that drive its own list while it is
+            -- the top layer.
+            "enter" | mPaletteOpen m -> runAction PaletteSelect
+            "arrowup" | mPaletteOpen m -> runAction PalettePrev
+            "arrowdown" | mPaletteOpen m -> runAction PaletteNext
             -- The command palette is reachable from every screen: the command
             -- mods always, Shift+K outside fields, and a bare k off the ledger
             -- (so the hint on the search line is not the only way in).
-            "k" | withModifier -> runAction PaletteOpen
-            "k" | not editable && keShift key -> runAction PaletteOpen
-            "k" | not editable && plain && ledger -> moveCursor (-1)
-            "k" | not editable && plain && not (hasModalLayer m) -> runAction PaletteOpen
-            "j" | not editable && plain && ledger -> moveCursor 1
+            "k" | not modal && withModifier -> runAction PaletteOpen
+            "k" | not modal && not editable && keShift key -> runAction PaletteOpen
+            "k" | not modal && not editable && plain && ledger -> moveCursor (-1)
+            "k" | not modal && not editable && plain -> runAction PaletteOpen
+            "j" | not modal && not editable && plain && ledger -> moveCursor 1
             -- The search line: focus it from any screen, but never steal a
             -- slash the user is typing into a field.
-            "/" | not editable -> do
+            "/" | not modal && not editable -> do
                 runAction PaletteClose
                 liftSinkIO (focus "search-input")
-            "enter" | mPaletteOpen m -> runAction PaletteSelect
-            "enter" | not editable && ledger -> openCursorRecord m
-            "arrowup" | mPaletteOpen m -> runAction PalettePrev
-            "arrowdown" | mPaletteOpen m -> runAction PaletteNext
+            -- Enter opens the focused row when the keyboard bridge reports
+            -- one; otherwise it falls back to the cursor row.
+            "enter" | not modal && not editable && ledger ->
+                case keRow key of
+                    Just bookmarkId -> activateRow bookmarkId
+                    Nothing -> openCursorRecord m
             -- The graph keys live on the global bridge so the canvas never
             -- scrolls the panel while panning; pwa.js cancels the browser
             -- default for arrows and zoom keys on the graph canvas.
@@ -754,7 +778,7 @@ updateModel = \case
             "0" | graphKeys -> runAction GraphFit
             "f" | graphKeys -> runAction GraphFit
             "enter" | graphKeys -> graphOpenSelected m
-            "s" | withModifier && isDetailRoute (mRoute m) -> runAction SaveBookmark
+            "s" | not modal && withModifier && isDetailRoute (mRoute m) -> runAction SaveBookmark
             _ -> pure ()
     Noop -> pure ()
     -- boot ------------------------------------------------------------------
@@ -828,7 +852,12 @@ updateModel = \case
     LedgerCursorNext -> moveCursor 1
     LedgerCursorPrev -> moveCursor (-1)
     LedgerCursorSet idx -> setCursor idx
-    DrawerOpen bid -> putModel (\m -> m{mDrawer = Just bid})
+    DrawerOpen bid -> do
+        m <- get
+        let cursor = case indexOfBookmark (mItems m) bid of
+                Just idx -> Just idx
+                Nothing -> mLedgerCursor m
+        putModel (\x -> x{mDrawer = Just bid, mLedgerCursor = cursor})
     DrawerClose -> putModel (\m -> m{mDrawer = Nothing})
     AccountTabSelected tab -> do
         putModel (\m -> m{mAccountTab = tab})
@@ -852,7 +881,20 @@ updateModel = \case
                     , mSelection = IS.empty
                     , mSelectAnchor = Nothing
                     , mSelectingAll = False
+                    , mSelectFetched = 0
+                    , mSelectEpoch = mSelectEpoch m + 1
+                    , mSelectParams = Nothing
                     , mConfirmMarkAll = False
+                    , -- The input now names a query no in-flight page can
+                      -- answer, so invalidate the list epoch at once: stale
+                      -- ListLoaded/ListFailed responses are dropped and
+                      -- loadMore cannot mix the new query with the old offset
+                      -- during the debounce window.
+                      mListEpoch = mListEpoch m + 1
+                    , mLoading = True
+                    , mLoadingMore = False
+                    , mHasMore = False
+                    , mError = Nothing
                     }
             )
         scheduleSearch 180
@@ -898,7 +940,9 @@ updateModel = \case
                     , mConfirmMarkAll = False
                     , mSelection = if append then mSelection m else IS.empty
                     , mSelectAnchor = if append then mSelectAnchor m else Nothing
-                    , mSelectingAll = False
+                    , mSelectingAll = if append then mSelectingAll m else False
+                    , mSelectEpoch = if append then mSelectEpoch m else mSelectEpoch m + 1
+                    , mSelectParams = if append then mSelectParams m else Nothing
                     , mLedgerCursor =
                         case (append, mLedgerCursor m) of
                             (False, _) -> Nothing
@@ -1098,17 +1142,18 @@ updateModel = \case
             Nothing -> pure ()
             Just detail -> do
                 putModel (\x -> x{mSaving = True})
-                patchBookmark
-                    (bdId detail)
-                    ( object
+                let fields =
                         [ "title" .= mEditTitle m
                         , "note_body" .= mEditNote m
-                        , "is_read" .= bdIsRead detail
                         , "tags" .= mEditTags m
                         ]
-                    )
-                    SavedOk
-                    SaveFailed
+                    -- A read toggle that is still in flight owns is_read: this
+                    -- save must not echo a flag the server has not confirmed.
+                    readField =
+                        [ "is_read" .= bdIsRead detail
+                        | not (mReadPending m)
+                        ]
+                patchBookmark (bdId detail) (object (fields ++ readField)) SavedOk SaveFailed
     SavedOk -> do
         putModel (\m -> m{mSaving = False, mDirty = False})
         notify "Saved" ToastOk
@@ -1124,26 +1169,44 @@ updateModel = \case
             Nothing -> pure ()
             Just detail -> do
                 let nextRead = not (bdIsRead detail)
-                putModel (\x -> x{mDetail = Just detail{bdIsRead = nextRead}})
+                    requestId = mReadRequest m + 1
+                putModel
+                    ( \x ->
+                        x
+                            { mDetail = Just detail{bdIsRead = nextRead}
+                            , mReadRequest = requestId
+                            , mReadPending = True
+                            }
+                    )
                 patchBookmark
                     (bdId detail)
                     (object ["is_read" .= nextRead])
-                    (ReadPatched nextRead)
-                    (ReadPatchFailed nextRead)
-    ReadPatched readFlag -> do
+                    (ReadPatched requestId nextRead)
+                    (ReadPatchFailed requestId nextRead)
+    -- Only the newest read PATCH may paint: a slow response for an older
+    -- toggle is dropped instead of repainting the previous flag.
+    ReadPatched requestId readFlag -> do
         m <- get
-        case currentDetail m of
-            Nothing -> pure ()
-            Just detail -> putModel (\x -> x{mDetail = Just detail{bdIsRead = readFlag}})
-        refreshStats
-    ReadPatchFailed readFlag err -> do
+        when (requestId == mReadRequest m) $ do
+            putModel (\x -> x{mReadPending = False})
+            case currentDetail m of
+                Nothing -> pure ()
+                Just detail -> putModel (\x -> x{mDetail = Just detail{bdIsRead = readFlag}})
+            refreshStats
+    -- On failure, read the record back from the server rather than guessing
+    -- the inverse; an unsaved note keeps its edits and only the flag rolls
+    -- back, because reloading the detail would replace the editor.
+    ReadPatchFailed requestId readFlag err -> do
         m <- get
-        case currentDetail m of
-            Just detail
-                | bdIsRead detail == readFlag ->
-                    putModel (\x -> x{mDetail = Just detail{bdIsRead = not readFlag}})
-            _ -> pure ()
-        handleApiError err
+        when (requestId == mReadRequest m) $ do
+            putModel (\x -> x{mReadPending = False})
+            case currentDetail m of
+                Just detail
+                    | mDirty m ->
+                        putModel (\x -> x{mDetail = Just detail{bdIsRead = not readFlag}})
+                    | otherwise -> updateModel (DetailReload (bdId detail))
+                Nothing -> pure ()
+            handleApiError err
     OpenToggled -> pure ()
     BacklinksLoaded epoch links -> sameEpoch epoch $ do
         m <- get
@@ -1207,14 +1270,24 @@ updateModel = \case
             Bookmark currentId | currentId == bookmarkId -> withSink $ \_ -> pushRoute Index
             _ -> reloadList
     DeleteFailed err -> handleApiError err
-    DirtyGuardOpen route -> putModel (\m -> m{mGuardOpen = True, mPendingRoute = Just route})
-    DirtyGuardClose -> putModel (\m -> m{mGuardOpen = False, mPendingRoute = Nothing})
+    DirtyGuardOpen route -> putModel (\m -> m{mGuardOpen = True, mPendingRoute = Just route, mGuardFromHistory = False})
+    -- Keep editing. When the guard came from a history navigation the address
+    -- has already moved to the pending route; put it back without adding a
+    -- history entry so the URL matches the record still on screen.
+    DirtyGuardClose -> do
+        m <- get
+        putModel (\x -> x{mGuardOpen = False, mPendingRoute = Nothing, mGuardFromHistory = False})
+        when (mGuardFromHistory m) $ liftSinkIO (replaceBrowserUrl (prettyURI (toURI (mRoute m))))
     DirtyGuardDiscard -> do
         m <- get
-        putModel (\x -> x{mGuardOpen = False, mPendingRoute = Nothing, mDirty = False})
+        putModel (\x -> x{mGuardOpen = False, mPendingRoute = Nothing, mGuardFromHistory = False, mDirty = False})
         case mPendingRoute m of
             Nothing -> pure ()
-            Just route -> withSink $ \_ -> pushRoute route
+            -- The address already points at the pending route after a history
+            -- navigation, so load it directly instead of pushing a duplicate.
+            Just route
+                | mGuardFromHistory m -> loadRoute route
+                | otherwise -> withSink $ \_ -> pushRoute route
     -- import / export -------------------------------------------------------
     ImportStart -> liftSinkIO $ do
         element <- getElementById "import-file"
@@ -2488,43 +2561,61 @@ updateModel = \case
                             then IS.delete bookmarkId current
                             else IS.insert bookmarkId current
                  in putModel (\x -> x{mSelection = next, mSelectAnchor = Just bookmarkId})
-    SelectClear -> putModel (\m -> m{mSelection = IS.empty, mSelectAnchor = Nothing, mSelectingAll = False})
+    SelectClear -> putModel (\m -> (cancelSelectAllPaging m){mSelection = IS.empty, mSelectAnchor = Nothing})
+    -- Stop the paging run but keep the ids already collected.
+    SelectAllMatchingCancel -> putModel cancelSelectAllPaging
     SelectAllLoaded -> do
         m <- get
         putModel (\x -> x{mSelection = IS.fromList (map bsId (mItems m)), mSelectAnchor = Nothing})
     SelectAllMatchingStart -> do
         m <- get
-        put
-            m
-                { mSelectingAll = True
-                , mSelection = IS.empty
-                , mSelectAnchor = Nothing
-                , mSelectFetched = 0
-                }
-        fetchBookmarks
-            ((listParams m False){lpOffset = 0, lpLimit = 200})
-            (\page -> SelectPageLoaded (map bsId (spItems page)) (spHasMore page))
-            SelectPageFailed
-    SelectPageLoaded ids hasMore -> do
+        unless (mSelectingAll m) $ do
+            -- Capture the query, filter, sort and list epoch once: the pages
+            -- that follow belong to this result set even if the reader types
+            -- again or clears the bar.
+            let selectEpoch = mSelectEpoch m + 1
+                params = (listParams m False){lpOffset = 0, lpLimit = 200}
+            put
+                m
+                    { mSelectingAll = True
+                    , mSelection = IS.empty
+                    , mSelectAnchor = Nothing
+                    , mSelectFetched = 0
+                    , mSelectEpoch = selectEpoch
+                    , mSelectListEpoch = mListEpoch m
+                    , mSelectParams = Just params
+                    }
+            fetchBookmarks
+                params
+                (\page -> SelectPageLoaded selectEpoch (map bsId (spItems page)) (spHasMore page))
+                (SelectPageFailed selectEpoch)
+    -- A page may only extend the run captured by this token and only while the
+    -- list still shows the result set the run started on.
+    SelectPageLoaded selectEpoch ids hasMore -> do
         m <- get
-        let fetched = mSelectFetched m + length ids
-            merged = IS.union (mSelection m) (IS.fromList ids)
-            capped = if IS.size merged > 10000 then IS.fromList (take 10000 (IS.toList merged)) else merged
-        put m{mSelection = capped, mSelectFetched = fetched}
-        if hasMore && IS.size capped < 10000
-            then
-                fetchBookmarks
-                    ((listParams m False){lpOffset = fetched, lpLimit = 200})
-                    (\page -> SelectPageLoaded (map bsId (spItems page)) (spHasMore page))
-                    SelectPageFailed
-            else do
-                putModel (\x -> x{mSelectingAll = False})
-                if IS.size capped >= 10000
-                    then notify "Selected the first 10,000 bookmarks" ToastInfo
-                    else notify (ms ("Selected " <> show (IS.size capped) <> " bookmarks")) ToastOk
-    SelectPageFailed err -> do
-        putModel (\m -> m{mSelectingAll = False})
-        handleApiError err
+        when (mSelectingAll m && selectEpoch == mSelectEpoch m && mSelectListEpoch m == mListEpoch m) $ do
+            let fetched = mSelectFetched m + length ids
+                merged = IS.union (mSelection m) (IS.fromList ids)
+                capped = if IS.size merged > 10000 then IS.fromList (take 10000 (IS.toList merged)) else merged
+            put m{mSelection = capped, mSelectFetched = fetched}
+            if hasMore && IS.size capped < 10000
+                then case mSelectParams m of
+                    Nothing -> putModel cancelSelectAllPaging
+                    Just params ->
+                        fetchBookmarks
+                            (params{lpOffset = fetched, lpLimit = 200})
+                            (\page -> SelectPageLoaded selectEpoch (map bsId (spItems page)) (spHasMore page))
+                            (SelectPageFailed selectEpoch)
+                else do
+                    putModel (\x -> (cancelSelectAllPaging x){mSelection = capped})
+                    if IS.size capped >= 10000
+                        then notify "Selected the first 10,000 bookmarks" ToastInfo
+                        else notify (ms ("Selected " <> show (IS.size capped) <> " bookmarks")) ToastOk
+    SelectPageFailed selectEpoch err -> do
+        m <- get
+        when (selectEpoch == mSelectEpoch m) $ do
+            putModel cancelSelectAllPaging
+            handleApiError err
     BulkTagPromptOpen adding -> do
         putModel (\m -> m{mTagPrompt = Just adding, mTagPromptValue = ""})
         liftSinkIO (focusAfterRender "bulk-tag-input")
@@ -2642,14 +2733,7 @@ updateModel = \case
         notify "Token revoked" ToastOk
         fetchTokens TokensLoaded TokensFailed
     TokenRevealDismiss -> putModel (\m -> m{mTokenSecret = Nothing})
-    TokenCopied raw -> withSink $ \sink -> do
-        copiedValue <- jsgf "ezaCopy" (ms raw)
-        copied <- fromMaybe False <$> (fromJSVal copiedValue :: IO (Maybe Bool))
-        sink
-            ( ToastAdd
-                (if copied then "Token copied" else "Copy failed. Select the text instead")
-                (if copied then ToastOk else ToastError)
-            )
+    TokenCopied raw -> copyText (ms raw) "Token copied" "Copy failed. Select the text instead"
     -- admin users ----------------------------------------------------------
     AdminUsersLoaded users ->
         putModel
@@ -2757,14 +2841,7 @@ updateModel = \case
     UserResetCancel -> putModel (\m -> m{mUserReset = Nothing, mUserResetPassword = "", mUserActionError = Nothing})
     UserResetFailed err ->
         putModel (\m -> m{mUserActionError = Just (ms (aeMessage err))})
-    UserRecoveryCopied raw -> withSink $ \sink -> do
-        copiedValue <- jsgf "ezaCopy" (ms raw)
-        copied <- fromMaybe False <$> (fromJSVal copiedValue :: IO (Maybe Bool))
-        sink
-            ( ToastAdd
-                (if copied then "Recovery codes copied" else "Copy failed. Select the text instead")
-                (if copied then ToastOk else ToastError)
-            )
+    UserRecoveryCopied raw -> copyText (ms raw) "Recovery codes copied" "Copy failed. Select the text instead"
     UserRecoveryDismiss -> putModel (\m -> m{mUserRecovery = Nothing})
     UserResetShownDismiss -> putModel (\m -> m{mUserResetShown = Nothing})
     UserDeleteOpen user ->
@@ -2914,14 +2991,7 @@ updateModel = \case
             )
     WebhookDeleteFailed err -> handleApiError err
     WebhookSecretDismiss -> putModel (\m -> m{mWebhookSecret = Nothing})
-    WebhookSecretCopied raw -> withSink $ \sink -> do
-        copiedValue <- jsgf "ezaCopy" (ms raw)
-        copied <- fromMaybe False <$> (fromJSVal copiedValue :: IO (Maybe Bool))
-        sink
-            ( ToastAdd
-                (if copied then "Webhook secret copied" else "Copy failed. Select the text instead")
-                (if copied then ToastOk else ToastError)
-            )
+    WebhookSecretCopied raw -> copyText (ms raw) "Webhook secret copied" "Copy failed. Select the text instead"
     WebhookDeliveriesOpen webhookId -> do
         putModel (\m -> m{mWebhookDeliveriesError = Nothing})
         fetchWebhookDeliveries webhookId (WebhookDeliveriesLoaded webhookId) (WebhookDeliveriesFailed webhookId)
@@ -3095,14 +3165,7 @@ updateModel = \case
     ShareCreateFailed err -> do
         putModel (\m -> m{mShareBusy = False})
         handleApiError err
-    ShareCopy url -> withSink $ \sink -> do
-        copiedValue <- jsgf "ezaCopy" (ms (url :: Text))
-        copied <- fromMaybe False <$> (fromJSVal copiedValue :: IO (Maybe Bool))
-        sink
-            ( ToastAdd
-                (if copied then "Share link copied" else "Copy failed. Select the text instead")
-                (if copied then ToastOk else ToastError)
-            )
+    ShareCopy url -> copyText (ms (url :: Text)) "Share link copied" "Copy failed. Select the text instead"
     ShareRevoke shareId -> revokeShareLink shareId ShareRevoked ShareCreateFailed
     ShareRevoked -> do
         notify "Share link revoked" ToastOk
@@ -3232,6 +3295,8 @@ updateModel = \case
                 , mDetailLoading = True
                 , mDetailError = Nothing
                 , mDetailEpoch = epoch
+                , mReadRequest = mReadRequest m + 1
+                , mReadPending = False
                 , mEditTitle = ""
                 , mEditNote = ""
                 , mEditTags = []
@@ -3315,13 +3380,14 @@ updateModel = \case
         | isJust (mReaderSel m) = putModel (\x -> x{mReaderSel = Nothing})
         | mPaletteOpen m = putModel (\x -> x{mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})
         | mAddOpen m = putModel (\x -> x{mAddOpen = False})
-        | mGuardOpen m = putModel (\x -> x{mGuardOpen = False, mPendingRoute = Nothing})
+        | mGuardOpen m = updateModel DirtyGuardClose
         | isJust (mTagPrompt m) = putModel (\x -> x{mTagPrompt = Nothing, mTagPromptValue = ""})
         | mConfirmBulkDelete m = putModel (\x -> x{mConfirmBulkDelete = False})
         | isJust (mLinkQuery m) = putModel (\x -> x{mLinkQuery = Nothing, mLinkResults = []})
         | isJust (mDrawer m) = putModel (\x -> x{mDrawer = Nothing})
         | isJust (mConfirmDelete m) = putModel (\x -> x{mConfirmDelete = Nothing})
-        | not (IS.null (mSelection m)) = putModel (\x -> x{mSelection = IS.empty, mSelectAnchor = Nothing})
+        | not (IS.null (mSelection m)) = putModel (\x -> (cancelSelectAllPaging x){mSelection = IS.empty, mSelectAnchor = Nothing})
+        | mSelectingAll m = putModel cancelSelectAllPaging
         | otherwise = pure ()
 
     choosePalette :: Int -> Effect () () Model Action
@@ -3389,6 +3455,61 @@ updateModel = \case
         case itemAt (mItems m) (fromMaybe 0 (mLedgerCursor m)) of
             Nothing -> pure ()
             Just b -> updateModel (Navigate (Bookmark (bsId b)))
+
+    -- \| Open the row the keyboard is on: it becomes the cursor row first, so
+    -- returning from the record lands on what the reader activated.
+    activateRow :: Int -> Effect () () Model Action
+    activateRow bookmarkId = do
+        m <- get
+        case indexOfBookmark (mItems m) bookmarkId of
+            Just idx -> putModel (\x -> x{mLedgerCursor = Just idx})
+            Nothing -> pure ()
+        updateModel (Navigate (Bookmark bookmarkId))
+
+    -- \| The index of a bookmark in the loaded ledger.
+    indexOfBookmark :: [BookmarkSummary] -> Int -> Maybe Int
+    indexOfBookmark items bookmarkId =
+        case [i | (i, item) <- zip [0 :: Int ..] items, bsId item == bookmarkId] of
+            (i : _) -> Just i
+            [] -> Nothing
+
+    -- \| Stop the "select all matching" paging chain. Bumping the token makes
+    -- every response still in flight a no-op, so a cleared or cancelled run
+    -- cannot repopulate the selection.
+    cancelSelectAllPaging :: Model -> Model
+    cancelSelectAllPaging x =
+        x
+            { mSelectingAll = False
+            , mSelectFetched = 0
+            , mSelectEpoch = mSelectEpoch x + 1
+            , mSelectParams = Nothing
+            }
+
+    -- \| Rewrite the current history entry (no navigation, no new entry). Used
+    -- to put the address back after cancelling a history-driven dirty guard.
+    replaceBrowserUrl :: MisoString -> IO ()
+    replaceBrowserUrl path = void (jsgf "ezaReplaceUrl" (path :: MisoString))
+
+    -- \| Copy text through the promise-based bridge. The toast reports the
+    -- real result, so a one-time secret is never announced as copied when the
+    -- clipboard write was denied.
+    copyText :: MisoString -> MisoString -> MisoString -> Effect () () Model Action
+    copyText value successMessage failureMessage = withSink $ \sink -> do
+        _ <-
+            jsgf
+                "ezaCopy"
+                ( value
+                , asyncCallback1
+                    ( \jsValue -> do
+                        copied <- fromMaybe False <$> (fromJSVal jsValue :: IO (Maybe Bool))
+                        sink
+                            ( ToastAdd
+                                (if copied then successMessage else failureMessage)
+                                (if copied then ToastOk else ToastError)
+                            )
+                    )
+                )
+        pure ()
 
     decodeImportReport :: Value -> Either String ImportReport
     decodeImportReport value = case fromJSON value of

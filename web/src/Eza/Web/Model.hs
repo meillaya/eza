@@ -75,7 +75,7 @@ import Eza.View (
     View (..),
     ViewKind (..),
  )
-import Eza.Web.Api (LayoutWire (..), WebhookTest (..))
+import Eza.Web.Api (LayoutWire (..), ListParams, WebhookTest (..))
 import Eza.Web.Graph (
     GraphDrag,
     GraphLayout,
@@ -400,6 +400,11 @@ data KeyEvent = KeyEvent
     , keMeta :: Bool
     , keAlt :: Bool
     , keEditable :: Bool
+    , keRow :: Maybe Int
+    {- ^ The bookmark id of the ledger row that owns the focused element,
+    when the key was pressed inside one. Lets @Enter@ activate the row
+    the reader tabbed to instead of the cursor row.
+    -}
     }
     deriving (Eq, Show)
 
@@ -490,8 +495,8 @@ data Action
     | SavedOk
     | SaveFailed ApiError
     | ReadToggled
-    | ReadPatched Bool
-    | ReadPatchFailed Bool ApiError
+    | ReadPatched Int Bool
+    | ReadPatchFailed Int Bool ApiError
     | OpenToggled
     | BacklinksLoaded Int [Backlink]
     | BacklinksFailed Int ApiError
@@ -677,8 +682,9 @@ data Action
     | SelectClear
     | SelectAllLoaded
     | SelectAllMatchingStart
-    | SelectPageLoaded [Int] Bool
-    | SelectPageFailed ApiError
+    | SelectAllMatchingCancel
+    | SelectPageLoaded Int [Int] Bool
+    | SelectPageFailed Int ApiError
     | BulkTagPromptOpen Bool
     | BulkTagInput MisoString
     | BulkTagCancel
@@ -883,6 +889,15 @@ data Model = Model
     , mSelectAnchor :: Maybe Int
     , mSelectingAll :: Bool
     , mSelectFetched :: Int
+    , -- token for the "select all matching" paging chain; every start, clear,
+      -- search change, reload or route load bumps it so a response for an
+      -- abandoned chain cannot repopulate the selection
+      mSelectEpoch :: Int
+    , -- the list epoch captured when the chain started; a newer result set
+      -- stops the chain even when a reload only bumps the list epoch
+      mSelectListEpoch :: Int
+    , -- the stable query/filter/sort the chain pages through
+      mSelectParams :: Maybe ListParams
     , mBulkBusy :: Bool
     , mTagPrompt :: Maybe Bool
     , mTagPromptValue :: MisoString
@@ -906,6 +921,12 @@ data Model = Model
     , mDetailLoading :: Bool
     , mDetailError :: Maybe MisoString
     , mDetailEpoch :: Int
+    , -- monotonically increasing id for read-state PATCHes; a response older
+      -- than the latest toggle is dropped
+      mReadRequest :: Int
+    , -- a read PATCH is in flight, so a note save must not echo a possibly
+      -- stale is_read flag back to the server
+      mReadPending :: Bool
     , mEditTitle :: MisoString
     , mEditNote :: MisoString
     , mEditTags :: [Text]
@@ -948,6 +969,10 @@ data Model = Model
     , mDirty :: Bool
     , mGuardOpen :: Bool
     , mPendingRoute :: Maybe Route
+    , -- the guard was opened by a history navigation (Back/Forward): the
+      -- address already moved, so cancelling restores it and discarding does
+      -- not push a second entry
+      mGuardFromHistory :: Bool
     , mConfirmLogout :: Bool
     , -- graph: the fields a drag, hover, zoom or keystroke changes come
       -- first, so the derived Eq for Model short-circuits here instead of
@@ -1139,6 +1164,9 @@ initialModel =
         , mSelectAnchor = Nothing
         , mSelectingAll = False
         , mSelectFetched = 0
+        , mSelectEpoch = 0
+        , mSelectListEpoch = 0
+        , mSelectParams = Nothing
         , mBulkBusy = False
         , mTagPrompt = Nothing
         , mTagPromptValue = ""
@@ -1159,6 +1187,8 @@ initialModel =
         , mDetailLoading = False
         , mDetailError = Nothing
         , mDetailEpoch = 0
+        , mReadRequest = 0
+        , mReadPending = False
         , mEditTitle = ""
         , mEditNote = ""
         , mEditTags = []
@@ -1201,6 +1231,7 @@ initialModel =
         , mDirty = False
         , mGuardOpen = False
         , mPendingRoute = Nothing
+        , mGuardFromHistory = False
         , mConfirmLogout = False
         , mGraphView = initialGraphView
         , mGraphViewReady = False

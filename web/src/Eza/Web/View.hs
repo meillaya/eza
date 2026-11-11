@@ -811,7 +811,10 @@ columnHead _ =
 yearDivider :: Model -> Int -> Maybe Int -> View () () Model Action
 yearDivider m year matched =
     H.div_
-        [HP.class_ "year", HP.role_ "separator"]
+        [ HP.class_ "year"
+        , HP.role_ "heading"
+        , HP.aria_ "level" "2"
+        ]
         [ H.span_ [HP.class_ "year-n display"] [text (ms (show year))]
         , H.span_ [HP.class_ "year-rule", HP.aria_ "hidden" "true"] []
         , H.span_ [HP.class_ "year-meta meta"] meta
@@ -984,6 +987,17 @@ selectionBar m =
           , H.span_ [HP.class_ "ledg-selspacer", HP.aria_ "hidden" "true"] []
           , selAct "select page" SelectAllLoaded
           , selAct "select all matching" SelectAllMatchingStart
+          , if mSelectingAll m
+                then
+                    H.button_
+                        [ HP.class_ "ledg-act ledg-act--quiet"
+                        , HP.type_ "button"
+                        , HP.data_ "testid" "selection-stop"
+                        , HP.aria_ "label" "Stop selecting matching records"
+                        , HE.onClick SelectAllMatchingCancel
+                        ]
+                        [text "stop"]
+                else H.span_ [] []
           , selAct "add tag" (BulkTagPromptOpen True)
           , selAct "remove tag" (BulkTagPromptOpen False)
           , selAct "mark read" (BulkMark True)

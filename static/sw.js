@@ -111,7 +111,12 @@ async function navigationStrategy(request) {
   try {
     const response = await fetch(request);
     if (response && response.ok) {
-      if (new URL(request.url).pathname === "/") {
+      const requested = new URL(request.url);
+      // Only cache a real shell response. A logged-out "/" answers 302 to
+      // /login and fetch() follows it into a 200 login page; caching that
+      // under "/" would replace the app shell and poison offline navigation.
+      const redirectFree = !response.redirected && new URL(response.url).pathname === "/";
+      if (requested.pathname === "/" && redirectFree) {
         const cache = await caches.open(SHELL_CACHE);
         cache.put("/", response.clone());
       }
