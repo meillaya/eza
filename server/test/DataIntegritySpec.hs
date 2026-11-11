@@ -8,6 +8,8 @@ auth and data workstreams do not touch the same test file.
 module DataIntegritySpec (spec) where
 
 import Control.Exception (bracket)
+import Data.Aeson (object, (.=))
+import qualified Data.ByteString.Char8 as BSC
 import Data.Text (Text)
 import qualified Data.Text as T
 import Database.SQLite.Simple
@@ -20,8 +22,10 @@ import Eza.Bookmarks
 import Eza.Db (ftsIntegrityCheck, openDb, queryScalar, schemaV1, schemaV10, schemaV11, schemaV12, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaV7, schemaV8, schemaV9, schemaVersion, targetSchemaVersion)
 import Eza.Dedup (mergeBookmarks)
 import Eza.Highlights (createHighlight, listHighlights)
+import Eza.Import (ImportItem (..), ParsedImport (..), defaultImportOptions, importParsed, parseNetscape)
+import Eza.JsonExport (JsonImportReport (..), importJson)
 import Eza.Tags (deleteTag, deleteTagWithLinks, mergeTags, renameTag)
-import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), Highlight (..), SearchPage (..))
+import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), Highlight (..), ImportReport (..), LibraryStats (..), SearchPage (..))
 import Eza.Undo (recordUndo, recordUndoIds, snapshotBookmarks, undoLast, undoLastDetailed)
 
 spec :: Spec
@@ -447,6 +451,147 @@ spec = do
                 _ <- undoLast conn
                 restoredFlags <- readFlagsFor conn [first, second]
                 restoredFlags `shouldBe` [0, 0]
+
+    describe "out-of-range import timestamps" $ do
+        it "normalises a millisecond ADD_DATE and drops an unrenderable one" $
+            withDb $ \conn -> do
+                let raw =
+                        BSC.pack
+                            ( "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n"
+                                <> "<DT><A HREF=\"https://example.test/ms\" ADD_DATE=\"1700000000000\">Ms</A>\n"
+                                <> "<DT><A HREF=\"https://example.test/out\" ADD_DATE=\"253402300800\">Out</A>\n"
+                                <> "</DL><p>"
+                            )
+                    parsed = parseNetscape defaultImportOptions raw
+                report <- importParsed conn defaultImportOptions parsed
+                irInserted report `shouldBe` 2
+                stamps <- query_ conn "SELECT url, created_at FROM bookmarks ORDER BY id" :: IO [(Text, Int)]
+                stamps
+                    `shouldBe` [ ("https://example.test/ms", 1700000000)
+                               , ("https://example.test/out", 0)
+                               ]
+                -- The first page and the statistics still answer and no 1970
+                -- year is invented for the row with no renderable date.
+                page <- listBookmarks conn defaultListQuery
+                spTotal page `shouldBe` 2
+                spYearCounts page `shouldBe` [(2023, 1)]
+                stats <- libraryStats conn
+                lsTotal stats `shouldBe` 2
+                lsYears stats `shouldBe` [(2023, 1)]
+                lsFirstDay stats `shouldBe` "2023-11-14"
+
+        it "keeps the ledger and stats readable when a stored created_at is out of range" $
+            withDb $ \conn -> do
+                bid <- addBookmark conn "https://example.test/bad-created" "Bad timestamp"
+                -- Bypass the import validation: this is the row an old
+                -- importer could already have written.
+                execute conn "UPDATE bookmarks SET created_at = 1700000000000 WHERE id = ?" (Only bid)
+                page <- listBookmarks conn defaultListQuery
+                spTotal page `shouldBe` 1
+                spYearCounts page `shouldBe` []
+                stats <- libraryStats conn
+                lsTotal stats `shouldBe` 1
+                lsFilingDays stats `shouldBe` []
+                lsYears stats `shouldBe` []
+                lsFirstDay stats `shouldBe` ""
+
+        it "does not invent 1970 for a row whose created_at is zero" $
+            withDb $ \conn -> do
+                bid <- addBookmark conn "https://example.test/no-date" "Undated"
+                execute conn "UPDATE bookmarks SET created_at = 0 WHERE id = ?" (Only bid)
+                page <- listBookmarks conn defaultListQuery
+                spTotal page `shouldBe` 1
+                spYearCounts page `shouldBe` []
+                stats <- libraryStats conn
+                lsYears stats `shouldBe` []
+                lsFilingDays stats `shouldBe` []
+
+        it "normalises out-of-range JSON created_at and added_at on import" $
+            withDb $ \conn -> do
+                let document =
+                        object
+                            [ "format" .= ("eza-json" :: Text)
+                            , "version" .= (2 :: Int)
+                            , "bookmarks"
+                                .= [ object
+                                        [ "url" .= ("https://example.test/json-ms" :: Text)
+                                        , "created_at" .= (1700000000000 :: Int)
+                                        , "added_at" .= (1700000000000 :: Int)
+                                        ]
+                                   , object
+                                        [ "url" .= ("https://example.test/json-out" :: Text)
+                                        , "created_at" .= (999999999999999 :: Int)
+                                        , "added_at" .= (999999999999999 :: Int)
+                                        ]
+                                   ]
+                            ]
+                result <- importJson conn document
+                case result of
+                    Left err -> expectationFailure (T.unpack err)
+                    Right report -> do
+                        jrBookmarks report `shouldBe` 2
+                        jrTimestampsNormalised report `shouldBe` 2
+                stamps <- query_ conn "SELECT url, created_at, added_at FROM bookmarks ORDER BY id" :: IO [(Text, Int, Int)]
+                map (\(url, created, _) -> (url, created)) stamps
+                    `shouldBe` [ ("https://example.test/json-ms", 1700000000)
+                               , ("https://example.test/json-out", 0)
+                               ]
+                -- The unrenderable pair falls back to the import time for
+                -- added_at, which is what a real import does.
+                case stamps of
+                    [(_, _, firstAdded), (_, _, secondAdded)] -> do
+                        firstAdded `shouldBe` 1700000000
+                        secondAdded `shouldSatisfy` (> 1600000000)
+                    _ -> expectationFailure "expected two imported bookmarks"
+                page <- listBookmarks conn defaultListQuery
+                spTotal page `shouldBe` 2
+                spYearCounts page `shouldBe` [(2023, 1)]
+                stats <- libraryStats conn
+                lsYears stats `shouldBe` [(2023, 1)]
+
+    describe "import tag casing" $ do
+        it "links an imported lower-case tag to a pre-existing mixed-case row" $
+            withDb $ \conn -> do
+                execute_ conn "INSERT INTO tags (name, created_at) VALUES ('Rust', 1)"
+                let parsed =
+                        ParsedImport
+                            { piItems = [ImportItem "https://example.test/legacy-rust" "Legacy" "" "example.test" ["rust"] 100]
+                            , piFound = 1
+                            , piHttp = 1
+                            , piNonHttp = 0
+                            , piDuplicates = 0
+                            , piUntagged = 0
+                            , piFoldersSkipped = 0
+                            }
+                report <- importParsed conn defaultImportOptions parsed
+                irInserted report `shouldBe` 1
+                -- INSERT OR IGNORE kept the existing "Rust", so no tag is created.
+                irTagsCreated report `shouldBe` 0
+                irTagLinksAdded report `shouldBe` 1
+                tagNamesInDb conn `shouldReturn` ["Rust"]
+                links <- query_ conn "SELECT COUNT(*) FROM bookmark_tags" :: IO [Only Int]
+                map fromOnly links `shouldBe` [1]
+
+    describe "negated search terms" $ do
+        it "excludes a tag-name fallback match for -term" $
+            withDb $ \conn -> do
+                tagOnly <- addBookmark conn "https://example.test/tag-only" "Unrelated words"
+                tagBookmark conn tagOnly "rust"
+                textHit <- addBookmark conn "https://example.test/text-hit" "Rust analysis"
+                positive <- listBookmarks conn defaultListQuery{lqQ = "rust"}
+                spTotal positive `shouldBe` 2
+                map bsId (spItems positive) `shouldBe` [textHit, tagOnly]
+                -- The record matches only through its tag name; negating the
+                -- same term must hide it, exactly as the positive fallback
+                -- showed it.
+                negated <- listBookmarks conn defaultListQuery{lqQ = "rust -rust"}
+                spTotal negated `shouldBe` 0
+                -- Negation on its own is symmetric as well.
+                onlyNegated <- listBookmarks conn defaultListQuery{lqQ = "-rust"}
+                spTotal onlyNegated `shouldBe` 0
+                -- And an unrelated negation leaves both records alone.
+                unrelated <- listBookmarks conn defaultListQuery{lqQ = "rust -haskell"}
+                spTotal unrelated `shouldBe` 2
 
 -- ---------------------------------------------------------------------------
 -- Helpers

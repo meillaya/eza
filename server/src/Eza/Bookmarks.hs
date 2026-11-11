@@ -39,6 +39,7 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
 import Text.Read (readMaybe)
 
+import Eza.Db (maxStoredTimestamp)
 import Eza.Events (bookmarkEventData, bookmarkEventDataMany, recordEvent, recordEventMany)
 import Eza.Links (syncLinks)
 import Eza.Rules (applyRules)
@@ -155,7 +156,9 @@ listBookmarks conn q = do
                 )
         yearSql =
             Query
-                ( "SELECT CAST(strftime('%Y', b.created_at, 'unixepoch') AS INTEGER), COUNT(*) "
+                ( "SELECT CASE WHEN b.created_at > 0 AND b.created_at <= "
+                    <> T.pack (show maxStoredTimestamp)
+                    <> " THEN CAST(strftime('%Y', b.created_at, 'unixepoch') AS INTEGER) END, COUNT(*) "
                     <> "FROM bookmarks b "
                     <> joinSql
                     <> whereSql
@@ -168,12 +171,16 @@ listBookmarks conn q = do
                     <> whereSql
                 )
     -- The per-year counts are only needed for the first page; a later page
-    -- needs the total for hasMore, which is a cheaper single count.
+    -- needs the total for hasMore, which is a cheaper single count. A row
+    -- whose created_at cannot be rendered as a date (zero, or a value outside
+    -- year 9999 left by a pre-validation import) groups under NULL: it still
+    -- counts towards the total but invents no year, and NULL never reaches the
+    -- decoder as a crash.
     (total, yearRows) <-
         if lqOffset q == 0
             then do
-                rows <- queryNamed conn yearSql params :: IO [(Int, Int)]
-                pure (sum (map snd rows), rows)
+                rows <- queryNamed conn yearSql params :: IO [(Maybe Int, Int)]
+                pure (sum (map snd rows), [(year, count) | (Just year, count) <- rows])
             else do
                 rows <- queryNamed conn countSql params :: IO [Only Int]
                 pure (case rows of [Only n] -> (n, []); _ -> (0, []))
@@ -266,12 +273,27 @@ buildFilter q parsed tags =
             <> maybe [] (\b -> [("b.is_read = :isRead", [":isRead" := (if b then 1 else 0 :: Int)])]) (lqIsRead q)
             <> maybe [] (\b -> [("b.is_dead = :isDead", [":isDead" := (if b then 1 else 0 :: Int)])]) (lqIsDead q)
 
+    -- A negated term hides everything the same positive term would show: the
+    -- text index *and* the tag-name fallback. A term shorter than two
+    -- characters never takes part in the positive fallback, so its negation
+    -- stays text-index-only for symmetry.
     negFilters :: [(Text, [NamedParam])]
     negFilters =
-        [ ( "b.id NOT IN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH :neg" <> T.pack (show i) <> ")"
-          , [":neg" <> T.pack (show i) := quoteFts term]
+        [ ( T.intercalate
+                " AND "
+                ( ("b.id NOT IN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH :neg" <> n <> ")")
+                    : [ "b.id NOT IN (SELECT bt.bookmark_id FROM bookmark_tags bt JOIN tags t ON t.id = bt.tag_id WHERE instr(lower(t.name), :negTag"
+                            <> n
+                            <> ") > 0)"
+                      | tagFallback
+                      ]
+                )
+          , (":neg" <> n := quoteFts term)
+                : [":negTag" <> n := T.toLower term | tagFallback]
           )
         | (i, term) <- zip [0 :: Int ..] (sqNegated parsed)
+        , let n = T.pack (show i)
+        , let tagFallback = T.length (T.strip term) >= 2
         ]
 
     linkFilters :: [(Text, [NamedParam])]
@@ -335,9 +357,13 @@ buildFilter q parsed tags =
             <> linkFilters
             <> textOrTagParts
     params = ftsParams <> concatMap snd parts
+    -- Every part is parenthesised: the tag fallback part is an OR, and
+    -- without the brackets SQLite's precedence would turn
+    -- @negation AND (fts OR tag)@ into @(negation AND fts) OR tag@, letting a
+    -- tag-name hit bypass every negated term.
     whereSql = case parts of
         [] -> ""
-        _ -> " WHERE " <> T.intercalate " AND " (map fst parts)
+        _ -> " WHERE " <> T.intercalate " AND " ["(" <> part <> ")" | part <- map fst parts]
 
 quoteFts :: Text -> Text
 quoteFts t = "\"" <> sanitizeToken t <> "\"*"
@@ -1002,7 +1028,12 @@ libraryStats conn = do
     dateRows <-
         query_
             conn
-            "SELECT date(created_at, 'unixepoch'), COUNT(*) FROM bookmarks WHERE created_at > 0 GROUP BY 1" ::
+            ( Query
+                ( "SELECT date(created_at, 'unixepoch'), COUNT(*) FROM bookmarks WHERE created_at > 0 AND created_at <= "
+                    <> T.pack (show maxStoredTimestamp)
+                    <> " GROUP BY 1"
+                )
+            ) ::
             IO [(Text, Int)]
     let counts = case countRows of (row : _) -> row; [] -> StatsCounts 0 0 0 0 0 0 0 0 0
         topSources = take 24 (sortOn (\(domain, count) -> (negate count, domain)) domainRows)
