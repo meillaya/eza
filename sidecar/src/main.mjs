@@ -15,37 +15,48 @@
 //   failure  { "id": …, "ok": false,
 //              "error": { "code": "bad_json" | "bad_request" |
 //                         "payload_too_large" | "unsupported_content_type" |
-//                         "timeout" | "worker_crashed" | "busy" |
+//                         "timeout" | "worker_crashed" |
 //                         "extract_failed", "message": "…" } }
 //
 // Properties the server relies on:
 //   * No network. Extraction runs with useAsync:false and a rejecting fetch.
 //   * 15 s timeout (EZA_SIDECAR_TIMEOUT_MS overrides). A hung page terminates
 //     the worker thread and the next request gets a fresh one.
-//   * 5 MiB HTML cap (the JSON line overhead is allowed on top).
-//   * Restart safe: malformed input, worker crashes, and timeouts produce an
-//     error line rather than killing the process. A parent may kill and
-//     restart the process at any time; no state is persisted.
+//   * 5 MiB HTML cap. The reader buffers at most MAX_LINE_BYTES (~7 MiB: the
+//     JSON encoding overhead on top of the 5 MiB HTML) for the line being read.
+//     A longer line is rejected with payload_too_large and skipped to the next
+//     newline without being buffered, so one huge request cannot exhaust
+//     memory.
+//   * Backpressure instead of an unbounded queue: stdin is read chunk by chunk
+//     and an extraction is awaited before the next line is accepted, so a fast
+//     writer fills the OS pipe, not the sidecar heap. Requests are processed
+//     strictly in order, one at a time, and every input line gets exactly one
+//     response line. There is no `busy` response: the previous queue counter
+//     was unreachable behind a serialized read loop.
+//   * Restart safe: malformed input, overlong lines, worker crashes, and
+//     timeouts produce an error line rather than killing the process. A parent
+//     may kill and restart the process at any time; no state is persisted.
 //   * Nothing is written to stdout except response lines.
 
 import { readFileSync } from 'node:fs';
-import { createInterface } from 'node:readline';
 import { Worker } from 'node:worker_threads';
 
 const SIDECAR_VERSION = readSidecarVersion();
 const PINNED_DEFUDDLE_VERSION = readPinnedDefuddleVersion();
 
 const MAX_HTML_BYTES = 5 * 1024 * 1024;
+// Registry/variant metadata rides in the same JSON line as the HTML; 2 MiB is
+// generous for the protocol fields and bounds the read buffer at ~7 MiB.
 const MAX_LINE_BYTES = MAX_HTML_BYTES + 2 * 1024 * 1024;
-const MAX_QUEUED_REQUESTS = 64;
 const DEFAULT_TIMEOUT_MS = 15000;
 const TIMEOUT_MS = readBoundedInt(process.env.EZA_SIDECAR_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, 1000, 120000);
+const NEWLINE = 0x0a;
+const CARRIAGE_RETURN = 0x0d;
 
 /** @type {Worker | null} */
 let worker = null;
 /** @type {{resolve: (value: any) => void, timer: NodeJS.Timeout} | null} */
 let pending = null;
-let queued = 0;
 let stopping = false;
 
 process.stderr.write(
@@ -171,10 +182,6 @@ async function handleLine(line) {
   const trimmed = line.trim();
   if (!trimmed) return null;
 
-  if (Buffer.byteLength(trimmed, 'utf8') > MAX_LINE_BYTES) {
-    return errorResponse(null, 'payload_too_large', `a request line may be at most ${MAX_HTML_BYTES} bytes of HTML`);
-  }
-
   let request;
   try {
     request = JSON.parse(trimmed);
@@ -185,17 +192,85 @@ async function handleLine(line) {
   const validated = validateRequest(request);
   if (!validated.ok) return errorResponse(validated.id, validated.code, validated.message);
 
-  if (queued >= MAX_QUEUED_REQUESTS) {
-    return errorResponse(validated.id, 'busy', 'too many queued extraction requests');
-  }
-
-  queued += 1;
   try {
     const result = await dispatch(validated.request);
     return normalizeResult(result, validated.id);
-  } finally {
-    queued -= 1;
+  } catch (error) {
+    return errorResponse(validated.id, 'extract_failed', messageOf(error));
   }
+}
+
+/**
+ * Split a byte stream into protocol lines without buffering more than
+ * MAX_LINE_BYTES for the line being read.
+ *
+ * Reading is pull-based (`for await`), so while an extraction runs no further
+ * chunks are read: the kernel pipe fills and the writer blocks. That is the
+ * sidecar's real backpressure. An overlong line is reported once as
+ * `{ tooLarge: true }`; the rest of it is discarded up to its newline and the
+ * next line is parsed normally.
+ * @param {AsyncIterable<Buffer>} stream
+ * @returns {AsyncGenerator<{ line: string } | { tooLarge: true }>}
+ */
+async function* readLines(stream) {
+  let parts = [];
+  let size = 0;
+  let discarding = false;
+  const reset = () => {
+    parts = [];
+    size = 0;
+  };
+
+  for await (const chunk of stream) {
+    let offset = 0;
+    while (offset < chunk.length) {
+      const newline = chunk.indexOf(NEWLINE, offset);
+      const end = newline === -1 ? chunk.length : newline;
+      const segment = chunk.subarray(offset, end);
+
+      if (!discarding) {
+        if (size + segment.length > MAX_LINE_BYTES) {
+          // Drop everything buffered for this line and swallow the rest of it.
+          discarding = true;
+          reset();
+          yield { tooLarge: true };
+        } else if (segment.length > 0) {
+          parts.push(segment);
+          size += segment.length;
+        }
+      }
+
+      if (newline === -1) {
+        offset = chunk.length;
+      } else {
+        if (discarding) {
+          discarding = false;
+          reset();
+        } else if (size > 0) {
+          const bytes = Buffer.concat(parts, size);
+          reset();
+          yield { line: decodeLine(bytes) };
+        }
+        offset = newline + 1;
+      }
+    }
+  }
+
+  // EOF without a trailing newline is still a request line.
+  if (!discarding && size > 0) {
+    yield { line: decodeLine(Buffer.concat(parts, size)) };
+  }
+}
+
+/**
+ * Decode one line as UTF-8, dropping the optional CR of a CRLF terminator.
+ * @param {Buffer} bytes
+ * @returns {string}
+ */
+function decodeLine(bytes) {
+  let end = bytes.length;
+  while (end > 0 && bytes[end - 1] === CARRIAGE_RETURN) end -= 1;
+  return bytes.subarray(0, end).toString('utf8');
 }
 
 /**
@@ -262,40 +337,53 @@ function errorResponse(id, code, message) {
   return { id, ok: false, error: { code, message } };
 }
 
-/** @param {string} line @returns {boolean} */
+/**
+ * Write one line to stdout, waiting for the stream to drain so a throttled
+ * parent cannot make the response queue grow without bound.
+ * @param {string} line
+ * @returns {Promise<void>}
+ */
 function writeLine(line) {
-  try {
-    process.stdout.write(line + '\n');
-    return true;
-  } catch {
-    return false;
-  }
+  return new Promise((resolve) => {
+    let flushed = false;
+    try {
+      flushed = process.stdout.write(line + '\n');
+    } catch {
+      resolve();
+      return;
+    }
+    if (flushed) {
+      resolve();
+      return;
+    }
+    process.stdout.once('drain', resolve);
+  });
 }
 
-/** @param {any} response */
-function respond(response) {
-  if (response) writeLine(JSON.stringify(response));
+/** @param {any} response @returns {Promise<void>} */
+async function respond(response) {
+  if (response) await writeLine(JSON.stringify(response));
 }
 
 async function main() {
-  const reader = createInterface({ input: process.stdin, crlfDelay: Infinity });
-  let chain = Promise.resolve();
+  for await (const item of readLines(process.stdin)) {
+    if (item.tooLarge) {
+      await respond(
+        errorResponse(
+          null,
+          'payload_too_large',
+          `a request line may be at most ${MAX_LINE_BYTES} bytes (${MAX_HTML_BYTES} bytes of HTML plus protocol overhead)`,
+        ),
+      );
+      continue;
+    }
+    try {
+      await respond(await handleLine(item.line));
+    } catch (error) {
+      await respond(errorResponse(null, 'extract_failed', messageOf(error)));
+    }
+  }
 
-  await new Promise((resolve, reject) => {
-    reader.on('line', (line) => {
-      chain = chain.then(async () => {
-        try {
-          respond(await handleLine(line));
-        } catch (error) {
-          respond(errorResponse(null, 'extract_failed', messageOf(error)));
-        }
-      });
-    });
-    reader.on('close', resolve);
-    reader.on('error', reject);
-  });
-
-  await chain;
   await shutdown(0);
 }
 

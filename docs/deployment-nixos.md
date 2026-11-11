@@ -25,9 +25,11 @@ The deployment binary is **eza-bookmarks**:
 - A **secure origin** for passkeys: WebAuthn only works over HTTPS (or
   `http://localhost`). Use [Tailscale Serve](tailscale.md) or the module's
   Caddy option. Never expose plain HTTP to the internet.
-- The web client bundle. The flake pins it as a fixed-output release asset
-  (see [Web assets](#web-assets)); until CI publishes a release for your
-  version you must build it locally and point the module at the local package.
+- The web client bundle. The flake pins it as a fixed-output release asset in
+  `nix/web-assets.json` (see [Web assets](#web-assets)); until the release
+  workflow has published and pinned an asset for your version, either pin it
+  with `scripts/release-asset.sh` or build the bundle locally and point the
+  module at the local package.
 
 ## Flake input
 
@@ -169,7 +171,8 @@ so the SQLite file keeps a stable owner) with `StateDirectory=eza` →
 Environment: `EZA_DATA_DIR`, `EZA_CONTROL_DB`, `EZA_USERS_DIR`,
 `EZA_MAX_USERS`, `EZA_DB` (legacy migration path only), `EZA_BIND`, `PUBLIC_ORIGIN`,
 `EZA_RP_ID`, `EZA_RP_NAME`, `EZA_STATIC_DIR`, `EZA_SNAPSHOT_DIR`,
-`EZA_BACKUP_DIR`, `EZA_BACKUP_KEEP_DAYS`, `EZA_LOG_LEVEL`,
+`EZA_TRUSTED_PROXIES` (set it to the proxy/Caddy addresses so auth rate limits
+stay per client), `EZA_BACKUP_DIR`, `EZA_BACKUP_KEEP_DAYS`, `EZA_LOG_LEVEL`,
 `EZA_ALLOW_PRIVATE_FETCH`, `EZA_ENRICH_WORKERS`, `EZA_FETCH_TIMEOUT_MS`,
 `EZA_FAVICON_MAX_BYTES`, `EZA_FAVICON_TTL_DAYS`, `EZA_FAVICON_BACKFILL`, `EZA_SHARE_TTL_DAYS`,
 `EZA_AI_PROVIDER`, `EZA_OLLAMA_BASE_URL`, `EZA_AI_MODEL`, `HOME`. The
@@ -294,15 +297,23 @@ and loader JavaScript; the server serves those with `Content-Encoding: gzip`
 and `Vary: Accept-Encoding`, and without them the WASM crosses the wire at its
 raw 6.7 MB instead of about 1.5 MB.
 
-In `flake.nix` the hash is a placeholder (`lib.fakeHash`). After publishing
-the asset:
+The URL and SRI hash live in one file, `nix/web-assets.json`. Publish the
+asset with the release workflow (a `v*` tag runs
+`.github/workflows/release.yml`, which uploads `eza-web-<version>.tar.gz` and
+commits the resolved hash), or locally:
 
 ```bash
-nix store prefetch-file --json \
-  https://github.com/meillaya/eza/releases/download/v0.1.0.0/eza-web-0.1.0.0.tar.gz
-# copy the "hash" value into webAssets.hash in flake.nix, then:
+bash scripts/build-web.sh
+bash scripts/release-asset.sh            # dist/release/eza-web-<version>.tar.gz
+bash scripts/release-asset.sh --check    # prints the SRI hash to pin
+# copy sha256-... into nix/web-assets.json "hash", then:
 nix build .#eza-web
 ```
+
+`nix flake check` includes `checks.<system>.eza-web-pin`, so a placeholder hash
+fails the check loudly; `packages.<system>.eza-web` (and `.#docker`, and the
+default NixOS module web-assets path) also refuse with the pin instructions
+while the hash is unpinned.
 
 For local development before the first release, build the bundle and use the
 local override:
@@ -335,7 +346,7 @@ flake version changes (or keep `webAssets` overridden to a locally built
 package).
 
 Server dependencies are pinned in the flake to the generation used by the
-project's development build plan (`hpkgsUpgraded` overlay, including a few
+project's development build plan (`cabal.project.freeze` pins the cabal side) (`hpkgsUpgraded` overlay, including a few
 Hackage cabal-file revisions vendored under `nix/hackage-cabal/`). If the
 cabal dependencies change, update that overlay together with the release
 hashes; see the comments in `flake.nix`.
@@ -351,6 +362,7 @@ hashes; see the comments in `flake.nix`.
 | `packages.<system>.docker-local` | Same image built with the local `./static` bundle (before the first release asset). |
 | `nixosModules.default` | `services.eza` module (this page). |
 | `checks.<system>.eza-module` | Cheap module evaluation/security-posture check. |
+| `checks.<system>.eza-web-pin` | Fails while `nix/web-assets.json` still holds the placeholder hash. |
 | `checks.<system>.nixos-vm` | Full NixOS VM test (builds a system image; needs KVM for speed). |
 
 Validate a configuration before switching:

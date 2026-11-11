@@ -4,7 +4,11 @@ Kubernetes runs the same image as the Docker deployment:
 **eza-bookmarks** as non-root **uid/gid 10001**, state on a PVC mounted at
 **/data**, probes on **/healthz**. SQLite is a single-writer embedded database,
 so the deployment is deliberately **one replica** with the **Recreate**
-strategy and a **ReadWriteOnce** volume. Do not scale it horizontally.
+strategy and a **ReadWriteOncePod** volume (Kubernetes 1.29+ with a storage
+class that supports it). `ReadWriteOnce` is node-scoped, not pod-scoped, so on
+an RWO-only cluster two pods on the same node could open the SQLite files; the
+manifest keeps the strict claim and shows the documented RWO fallback. Do not
+scale it horizontally in either case.
 
 Manifests live in [`deploy/k8s/`](../deploy/k8s/):
 
@@ -14,7 +18,7 @@ Manifests live in [`deploy/k8s/`](../deploy/k8s/):
 | `namespace.yaml` | `eza` namespace |
 | `configmap.yaml` | non-secret env (`PUBLIC_ORIGIN`, `EZA_RP_ID`, ...) |
 | `secret.yaml` | optional `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` (empty by default) |
-| `pvc.yaml` | 10Gi RWO claim for `/data` |
+| `pvc.yaml` | 10Gi ReadWriteOncePod claim for `/data` (documented RWO fallback for older clusters) |
 | `deployment.yaml` | 1 replica, Recreate, probes, securityContext |
 | `service.yaml` | ClusterIP on port 80 → container `http` (8080) |
 
@@ -157,14 +161,15 @@ kubectl -n eza exec "$POD" -- /bin/eza-bookmarks backup
 kubectl -n eza exec "$POD" -- /bin/eza-bookmarks users list
 ```
 
-For scheduled off-cluster backups, use a separate Job/CronJob that mounts the
-same PVC (only possible while the eza pod is not mounting it, unless the volume
-is ReadWriteMany and the storage backend allows safe concurrent reads; SQLite
-reads are safe, but a second *writer* is not) or, more simply, a CronJob in the
-same node with an RWO volume and `strategy: Recreate` semantics via a
-`ReadWriteOncePod` claim. The simplest safe pattern is to copy backups off
-the volume from a Job that uses `kubectl exec`-style access or an object-store
-sidecar; the image already ships `rclone` for the upload step:
+For scheduled off-cluster backups, run the Job/CronJob only while it has
+exclusive access to the data volume. The claim is `ReadWriteOncePod`, so a
+second pod (including a backup Job) cannot mount the volume at the same time as
+the eza pod: in practice run the backup through `kubectl exec` (shown below) or
+scale the Deployment to zero before a dedicated backup/restore Job runs. On an
+RWO-only cluster, `ReadWriteOnce` is node-scoped rather than pod-scoped, so keep
+the single-replica `Recreate` deployment and never schedule two pods on the
+same node that mount the claim. The image already ships `rclone` for the
+off-cluster upload step:
 
 ```bash
 kubectl -n eza exec "$POD" -- rclone copy /data/backups/<stamp> remote:eza-backups

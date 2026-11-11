@@ -157,6 +157,15 @@ try {
   check('oversize: ok', oversize.ok, false);
   check('oversize: code', oversize.error?.code, 'payload_too_large');
 
+  // 6b. A line over the ~7 MiB protocol cap is rejected by the line reader
+  // while it is still reading, before the whole line is buffered, and the
+  // reader resynchronises on the next newline. id is null because the line was
+  // never parsed.
+  const overlong = await rawLine('x'.repeat(MAX_HTML_BYTES + 2 * 1024 * 1024 + 1));
+  check('overlong line: ok', overlong.ok, false);
+  check('overlong line: code', overlong.error?.code, 'payload_too_large');
+  check('overlong line: id', overlong.id, null);
+
   // 7. text/plain is wrapped and extracted.
   const plain = await requestLine({
     id: 'plain',

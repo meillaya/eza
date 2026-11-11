@@ -30,10 +30,21 @@ services:
     environment:
       EZA_DATA_DIR: /data
       EZA_BIND: 0.0.0.0:8080
-      # Must be the browser-visible origin (https in production); passkeys are
-      # bound to it. EZA_RP_ID defaults to this origin's host in the server.
+      # The browser-visible origin users open (https in production). Passkeys
+      # are bound to it, and the server derives the WebAuthn RP ID from its
+      # host, so setting PUBLIC_ORIGIN is enough for a normal deployment.
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:8080}
-      EZA_RP_ID: ${EZA_RP_ID:-localhost}
+      # EZA_RP_ID is deliberately NOT set by default: the server derives it
+      # from PUBLIC_ORIGIN (host part, minus a leading "www."). Set it only
+      # when the RP ID must differ from the origin host, e.g. an alias:
+      #   EZA_RP_ID: ${EZA_RP_ID:-}
+      # Hard-coding it here (it used to default to `localhost`) silently broke
+      # passkey registration whenever only PUBLIC_ORIGIN was changed.
+      # When set, it MUST be the PUBLIC_ORIGIN host or a registrable suffix of
+      # it (https://eza.example.com -> eza.example.com); otherwise WebAuthn
+      # rejects the ceremony. Changing either value invalidates enrolled
+      # passkeys until recovery.
+      # EZA_RP_NAME is only the passkey prompt label.
       EZA_RP_NAME: ${EZA_RP_NAME:-eza}
       EZA_LOG_LEVEL: ${EZA_LOG_LEVEL:-info}
       # Enrichment: in-process background workers (0 disables them), outbound

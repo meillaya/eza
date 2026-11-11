@@ -63,7 +63,10 @@ Only `url` is required. The payload carries optional `title`,
 extractor, extractor_version, word_count, parse_time_ms). The request hash
 ignores timing fields, so an extension retry with the same key returns the
 stored result (`replayed: true`) instead of filing twice. A different payload
-with the same key returns `409 idempotency_conflict`.
+with the same key returns `409 idempotency_conflict`. The bundled extension
+persists one key (and the payload fingerprint it belongs to) per logical save in
+`chrome.storage.session` and reuses it for its retry loop, so a network retry
+replays instead of filing a second capture.
 
 `saveClip` normalizes the URL, inserts or finds the bookmark, attaches a
 capture row, applies templates and deterministic save rules, and writes the
@@ -96,8 +99,11 @@ npm run check
 npm test
 ```
 
-The sidecar protocol, limits (5 MiB HTML, 15 s timeout, restart-safe) and
-response fields are documented in [sidecar/README.md](../sidecar/README.md).
+The sidecar protocol, limits (5 MiB HTML cap enforced while reading the request
+line, 15 s timeout, restart-safe) and response fields are documented in
+[sidecar/README.md](../sidecar/README.md). An overlong line answers
+`payload_too_large` and the stream resynchronises at the next newline; stdin
+backpressure keeps a flood from buffering unbounded input.
 
 ## Templates
 

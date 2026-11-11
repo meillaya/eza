@@ -30,14 +30,20 @@ npm start             # run the worker on stdin/stdout
 ```
 
 `npm test` is the acceptance check. It covers a real fixture, malformed JSON,
-an unsupported content type, a non-http URL, the 5 MiB cap, `text/plain`, and a
-final healthy request that proves the worker survived every error.
+an unsupported content type, a non-http URL, the 5 MiB HTML cap, an overlong
+protocol line (rejected and resynchronised), `text/plain`, and a final healthy
+request that proves the worker survived every error.
 
 ## Protocol
 
 One JSON object per line on stdin, exactly one JSON response line on stdout.
 Nothing else is ever written to stdout; diagnostics go to stderr. Requests are
-processed strictly in order (one extraction at a time).
+processed strictly in order (one extraction at a time). The reader applies
+backpressure: while an extraction runs it does not read stdin, so a fast writer
+fills the OS pipe instead of the sidecar heap. There is no request queue and no
+`busy` response. A single line is buffered up to ~7 MiB (5 MiB of HTML plus
+protocol overhead); a longer line is rejected with `payload_too_large` and
+skipped to the next newline without being buffered.
 
 ### Request
 
@@ -102,11 +108,10 @@ capped at 500,000 characters each.
 | --- | --- |
 | `bad_json` | The line was not valid JSON. `id` is `null`. |
 | `bad_request` | Missing/typed-wrong `id`, `html`, `url`, `contentType`, or `charset`; non-http URL. |
-| `payload_too_large` | HTML over 5 MiB (or a line over ~7 MiB). |
+| `payload_too_large` | HTML over 5 MiB, or a line over ~7 MiB (the rest of that line is skipped; the next line is processed normally). |
 | `unsupported_content_type` | The content type is neither HTML-family nor `text/plain`. |
 | `timeout` | Extraction exceeded the timeout; the worker thread was terminated. The next request gets a fresh worker. |
 | `worker_crashed` | The worker thread crashed or exited unexpectedly. The next request gets a fresh worker. |
-| `busy` | More than 64 requests were already queued. |
 | `extract_failed` | Defuddle threw while parsing the page. |
 
 A parent process may kill and restart the sidecar at any time; it keeps no
@@ -120,9 +125,17 @@ state between requests.
 - **15 s timeout.** The main thread owns a worker thread and terminates it if
   an extraction does not answer in time, then serves the next request from a
   fresh worker. Override with `EZA_SIDECAR_TIMEOUT_MS` (1000–120000).
-- **5 MiB HTML cap.** A larger request is rejected before Defuddle sees it.
-- **Restart safe.** Malformed JSON, an unsupported page, a timeout, or a worker
-  crash produces an error line and the process stays alive.
+- **5 MiB HTML cap enforced while reading.** The line reader stops buffering a
+  line at ~7 MiB, returns `payload_too_large`, discards the rest of that line
+  and continues with the next one; the whole line is never accumulated in
+  memory. The 5 MiB `html` field check then runs on any line that fits.
+- **Backpressure, not a queue.** Reads are pull-based and pause while an
+  extraction is in flight, so a faster-than-extraction writer blocks on the
+  pipe. The old `busy`/`MAX_QUEUED_REQUESTS` path is gone because reads were
+  serialized and the counter could never exceed one.
+- **Restart safe.** Malformed JSON, an overlong line, an unsupported page, a
+  timeout, or a worker crash produces an error line and the process stays
+  alive.
 - **Boilerplate removal.** Hidden elements, low-scoring blocks, small images,
   exact/partial ad selectors, and content patterns are all removed by Defuddle
   (`removeHiddenElements`, `removeLowScoring`, `removeSmallImages`, …).

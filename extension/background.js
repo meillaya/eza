@@ -7,18 +7,32 @@
 //     message to a content script.
 //   * Extraction is read-only. The Defuddle bundle clones the document and the
 //     minimal extractor never writes to the page.
-//   * Idempotency-Key is generated once per logical save so a retry after a
-//     network failure cannot duplicate the bookmark.
+//   * One Idempotency-Key per logical save. The key (and the exact payload
+//     that first used it) is persisted in chrome.storage.session keyed by the
+//     server URL + stable payload hash, so a retry after a network failure, a
+//     double click, or the popup's "Try again" replays the server result
+//     instead of filing a second capture. The key never leaves the
+//     Authorization/Idempotency-Key headers.
 
 import { isConfigured, loadConfig, originPattern } from './src/config.js';
-import { ApiError, newIdempotencyKey, saveClip } from './src/api.js';
+import { ApiError, newIdempotencyKey, payloadFingerprint, saveClipWithRetry } from './src/api.js';
 import { extractPage } from './src/extract.js';
 import { CLIENT } from './src/version.js';
 
 const MENU_PAGE = 'eza-save-page';
 const MENU_SELECTION = 'eza-save-selection';
 const LAST_RUN_KEY = 'ezaClipper.lastRun';
+// Persisted idempotency records: slot = payloadFingerprint, value = { key,
+// payload, expiresAt }. storage.session is cleared when the browser closes,
+// which is exactly the window in which a retry can replay.
+const IDEMPOTENCY_STORE_KEY = 'ezaClipper.idempotency';
+const IDEMPOTENCY_TTL_MS = 10 * 60 * 1000;
+const IDEMPOTENCY_MAX_ENTRIES = 32;
 const RESTRICTED_PROTOCOLS = ['chrome:', 'chrome-extension:', 'edge:', 'about:', 'devtools:', 'view-source:', 'file:'];
+
+/** In-flight saves by fingerprint, so a double click shares one request. */
+/** @type {Map<string, Promise<{result: object}>>} */
+const inFlightSaves = new Map();
 
 chrome.runtime.onInstalled.addListener(() => {
   createContextMenus();
@@ -202,7 +216,7 @@ async function saveActiveTab(selectionOnly) {
 
 /**
  * @param {object} payload
- * @returns {Promise<{result: object, status: number}>}
+ * @returns {Promise<{result: object, record: object}>}
  */
 async function saveRequest(payload) {
   const config = await loadConfig();
@@ -220,8 +234,7 @@ async function saveRequest(payload) {
       'This extension has no access to ' + config.serverUrl + '. Open the extension options and use Grant access.',
     );
   }
-  const key = newIdempotencyKey();
-  const result = await saveClip(config, payload, key);
+  const { result } = await saveWithIdempotency(config, payload);
   const record = {
     at: Date.now(),
     ok: true,
@@ -239,6 +252,125 @@ async function saveRequest(payload) {
   await chrome.storage.local.set({ [LAST_RUN_KEY]: record });
   await showSuccess(record);
   return { result, record };
+}
+
+// ---------------------------------------------------------------------------
+// Idempotency records
+// ---------------------------------------------------------------------------
+
+/** @returns {chrome.storage.StorageArea} */
+function idempotencyStore() {
+  // storage.session is the right lifetime for a retry window; fall back to
+  // local storage on a build that predates it (both are extension-private).
+  return chrome.storage.session || chrome.storage.local;
+}
+
+/**
+ * Read the unexpired idempotency records and the one for this fingerprint.
+ * @param {string} fingerprint
+ * @returns {Promise<{entries: Record<string, any>, record: any | null}>}
+ */
+async function readIdempotencyRecords(fingerprint) {
+  let raw = null;
+  try {
+    const stored = await idempotencyStore().get(IDEMPOTENCY_STORE_KEY);
+    raw = stored && stored[IDEMPOTENCY_STORE_KEY];
+  } catch {
+    raw = null;
+  }
+  const entries = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const now = Date.now();
+  const live = {};
+  let record = null;
+  for (const [slot, value] of Object.entries(entries)) {
+    if (!value || typeof value !== 'object' || !Number.isFinite(value.expiresAt) || value.expiresAt <= now) continue;
+    live[slot] = value;
+    if (slot === fingerprint) record = value;
+  }
+  return { entries: live, record };
+}
+
+/**
+ * Persist one record, prune expired ones and cap the total. Best effort: a
+ * storage failure must not block the save.
+ * @param {string} fingerprint
+ * @param {Record<string, any>} entries already-pruned records
+ * @param {{key: string, payload: object}} record
+ */
+async function writeIdempotencyRecord(fingerprint, entries, record) {
+  const next = { ...entries, [fingerprint]: { ...record, expiresAt: Date.now() + IDEMPOTENCY_TTL_MS } };
+  const slots = Object.keys(next);
+  if (slots.length > IDEMPOTENCY_MAX_ENTRIES) {
+    slots.sort((a, b) => (next[a].expiresAt || 0) - (next[b].expiresAt || 0));
+    for (const slot of slots.slice(0, slots.length - IDEMPOTENCY_MAX_ENTRIES)) delete next[slot];
+  }
+  try {
+    await idempotencyStore().set({ [IDEMPOTENCY_STORE_KEY]: next });
+  } catch {
+    // The in-flight map still reuses the key for concurrent attempts.
+  }
+}
+
+/** @param {string} fingerprint */
+async function forgetIdempotencyRecord(fingerprint) {
+  try {
+    const { entries } = await readIdempotencyRecords(fingerprint);
+    if (!entries[fingerprint]) return;
+    delete entries[fingerprint];
+    await idempotencyStore().set({ [IDEMPOTENCY_STORE_KEY]: entries });
+  } catch {
+    // Best effort: the record expires on its own.
+  }
+}
+
+/**
+ * Send one logical save, reusing the persisted key (and the exact payload that
+ * first used it) so a retry replays the server's stored result. Concurrent
+ * callers for the same fingerprint share one request.
+ * @param {object} config
+ * @param {object} payload
+ * @returns {Promise<{result: object}>}
+ */
+async function saveWithIdempotency(config, payload) {
+  const fingerprint = await payloadFingerprint(config, payload);
+  const pending = inFlightSaves.get(fingerprint);
+  if (pending) return pending;
+  const attempt = saveOnce(config, payload, fingerprint).finally(() => inFlightSaves.delete(fingerprint));
+  inFlightSaves.set(fingerprint, attempt);
+  return attempt;
+}
+
+/**
+ * @param {object} config
+ * @param {object} payload
+ * @param {string} fingerprint
+ * @returns {Promise<{result: object}>}
+ */
+async function saveOnce(config, payload, fingerprint) {
+  const { entries, record } = await readIdempotencyRecords(fingerprint);
+  const key = record && typeof record.key === 'string' && record.key ? record.key : newIdempotencyKey();
+  // Replay needs the server's request hash to match, so reuse the exact
+  // payload from the first attempt when there is one.
+  const requestPayload =
+    record && record.payload && typeof record.payload === 'object' ? record.payload : payload;
+  // Persist before sending: a crash after the server committed the write still
+  // leaves the key for the next click.
+  await writeIdempotencyRecord(fingerprint, entries, { key, payload: requestPayload });
+  try {
+    const result = await saveClipWithRetry(config, requestPayload, key);
+    await writeIdempotencyRecord(fingerprint, entries, { key, payload: requestPayload });
+    return { result };
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      // Same key, different request: drop the stale record so the user's retry
+      // can start from a fresh key instead of hitting the conflict forever.
+      await forgetIdempotencyRecord(fingerprint);
+      throw new ClipperError(
+        'A previous save under this idempotency key used a different payload. Try again to save a fresh capture.',
+      );
+    }
+    throw error;
+  }
 }
 
 /**
