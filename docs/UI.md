@@ -82,7 +82,11 @@ fixed optical size so every browser draws the same letterforms.
 Ledger rows expose a tick control once the row is hovered or focused. The
 sticky selection bar then shows the count and the bulk actions, and keeps
 `select page` and `select all matching` available so a selection can be
-extended after the first pick. With nothing selected, the ledger foot offers
+extended after the first pick. `select all matching` pages with the query,
+filters and sort captured when it starts, so typing or changing a filter while
+it runs cannot mix two result sets; the bar offers `stop` to keep the pages
+collected so far, and `clear`/`Esc` cancel the run entirely. With nothing
+selected, the ledger foot offers
 the same two controls as separate text buttons. A selection is capped at
 10,000 records, and the bar is dismissed with `clear` or `Esc`. Each source
 cell shows a cached 16px favicon when the domain has one and a printed
@@ -207,7 +211,7 @@ nothing.
 | `/` | Focus the search line |
 | `Shift+K`, `Cmd+K`, `Ctrl+K` | Open the command palette from any screen (`Ctrl/Cmd+K` works while the search line has focus) |
 | `j`, `k` | Move the ledger cursor and open its field drawer; bare `k` opens the palette away from the ledger and inbox |
-| `Enter` | Open the record under the cursor, or run the palette item |
+| `Enter` | Open the focused ledger row when one has focus, otherwise the record under the cursor; or run the palette item |
 | `+`, `-` | Zoom the graph in and out |
 | `0`, `f` | Fit the whole graph in the canvas |
 | Arrow keys | Pan the graph |

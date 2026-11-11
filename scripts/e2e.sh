@@ -58,10 +58,13 @@ SCRIPTS=(
   logout-smoke.mjs
   dedup-smoke.mjs
   bulk-ui-smoke.mjs
+  bulk-smoke.mjs
   flows-smoke.mjs
   token-smoke.mjs
+  token-ui-smoke.mjs
   share-ui-smoke.mjs
   highlight-ui-smoke.mjs
+  highlights-shares-smoke.mjs
   prune-undo-smoke.mjs
   rules-ui-smoke.mjs
   deeplink-smoke.mjs
@@ -78,8 +81,49 @@ FIRST_RUN_SCRIPTS=(
   auth-smoke.mjs
   flows-smoke.mjs
   token-smoke.mjs
+  bulk-smoke.mjs
+  highlights-shares-smoke.mjs
   addpasskey-smoke.mjs
 )
+
+# Scripts that deliberately stay outside the CI suite. Everything else under
+# tests/e2e/ must be listed in SCRIPTS, so a new smoke script cannot silently
+# rot without a browser run.
+EXCLUDED_SCRIPTS=(
+  # Needs the public network: it records live pages through the clipper.
+  capture-smoke.mjs
+  # Superseded by dedup-smoke.mjs (merge) and prune-undo-smoke.mjs (undo);
+  # kept as a manual debugging script.
+  undo-smoke.mjs
+  # Utilities, not assertions.
+  capture-screenshots.mjs
+  graph-perf.mjs
+  login-visual-check.mjs
+  wasm-fetch.mjs
+)
+
+in_list() {
+  local needle="$1"
+  shift
+  local candidate
+  for candidate in "$@"; do
+    [[ "$candidate" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+# Refuse to run the full suite when a tests/e2e script is neither part of the
+# suite nor explicitly excluded above.
+if [[ -z "${EZA_E2E_SCRIPTS:-}" ]]; then
+  for script_path in tests/e2e/*.mjs; do
+    script_name="$(basename "$script_path")"
+    if ! in_list "$script_name" "${SCRIPTS[@]}" && ! in_list "$script_name" "${EXCLUDED_SCRIPTS[@]}"; then
+      echo "e2e: $script_name is neither in SCRIPTS nor EXCLUDED_SCRIPTS" >&2
+      echo "e2e: add it to one of the lists in scripts/e2e.sh" >&2
+      exit 1
+    fi
+  done
+fi
 
 if [[ -n "${EZA_E2E_SCRIPTS:-}" ]]; then
   read -r -a SCRIPTS <<<"$EZA_E2E_SCRIPTS"

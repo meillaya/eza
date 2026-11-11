@@ -34,6 +34,7 @@ server-rendered pages keep are used directly. Shared selectors live in
 | `[data-testid="ledger-row-title"]` | row title |
 | `[data-testid="ledger-row-select"]` | selection control, `role="checkbox"` |
 | `[data-testid="selection-bar"]` / `[data-testid="selection-count"]` | bulk bar and count, text `N selected` |
+| `[data-testid="selection-stop"]` | stops a running "select all matching" paging run and keeps the pages collected so far |
 | `[data-testid="drawer"]` | field card |
 | `[data-testid="dialog"]`, `[data-testid="dialog-body"]` | dialog overlay and body |
 | `[data-testid="dialog-confirm"]` / `[data-testid="dialog-cancel"]` | dialog actions |
@@ -51,8 +52,9 @@ the whole filtered result set. The ledger foot shows `select page` and
 `select all matching` while nothing is selected, with a visible gap between
 the two controls. The Direction B ledger does not implement Shift-click range
 selection or an in-ledger undo button; `bulk-ui-smoke.mjs` documents both as
-non-mapping steps and undo stays covered by `undo-smoke.mjs` and
-`prune-undo-smoke.mjs`.
+non-mapping steps and undo stays covered by `prune-undo-smoke.mjs` (the
+legacy print-only `undo-smoke.mjs` is excluded from the suite, see
+`scripts/e2e.sh`).
 
 ## Bookmark record
 

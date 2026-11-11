@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "slug": "-leading-hyphen",
+  "name": "Leading hyphen slug",
+  "kind": "ledger",
+  "is_default": false,
+  "definition": {
+    "query": "",
+    "sort": "created"
+  }
+}

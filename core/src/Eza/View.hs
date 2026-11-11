@@ -405,6 +405,8 @@ validateViewDraft input = do
         Just slug
             | T.null slug -> Left ["slug must not be empty"]
             | T.any (not . isSlugChar) slug -> Left ["slug may only use lower-case letters, digits, and hyphens"]
+            | not (maybe False (\(first, _) -> isAsciiLower first || isDigit first) (T.uncons slug)) ->
+                Left ["slug must start with a lower-case letter or a digit"]
             | T.length slug > 48 -> Left ["slug is too long"]
             | otherwise -> Right ()
   where

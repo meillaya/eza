@@ -13,9 +13,11 @@
 #   - share/java/tla2tools.jar in a nix profile,
 #   - `nix build nixpkgs#tlaplus` as a last resort.
 #
-# The deeper check between these documents and the Haskell decoders is a
-# planned server test; this script only proves JSON shape and the bounded
-# model's invariants. See spec/README.md for the scope.
+# The decoder contract between these documents and the Haskell decoders is not
+# part of this script: server/test/ViewContractSpec.hs (run by `cabal test
+# all`) decodes every example with the real server codecs and rejects every
+# bad fixture. This script only proves JSON shape and the bounded model's
+# invariants. See spec/README.md for the scope.
 set -euo pipefail
 shopt -s nullglob
 
