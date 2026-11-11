@@ -349,6 +349,29 @@ spec = do
                 queryScalar migrated "SELECT event_cursor FROM app_state WHERE id = 1" `shouldReturn` (0 :: Int)
                 Sqlite.close migrated
 
+    describe "delivery history retention" $ do
+        it "keeps a delivery readable after its event row is purged" $
+            withTempDb $ \conn -> do
+                webhookId <- createdHook conn "History" [BookmarkCreated]
+                _ <- insertBookmark conn "https://example.test/history" "History" []
+                dispatchNewEvents conn `shouldReturn` 1
+                firstDelivery <- deliveryView conn webhookId
+                dvEvent firstDelivery `shouldBe` BookmarkCreated
+                dvState firstDelivery `shouldBe` "queued"
+                -- Age the outbox row past the 30-day window and purge it. The
+                -- delivery row is kept (only terminal deliveries are pruned)
+                -- and has to stay readable with the kind it was created with.
+                Sqlite.execute_ conn "UPDATE event_log SET created_at = 0"
+                purgeExpired conn
+                eventKinds conn `shouldReturn` []
+                deliveries <- listDeliveries conn webhookId 20
+                length deliveries `shouldBe` 1
+                case deliveries of
+                    (deliveryAfterPurge : _) -> do
+                        dvEvent deliveryAfterPurge `shouldBe` BookmarkCreated
+                        dvState deliveryAfterPurge `shouldBe` "queued"
+                    [] -> expectationFailure "expected the delivery history to survive the purge"
+
 -- ---------------------------------------------------------------- fixtures ---
 
 withTempDb :: (Sqlite.Connection -> IO a) -> IO a

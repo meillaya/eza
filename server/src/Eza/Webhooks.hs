@@ -168,17 +168,24 @@ getWebhookRow conn webhookId = do
     firstRow (row : _) = Just row
     firstRow [] = Nothing
 
+{- | The recent deliveries of one subscription. The delivery row keeps the
+event kind it was fanned out for (schema v14), so a LEFT JOIN is enough: the
+event row may have been purged after its 30-day window while the delivery
+history is kept, and the row still names the event it carried.
+-}
 listDeliveries :: Connection -> Int -> Int -> IO [DeliveryView]
 listDeliveries conn webhookId limit = do
     let bounded = max 1 (min 100 limit)
     rows <-
         query
             conn
-            "SELECT d.id, e.kind, d.state, d.attempts, d.last_error, d.created_at \
-            \FROM webhook_deliveries d JOIN event_log e ON e.id = d.event_id \
+            "SELECT d.id, COALESCE(e.kind, d.event_kind), d.state, d.attempts, d.last_error, d.created_at \
+            \FROM webhook_deliveries d LEFT JOIN event_log e ON e.id = d.event_id \
             \WHERE d.webhook_id = ? ORDER BY d.id DESC LIMIT ?"
             (webhookId, bounded) ::
             IO [(Int, Text, Text, Int, Text, Int)]
+    -- A delivery written before v14 whose event was already purged has no kind
+    -- anywhere; it cannot be rendered as an EventType and is skipped.
     pure (mapMaybe deliveryOfRow rows)
   where
     deliveryOfRow (deliveryId, kindText, state, attempts, lastError, createdAt) = do
@@ -397,8 +404,8 @@ dispatchNewEvents conn =
                         when (eventMatches kindText eventsJson) $
                             execute
                                 conn
-                                "INSERT OR IGNORE INTO webhook_deliveries (webhook_id, event_id, state, attempts, available_at, created_at) VALUES (?,?,'queued',0,?,?)"
-                                (webhookId, eventId, now, now)
+                                "INSERT OR IGNORE INTO webhook_deliveries (webhook_id, event_id, event_kind, state, attempts, available_at, created_at) VALUES (?,?,?,'queued',0,?,?)"
+                                (webhookId, eventId, kindText, now, now)
                 let lastId = maximum (map fst events)
                 execute conn "UPDATE app_state SET event_cursor = ? WHERE id = 1" (Only lastId)
                 pure (length events)
@@ -557,7 +564,9 @@ recordDeliveryRetry conn deliveryId availableAt message =
         (availableAt, truncateError message, deliveryId)
 
 {- | Delete deliveries and events older than the 30 day retention window. The
-delivery history survives the event rows (event_id has no foreign key).
+delivery history survives the event rows (event_id has no foreign key), and the
+delivery row stores the event kind (schema v14) so a purged event does not hide
+it from 'listDeliveries'.
 -}
 purgeExpired :: Connection -> IO ()
 purgeExpired conn = do

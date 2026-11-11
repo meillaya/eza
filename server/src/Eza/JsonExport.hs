@@ -19,6 +19,7 @@ import Database.SQLite.Simple
 import GHC.Generics (Generic)
 
 import Eza.ClipTemplates (ClipTemplate (..), createTemplate, listTemplates)
+import Eza.Db (normaliseTimestamp)
 import Eza.Url (dedupeLookupUrls, hostOf, normalizeUrl)
 import Eza.View (View (..), ViewDefinition, ViewInput (..), ViewKind (..), decodeViewDefinition, parseViewKind, viewKindText)
 import Eza.Views (ViewPatch (..), createView, listViews, updateView)
@@ -30,6 +31,7 @@ data JsonImportReport = JsonImportReport
     , jrViews :: Int
     , jrTemplates :: Int
     , jrSkipped :: Int
+    , jrTimestampsNormalised :: Int
     }
     deriving (Show, Eq, Generic)
 
@@ -42,6 +44,7 @@ instance ToJSON JsonImportReport where
             , "views" .= jrViews report
             , "clip_templates" .= jrTemplates report
             , "skipped" .= jrSkipped report
+            , "timestamps_normalised" .= jrTimestampsNormalised report
             ]
 
 data ExportBookmark = ExportBookmark
@@ -394,9 +397,10 @@ importJson conn value =
             | otherwise -> do
                 now <- (floor <$> getPOSIXTime) :: IO Int
                 imported <- forM bookmarks (importBookmark now)
-                let idPairs = [(old, new) | Right (Just old, new) <- imported]
+                let idPairs = [(old, new) | Right (Just old, new, _) <- imported]
                     bookmarkMap = Map.fromList idPairs
                     bad = length [() | Left _ <- imported]
+                    normalisedTimestamps = length [() | Right (_, _, True) <- imported]
                 importedHighlights <- forM highlights (importHighlight now bookmarkMap)
                 importedSearches <- forM searches (importSavedSearch now)
                 importedRules <- forM rules (importRule now)
@@ -421,17 +425,25 @@ importJson conn value =
                             (countRight importedViews)
                             (countRight importedTemplates)
                             skipped
+                            normalisedTimestamps
                         )
                     )
   where
-    importBookmark :: Int -> Value -> IO (Either Text (Maybe Int, Int))
+    importBookmark :: Int -> Value -> IO (Either Text (Maybe Int, Int, Bool))
     importBookmark now raw =
         case parseMaybe parseBookmark raw of
             Nothing -> pure (Left "invalid bookmark")
             Just bookmark -> do
-                let url = normalizeUrl (ibUrl bookmark)
-                    created = if ibCreated bookmark > 0 then ibCreated bookmark else ibAdded bookmark
-                    added = if ibAdded bookmark > 0 then ibAdded bookmark else now
+                -- An out-of-range created_at/added_at would make SQLite's
+                -- strftime/date return NULL and break the ledger and stats
+                -- queries for the whole library, so a bad export value is
+                -- normalised before it can be stored.
+                let rawCreated = normaliseTimestamp (ibCreated bookmark)
+                    rawAdded = normaliseTimestamp (ibAdded bookmark)
+                    url = normalizeUrl (ibUrl bookmark)
+                    created = if rawCreated > 0 then rawCreated else rawAdded
+                    added = if rawAdded > 0 then rawAdded else now
+                    timestampsAdjusted = rawCreated /= ibCreated bookmark || rawAdded /= ibAdded bookmark
                 let candidates = dedupeLookupUrls (ibUrl bookmark)
                     marks = T.intercalate "," (replicate (length candidates) "?")
                 existing <- query conn (Query ("SELECT id FROM bookmarks WHERE url IN (" <> marks <> ") ORDER BY id LIMIT 1")) candidates :: IO [Only Int]
@@ -439,7 +451,7 @@ importJson conn value =
                     (Only bid : _) -> do
                         fillMissing conn bid bookmark
                         mergeTags conn bid (ibTags bookmark) now
-                        pure (Right (ibOldId bookmark, bid))
+                        pure (Right (ibOldId bookmark, bid, timestampsAdjusted))
                     [] -> do
                         bid <-
                             withImmediateTransaction conn $ do
@@ -477,7 +489,7 @@ importJson conn value =
                                         (Only tid : _) -> execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (newId, tid)
                                         _ -> pure ()
                                 pure newId
-                        pure (Right (ibOldId bookmark, bid))
+                        pure (Right (ibOldId bookmark, bid, timestampsAdjusted))
     fillMissing connection bid bookmark =
         executeNamed
             connection

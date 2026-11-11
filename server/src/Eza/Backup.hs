@@ -52,6 +52,7 @@ import Control.Monad (forM_, unless, when)
 import Data.Aeson (FromJSON (..), ToJSON (..), decode, encode, object, withObject, (.!=), (.:), (.:?), (.=))
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isDigit)
+import Data.List (isPrefixOf, nub)
 import Data.Maybe (isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -61,6 +62,7 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import Database.SQLite.Simple (Connection, Only (..), Query (..))
 import qualified Database.SQLite.Simple as Sqlite
 import System.Directory (
+    canonicalizePath,
     copyFile,
     createDirectory,
     createDirectoryIfMissing,
@@ -73,7 +75,7 @@ import System.Directory (
     renameFile,
  )
 import System.Environment (lookupEnv)
-import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.FilePath (addTrailingPathSeparator, isAbsolute, takeDirectory, takeFileName, (</>))
 
 import qualified Eza.Admin as Admin
 import Eza.Config (Config (..))
@@ -234,7 +236,9 @@ runBackupInternal cfg selector pruneOld = do
                             pure (Left (T.pack (show err)))
                         Right report -> do
                             copyOffsite root
-                            when pruneOld (pruneBackups (cfgBackupDir cfg) (cfgBackupKeepDays cfg))
+                            when pruneOld $ do
+                                pruneBackups (cfgBackupDir cfg) (cfgBackupKeepDays cfg)
+                                prunePreMigrationSiblings cfg users
                             pure (Right report)
   where
     openControl = do
@@ -401,6 +405,21 @@ copyTree source dest = do
             then copyTree from to
             else copyFile from to
 
+{- | Prune the per-database sibling @backups@ directories as well as the
+configured backup directory. "Eza.Db.preMigrationBackup" writes its verified
+copy to @EZA_BACKUP_DIR@ when that is set and next to the database
+(@users/<id>/backups@) when it is not, so retention has to scan both places or
+the default installation would accumulate one full copy per account per schema
+migration forever.
+-}
+prunePreMigrationSiblings :: Config -> [ControlUser] -> IO ()
+prunePreMigrationSiblings cfg users =
+    forM_ (nub (map siblingDirectory (cfgDbPath cfg : map cuDbPath users))) $ \directory -> do
+        exists <- doesDirectoryExist directory
+        when exists (pruneBackups directory (cfgBackupKeepDays cfg))
+  where
+    siblingDirectory dbPath = takeDirectory dbPath </> "backups"
+
 {- | Remove backup runs and pre-migration copies older than the keep window.
 Legacy flat @eza-<stamp>.db@ files from the single-user layout and the
 @pre-migration-*.db@ copies written by "Eza.Db" are pruned too; the latter are
@@ -558,36 +577,44 @@ buildRestorePlan cfg stamp layout contents = do
     if not controlOk
         then pure (Left "the stamp control database failed its integrity check")
         else do
-            legacySource <- case layout of
+            legacyResult <- case layout of
                 StampLayoutFlat -> do
                     exists <- doesFileExist (stamp </> "users" </> "legacy.db")
-                    pure (if exists then Just (stamp </> "users" </> "legacy.db") else Nothing)
-                StampLayoutManifest -> pure (fmap (stamp </>) . bmLegacyDb =<< scManifest contents)
-            legacyOk <- case legacySource of
-                Nothing -> pure True
-                Just path -> verify path
-            if not legacyOk
-                then pure (Left "the stamp's legacy database failed its integrity check")
-                else do
-                    currentUsers <- readCurrentUsers cfg
-                    result <- foldRestorePlan cfg stamp layout contents currentUsers (scUsers contents) ([], [], [])
-                    case result of
-                        Left message -> pure (Left message)
-                        Right (entries, preserved, dropped)
-                            | null entries && null preserved && legacySource == Nothing ->
-                                pure (Left "the stamp contains no account libraries to restore")
-                            | otherwise ->
-                                pure
-                                    ( Right
-                                        RestorePlan
-                                            { rpStamp = stamp
-                                            , rpEntries = entries
-                                            , rpPreserved = preserved
-                                            , rpDropped = dropped
-                                            , rpLegacySource = legacySource
-                                            , rpControlSource = stamp </> "control.db"
-                                            }
-                                    )
+                    pure (Right (if exists then Just (stamp </> "users" </> "legacy.db") else Nothing))
+                StampLayoutManifest ->
+                    case scManifest contents >>= bmLegacyDb of
+                        Nothing -> pure (Right Nothing)
+                        Just relative -> do
+                            resolved <- stampFileContained stamp ("users" </> "legacy.db") relative
+                            pure (fmap Just resolved)
+            case legacyResult of
+                Left message -> pure (Left message)
+                Right legacySource -> do
+                    legacyOk <- case legacySource of
+                        Nothing -> pure True
+                        Just path -> verify path
+                    if not legacyOk
+                        then pure (Left "the stamp's legacy database failed its integrity check")
+                        else do
+                            currentUsers <- readCurrentUsers cfg
+                            result <- foldRestorePlan cfg stamp layout contents currentUsers (scUsers contents) ([], [], [])
+                            case result of
+                                Left message -> pure (Left message)
+                                Right (entries, preserved, dropped)
+                                    | null entries && null preserved && legacySource == Nothing ->
+                                        pure (Left "the stamp contains no account libraries to restore")
+                                    | otherwise ->
+                                        pure
+                                            ( Right
+                                                RestorePlan
+                                                    { rpStamp = stamp
+                                                    , rpEntries = entries
+                                                    , rpPreserved = preserved
+                                                    , rpDropped = dropped
+                                                    , rpLegacySource = legacySource
+                                                    , rpControlSource = stamp </> "control.db"
+                                                    }
+                                            )
 
 {- | Decide, for every account in the stamp's control database, whether its
 library is restored from the stamp, kept from the current installation (an old
@@ -608,16 +635,17 @@ foldRestorePlan cfg stamp layout contents currentUsers pending (entries, preserv
     case pending of
         [] -> pure (Right (reverse entries, reverse preserved, reverse dropped))
         (user : rest) -> do
-            source <- stampSourceFor stamp layout contents (cuId user)
+            sourceResult <- stampSourceFor stamp layout contents (cuId user)
             let dest = cfgUsersDir cfg </> show (cuId user) </> "eza.db"
-            case source of
-                Just path -> do
+            case sourceResult of
+                Left message -> pure (Left message)
+                Right (Just path) -> do
                     ok <- verify path
                     if not ok
                         then pure (Left ("the stamp library for account " <> cuUsername user <> " failed its integrity check: " <> T.pack path))
                         else
                             foldRestorePlan cfg stamp layout contents currentUsers rest (RestoreEntry user path dest : entries, preserved, dropped)
-                Nothing ->
+                Right Nothing ->
                     case lookup (cuId user) [(cuId current, current) | current <- currentUsers] of
                         Just current -> do
                             currentExists <- doesFileExist (cuDbPath current)
@@ -631,21 +659,59 @@ foldRestorePlan cfg stamp layout contents currentUsers pending (entries, preserv
 
 {- | Where a stamp keeps one account's library. New stamps name the file in
 the manifest; flat stamps use @users/<id>.db@. A manifest that names a file
-which is missing is reported through the integrity check, not silently kept.
+which is missing is reported as absent (the current installation's copy is
+kept); a manifest whose path is not the expected file inside the stamp refuses
+the whole restore.
 -}
-stampSourceFor :: FilePath -> StampLayout -> StampContents -> Int -> IO (Maybe FilePath)
+stampSourceFor :: FilePath -> StampLayout -> StampContents -> Int -> IO (Either Text (Maybe FilePath))
 stampSourceFor stamp layout contents userId = case layout of
     StampLayoutFlat -> do
         let path = stamp </> "users" </> show userId <> ".db"
         exists <- doesFileExist path
-        pure (if exists then Just path else Nothing)
+        pure (Right (if exists then Just path else Nothing))
     StampLayoutManifest ->
         case scManifest contents of
-            Nothing -> pure Nothing
+            Nothing -> pure (Right Nothing)
             Just manifest ->
-                pure $ case [muFile user | user <- bmUsers manifest, muId user == userId] of
-                    (relative : _) -> Just (stamp </> relative)
-                    [] -> Nothing
+                case [muFile user | user <- bmUsers manifest, muId user == userId] of
+                    [] -> pure (Right Nothing)
+                    (relative : _) -> do
+                        resolved <- stampFileContained stamp ("users" </> show userId </> "eza.db") relative
+                        case resolved of
+                            Left message -> pure (Left message)
+                            Right candidate -> do
+                                exists <- doesFileExist candidate
+                                pure (Right (if exists then Just candidate else Nothing))
+
+{- | Resolve one file a stamp manifest names. The manifest is stamp data, not
+trusted text: the backup layout is fixed, so the entry has to be exactly the
+expected relative path and both its lexical form and its canonical form (which
+follows symlinks) have to stay inside the stamp. Without this a moved or
+tampered manifest could name @../../other.db@ or @/tmp/other.db@ and have that
+file copied over an account's library.
+-}
+stampFileContained :: FilePath -> FilePath -> FilePath -> IO (Either Text FilePath)
+stampFileContained stamp expected relative
+    | isAbsolute relative || relative /= expected = refuse
+    | otherwise = do
+        rootResult <- try (canonicalizePath stamp) :: IO (Either SomeException FilePath)
+        candidateResult <- try (canonicalizePath (stamp </> expected)) :: IO (Either SomeException FilePath)
+        case (rootResult, candidateResult) of
+            (Right root, Right candidate)
+                | isUnder candidate root -> pure (Right candidate)
+            _ -> refuse
+  where
+    isUnder path root = path == root || addTrailingPathSeparator root `isPrefixOf` path
+    refuse =
+        pure
+            ( Left
+                ( "the backup manifest names an invalid file: "
+                    <> T.pack relative
+                    <> " (expected "
+                    <> T.pack expected
+                    <> " inside the stamp)"
+                )
+            )
 
 readCurrentUsers :: Config -> IO [ControlUser]
 readCurrentUsers cfg = do

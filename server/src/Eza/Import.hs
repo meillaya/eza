@@ -19,7 +19,7 @@ module Eza.Import (
     decodeHtml,
 ) where
 
-import Control.Monad (forM, forM_)
+import Control.Monad (forM, forM_, when)
 import Data.Aeson (encode)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -35,9 +35,11 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
+import System.IO (hPutStrLn, stderr)
 import Text.HTML.TagSoup
 import Text.Read (readMaybe)
 
+import Eza.Db (normaliseTimestamp)
 import Eza.Jobs (enqueueJob)
 import Eza.Types (ImportReport (..))
 import Eza.Url (dedupeKey, hostOf, isHttpUrl, normalizeUrl)
@@ -509,6 +511,17 @@ importParsed :: Connection -> ImportOptions -> ParsedImport -> IO ImportReport
 importParsed conn opts parsed = do
     start <- getPOSIXTime
     now <- floor <$> getPOSIXTime
+    -- An ADD_DATE outside SQLite's renderable range would make strftime/date
+    -- return NULL and break the ledger and stats queries, so the stored value
+    -- is normalised below. Report the adjustment rather than failing the run.
+    let adjustedDates = length [() | item <- piItems parsed, normaliseTimestamp (iiCreatedAt item) /= iiCreatedAt item]
+    when (adjustedDates > 0) $
+        hPutStrLn
+            stderr
+            ( "import: normalised "
+                <> show adjustedDates
+                <> " out-of-range or millisecond ADD_DATE value(s) instead of storing them"
+            )
     (inserted, existing, tagsCreated, tagLinks) <-
         withImmediateTransaction conn $ do
             existingRows <- query_ conn "SELECT id, url FROM bookmarks" :: IO [(Int, Text)]
@@ -520,7 +533,7 @@ importParsed conn opts parsed = do
                 (csHeal classified)
             let allTagNames = Set.toList (Set.fromList (concatMap iiTags (piItems parsed)))
             tagsCreated <- sum <$> mapM (insertTag conn now) allTagNames
-            tagIds <- tagIdMap conn
+            tagIds <- tagIdMap conn allTagNames
             [Only linksBefore] <- query_ conn "SELECT COUNT(*) FROM bookmark_tags" :: IO [Only Int]
             (nInserted, nRaced, insertedTargets) <- insertNewItems conn opts now (reverse (csNew classified))
             -- Newly imported bookmarks get a background extraction job, so a
@@ -666,7 +679,7 @@ rowFor opts now item =
     , iiDescription item
     , iiDomain item
     , "netscape"
-    , iiCreatedAt item
+    , normaliseTimestamp (iiCreatedAt item)
     , now
     , now
     , if ioMarkRead opts then 1 else 0
@@ -692,7 +705,16 @@ insertTag conn now name = do
     execute conn "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, ?)" (name, now)
     changes conn
 
-tagIdMap :: Connection -> IO (Map.Map Text Int)
-tagIdMap conn = do
-    rows <- query_ conn "SELECT id, name FROM tags" :: IO [(Int, Text)]
-    pure (Map.fromList [(name, i) | (i, name) <- rows])
+{- | Resolve the stored id for every imported tag name. @tags.name@ is
+@UNIQUE COLLATE NOCASE@, so @INSERT OR IGNORE@ can leave a legacy mixed-case
+name (for example @Rust@) in place of the lower-case import name. A Haskell
+'Map' built from the raw stored names is case-sensitive and would silently
+drop the link; asking SQLite by name applies the column collation, exactly as
+the insert did.
+-}
+tagIdMap :: Connection -> [Text] -> IO (Map.Map Text Int)
+tagIdMap conn names = do
+    pairs <- forM names $ \name -> do
+        rows <- query conn "SELECT id FROM tags WHERE name = ?" (Only name) :: IO [Only Int]
+        pure [(name, i) | Only i <- rows]
+    pure (Map.fromList (concat pairs))

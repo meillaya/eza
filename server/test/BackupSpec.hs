@@ -7,9 +7,11 @@ control paths rewritten and the current installation backed up first.
 -}
 module BackupSpec (spec) where
 
-import Control.Exception (bracket)
-import Control.Monad (forM_)
+import Control.Exception (bracket, finally)
+import Control.Monad (forM_, when)
+import Data.Aeson (encode)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Database.SQLite.Simple as Sqlite
@@ -22,7 +24,8 @@ import System.Directory (
     removePathForcibly,
     renameFile,
  )
-import System.FilePath ((</>))
+import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.FilePath (takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
@@ -198,6 +201,86 @@ spec = describe "backup and restore" $ do
             doesFileExist oldPreMigration `shouldReturn` False
             doesDirectoryExist newStamp `shouldReturn` True
 
+    it "prunes pre-migration copies written next to user databases" $
+        withSystemTempDirectory "eza-backup-prune-sibling" $ \dir ->
+            withUnsetEnv "EZA_BACKUP_DIR" $ do
+                let cfg = testConfig dir
+                (alice, _) <- createAccounts cfg
+                -- What preMigrationBackup writes when EZA_BACKUP_DIR is unset:
+                -- a copy beside the account's database, in users/<id>/backups.
+                let sibling = takeDirectory (cuDbPath alice) </> "backups"
+                    oldCopy = sibling </> "pre-migration-v13-eza.db-1-abc.db"
+                    freshCopy = sibling </> "pre-migration-v13-eza.db-2-def.db"
+                createDirectoryIfMissing True sibling
+                BS.writeFile oldCopy ""
+                BS.writeFile freshCopy ""
+                setFileTimes oldCopy 0 0
+                _ <- expectBackup =<< runBackup cfg Nothing
+                doesFileExist oldCopy `shouldReturn` False
+                doesFileExist freshCopy `shouldReturn` True
+
+    it "writes the pre-migration copy where backup retention scans for it" $
+        withSystemTempDirectory "eza-backup-migration-dir" $ \dir ->
+            withUnsetEnv "EZA_BACKUP_DIR" $ do
+                let cfg = testConfig dir
+                (alice, _) <- createAccounts cfg
+                let dbPath = cuDbPath alice
+                    sibling = takeDirectory dbPath </> "backups"
+                -- Replace the account library with a v1 database so opening it
+                -- runs the migration path and writes the pre-migration copy.
+                removeDbFiles dbPath
+                bracket (Sqlite.open dbPath) Sqlite.close $ \conn -> do
+                    mapM_ (Sqlite.execute_ conn) Db.schemaV1
+                    Sqlite.execute_ conn "PRAGMA user_version = 1"
+                migrated <- Db.openDb dbPath
+                Sqlite.close migrated
+                copies <- listDirectory sibling
+                copyPath <-
+                    case copies of
+                        [copy] -> do
+                            T.isPrefixOf "pre-migration-" (T.pack copy) `shouldBe` True
+                            pure (sibling </> copy)
+                        other -> do
+                            expectationFailure ("expected one pre-migration copy, got " <> show other)
+                            error "unreachable"
+                -- Age the copy and run a backup: the retention pass has to
+                -- find it in the same directory the migration wrote it to.
+                setFileTimes copyPath 0 0
+                _ <- expectBackup =<< runBackup cfg Nothing
+                doesFileExist copyPath `shouldReturn` False
+
+    it "refuses a stamp manifest whose file path leaves the stamp" $
+        withSystemTempDirectory "eza-backup-manifest-escape" $ \dir -> do
+            let cfg = testConfig dir
+            (alice, _) <- createAccounts cfg
+            addBookmarkTo cfg alice "https://alice.example/inside"
+            backup <- expectBackup =<< runBackup cfg Nothing
+            -- A bookmark filed after the backup distinguishes "the restore
+            -- was refused" from "the stamp was restored".
+            addBookmarkTo cfg alice "https://alice.example/after"
+            let root = brRoot backup
+            -- A different but valid database outside the stamp: without the
+            -- containment check it would pass the integrity check and be
+            -- copied over alice's library.
+            let outside = dir </> "outside.db"
+            bracket (Db.openDb outside) Sqlite.close $ \conn ->
+                Sqlite.execute_ conn "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://outside.example/x','Outside','outside.example',1,1,1)"
+            manifest <- expectRightIO "manifest" (readManifest root)
+            let tamper file =
+                    manifest
+                        { bmUsers =
+                            [if muId user == cuId alice then user{muFile = file} else user | user <- bmUsers manifest]
+                        }
+            forM_ ["../../outside.db", outside] $ \badPath -> do
+                LBS.writeFile (root </> "manifest.json") (encode (tamper badPath))
+                result <- runRestore cfg (RestoreOptions root False False)
+                case result of
+                    Left message -> message `shouldSatisfy` T.isInfixOf "manifest"
+                    Right _ -> expectationFailure ("a manifest path outside the stamp must refuse the restore: " <> badPath)
+            -- The refusal is before any write: the current library is intact.
+            bracket (Db.openDb (cuDbPath alice)) Sqlite.close $ \conn ->
+                scalar conn "SELECT COUNT(*) FROM bookmarks" `shouldReturn` 2
+
 -- --------------------------------------------------------------------------- helpers
 
 withControl :: Config -> (Sqlite.Connection -> IO a) -> IO a
@@ -293,3 +376,21 @@ removeIfExists :: FilePath -> IO ()
 removeIfExists path = do
     exists <- doesFileExist path
     if exists then removeFile path else pure ()
+
+{- | Run an action with one environment variable unset, restoring the previous
+value afterwards. Where pre-migration copies land depends on EZA_BACKUP_DIR.
+-}
+withUnsetEnv :: String -> IO a -> IO a
+withUnsetEnv key action = do
+    previous <- lookupEnv key
+    unsetEnv key
+    action `finally` case previous of
+        Nothing -> unsetEnv key
+        Just value -> setEnv key value
+
+-- | Remove a database file and its WAL sidecars (test setup only).
+removeDbFiles :: FilePath -> IO ()
+removeDbFiles path =
+    forM_ [path, path <> "-wal", path <> "-shm"] $ \file -> do
+        exists <- doesFileExist file
+        when exists (removeFile file)

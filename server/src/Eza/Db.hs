@@ -26,6 +26,9 @@ module Eza.Db (
     schemaV11,
     schemaV12,
     schemaV13,
+    schemaV14,
+    maxStoredTimestamp,
+    normaliseTimestamp,
     databaseClaimed,
     ftsIntegrityCheck,
     DbError (..),
@@ -55,7 +58,35 @@ newtype DbError = DbError Text
 instance Exception DbError
 
 targetSchemaVersion :: Int
-targetSchemaVersion = 13
+targetSchemaVersion = 14
+
+{- | The last POSIX second SQLite can render as a calendar date: 9999-12-31
+23:59:59 UTC. A stored @created_at@ above this makes @strftime@ and @date@
+return NULL, which used to break a whole list or statistics query.
+-}
+maxStoredTimestamp :: Int
+maxStoredTimestamp = 253402300799
+
+{- | Normalise an imported timestamp before it is written to @created_at@.
+
+A seconds value outside @[0, maxStoredTimestamp]@ cannot be rendered by
+SQLite, so it is never stored as-is: the common 13-digit millisecond exporter
+bug is converted to seconds, and any other out-of-range value becomes 0
+("no original save date"), which is the value an export without a founding
+date already uses. Zero stays zero because a row with no filing date is
+legitimate.
+-}
+normaliseTimestamp :: Int -> Int
+normaliseTimestamp raw
+    | raw <= 0 = 0
+    | raw <= maxStoredTimestamp = raw
+    | raw >= firstPlausibleMillisecond && raw <= maxStoredTimestamp * 1000 = raw `div` 1000
+    | otherwise = 0
+  where
+    -- 2000-01-01 as milliseconds. A millisecond @ADD_DATE@ below that is not
+    -- a real saved date, so it is dropped rather than divided into a bogus
+    -- 1970s second value.
+    firstPlausibleMillisecond = 946684800000
 
 {- | Open the database and bring the schema up to date. Every open also makes
 sure the default graph view exists, so a fresh or migrated database always
@@ -119,8 +150,12 @@ applyFrom conn start = forM_ (filter ((> start) . fst) migrations) $ \(version, 
 copy. The name carries the database file name and random bytes: every user
 database in one installation shares @EZA_BACKUP_DIR@, so a name that only had
 the version and the second would collide when two accounts migrate within the
-same second. @Eza.Backup.pruneBackups@ removes these files on the normal keep
-window.
+same second.
+
+The copy goes to @EZA_BACKUP_DIR@ when it is set. When it is unset the copy
+lands next to the database in @users/<id>/backups/@ (or @data/backups/@ for
+the legacy bootstrap database); @Eza.Backup.pruneBackups@ prunes the configured
+directory and those sibling directories on the normal keep window.
 -}
 preMigrationBackup :: FilePath -> Sqlite.Connection -> Int -> IO ()
 preMigrationBackup dbPath conn fromVersion = do
@@ -271,6 +306,7 @@ migrations =
     , (11, schemaV11)
     , (12, schemaV12)
     , (13, schemaV13)
+    , (14, schemaV14)
     ]
 
 schemaV1 :: [Query]
@@ -480,4 +516,19 @@ schemaV13 =
     , "CREATE TRIGGER bookmarks_ad AFTER DELETE ON bookmarks BEGIN     INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, url, note_body, extracted_text, domain)     VALUES('delete', old.id, old.title, old.description, old.url, old.note_body, old.extracted_text, old.domain);     END"
     , "CREATE TRIGGER bookmarks_au AFTER UPDATE ON bookmarks     WHEN old.title IS NOT new.title OR old.description IS NOT new.description     OR old.url IS NOT new.url OR old.note_body IS NOT new.note_body     OR old.extracted_text IS NOT new.extracted_text OR old.domain IS NOT new.domain     BEGIN     INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, url, note_body, extracted_text, domain)     VALUES('delete', old.id, old.title, old.description, old.url, old.note_body, old.extracted_text, old.domain);     INSERT INTO bookmarks_fts(rowid, title, description, url, note_body, extracted_text, domain)     VALUES (new.id, new.title, new.description, new.url, new.note_body, new.extracted_text, new.domain);     END"
     , "INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')"
+    ]
+
+{- | v14 keeps the webhook delivery history readable after the 30-day event
+purge. @webhook_deliveries.event_id@ deliberately has no foreign key because
+the delivery history outlives the event rows, but the read path joined the
+event kind from @event_log@, so a purged event hid its deliveries. The
+delivery row now records the kind it was fanned out for; the kind of every
+event still present is copied into the existing rows. A delivery whose event
+was already purged before this migration keeps an empty kind (the kind is not
+recoverable) and stays out of the list, as before.
+-}
+schemaV14 :: [Query]
+schemaV14 =
+    [ "ALTER TABLE webhook_deliveries ADD COLUMN event_kind TEXT NOT NULL DEFAULT ''"
+    , "UPDATE webhook_deliveries SET event_kind = COALESCE((SELECT e.kind FROM event_log e WHERE e.id = webhook_deliveries.event_id), '')"
     ]
