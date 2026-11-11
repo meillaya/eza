@@ -77,9 +77,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .devenv/cabal-wasm
-          key: cabal-wasm-index-${{ runner.os }}-${{ hashFiles('cabal.project.wasm', 'core/eza-core.cabal', 'web/eza-web.cabal', 'devenv.lock') }}
+          key: cabal-wasm-index-v2-${{ runner.os }}-${{ hashFiles('cabal.project.wasm', 'core/eza-core.cabal', 'web/eza-web.cabal', 'devenv.lock') }}
           restore-keys: |
-            cabal-wasm-index-${{ runner.os }}-
+            cabal-wasm-index-v2-${{ runner.os }}-
 
       # build-web.sh runs wasm32-wasi-cabal with CABAL_DIR in the checkout
       # (\`.devenv/cabal-wasm\`); a fresh runner has no Hackage index there, so
