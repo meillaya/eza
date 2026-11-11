@@ -27,6 +27,21 @@ fi
 export CABAL_DIR="${EZA_WASM_CABAL_DIR:-$ROOT/.devenv/cabal-wasm}"
 mkdir -p static/app
 
+# The WASM toolchain builds dynamic objects and interface files (the Miso
+# compile loads aeson's .dyn_hi), and a developer's existing Cabal config has
+# shared: True / optimization: True from its first build. A fresh Cabal dir
+# (CI, release runners, a clean checkout) defaults to shared: False, builds
+# aeson without .dyn_hi and then fails the Miso compile with "Failed to load
+# dynamic interface file". Pin the two settings in the WASM Cabal config so a
+# cold store behaves exactly like a warm one; both writes are idempotent.
+mkdir -p "$CABAL_DIR"
+if ! grep -qE '^shared: *True' "$CABAL_DIR/config" 2>/dev/null; then
+  printf '\nshared: True\n' >> "$CABAL_DIR/config"
+fi
+if ! grep -qE '^optimization: *True' "$CABAL_DIR/config" 2>/dev/null; then
+  printf 'optimization: True\n' >> "$CABAL_DIR/config"
+fi
+
 wasm32-wasi-cabal build --project-file=cabal.project.wasm eza-web
 BIN="$(wasm32-wasi-cabal list-bin --project-file=cabal.project.wasm eza-web)"
 echo "wasm binary: $BIN"

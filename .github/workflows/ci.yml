@@ -36,9 +36,9 @@ jobs:
           path: |
             .devenv/cabal
             .devenv/cabal-wasm
-          key: cabal-index-${{ runner.os }}-${{ hashFiles('cabal.project', 'cabal.project.wasm', 'devenv.lock', 'flake.lock') }}
+          key: cabal-index-v2-${{ runner.os }}-${{ hashFiles('cabal.project', 'cabal.project.wasm', 'devenv.lock', 'flake.lock') }}
           restore-keys: |
-            cabal-index-${{ runner.os }}-
+            cabal-index-v2-${{ runner.os }}-
       - name: Bootstrap Cabal package indexes (native and WASM)
         run: |
           set -euo pipefail
