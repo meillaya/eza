@@ -400,12 +400,35 @@ publicV4 address =
             || address .&. 0xf0000000 == 0xf0000000
         )
 
+{- | Whether an IPv6 address (in network order) may be reached. Besides the
+special, private, link-local, multicast, and documentation ranges, the blocked
+set covers every prefix that can carry or tunnel an IPv4 address: IPv4-mapped
+(@::ffff:0:0/96@), IPv4-compatible (@::/96@), 6to4 (@2002::/16@), Teredo
+(@2001:0000::/32@), and the NAT64 prefixes (@64:ff9b::/96@ and
+@64:ff9b:1::/48@). On a host that routes one of those prefixes to IPv4, a
+literal IPv6 URL would otherwise reach a loopback or private destination and
+bypass the policy.
+-}
 publicV6 :: HostAddress6 -> Bool
 publicV6 (a, b, c, d) =
     not
         ( (a, b, c, d) == (0, 0, 0, 0)
             || (a, b, c, d) == (0, 0, 0, 1)
+            -- IPv4-compatible: ::/96 embeds an IPv4 address in the low word.
+            || a == 0 && b == 0 && c == 0
+            -- IPv4-mapped: ::ffff:0:0/96 is the other common embedding.
             || (a, b, c) == (0, 0, 0xffff)
+            -- 6to4: 2002::/16 carries an arbitrary IPv4 address in bits 16-47.
+            || a .&. 0xffff0000 == 0x20020000
+            -- Teredo: 2001:0000::/32 tunnels IPv4 over UDP.
+            || a == 0x20010000
+            -- NAT64 well-known prefix and the local-use prefix.
+            || a == 0x0064ff9b && b == 0 && c == 0
+            || a == 0x0064ff9b && b .&. 0xffff0000 == 0x00010000
+            -- 100::/64 is the discard-only prefix.
+            || a == 0x01000000 && b == 0
+            -- 2001:2::/48 is reserved for benchmarking.
+            || a == 0x20010002 && b .&. 0xffff0000 == 0
             || a .&. 0xfe000000 == 0xfc000000
             || a .&. 0xffc00000 == 0xfe800000
             || a .&. 0xff000000 == 0xff000000

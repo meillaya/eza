@@ -43,6 +43,7 @@ import Eza.Url (dedupeKey, dedupeLookupUrls, normalizeUrl)
 import qualified GraphLayoutSpec
 import qualified IsolationSpec
 import qualified LedgerSpec
+import qualified OriginGuardSpec
 import qualified PerfSpec
 import qualified SecuritySpec
 import qualified ViewContractSpec
@@ -1032,6 +1033,7 @@ main = hspec $ do
     WorkerSpec.spec
     WebhookSpec.spec
     SecuritySpec.spec
+    OriginGuardSpec.spec
 
 -- ---------------------------------------------------------------------------
 -- Test helpers

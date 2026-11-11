@@ -24,13 +24,14 @@ module Eza.Server (
     app,
     runServer,
     bootPayloadFor,
+    clientHostKey,
 ) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (Async, async, cancel, poll)
 import Control.Concurrent.MVar
-import Control.Concurrent.QSem (QSem, newQSem)
-import Control.Exception (IOException, SomeException, bracket, onException, throwIO, try)
+import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
+import Control.Exception (IOException, SomeException, bracket, bracket_, onException, throwIO, try)
 import Control.Monad (filterM, forM, forM_, void, when)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -49,6 +50,7 @@ import Data.String (fromString)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Data.Text.Encoding.Error (lenientDecode)
 import Data.Time.Clock.POSIX (getPOSIXTime, utcTimeToPOSIXSeconds)
 import Data.Word (Word64)
 import Database.SQLite.Simple (Connection, Only (..), query)
@@ -56,7 +58,6 @@ import qualified Database.SQLite.Simple as Sqlite
 import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types
-import Network.Socket (SockAddr (..))
 import Network.Wai
 import Network.Wai.Handler.Warp
 import Network.Wai.Middleware.Gzip (GzipFiles (..), GzipSettings (..), defaultGzipSettings, gzip)
@@ -189,6 +190,10 @@ data AppState = AppState
     , asManager :: Manager
     , asRecoveryLimiter :: Auth.RateLimiter
     , asLoginLimiter :: Auth.RateLimiter
+    , asLoginHostLimiter :: Auth.RateLimiter
+    , asLoginGlobalLimiter :: Auth.RateLimiter
+    , asArgon2Sem :: QSem
+    , asTrustedProxies :: [TrustedProxy]
     , asWorkersEnabled :: MVar Bool
     , asEnrichSem :: QSem
     , asLastSessionCleanup :: MVar Int
@@ -253,6 +258,31 @@ authConfig cfg =
 -- Application state
 -- ---------------------------------------------------------------------------
 
+{- | Attempts one client host may make against the public password paths per
+lockout window. This caps the Argon2 work a single source can cause; a
+household behind one NAT is far below it even when every member signs in.
+-}
+loginHostMaxAttempts :: Int
+loginHostMaxAttempts = 30
+
+{- | Attempts all clients together may make per minute, so rotating source
+addresses (or spoofed forwarding headers from a trusted proxy) cannot multiply
+the per-host budget into a CPU exhaustion. Sized for a small household: a
+whole family signing in at once stays well under it.
+-}
+loginGlobalMaxAttempts :: Int
+loginGlobalMaxAttempts = 120
+
+loginGlobalWindowSeconds :: Int
+loginGlobalWindowSeconds = 60
+
+{- | Concurrent Argon2 verifications. One hash holds the configured memory for
+the duration, so unbounded concurrency is a memory exhaustion even when the
+request rate is capped. Two in flight keeps the peak at a couple of hashes.
+-}
+argon2Slots :: Int
+argon2Slots = 2
+
 {- | Open the control database, register an existing single-user installation
 when the control registry is empty, and start with no user slots open. The
 control database is cheap and the user databases open lazily; a request only
@@ -263,8 +293,9 @@ newAppState cfg = do
     control <- Control.openControlDb (cfgControlDbPath cfg)
     bootstrapControl cfg control
     manager <- newTlsManager
+    proxies <- loadTrustedProxies
     recoveryLimiter <- Auth.newRateLimiter 5 900
-    {- The per-host login limiter is checked before the current attempt is
+    {- The per-username login limiter is checked before the current attempt is
     recorded, while an account's database lockout is decided after the attempt
     that reaches 'EZA_LOGIN_MAX_ATTEMPTS'. Sizing the limiter one attempt short
     makes a known username and an unknown one answer 429 on the same attempt,
@@ -275,6 +306,12 @@ newAppState cfg = do
         Auth.newRateLimiter
             (max 1 (cfgLoginMaxAttempts cfg - 1))
             (max 1 (cfgLoginLockoutSeconds cfg))
+    -- Host and global buckets are deliberately not keyed by a request field
+    -- the attacker can rotate: one caps a single source address and one caps
+    -- the whole process, so rotating usernames cannot multiply the Argon2 work.
+    loginHostLimiter <- Auth.newRateLimiter loginHostMaxAttempts (max 1 (cfgLoginLockoutSeconds cfg))
+    loginGlobalLimiter <- Auth.newRateLimiter loginGlobalMaxAttempts loginGlobalWindowSeconds
+    argon2Sem <- newQSem argon2Slots
     controlVar <- newMVar control
     usersVar <- newMVar Map.empty
     workersEnabledVar <- newMVar False
@@ -289,6 +326,10 @@ newAppState cfg = do
             , asManager = manager
             , asRecoveryLimiter = recoveryLimiter
             , asLoginLimiter = loginLimiter
+            , asLoginHostLimiter = loginHostLimiter
+            , asLoginGlobalLimiter = loginGlobalLimiter
+            , asArgon2Sem = argon2Sem
+            , asTrustedProxies = proxies
             , asWorkersEnabled = workersEnabledVar
             , asEnrichSem = enrichSem
             , asLastSessionCleanup = lastCleanupVar
@@ -808,7 +849,8 @@ requestBodyLimitMiddleware cfg =
 bodyLimitFor :: Config -> Request -> Maybe Word64
 bodyLimitFor cfg req
     | requestMethod req `elem` ["GET", "HEAD"] = Nothing
-    | pathInfo req == ["api", "v1", "import"] = Just (fromIntegral (cfgImportMaxBytes cfg))
+    | pathInfo req `elem` [["api", "v1", "import"], ["api", "v1", "import", "json"]] =
+        Just (fromIntegral (cfgImportMaxBytes cfg))
     | otherwise = Just (fromIntegral (cfgMaxBodyBytes cfg))
 
 requestTooLargeResponse :: Word64 -> Response
@@ -828,35 +870,93 @@ dispatchApp cfg state req respond =
         -- CORS preflight for the browser clipper. This must run before the
         -- auth guard: the preflight deliberately carries no Authorization.
         ("OPTIONS", path) | isClipPath path -> clipPreflight cfg req respond
-        -- Public: health + password auth pages/ceremonies.
-        ("GET", ["healthz"]) -> health state respond
-        ("GET", ["login"]) -> loginHandler state req respond
-        ("GET", ["setup"]) -> setupHandler state req respond
-        ("GET", ["recover"]) -> respond (htmlResponse recoverPage)
-        ("GET", ["s", token]) -> publicShareHandler state token respond
-        ("POST", ["api", "auth", "login"]) -> passwordLoginHandler state req respond
-        ("POST", ["api", "auth", "passkey", "options"]) -> passkeySecondFactorOptionsHandler state req respond
-        ("POST", ["api", "auth", "passkey", "verify"]) -> passkeySecondFactorVerifyHandler state req respond
-        ("POST", ["api", "auth", "options"]) -> legacyPasskeyOptionsHandler state req respond
-        ("POST", ["api", "auth", "verify"]) -> legacyPasskeyVerifyHandler state req respond
-        ("POST", ["api", "setup", "password"]) -> passwordSetupHandler state req respond
+        -- OPTIONS on the public surface answers with the allowed methods
+        -- instead of falling into the auth guard and producing a login
+        -- redirect. Unknown paths keep the authenticated fallthrough.
+        ("OPTIONS", path) -> case publicAllow path of
+            Just allow -> respond (responseLBS status204 [(hAllow, allow)] "")
+            Nothing -> authed
+        -- Public auth ceremonies. They run before the session guard.
+        ("POST", path) -> case publicPost path of
+            Just route -> route
+            Nothing -> authed
+        -- HEAD is the GET headers without a body. Warp strips the body for a
+        -- HEAD response and still sends the computed length, so the public GET
+        -- handlers are reused unchanged.
+        (method, path)
+            | method == "GET" || method == "HEAD" -> case publicGet path of
+                Just route -> route
+                Nothing -> authed
+        _ -> authed
+  where
+    authed =
+        withAuthed cfg state req respond $ \rctx conn ->
+            authedRoute rctx req respond conn
+
+    publicPost path = case path of
+        ["api", "auth", "login"] -> Just (passwordLoginHandler state req respond)
+        ["api", "auth", "passkey", "options"] -> Just (passkeySecondFactorOptionsHandler state req respond)
+        ["api", "auth", "passkey", "verify"] -> Just (passkeySecondFactorVerifyHandler state req respond)
+        ["api", "auth", "options"] -> Just (legacyPasskeyOptionsHandler state req respond)
+        ["api", "auth", "verify"] -> Just (legacyPasskeyVerifyHandler state req respond)
+        ["api", "setup", "password"] -> Just (passwordSetupHandler state req respond)
         -- Passkey-first setup is retired. Recovery sets a password too.
-        ("POST", ["api", "setup", "options"]) -> respond passkeySetupRetired
-        ("POST", ["api", "setup", "verify"]) -> respond passkeySetupRetired
-        ("POST", ["api", "recovery", "redeem"]) -> recoveryRedeemHandler state req respond
-        ("GET", ("assets" : rest)) -> serveAsset cfg rest req respond
-        ("GET", ["favicon.svg"]) -> serveAsset cfg ["favicon.svg"] req respond
-        ("GET", ["theme.js"]) -> serveAsset cfg ["theme.js"] req respond
-        ("GET", ["manifest.webmanifest"]) ->
-            serveStaticFile cfg "manifest.webmanifest" [("Content-Type", "application/manifest+json")] req respond
-        ("GET", ["sw.js"]) -> serveServiceWorker cfg req respond
-        ("GET", []) -> do
+        ["api", "setup", "options"] -> Just (respond passkeySetupRetired)
+        ["api", "setup", "verify"] -> Just (respond passkeySetupRetired)
+        ["api", "recovery", "redeem"] -> Just (recoveryRedeemHandler state req respond)
+        _ -> Nothing
+
+    publicGet path = case path of
+        -- Public: health + password auth pages.
+        ["healthz"] -> Just (health state respond)
+        ["login"] -> Just (loginHandler state req respond)
+        ["setup"] -> Just (setupHandler state req respond)
+        ["recover"] -> Just (respond (htmlResponse recoverPage))
+        ["s", token] -> Just (publicShareHandler state token respond)
+        ("assets" : rest) -> Just (serveAsset cfg rest req respond)
+        ["favicon.svg"] -> Just (serveAsset cfg ["favicon.svg"] req respond)
+        ["theme.js"] -> Just (serveAsset cfg ["theme.js"] req respond)
+        ["manifest.webmanifest"] ->
+            Just (serveStaticFile cfg "manifest.webmanifest" [("Content-Type", "application/manifest+json")] req respond)
+        ["sw.js"] -> Just (serveServiceWorker cfg req respond)
+        [] -> Just $ do
             msess <- requestSession state req
             case msess of
                 Just (_, _, sess) | Auth.sessScope sess == "normal" -> indexResponse cfg req respond
                 _ -> respond (redirectTo "/login")
-        -- Authenticated API.
-        _ -> withAuthed cfg state req respond $ \rctx conn -> authedRoute rctx req respond conn
+        _ -> Nothing
+
+{- | Methods the public routes accept, for an OPTIONS answer. The public
+ceremonies are POST-only; the pages and assets are GET/HEAD. Nothing outside
+this list is answered before the auth guard, so the public surface does not
+advertise methods on authenticated routes.
+-}
+publicAllow :: [Text] -> Maybe BS.ByteString
+publicAllow path = case path of
+    ["healthz"] -> getOnly
+    ["login"] -> getOnly
+    ["setup"] -> getOnly
+    ["recover"] -> getOnly
+    ("s" : [_]) -> getOnly
+    ("assets" : _) -> getOnly
+    ["favicon.svg"] -> getOnly
+    ["theme.js"] -> getOnly
+    ["manifest.webmanifest"] -> getOnly
+    ["sw.js"] -> getOnly
+    [] -> getOnly
+    ["api", "auth", "login"] -> postOnly
+    ["api", "auth", "passkey", "options"] -> postOnly
+    ["api", "auth", "passkey", "verify"] -> postOnly
+    ["api", "auth", "options"] -> postOnly
+    ["api", "auth", "verify"] -> postOnly
+    ["api", "setup", "password"] -> postOnly
+    ["api", "setup", "options"] -> postOnly
+    ["api", "setup", "verify"] -> postOnly
+    ["api", "recovery", "redeem"] -> postOnly
+    _ -> Nothing
+  where
+    getOnly = Just "GET, HEAD, OPTIONS"
+    postOnly = Just "POST, OPTIONS"
 
 -- ---------------------------------------------------------------------------
 -- Public auth handlers
@@ -922,20 +1022,25 @@ passwordLoginHandler state req respond =
     case requireOrigin cfg req of
         Left err -> respond (authErrResponse err)
         Right () -> do
-            body <- readAuthBody cfg req
-            case body of
-                Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
-                Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
-                Right value -> case parseMaybeObj value of
-                    Nothing -> respond (jsonError status400 "bad_request" "invalid body")
-                    Just o -> case (parseMaybe (.: "username") o, parseMaybe (.: "password") o) of
-                        (Just username, Just password) -> do
-                            let limiterKey = clientHostKey req <> "|" <> T.toLower (T.strip username)
-                            attempt <- Auth.checkRateLimit (asLoginLimiter state) limiterKey
-                            case attempt of
-                                Left retryAfter -> respond (lockedResponse "login_locked" retryAfter)
-                                Right () -> attemptLogin username password limiterKey
-                        _ -> respond (jsonError status400 "bad_request" "username and password are required")
+            clientKey <- clientHostKey (asTrustedProxies state) req
+            limited <- checkLoginLimiters state clientKey
+            case limited of
+                Left retryAfter -> respond (lockedResponse "login_locked" retryAfter)
+                Right () -> do
+                    body <- readAuthBody cfg req
+                    case body of
+                        Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
+                        Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
+                        Right value -> case parseMaybeObj value of
+                            Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+                            Just o -> case (parseMaybe (.: "username") o, parseMaybe (.: "password") o) of
+                                (Just username, Just password) -> do
+                                    let limiterKey = clientKey <> "|" <> T.toLower (T.strip username)
+                                    attempt <- Auth.checkRateLimit (asLoginLimiter state) limiterKey
+                                    case attempt of
+                                        Left retryAfter -> respond (lockedResponse "login_locked" retryAfter)
+                                        Right () -> attemptLogin username password limiterKey
+                                _ -> respond (jsonError status400 "bad_request" "username and password are required")
   where
     cfg = asConfig state
 
@@ -943,12 +1048,15 @@ passwordLoginHandler state req respond =
         mfound <- enabledUserByUsername state username
         case mfound of
             Nothing -> do
-                Password.dummyVerify (cfgArgon2 cfg) password
+                -- An unknown name still pays Argon2, so the slot cap and the
+                -- pre-Argon2 limiters above are what keep that work bounded.
+                withArgon2Slot state (Password.dummyVerify (cfgArgon2 cfg) password)
                 respond invalidCredentials
             Just user -> withSlot state user respond $ \slot -> do
                 result <-
-                    withDb slot $ \conn ->
-                        Auth.verifyPasswordLogin conn (authConfig cfg) username password
+                    withArgon2Slot state $
+                        withDb slot $ \conn ->
+                            Auth.verifyPasswordLogin conn (authConfig cfg) username password
                 case result of
                     Left err -> respond (authErrResponse err)
                     Right (Auth.LoginComplete session) -> do
@@ -979,14 +1087,52 @@ lockedResponse code retryAfter =
         (<> [("Retry-After", BSC.pack (show retryAfter))])
         (jsonError status429 code "too many failed attempts; try again later")
 
-{- | The client address without the ephemeral source port, so the login and
-recovery limiters key on the host instead of on each new connection.
+{- | The client address the limiters key on. Without a trusted proxy that is
+the socket peer, without the ephemeral source port. When the peer is one of the
+configured @EZA_TRUSTED_PROXIES@, the right-most untrusted @X-Forwarded-For@
+hop is the client; hops that are themselves trusted proxies are skipped. A
+forwarded header from an untrusted peer is ignored, so a direct client cannot
+pick its own bucket.
+
+The result is an opaque stable key, not a validated address: after a trusted
+proxy names the client it is used only as a map key.
 -}
-clientHostKey :: Request -> Text
-clientHostKey req = case remoteHost req of
-    SockAddrInet _ address -> T.pack (show address)
-    SockAddrInet6 _ _ address _ -> T.pack (show address)
-    other -> T.pack (show other)
+clientHostKey :: [TrustedProxy] -> Request -> IO Text
+clientHostKey proxies req
+    | not (isTrustedProxy proxies (remoteHost req)) = pure (sockAddrKey (remoteHost req))
+    | otherwise = case lookup "X-Forwarded-For" (requestHeaders req) of
+        Nothing -> pure (sockAddrKey (remoteHost req))
+        Just raw -> pick (reverse (forwardedHops raw))
+  where
+    forwardedHops raw =
+        filter (not . T.null) (map T.strip (T.splitOn "," (TE.decodeUtf8With lenientDecode raw)))
+
+    pick [] = pure (sockAddrKey (remoteHost req))
+    pick (hop : rest) = do
+        parsed <- parseNumericAddress hop
+        case parsed of
+            Just address
+                | isTrustedProxy proxies address -> pick rest
+                | otherwise -> pure (sockAddrKey address)
+            -- An unparseable hop is treated as the client rather than skipped,
+            -- so a malformed header cannot be used to hide behind a trusted
+            -- address further left.
+            Nothing -> pure hop
+
+{- | Count one attempt against the process-wide and per-client login budgets
+before any Argon2 work. Neither key carries the username, so rotating the
+username cannot create a fresh budget.
+-}
+checkLoginLimiters :: AppState -> Text -> IO (Either Int ())
+checkLoginLimiters state clientKey = do
+    global <- Auth.checkRateLimit (asLoginGlobalLimiter state) "global"
+    case global of
+        Left retryAfter -> pure (Left retryAfter)
+        Right () -> Auth.checkRateLimit (asLoginHostLimiter state) clientKey
+
+-- | Run one Argon2 computation under the shared concurrency slots.
+withArgon2Slot :: AppState -> IO a -> IO a
+withArgon2Slot state = bracket_ (waitQSem (asArgon2Sem state)) (signalQSem (asArgon2Sem state))
 
 {- | The passkey half of a two-factor sign-in. Both handlers need the pending
 cookie that the password step set; without it there is no sign-in to finish.
@@ -1120,31 +1266,36 @@ passwordSetupHandler state req respond =
     case requireOrigin cfg req of
         Left err -> respond (authErrResponse err)
         Right () -> do
-            msess <- requestSession state req
-            case msess of
-                -- A recovery session is a live cookie session, so this route
-                -- needs the same CSRF check as every other unsafe session
-                -- request. The Origin check above only covers the fresh
-                -- install, which has no session at all.
-                Just (_, _, sess)
-                    | Auth.sessScope sess == "recovery"
-                    , not (csrfOk req sess) ->
-                        respond (jsonError status403 "csrf" "missing or invalid CSRF token")
-                _ -> do
-                    body <- readAuthBody cfg req
-                    case body of
-                        Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
-                        Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
-                        Right value -> case parseSetupBody value of
-                            Left message -> respond (jsonError status400 "bad_request" message)
-                            Right (rawUsername, password) ->
-                                case msess of
-                                    Just (user, slot, sess)
-                                        | Auth.sessScope sess == "recovery" ->
-                                            finishRecoverySetup user slot rawUsername password
-                                    Just _ ->
-                                        respond (jsonError status403 "recovery_session_required" "a recovery session is required to finish recovery setup")
-                                    Nothing -> startFreshSetup rawUsername password
+            clientKey <- clientHostKey (asTrustedProxies state) req
+            limited <- checkLoginLimiters state clientKey
+            case limited of
+                Left retryAfter -> respond (lockedResponse "login_locked" retryAfter)
+                Right () -> do
+                    msess <- requestSession state req
+                    case msess of
+                        -- A recovery session is a live cookie session, so this route
+                        -- needs the same CSRF check as every other unsafe session
+                        -- request. The Origin check above only covers the fresh
+                        -- install, which has no session at all.
+                        Just (_, _, sess)
+                            | Auth.sessScope sess == "recovery"
+                            , not (csrfOk req sess) ->
+                                respond (jsonError status403 "csrf" "missing or invalid CSRF token")
+                        _ -> do
+                            body <- readAuthBody cfg req
+                            case body of
+                                Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
+                                Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
+                                Right value -> case parseSetupBody value of
+                                    Left message -> respond (jsonError status400 "bad_request" message)
+                                    Right (rawUsername, password) ->
+                                        case msess of
+                                            Just (user, slot, sess)
+                                                | Auth.sessScope sess == "recovery" ->
+                                                    finishRecoverySetup user slot rawUsername password
+                                            Just _ ->
+                                                respond (jsonError status403 "recovery_session_required" "a recovery session is required to finish recovery setup")
+                                            Nothing -> startFreshSetup rawUsername password
   where
     cfg = asConfig state
 
@@ -1218,12 +1369,13 @@ recoveryRedeemHandler state req respond =
     case requireOrigin cfg req of
         Left err -> respond (authErrResponse err)
         Right () -> do
+            clientKey <- clientHostKey (asTrustedProxies state) req
             body <- readAuthBody cfg req
             case body of
                 Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
                 Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
                 Right value -> do
-                    let limiterKey = clientHostKey req <> "|recovery"
+                    let limiterKey = clientKey <> "|recovery"
                     attempt <- Auth.checkRateLimit (asRecoveryLimiter state) limiterKey
                     case attempt of
                         Left retryAfter -> respond (lockedResponse "recovery_locked" retryAfter)
@@ -1626,7 +1778,7 @@ authedRoute rctx req respond conn =
             respond (jsonResponse status200 (object ["restored" .= n]))
         ("POST", ["api", "v1", "import"]) -> importHandler cfg conn req respond
         ("POST", ["api", "v1", "import", "json"]) -> do
-            body <- jsonBody cfg req
+            body <- jsonBodyTo (cfgImportMaxBytes cfg) req
             case body of
                 Left response -> respond response
                 Right value -> do
@@ -2724,7 +2876,9 @@ importHandler cfg conn req respond =
     -- documented portable backup). It answers with the Netscape report shape so
     -- the account import panel can show one result format for both sources.
     importJsonBody = do
-        body <- jsonBody cfg req
+        -- The JSON-body variant of the portable-backup import gets the same
+        -- EZA_IMPORT_MAX_BYTES cap the multipart parser and the middleware use.
+        body <- jsonBodyTo (cfgImportMaxBytes cfg) req
         case body of
             Left response -> respond response
             Right value -> do
@@ -2803,24 +2957,28 @@ isEzaJsonExport (Object o) = case KeyMap.lookup "format" o of
     _ -> False
 isEzaJsonExport _ = False
 
-{- | Read the request body under the general per-request cap. The size-limit
-middleware rejects a declared or chunked oversize body before the handler, but
-this is the in-handler backstop: no handler ever builds an unbounded lazy
-bytestring. Returns a ready 413 in the shared JSON error shape.
+{- | The same bounded reader with an explicit cap. The import routes use
+'EZA_IMPORT_MAX_BYTES' so a declared-length body inside the import cap is not
+rejected by the general 8 MiB limit while the multipart parser and the
+size-limit middleware both allow the import cap. The 413 names that limit.
 -}
-readBodyBounded :: Config -> Request -> IO (Either Response LBS.ByteString)
-readBodyBounded cfg req = do
-    body <- readBodyLimited (cfgMaxBodyBytes cfg) req
+readBodyBoundedTo :: Int -> Request -> IO (Either Response LBS.ByteString)
+readBodyBoundedTo limit req = do
+    body <- readBodyLimited limit req
     pure $ case body of
-        Left () -> Left (requestTooLargeResponse (fromIntegral (cfgMaxBodyBytes cfg)))
+        Left () -> Left (requestTooLargeResponse (fromIntegral limit))
         Right raw -> Right raw
 
 {- | Decode a bounded JSON body. A body over the cap is a ready-made 413; a
 parse failure keeps the existing generic 400 shape.
 -}
 jsonBody :: Config -> Request -> IO (Either Response Value)
-jsonBody cfg req = do
-    body <- readBodyBounded cfg req
+jsonBody cfg = jsonBodyTo (cfgMaxBodyBytes cfg)
+
+-- | Decode a JSON body under an explicit cap, for the import routes.
+jsonBodyTo :: Int -> Request -> IO (Either Response Value)
+jsonBodyTo limit req = do
+    body <- readBodyBoundedTo limit req
     pure $ case body of
         Left response -> Left response
         Right raw -> case eitherDecode raw of
