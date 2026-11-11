@@ -73,6 +73,34 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "asset=eza-web-${version}.tar.gz" >> "$GITHUB_OUTPUT"
 
+      - name: Cache the WASM Cabal package index
+        uses: actions/cache@v4
+        with:
+          path: .devenv/cabal-wasm
+          key: cabal-wasm-index-${{ runner.os }}-${{ hashFiles('cabal.project.wasm', 'core/eza-core.cabal', 'web/eza-web.cabal', 'devenv.lock') }}
+          restore-keys: |
+            cabal-wasm-index-${{ runner.os }}-
+
+      # build-web.sh runs wasm32-wasi-cabal with CABAL_DIR in the checkout
+      # (\`.devenv/cabal-wasm\`); a fresh runner has no Hackage index there, so
+      # bootstrap it before building. This is the same failure class the CI
+      # workflow fixed (a cold CABAL_DIR cannot resolve aeson).
+      - name: Bootstrap the WASM Cabal package index
+        run: |
+          set -euo pipefail
+          index=".devenv/cabal-wasm/packages/hackage.haskell.org/01-index.tar"
+          if [ ! -f "$index" ]; then
+            echo "::notice::WASM Cabal index is not cached; running 'cabal update' for scripts/build-web.sh's CABAL_DIR."
+            devenv shell -- bash -c 'CABAL_DIR="$PWD/.devenv/cabal-wasm" cabal update' || {
+              echo "::error title=WASM Cabal index bootstrap failed::'cabal update' failed for CABAL_DIR=$PWD/.devenv/cabal-wasm, which scripts/build-web.sh uses. Check Hackage reachability and re-run the job."
+              exit 1
+            }
+          fi
+          devenv shell -- bash -c 'CABAL_DIR="$PWD/.devenv/cabal-wasm" wasm32-wasi-cabal build --project-file=cabal.project.wasm eza-web --dry-run' || {
+            echo "::error title=WASM dependency resolution failed::wasm32-wasi-cabal could not resolve cabal.project.wasm."
+            exit 1
+          }
+
       - name: Build the WASM web bundle
         run: devenv shell -- bash scripts/build-web.sh
 
