@@ -35,6 +35,7 @@ module Eza.Auth (
     newRateLimiter,
     checkRateLimit,
     resetRateLimit,
+    rateLimiterKeyCount,
     countCredentials,
     setupClaimed,
     hasRecoverySession,
@@ -85,7 +86,7 @@ module Eza.Auth (
     hashToken,
 ) where
 
-import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
 import Control.Monad (forM_, when)
 import Crypto.Hash (Digest, SHA256, hash)
 import Crypto.Random (getRandomBytes)
@@ -217,12 +218,26 @@ emptyAccount = Account "" "" Nothing False 0 Nothing Nothing Nothing
 {- | In-memory attempt counter for public endpoints without a database row
 (recovery redemption). A restart clears it, which is fine for a one-shot
 code exchange.
+
+The key set is bounded: keys come from client addresses and client-supplied
+request fields, so rotating names must not grow the map without limit. Once
+the cap is reached a key is evicted before the current key is stored; the
+current attempt is always counted, so a full map cannot be used to dodge the
+limit for a fresh key.
 -}
 data RateLimiter = RateLimiter
     { rlAttempts :: MVar (Map.Map Text [Int])
     , rlMaxAttempts :: Int
     , rlWindowSeconds :: Int
+    , rlMaxKeys :: Int
     }
+
+{- | Hard cap on limiter buckets. A login burst keys one bucket per client host
+and per username; a few thousand buckets is far above any real household and
+still bounds the memory an attacker-chosen key stream can hold.
+-}
+defaultRateLimiterMaxKeys :: Int
+defaultRateLimiterMaxKeys = 4096
 
 sessionCookieName, csrfCookieName, pendingCookieName :: Text
 sessionCookieName = "eza_session"
@@ -545,26 +560,54 @@ recordFailedLogin conn ac priorFailures now = do
 
 newRateLimiter :: Int -> Int -> IO RateLimiter
 newRateLimiter maxAttempts windowSeconds =
-    RateLimiter <$> newMVar Map.empty <*> pure (max 1 maxAttempts) <*> pure (max 1 windowSeconds)
+    RateLimiter
+        <$> newMVar Map.empty
+        <*> pure (max 1 maxAttempts)
+        <*> pure (max 1 windowSeconds)
+        <*> pure defaultRateLimiterMaxKeys
 
 {- | Allow one more attempt for a key, or report how many seconds to wait.
-Keys are client hosts for the recovery endpoint.
+Expired attempts are pruned on every check, so a key with no recent attempt
+costs nothing and an idle process empties the map. Keys are client addresses,
+the constant global key, or one of those combined with a username; see
+'Eza.Server' for the callers.
 -}
 checkRateLimit :: RateLimiter -> Text -> IO (Either Int ())
 checkRateLimit limiter key = do
     now <- epoch
     modifyMVar (rlAttempts limiter) $ \attemptsMap -> do
         let window = rlWindowSeconds limiter
-            pruned =
-                Map.filter (not . null) $
-                    Map.map (filter (> now - window)) attemptsMap
-            recent = filter (> now - window) (Map.findWithDefault [] key pruned)
+            pruned = Map.mapMaybe (recentAttempts now window) attemptsMap
+            recent = Map.findWithDefault [] key pruned
         if length recent >= rlMaxAttempts limiter
             then do
                 let oldest = minimum (now : recent)
                     retryAfter = max 1 (window - (now - oldest))
-                pure (Map.insert key recent pruned, Left retryAfter)
-            else pure (Map.insert key (now : recent) pruned, Right ())
+                pure (boundedKeys limiter key (Map.insert key recent pruned), Left retryAfter)
+            else pure (boundedKeys limiter key (Map.insert key (now : recent) pruned), Right ())
+  where
+    recentAttempts now window attempts =
+        case filter (> now - window) attempts of
+            [] -> Nothing
+            fresh -> Just fresh
+
+-- | Read the number of live limiter buckets (used by the map-bound tests).
+rateLimiterKeyCount :: RateLimiter -> IO Int
+rateLimiterKeyCount limiter = Map.size <$> readMVar (rlAttempts limiter)
+
+{- | Enforce the hard bucket cap. The current key is never the one evicted, so
+a new key cannot escape being counted by being lexicographically first.
+Eviction is by key order, not by recency: the cap is a memory backstop for an
+attacker-chosen key stream, not the primary rate limit.
+-}
+boundedKeys :: RateLimiter -> Text -> Map.Map Text [Int] -> Map.Map Text [Int]
+boundedKeys limiter currentKey attemptsMap
+    | Map.size attemptsMap <= cap = attemptsMap
+    | otherwise =
+        Map.insert currentKey (Map.findWithDefault [] currentKey attemptsMap) $
+            Map.deleteMin (Map.delete currentKey attemptsMap)
+  where
+    cap = max 1 (rlMaxKeys limiter)
 
 resetRateLimit :: RateLimiter -> Text -> IO ()
 resetRateLimit limiter key = modifyMVar_ (rlAttempts limiter) (pure . Map.delete key)

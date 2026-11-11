@@ -7,14 +7,23 @@ module Eza.Config (
     originHost,
     bindHost,
     bindPort,
+    TrustedProxy (..),
+    loadTrustedProxies,
+    parseTrustedProxies,
+    isTrustedProxy,
+    parseNumericAddress,
+    sockAddrKey,
 ) where
 
+import Control.Exception (SomeException, try)
+import Data.Bits (shiftL, shiftR, (.&.))
 import Data.Char (toLower)
 import Data.List (isInfixOf, nub)
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Word (Word32)
+import Data.Word (Word32, Word8)
+import Network.Socket (AddrInfo, AddrInfoFlag (AI_NUMERICHOST), SockAddr (..), SocketType (Stream), addrAddress, addrFlags, addrSocketType, defaultHints, getAddrInfo, hostAddressToTuple)
 import System.Directory (createDirectoryIfMissing)
 import System.Environment (lookupEnv)
 import System.FilePath (takeDirectory, (</>))
@@ -244,3 +253,121 @@ _lower = toLower
 
 nonEmpty :: String -> Maybe String
 nonEmpty value = if null value then Nothing else Just value
+
+-- ---------------------------------------------------------------------------
+-- Trusted reverse proxies
+-- ---------------------------------------------------------------------------
+
+{- | One address range whose @X-Forwarded-For@ chain eza trusts. Only a request
+whose socket peer falls inside a trusted range may name its client in the
+header; a direct request that carries the header is still keyed on its socket
+peer, so the header cannot be used to dodge a limiter.
+-}
+data TrustedProxy = TrustedProxy
+    { tpxPrefixLength :: Int
+    , tpxIsIpv6 :: Bool
+    , tpxBytes :: [Word8]
+    }
+    deriving (Show, Eq)
+
+-- | Read @EZA_TRUSTED_PROXIES@ (comma-separated CIDRs); empty by default.
+loadTrustedProxies :: IO [TrustedProxy]
+loadTrustedProxies = maybe (pure []) (parseTrustedProxies . T.pack) =<< lookupEnv "EZA_TRUSTED_PROXIES"
+
+{- | Parse a comma-separated CIDR list such as
+@127.0.0.1/32,10.0.0.0/8,fd00::/8@. Entries that are not a numeric address or
+whose prefix lies outside that address family are ignored, so one typo cannot
+widen the trusted set.
+-}
+parseTrustedProxies :: Text -> IO [TrustedProxy]
+parseTrustedProxies raw =
+    catMaybes <$> mapM parseOne (filter (not . T.null) (map T.strip (T.splitOn "," raw)))
+  where
+    parseOne entry = case T.splitOn "/" entry of
+        [address] -> do
+            parsed <- parseNumericAddress address
+            pure (fullRange <$> (parsed >>= sockAddrBytes))
+        [address, rawPrefix] -> do
+            parsed <- parseNumericAddress address
+            pure $ do
+                (isV6, bytes) <- parsed >>= sockAddrBytes
+                prefix <- readIntText rawPrefix
+                let maxPrefix = length bytes * 8
+                if prefix < 0 || prefix > maxPrefix
+                    then Nothing
+                    else Just (TrustedProxy prefix isV6 (maskNetworkBytes prefix bytes))
+        _ -> pure Nothing
+
+    fullRange (isV6, bytes) = TrustedProxy (length bytes * 8) isV6 bytes
+
+-- | Whether a socket peer address falls inside one of the trusted ranges.
+isTrustedProxy :: [TrustedProxy] -> SockAddr -> Bool
+isTrustedProxy proxies address = case sockAddrBytes address of
+    Nothing -> False
+    Just (isV6, bytes) ->
+        any
+            (\proxy -> tpxIsIpv6 proxy == isV6 && prefixMatches (tpxPrefixLength proxy) (tpxBytes proxy) bytes)
+            proxies
+
+{- | Parse one numeric IPv4 or IPv6 address without resolving a name. A DNS
+lookup here would be slow per request and a rebinding risk.
+-}
+parseNumericAddress :: Text -> IO (Maybe SockAddr)
+parseNumericAddress raw
+    | T.null trimmed = pure Nothing
+    | otherwise = do
+        result <-
+            try
+                (getAddrInfo (Just hints) (Just (T.unpack trimmed)) Nothing) ::
+                IO (Either SomeException [AddrInfo])
+        pure $ case result of
+            Right (info : _) -> Just (addrAddress info)
+            _ -> Nothing
+  where
+    trimmed = T.strip raw
+    hints = defaultHints{addrFlags = [AI_NUMERICHOST], addrSocketType = Stream}
+
+{- | The limiter key for a peer address. IPv4 keys on its dotted spelling and
+IPv6 on its numeric words; the exact form only has to be stable inside this
+process.
+-}
+sockAddrKey :: SockAddr -> Text
+sockAddrKey address = case address of
+    SockAddrInet _ hostAddress -> T.pack (show (hostAddressToTuple hostAddress))
+    SockAddrInet6 _ _ hostAddress _ -> T.pack (show hostAddress)
+    other -> T.pack (show other)
+
+sockAddrBytes :: SockAddr -> Maybe (Bool, [Word8])
+sockAddrBytes address = case address of
+    SockAddrInet _ hostAddress ->
+        let (a, b, c, d) = hostAddressToTuple hostAddress in Just (False, [a, b, c, d])
+    SockAddrInet6 _ _ (a, b, c, d) _ -> Just (True, concatMap word32Bytes [a, b, c, d])
+    _ -> Nothing
+  where
+    word32Bytes value =
+        [ fromIntegral (value `shiftR` 24)
+        , fromIntegral (value `shiftR` 16)
+        , fromIntegral (value `shiftR` 8)
+        , fromIntegral value
+        ]
+
+-- | Zero every bit after the prefix so a stored range compares cleanly.
+maskNetworkBytes :: Int -> [Word8] -> [Word8]
+maskNetworkBytes prefix = zipWith maskAt [0, 8 ..]
+  where
+    maskAt offset byte
+        | prefix >= offset + 8 = byte
+        | prefix <= offset = 0
+        | otherwise = byte .&. (0xff `shiftL` (8 - (prefix - offset)))
+
+prefixMatches :: Int -> [Word8] -> [Word8] -> Bool
+prefixMatches prefix left right
+    | prefix <= 0 = True
+    | otherwise = case (left, right) of
+        (a : as, b : bs)
+            | prefix >= 8 -> a == b && prefixMatches (prefix - 8) as bs
+            | otherwise -> (a `shiftR` (8 - prefix)) == (b `shiftR` (8 - prefix))
+        _ -> False
+
+readIntText :: Text -> Maybe Int
+readIntText value = readMaybe (T.unpack (T.strip value))

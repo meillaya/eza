@@ -127,6 +127,7 @@ test-suite eza-test
                     CliSpec
                     IsolationSpec
                     LedgerSpec
+                    OriginGuardSpec
                     TestHarness
                     WorkerSpec
                     ControlSpec
