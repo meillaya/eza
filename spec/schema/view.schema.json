@@ -70,7 +70,7 @@
     "hexColor": {
       "type": "string",
       "pattern": "^#[0-9a-fA-F]{6}$",
-      "description": "Lowercase #rrggbb."
+      "description": "Hex colour, #rrggbb; hex digits are case-insensitive."
     },
     "colorGroup": {
       "type": "object",

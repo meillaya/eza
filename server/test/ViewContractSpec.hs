@@ -11,6 +11,7 @@ module ViewContractSpec (viewContractSpec) where
 import Control.Monad (filterM, forM_)
 import Data.Aeson (Result (..), Value, decodeStrict', fromJSON)
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
 import System.Directory (doesDirectoryExist, getCurrentDirectory)
 import System.FilePath ((</>))
 import Test.Hspec
@@ -43,7 +44,7 @@ viewContractSpec = do
         let badView name = do
                 value <- readJson (root </> "spec" </> "bad" </> name)
                 takeViewDraft value `shouldBe` Nothing
-        mapM_ badView ["unknown-kind.json", "bad-schema.json", "bad-color.json", "too-many-groups.json"]
+        mapM_ badView ["unknown-kind.json", "bad-schema.json", "bad-color.json", "bad-slug.json", "too-many-groups.json"]
         value <- readJson (root </> "spec" </> "bad" </> "webhook-unknown-event.json")
         (fromJSON value :: Result WebhookInput) `shouldSatisfy` isError
         ( case fromJSON value :: Result WebhookInput of
@@ -51,6 +52,19 @@ viewContractSpec = do
                 Success input -> either (const Nothing) (const (Just input)) (validateWebhookInput input)
             )
             `shouldBe` Nothing
+
+    it "agrees with the schema on the slug first character and colour case" $ do
+        -- The schema pattern requires a slug to start with [a-z0-9].
+        validateViewDraft
+            (ViewInput "Name" LedgerKind (LedgerDefinition defaultLedgerViewDefinition) (Just "-leading"))
+            `shouldSatisfy` isLeft
+        validateViewDraft
+            (ViewInput "Name" LedgerKind (LedgerDefinition defaultLedgerViewDefinition) (Just "0-leading"))
+            `shouldBe` Right ()
+        -- The schema pattern accepts upper-case hex digits; its description
+        -- says so too, so the validator must accept them.
+        validateColor "#AABBCC" `shouldBe` Right ()
+        validateColor "#00ff0" `shouldSatisfy` isLeft
 
     it "parses the JSON Schema files as JSON" $ do
         root <- findRepoRoot

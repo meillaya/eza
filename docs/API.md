@@ -178,7 +178,9 @@ DELETE /api/v1/bookmarks/{id}
 match the FTS index (title, description, URL, note body, extracted text, and
 source domain) and, as a fallback, source tag names, so `rust` can return
 records filed under the `rust` tag even when no indexed field contains the
-word. Rows that matched the text index come before rows that matched only
+word. A negated term excludes the same tag-name fallback, so `-rust` also
+hides records that match only through the tag. Rows that matched the text
+index come before rows that matched only
 through the tag-name fallback; inside each group the `sort` order applies, so
 a searched ledger sorts exactly like an unsearched one. Because the domain is
 indexed, a query such as
@@ -188,6 +190,11 @@ this query. Date filters use UTC and match the original save
 date (`created_at`); rows with no save date (`created_at` = 0) never match. A
 filter ANDs with the other operators and the `tags`, `is_read`, and
 `is_dead` columns, and `year_counts` reflects it.
+
+A row whose stored save date is outside the range eza represents (or whose
+import value looked like milliseconds) is normalised at the storage boundary:
+the importer reports the count as `timestamps_normalised` and the list/stats
+queries never fail on a bad row.
 
 The route returns a `SearchPage`. `POST /api/v1/bookmarks` takes
 `{"url","title","tags"}` and returns 201 `{"id":N}`. It returns 409 when the
@@ -371,8 +378,10 @@ design. The command-line equivalent is
 
 `POST /api/v1/import` accepts either a multipart body with one `file` field in
 the Netscape format (or an eza JSON export) or an `application/json` body with
-a versioned eza JSON document. Both answer with an `ImportReport` shape (the
-JSON path adds `json_report` with per-kind counts); `POST /api/v1/import/json`
+a versioned eza JSON document. Both are bounded by `EZA_IMPORT_MAX_BYTES`
+(the JSON body path uses the import cap, not `EZA_MAX_BODY_BYTES`) and answer
+with an `ImportReport` shape (the JSON path adds `json_report` with per-kind
+counts, including `timestamps_normalised`); `POST /api/v1/import/json`
 is the dedicated JSON-only route. Rows are de-duplicated against the library
 by the canonical URL key before anything is inserted, so a re-run, an
 overlapping export, or an http/https copy of a filed page merges tags onto the

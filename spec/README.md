@@ -128,8 +128,12 @@ available; otherwise `jq` checks the same constraints the schemas state.
   session expiry, and worker shutdown are not checked. The models would need
   fairness and time to state those.
 - The schemas check shape, not semantics. A query string of 512 characters can
-  still be nonsense; the Haskell parser is the deeper check. A planned server
-  test will decode the fixtures against the real decoders.
+  still be nonsense; the Haskell parser is the deeper check. The decoder
+  contract is covered: `server/test/ViewContractSpec.hs` (run by
+  `cabal test all`) decodes every example document with the real server codecs
+  and rejects every `spec/bad/` fixture. That test is part of the normal test
+  suite; `scripts/check-specs.sh` still checks JSON shape and the TLA+ model
+  only.
 - The authorization matrix for current routes is a separate M0 workstream. The
   models cover the multi-user and extension transitions only.
 

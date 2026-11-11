@@ -136,7 +136,9 @@ through the JSON-lines Node/Defuddle sidecar and falls back to the Haskell
 extractor on any error. The sidecar has no network access and a 5 MiB/15 s
 limit. Schema v7 adds the lossless undo side tables; v8 adds `captures` and
 `clip_templates`; v12 extends the side snapshot to `captures`, so undoing a
-delete, prune, or merge brings the clipped content back too. The restore path
+delete, prune, or merge brings the clipped content back too; v14 stores the
+event kind on each webhook delivery row so the delivery history stays readable
+after the 30-day event purge. The restore path
 re-enables `recursive_triggers` and rebuilds the FTS index, so an undo cannot
 leave stale terms behind.
 
@@ -169,13 +171,21 @@ filters, the predicate is
 COUNT(DISTINCT bookmark_tags.tag_id) = m
 ```
 
-The result order is
+The result order keeps the ledger's sort contract: rows whose text matched the
+FTS index come before rows that matched only through the tag-name fallback,
+then the requested sort (`created_at`, `added_at`, or `last_opened_at`, with
+`id` as the final tie-break) orders both groups:
 
 ```
-ORDER BY bm25(bookmarks_fts), bookmarks.created_at DESC
+ORDER BY CASE WHEN full_text_hit THEN 0 ELSE 1 END,
+         sort_column DESC, id DESC
 ```
 
-FTS5 computes `bm25` over the six indexed columns (title, description, URL,
+Relevance is not the primary order: rank-first ordering silently turns the
+ledger's filed/added/opened sort into a no-op for every search, so the FTS
+join only classifies hits and produces snippets.
+
+FTS5 indexes six columns (title, description, URL,
 note body, extracted text, and source domain). Indexing the domain matters for
 the source facets: an import can record `www.reddit.com` while the saved URL
 is `https://reddit.com/...`, so a URL-only index makes the facet link return
@@ -183,7 +193,7 @@ nothing. The server then opens a
 snippet window around the first matching term and returns at most the requested
 page size.
 
-![Search: query parsing, FTS, tag filters, and rank](figures/search.png)
+![Search: query parsing, FTS, tag filters, and match grouping](figures/search.png)
 
 The measured p95 on the 14,582-row scratch copy (the dataset used by
 [performance.md](performance.md)) is 0.92 to 2.00 ms for FTS queries and 11.15
@@ -197,9 +207,10 @@ SQLite runs with WAL, foreign keys, and a five-second busy timeout. The schema
 creates FTS5 with the `porter unicode61` tokenizer and keeps it in sync with
 insert, update, and delete triggers.
 
-The triggers compare only `title`, `description`, `url`, `note_body`, and
-`extracted_text`. Updating `is_read` or `last_opened_at` does not rewrite the
-index.
+The triggers compare only the six indexed columns — `title`, `description`,
+`url`, `note_body`, `extracted_text`, and `domain` (the source domain joined
+the FTS index in schema v13). Updating `is_read` or `last_opened_at` does not
+rewrite the index.
 
 Destructive actions write an undo snapshot first. The snapshot stores the full
 `bookmarks` row, the tag names for the affected rows, highlights, wikilinks,
@@ -228,7 +239,22 @@ wraps it in a hardened systemd unit with `StateDirectory=eza`, a
 SecretSpec-wrapped `ExecStart`, a `/healthz` probe, and a daily backup timer.
 The Docker image runs as uid 10001 with `/data` as the state volume. The
 Kubernetes manifests use one replica, a `Recreate` strategy, and a
-`ReadWriteOnce` `PersistentVolumeClaim`.
+`ReadWriteOncePod` `PersistentVolumeClaim` (with a documented `ReadWriteOnce`
+fallback for clusters that do not support pod-scoped access).
+
+## Build reproducibility
+
+The native build is pinned twice. `cabal.project.freeze` fixes the Hackage
+versions resolved by every cabal build (tests, CI, and the `scripts/release.sh`
+fallback), while the deployment flake pins its own generation through
+`flake.lock` plus the `hpkgsUpgraded` overlay in `flake.nix`. The two Nixpkgs
+pins are intentionally different: the development shell follows
+`nixpkgs-unstable` for tooling, and the deployment flake follows
+`nixos-unstable` with a hand-maintained Hackage overlay so the release artifact
+does not move when the development shell updates. A dependency bump changes the
+freeze file and the flake overlay together; the WASM web bundle is pinned
+separately by URL and SRI hash in `nix/web-assets.json` (see
+[deployment-nixos.md](deployment-nixos.md#web-assets)).
 
 ![Deployment: one binary across NixOS, Docker, and Kubernetes](figures/deployment.png)
 
