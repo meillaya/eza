@@ -3,7 +3,9 @@
 // Rules that matter:
 //   * The capture token travels only in the Authorization header.
 //   * Requests use credentials: 'omit'; the extension never relies on cookies.
-//   * Idempotency-Key is generated once per save and reused on retry.
+//   * One Idempotency-Key per logical save. saveClipWithRetry retries a
+//     network failure/timeout/429/5xx with the same key, so the server replays
+//     its stored result instead of filing a duplicate capture.
 //   * No request or response body is ever logged, and no error message includes
 //     the token.
 
@@ -72,6 +74,121 @@ export async function saveClip(config, payload, idempotencyKey) {
     body: payload,
     idempotencyKey,
   });
+}
+
+// Retryable failures: a network error or timeout (the request may have reached
+// the server), a 429 (honouring Retry-After) and the 5xx family. Validation,
+// auth, and 409 idempotency_conflict are final; retrying them cannot help.
+const RETRYABLE_API_CODES = new Set(['timeout', 'network']);
+const RETRYABLE_HTTP_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+const DEFAULT_RETRY_ATTEMPTS = 3;
+const DEFAULT_RETRY_BASE_MS = 500;
+const MAX_RETRY_DELAY_MS = 10000;
+
+/**
+ * POST /api/v1/clip with one idempotency key and a small retry loop.
+ *
+ * Every attempt sends the same key and payload, so a retry after a timeout or
+ * a dropped response makes the server replay the stored result
+ * (`replayed: true`) instead of inserting a second capture. The caller is
+ * expected to persist the key for cross-invocation retries (see background.js).
+ * @param {import('./config.js').DEFAULT_CONFIG} config
+ * @param {object} payload ClipRequest JSON
+ * @param {string} idempotencyKey
+ * @param {{attempts?: number, baseDelayMs?: number}} [options]
+ * @returns {Promise<object>} SaveClipResult
+ */
+export async function saveClipWithRetry(config, payload, idempotencyKey, options = {}) {
+  const attempts =
+    Number.isFinite(options.attempts) && options.attempts > 0
+      ? Math.min(10, Math.floor(options.attempts))
+      : DEFAULT_RETRY_ATTEMPTS;
+  const baseDelayMs =
+    Number.isFinite(options.baseDelayMs) && options.baseDelayMs >= 0
+      ? Math.floor(options.baseDelayMs)
+      : DEFAULT_RETRY_BASE_MS;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await saveClip(config, payload, idempotencyKey);
+    } catch (error) {
+      lastError = error;
+      if (!isRetryable(error) || attempt >= attempts) throw error;
+      await sleep(retryDelayMs(error, baseDelayMs, attempt));
+    }
+  }
+  throw lastError || new ApiError('The clip could not be saved.', { code: 'unknown' });
+}
+
+/** @param {unknown} error @returns {boolean} */
+function isRetryable(error) {
+  if (!(error instanceof ApiError)) return false;
+  if (RETRYABLE_API_CODES.has(error.code)) return true;
+  return RETRYABLE_HTTP_STATUS.has(error.status);
+}
+
+/**
+ * @param {ApiError} error
+ * @param {number} baseDelayMs
+ * @param {number} attempt
+ * @returns {number}
+ */
+function retryDelayMs(error, baseDelayMs, attempt) {
+  const serverHintMs =
+    Number.isFinite(error.retryAfter) && error.retryAfter > 0 ? Math.min(error.retryAfter * 1000, MAX_RETRY_DELAY_MS) : 0;
+  const exponential = baseDelayMs * 2 ** (attempt - 1);
+  const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(baseDelayMs / 2)));
+  return Math.min(MAX_RETRY_DELAY_MS, Math.max(serverHintMs, exponential) + jitter);
+}
+
+/** @param {number} ms @returns {Promise<void>} */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Canonical, retry-stable representation of a clip payload: the timing fields
+ * that differ between a failed attempt and its retry are dropped. Those are
+ * also the fields the server's request hash ignores (captured_at, word_count,
+ * parse_time_ms), so reusing the key across a retry still hits the stored
+ * result rather than 409 idempotency_conflict.
+ * @param {object} payload
+ * @returns {string}
+ */
+export function stablePayload(payload) {
+  const copy = { ...payload };
+  delete copy.captured_at;
+  delete copy.word_count;
+  delete copy.parse_time_ms;
+  return JSON.stringify(Object.keys(copy).sort().map((key) => [key, copy[key]]));
+}
+
+/**
+ * Storage-slot name for one logical save: the server URL plus the stable
+ * payload. It is not a secret and not a substitute for the server's request
+ * hash; it only names the persisted idempotency record so a retry (a second
+ * popup click, a re-extracted page) reuses the same key and payload.
+ * @param {import('./config.js').DEFAULT_CONFIG} config
+ * @param {object} payload
+ * @returns {Promise<string>}
+ */
+export async function payloadFingerprint(config, payload) {
+  const material = 'eza-clip-v1\n' + String(config.serverUrl || '') + '\n' + stablePayload(payload);
+  const bytes = new TextEncoder().encode(material);
+  try {
+    if (globalThis.crypto && globalThis.crypto.subtle && typeof globalThis.crypto.subtle.digest === 'function') {
+      const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+      return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+    }
+  } catch {
+    // Fall through to the non-cryptographic slot name.
+  }
+  let hash = 0x811c9dc5;
+  for (const byte of bytes) {
+    hash ^= byte;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return 'fnv-' + hash.toString(16).padStart(8, '0');
 }
 
 /**

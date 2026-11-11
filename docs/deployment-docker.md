@@ -39,7 +39,7 @@ The container CMD is `eza-bookmarks serve`; the same binary also provides
 
 ```bash
 cp deploy/docker-compose.yml docker-compose.yml
-# edit PUBLIC_ORIGIN / EZA_RP_ID (must be the URL users open, https in prod)
+# edit PUBLIC_ORIGIN only; the WebAuthn RP ID is derived from its host
 docker compose up -d
 docker compose logs -f eza
 ```
@@ -78,9 +78,10 @@ WebAuthn passkeys require a **secure origin**, so plain
 | `EZA_DB` | `$EZA_DATA_DIR/eza.db` | Legacy single-user database, read only at startup to register an existing claimed install as user 1. |
 | `EZA_BIND` | `0.0.0.0:8080` | Listen address. |
 | `PUBLIC_ORIGIN` | `http://localhost:8080` | Browser-visible origin; passkeys are bound to it. Set this. |
-| `EZA_RP_ID` | host of origin | WebAuthn relying-party ID (host only, no scheme/port). |
+| `EZA_RP_ID` | host of `PUBLIC_ORIGIN` | WebAuthn relying-party ID (host only, no scheme/port). The server derives it from `PUBLIC_ORIGIN` when unset; set it only to override, it must be a suffix of the origin host. |
 | `EZA_RP_NAME` | `eza` | Passkey prompt display name. |
 | `EZA_ALLOWED_ORIGINS` | `$PUBLIC_ORIGIN` | Comma-separated extra allowed origins. |
+| `EZA_TRUSTED_PROXIES` | empty | Comma-separated proxy CIDRs. When the socket peer is in this list, the auth rate limiters key on the right-most untrusted `X-Forwarded-For` hop instead of the proxy address. Set it when eza runs behind a reverse proxy so login/recovery limits stay per client. |
 | `EZA_CLIP_ORIGINS` | empty | Comma-separated extension origins for the clipper; extension schemes are accepted automatically. |
 | `EZA_DEFUDDLE_CMD` | unset | Optional `node .../sidecar/src/main.mjs` command for Defuddle extraction. |
 | `EZA_SESSION_TTL_SECONDS` | `2592000` | Session lifetime. |
@@ -244,13 +245,14 @@ writable by uid 10001 (group-write for group 10001 also works).
 
 The client is compiled with the wasm32-wasi GHC toolchain (not in nixpkgs),
 built in CI with `scripts/build-web.sh`, and published as a release asset. The
-deployment flake pins it as a fixed-output derivation:
+deployment flake pins it as a fixed-output derivation; the URL and SRI hash live
+in one place, `nix/web-assets.json`:
 
-```nix
-webAssets = {
-  url = "https://github.com/meillaya/eza/releases/download/v0.1.0.0/eza-web-0.1.0.0.tar.gz";
-  hash = lib.fakeHash; # <- replace with the published asset's SRI hash
-};
+```json
+{
+  "url": "https://github.com/meillaya/eza/releases/download/v0.1.0.0/eza-web-0.1.0.0.tar.gz",
+  "hash": "sha256-..."
+}
 ```
 
 Asset layout: `eza-web-<version>.tar.gz` is a **tarball of the `static/`
@@ -272,39 +274,24 @@ bundle crosses the wire at about 1.5 MB instead of 6.7 MB. Including them in the
 tarball is what keeps the compression on; without them the assets are served
 uncompressed.
 
-After the asset exists:
+Publish the asset with the release workflow or locally:
 
 ```bash
-nix store prefetch-file --json \
-  https://github.com/meillaya/eza/releases/download/v0.1.0.0/eza-web-0.1.0.0.tar.gz
-# paste "hash" into webAssets.hash, then:
+# Local route: build the deterministic tarball, then upload it to a v<version>
+# release (the release workflow does the same on a v* tag and updates the pin):
+bash scripts/build-web.sh
+bash scripts/release-asset.sh            # writes dist/release/eza-web-0.1.0.0.tar.gz
+bash scripts/release-asset.sh --check    # prints the SRI hash
+# put the printed sha256-... into nix/web-assets.json "hash", then:
 nix build .#eza-web
 nix build .#docker              # rebuild the image with the pinned bundle
 ```
 
-Example CI job (illustrative, because the dev toolchain comes from `devenv.nix`):
-
-```yaml
-name: web-assets
-on:
-  push:
-    tags: ["v*"]
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v31
-      - uses: cachix/cachix-action@v16
-        with:
-          name: devenv
-      - run: nix profile install nixpkgs#devenv
-      - run: devenv shell -- scripts/build-web.sh
-      - run: tar -czf "eza-web-${GITHUB_REF_NAME#v}.tar.gz" -C static .
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: eza-web-*.tar.gz
-```
+`.github/workflows/release.yml` builds and uploads the asset on a `v*` tag and
+commits the resolved SRI hash to `nix/web-assets.json`. Until the pin is real,
+`.#docker` and the default NixOS web-assets path fail at evaluation with an
+actionable message rather than a hash mismatch; `nix/web-assets.json` is the
+only file to edit.
 
 Use the local bundle while iterating without a release:
 

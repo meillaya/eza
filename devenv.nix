@@ -23,6 +23,11 @@ in
     pkgs.sqlite
     pkgs.curl
     pkgs.jq
+    # gzip is used by scripts/build-web.sh for the precompressed <file>.gz
+    # sidecars the server serves with Content-Encoding: gzip. Listing it here
+    # keeps the build off the host PATH and makes a missing gzip a shell
+    # problem, not a silently skipped compression step.
+    pkgs.gzip
     # python3 with Draft 2020-12 JSON-Schema validation for
     # scripts/check-specs.sh, plus fontTools and brotli for the README wordmark
     # generator in docs/figures.
@@ -69,6 +74,9 @@ in
     test.exec = "cabal test all";
     lint.exec = "fourmolu --mode check core server web && hlint core server web";
     spec.exec = "bash scripts/check-specs.sh";
+    # THIRD-PARTY-NOTICES.md vs the flake's pinned dependency set (and, when a
+    # cabal build plan exists, the resolved versions).
+    notices.exec = "bash scripts/check-notices.sh --plan";
     fmt.exec = "fourmolu --mode inplace core server web";
     e2e.exec = "bash scripts/e2e.sh";
     bench.exec = "cabal run eza-bookmarks -- bench --iterations 100";

@@ -1,6 +1,13 @@
 # SQLite is a single-writer database: exactly one replica and Recreate
 # rollouts, so a new pod never opens the database while the old one still has
 # it open. Do not add replicas or switch to RollingUpdate.
+#
+# The volume claim is ReadWriteOncePod (deploy/k8s/pvc.yaml), which enforces
+# the single-pod mount at the volume level and catches the cases replicas: 1
+# cannot: a manual `kubectl run`, an extra workload mounting eza-data, or a
+# backup Job on the same node. On RWO-only storage classes the claim falls
+# back to node-scoped exclusivity; see the comment in pvc.yaml and
+# docs/deployment-k8s.md before running a second pod on the same node.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

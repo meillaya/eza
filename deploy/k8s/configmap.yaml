@@ -12,6 +12,10 @@ data:
   # Browser-visible origin — MUST be the URL users open (https in production).
   # Passkeys are bound to this origin; changing it after enrollment breaks them.
   PUBLIC_ORIGIN: https://eza.example.com
+  # WebAuthn RP ID. This must be the PUBLIC_ORIGIN host (or its registrable
+  # suffix): eza.example.com for https://eza.example.com. The server derives it
+  # from PUBLIC_ORIGIN when unset, so the safe pattern is to delete this line
+  # and only set PUBLIC_ORIGIN. It is kept here to make the pairing explicit.
   EZA_RP_ID: eza.example.com
   EZA_RP_NAME: eza
   EZA_LOG_LEVEL: info

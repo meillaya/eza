@@ -1,4 +1,9 @@
-# eza on Kubernetes — one replica, Recreate strategy, RWO PVC.
+# eza on Kubernetes — one replica, Recreate strategy, ReadWriteOncePod PVC.
+#
+# ReadWriteOncePod (Kubernetes 1.29+) means one *pod*, not one node, may mount
+# /data; that matches SQLite's single-writer model. A cluster whose storage
+# class only supports ReadWriteOnce still works, but RWO is node-scoped: see
+# pvc.yaml for the fallback and never run a second writer pod on that node.
 #
 #   kubectl apply -k deploy/k8s
 #

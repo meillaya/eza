@@ -79,3 +79,6 @@ data-demo/
 design/
 design-demos/
 .huashu-design/
+
+# Per-agent build directories (disjoint build dirs used during parallel work)
+dist-newstyle-*/

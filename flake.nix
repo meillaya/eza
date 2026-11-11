@@ -30,20 +30,42 @@
       # the asset as a fixed-output derivation -- the CI-built asset IS the
       # fixed output.
       #
-      # The hash is intentionally a placeholder until the first release asset
-      # exists. To fill it in:
-      #   1. publish eza-web-<version>.tar.gz (a tarball of the static/ tree,
-      #      files at the archive root; built in CI, see docs/deployment-docker.md)
-      #   2. run: nix store prefetch-file --json <url>
-      #   3. copy the "hash" value over `hash = lib.fakeHash` below.
-      # See docs/deployment-docker.md ("Web assets") and
-      # "nix/module.nix" documentation for the local override
-      # (packages.<system>.eza-web-local) used during development.
+      # The URL and SRI hash live in nix/web-assets.json: exactly one file to
+      # edit on a release. .github/workflows/release.yml builds and uploads
+      # eza-web-<version>.tar.gz on a v* tag and rewrites that file with the
+      # uploaded asset's hash; scripts/release-asset.sh builds the same
+      # deterministic tarball locally and prints the SRI hash. Until the hash
+      # is pinned, packages.<system>.eza-web (and therefore .#docker and the
+      # default NixOS module path) fails with an actionable message; use
+      # packages.<system>.eza-web-local / .#docker-local in the meantime.
+      # docs/deployment-docker.md and docs/deployment-nixos.md describe the
+      # operator-facing release sequence.
       # ---------------------------------------------------------------------
-      webAssets = {
-        url = "https://github.com/meillaya/eza/releases/download/v${version}/eza-web-${version}.tar.gz";
-        hash = lib.fakeHash;
-      };
+      webAssets = builtins.fromJSON (builtins.readFile ./nix/web-assets.json);
+
+      expectedWebAssetUrl =
+        "https://github.com/meillaya/eza/releases/download/v${version}/eza-web-${version}.tar.gz";
+
+      webAssetsPinned = webAssets.hash != lib.fakeHash;
+
+      # The failure operators see when a release asset has not been published
+      # yet. Kept next to the pin so there is one place to explain the process.
+      webAssetsUnpinnedMessage = ''
+        eza-web: the pinned web bundle asset is not available yet.
+
+        nix/web-assets.json still carries the lib.fakeHash placeholder for:
+          ${webAssets.url}
+
+        Publish the release asset (or run `bash scripts/release-asset.sh`),
+        then pin its SRI hash in nix/web-assets.json:
+          "hash": "<nix hash file --sri --type sha256 eza-web-${version}.tar.gz>"
+
+        Before the first release asset, build the bundle locally and use the
+        local override instead:
+          bash scripts/build-web.sh
+          nix build path:.#eza-web-local
+          nix build path:.#docker-local
+      '';
 
       # NixOS module: nix/module.nix is a normal module; this wrapper injects
       # the pinned package defaults through _module.args.
@@ -174,17 +196,30 @@
 
           # --- web assets ----------------------------------------------------
           # CI-built release asset, fetched and unpacked to a stable location
-          # that EZA_STATIC_DIR can point at.
-          eza-web-asset = pkgs.fetchurl {
-            name = "eza-web-${version}.tar.gz";
-            inherit (webAssets) url hash;
-          };
+          # that EZA_STATIC_DIR can point at. While the pin is the
+          # lib.fakeHash placeholder the derivation throws with the release
+          # instructions rather than failing on a hash mismatch after a
+          # network fetch; .#docker and the default module path inherit it.
+          eza-web-asset =
+            if webAssetsPinned then
+              pkgs.fetchurl {
+                name = "eza-web-${version}.tar.gz";
+                inherit (webAssets) url hash;
+              }
+            else
+              throw webAssetsUnpinnedMessage;
 
           eza-web = pkgs.runCommand "eza-web-${version}" {
             meta.description = "eza web client bundle (CI-built release asset)";
           } ''
             mkdir -p $out/share/eza/static
             tar -xzf ${eza-web-asset} -C $out/share/eza/static
+            # The bundle must contain the WASM client and its precompressed
+            # sidecars; an empty/incorrect tarball should fail here, not in a
+            # browser.
+            test -f $out/share/eza/static/index.html
+            test -f $out/share/eza/static/app/app.wasm
+            test -f $out/share/eza/static/app/app.wasm.gz
           '';
 
           # Local override: package the working tree's static/ directory
@@ -367,56 +402,138 @@
           # Cheap check: forces the full NixOS module evaluation (assertions,
           # systemd unit rendering, users, tmpfiles) and asserts the security
           # posture without building a system.
-          eza-module = pkgs.runCommand "eza-module-check" { } ''
+          #
+          # ExecStart/ExecStartPost point at wrapper scripts in the store. grep
+          # reads the *contents* of a file argument, so the wrapper paths are
+          # resolved and copied first; the generated scripts single-quote some
+          # arguments (lib.escapeShellArg) and not others, so quotes are
+          # stripped before matching. The previous version grep'd for
+          # `--provider systemd-credential` while the wrapper contains
+          # `--provider 'systemd-credential'`, which is why this check failed
+          # for every system.
+          eza-module = pkgs.runCommand "eza-module-check" {
+            inherit expectedWebAssetUrl;
+            pinUrl = webAssets.url;
+            pinHash = webAssets.hash;
+            pinPinned = if webAssetsPinned then "1" else "0";
+            staticDirExpected = "${stubWeb}/share/eza/static";
+          } ''
             mkdir -p $out
+            fail() {
+              echo "eza-module check failed: $*" >&2
+              exit 1
+            }
             cat > $out/eza.service <<'UNIT'
             ${unitText}
             UNIT
 
             # Unit structure and hardening posture.
-            grep -Fq 'StateDirectory=eza' $out/eza.service
-            grep -Fq 'StateDirectoryMode=0750' $out/eza.service
-            grep -Fq 'User=eza' $out/eza.service
-            grep -Fq 'NoNewPrivileges=true' $out/eza.service
-            grep -Fq 'ProtectSystem=strict' $out/eza.service
-            grep -Fq 'RestrictNamespaces=true' $out/eza.service
-            grep -Fq 'EZA_DATA_DIR=/var/lib/eza' $out/eza.service
-            grep -Fq 'ExecStartPost=-' $out/eza.service
+            grep -Fq 'StateDirectory=eza' $out/eza.service || fail 'StateDirectory=eza missing'
+            grep -Fq 'StateDirectoryMode=0750' $out/eza.service || fail 'StateDirectoryMode=0750 missing'
+            grep -Fq 'User=eza' $out/eza.service || fail 'User=eza missing'
+            grep -Fq 'NoNewPrivileges=true' $out/eza.service || fail 'NoNewPrivileges missing'
+            grep -Fq 'ProtectSystem=strict' $out/eza.service || fail 'ProtectSystem=strict missing'
+            grep -Fq 'RestrictNamespaces=true' $out/eza.service || fail 'RestrictNamespaces missing'
+            grep -Fq 'EZA_DATA_DIR=/var/lib/eza' $out/eza.service || fail 'EZA_DATA_DIR wrong'
+            grep -Fq "EZA_STATIC_DIR=$staticDirExpected" $out/eza.service \
+              || fail "EZA_STATIC_DIR does not point at the webAssets package ($staticDirExpected)"
+            grep -Fq 'ExecStartPost=-' $out/eza.service || fail 'ExecStartPost=- missing'
 
             # ExecStart is the SecretSpec wrapper, configured for systemd
-            # credentials and the production profile.
+            # credentials and the production profile. Read the wrapper file
+            # itself (not the path string) and normalise the shell quoting.
             exe=$(sed -n 's/^ExecStart=//p' $out/eza.service)
-            test -x "$exe"
-            grep -Fq -- '--provider systemd-credential' "$exe"
-            grep -Fq -- '--profile production' "$exe"
-            grep -Fq 'secretspec run' "$exe"
-            grep -Fq 'bin/eza-bookmarks' "$exe"
+            [ -n "$exe" ] || fail 'no ExecStart= line in eza.service'
+            test -x "$exe" || fail "ExecStart is not an executable wrapper: $exe"
+            cat "$exe" > $out/eza-secretspec-run
+            tr -d "'" < $out/eza-secretspec-run > $out/eza-secretspec-run.txt
+            grep -Fq 'secretspec run' $out/eza-secretspec-run.txt || fail 'wrapper does not run secretspec'
+            grep -Fq -- '--file' $out/eza-secretspec-run.txt || fail 'wrapper has no --file'
+            grep -Fq -- '--provider systemd-credential' $out/eza-secretspec-run.txt \
+              || fail "wrapper provider is not systemd-credential: $(cat $out/eza-secretspec-run.txt)"
+            grep -Fq -- '--profile production' $out/eza-secretspec-run.txt \
+              || fail 'wrapper profile is not production'
+            grep -Fq 'bin/eza-bookmarks serve' $out/eza-secretspec-run.txt \
+              || fail 'wrapper does not exec eza-bookmarks serve'
 
             # The startup probe uses the server's own healthcheck command.
             probe=$(sed -n 's/^ExecStartPost=-//p' $out/eza.service)
-            test -x "$probe"
-            grep -Fq 'eza-bookmarks healthcheck' "$probe"
+            [ -n "$probe" ] || fail 'no ExecStartPost= line in eza.service'
+            test -x "$probe" || fail "ExecStartPost is not an executable wrapper: $probe"
+            cat "$probe" > $out/eza-healthz-wait
+            grep -Fq 'eza-bookmarks healthcheck' $out/eza-healthz-wait \
+              || fail 'startup probe does not call eza-bookmarks healthcheck'
 
             # The backup oneshot delegates to the server's backup command and
             # runs as the unprivileged user.
             cat > $out/eza-backup.service <<'UNIT'
             ${backupUnitText}
             UNIT
-            grep -Fq 'User=eza' $out/eza-backup.service
-            grep -Fq 'Type=oneshot' $out/eza-backup.service
-            grep -Fq 'WorkingDirectory=/var/lib/eza' $out/eza-backup.service
-            grep -Fq 'EZA_DATA_DIR=/var/lib/eza' $out/eza-backup.service
-            grep -Fq 'EZA_BACKUP_DIR=/var/lib/eza/backups' $out/eza-backup.service
-            grep -Fq 'EZA_BACKUP_KEEP_DAYS=14' $out/eza-backup.service
+            grep -Fq 'User=eza' $out/eza-backup.service || fail 'backup unit User=eza missing'
+            grep -Fq 'Type=oneshot' $out/eza-backup.service || fail 'backup unit Type=oneshot missing'
+            grep -Fq 'WorkingDirectory=/var/lib/eza' $out/eza-backup.service || fail 'backup WorkingDirectory wrong'
+            grep -Fq 'EZA_DATA_DIR=/var/lib/eza' $out/eza-backup.service || fail 'backup EZA_DATA_DIR wrong'
+            grep -Fq 'EZA_BACKUP_DIR=/var/lib/eza/backups' $out/eza-backup.service || fail 'backup EZA_BACKUP_DIR wrong'
+            grep -Fq 'EZA_BACKUP_KEEP_DAYS=14' $out/eza-backup.service || fail 'backup keep-days wrong'
             backup_script=$(sed -n 's/^ExecStart=//p' $out/eza-backup.service | sed 's/[[:space:]]*$//')
-            test -x "$backup_script"
-            grep -Fq 'eza-bookmarks backup' "$backup_script"
+            [ -n "$backup_script" ] || fail 'no backup ExecStart='
+            test -x "$backup_script" || fail "backup ExecStart is not executable: $backup_script"
+            cat "$backup_script" > $out/eza-backup
+            grep -Fq 'eza-bookmarks backup' $out/eza-backup || fail 'backup script does not call eza-bookmarks backup'
             # The command owns retention and writes a stamp directory; the unit
             # must not run a second find-based retention pass.
-            ! grep -Fq -- '-mtime' "$backup_script"
+            ! grep -Fq -- '-mtime' $out/eza-backup || fail 'backup unit runs its own retention pass'
+
+            # Web-asset pin: the module path serves the flake's fixed-output
+            # CI bundle, so its URL must name this flake version and its hash
+            # must be a syntactically valid SRI sha256. The real value lives in
+            # nix/web-assets.json; checks.eza-web-pin fails while it is the
+            # placeholder (this check still passes so the security posture is
+            # testable before the first release asset).
+            [ "$pinUrl" = "$expectedWebAssetUrl" ] || fail "nix/web-assets.json url is '$pinUrl', expected '$expectedWebAssetUrl'"
+            printf '%s' "$pinHash" | grep -Eq '^sha256-[A-Za-z0-9+/]{43}=$' \
+              || fail "nix/web-assets.json hash is not an SRI sha256: $pinHash"
+            if [ "$pinPinned" != "1" ]; then
+              echo "eza-module: warning: nix/web-assets.json still pins the lib.fakeHash placeholder." >&2
+              echo "  checks.eza-web-pin fails until the release asset hash is set." >&2
+            fi
 
             touch $out/ok
           '';
+
+          # Fails while nix/web-assets.json carries the lib.fakeHash
+          # placeholder. Default builds (.eza-web, .#docker, the default NixOS
+          # module path) cannot produce a real bundle until the release asset
+          # exists; this check makes that state visible instead of a
+          # fixed-output hash mismatch. Run release.yml, then the hash pin
+          # turns this check green.
+          eza-web-pin = pkgs.runCommand "eza-web-pin-check" {
+            inherit expectedWebAssetUrl;
+            pinnedUrl = webAssets.url;
+            pinnedHash = webAssets.hash;
+          } (
+            if webAssetsPinned then
+              ''
+                mkdir -p $out
+                [ "$pinnedUrl" = "$expectedWebAssetUrl" ] || {
+                  echo "eza-web-pin: nix/web-assets.json url is '$pinnedUrl', expected '$expectedWebAssetUrl'" >&2
+                  exit 1
+                }
+                printf '%s\n' "$pinnedUrl" > $out/url
+                printf '%s\n' "$pinnedHash" > $out/hash
+                touch $out/ok
+              ''
+            else
+              ''
+                echo "eza-web-pin check failed: nix/web-assets.json still pins lib.fakeHash." >&2
+                echo "" >&2
+                cat > $out/unpinned-message <<'MSG'
+                ${webAssetsUnpinnedMessage}
+                MSG
+                cat $out/unpinned-message >&2
+                exit 1
+              ''
+          );
 
           # Full NixOS VM test (best effort: builds the server package and a
           # complete system image; needs KVM to run quickly). Covers health

@@ -53,11 +53,13 @@ reference library. Paper on the left, the reading room at night on the right.
 ## 📦 Installation
 
 > [!IMPORTANT]
-> No release is published yet. The Nix and Docker outputs pin the web client as a
-> CI-built release asset and the flake still carries a placeholder hash, so build
-> the client once from a checkout with `devenv shell -- web`, then use the local
-> image or the built `static/` directory as shown below. The source route needs
-> nothing extra.
+> The Nix and Docker outputs pin the web client as a CI-built release asset; the
+> URL and SRI hash live in `nix/web-assets.json`. A `v*` tag runs
+> `.github/workflows/release.yml`, which builds and uploads
+> `eza-web-<version>.tar.gz` and commits the resolved hash. Until that asset is
+> published and pinned, build the client once from a checkout with
+> `devenv shell -- web`, then use the local image or the built `static/`
+> directory as shown below. The source route needs nothing extra.
 
 One Warp and WAI process serves the client assets, the auth and share pages and
 `/api/v1`. The control database owns identity only; each account has a private

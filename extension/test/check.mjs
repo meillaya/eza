@@ -86,7 +86,7 @@ async function main() {
   }
 
   // Syntax check every JavaScript file.
-  const jsFiles = ['background.js', 'popup.js', 'options.js', 'build.mjs', 'test/check.mjs'];
+  const jsFiles = ['background.js', 'popup.js', 'options.js', 'build.mjs', 'test/check.mjs', 'test/idempotency.mjs'];
   for (const directory of ['src']) {
     for (const entry of await readdir(join(root, directory))) {
       if (entry.endsWith('.js') || entry.endsWith('.mjs')) jsFiles.push(join(directory, entry));
@@ -113,6 +113,18 @@ async function main() {
   // URL or a log line.
   const apiSource = await readText('src/api.js');
   checkTruthy('api.js sends the bearer token in a header', /Authorization:\s*'Bearer '\s*\+\s*config\.captureToken/.test(apiSource));
+
+  // Idempotency contract: one key per logical save, reused by the retry loop,
+  // and persisted by the background worker so a second popup attempt replays.
+  const backgroundSource = await readText('background.js');
+  checkTruthy('api.js has a retry path for saveClip', /export\s+async\s+function\s+saveClipWithRetry\s*\(/.test(apiSource));
+  checkTruthy('api.js retry reuses the same idempotency key', /saveClip\(config,\s*payload,\s*idempotencyKey\)/.test(apiSource));
+  checkTruthy('api.js derives a stable payload fingerprint', /export\s+function\s+stablePayload\s*\(/.test(apiSource) && /export\s+async\s+function\s+payloadFingerprint\s*\(/.test(apiSource));
+  checkTruthy('background.js persists idempotency records', /storage\.session/.test(backgroundSource) && /IDEMPOTENCY_STORE_KEY/.test(backgroundSource));
+  checkTruthy('background.js reuses the persisted key on retry', /record\.key/.test(backgroundSource));
+  checkTruthy('background.js sends saves through the retrying helper', /saveClipWithRetry\(/.test(backgroundSource));
+  checkTruthy('popup retry re-runs the save flow (so the persisted key is reused)', /getElementById\('retry'\)[\s\S]{0,120}main\(\)/.test(await readText('popup.js')));
+
   const allSources = (
     await Promise.all(['background.js', 'popup.js', 'options.js', 'src/config.js', 'src/api.js', 'src/extract.js'].map(readText))
   ).join('\n');

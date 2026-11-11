@@ -67,7 +67,13 @@ empty keeps the existing token. The token is sent only in the
 never logged.
 
 Only the capture token is needed. No cookies are used; requests are sent with
-`credentials: 'omit'` and an `Idempotency-Key` per save.
+`credentials: 'omit'` and one `Idempotency-Key` per logical save. The key (and
+the exact payload that first used it) is persisted in `chrome.storage.session`
+keyed by server URL + stable payload hash, and reused for retries — a network
+failure, timeout, 429, or 5xx is retried by `saveClipWithRetry` with the same
+key, and the popup's **Try again** / a second click within ten minutes sends the
+same recorded request, so the server replays (`replayed: true`) instead of
+filing a second capture.
 
 ## Use
 
@@ -132,10 +138,14 @@ X-Eza-Client: eza-clipper/0.1.0
 }
 ```
 
-A retry of the same save reuses the same `Idempotency-Key`, so the server can
-answer `200` with `replayed: true` instead of inserting a duplicate. A `409
-idempotency_conflict` means the key was reused for a different payload; the
-popup surfaces that as an error.
+A retry of the same save reuses the same `Idempotency-Key` *and* the same
+recorded payload, so the server answers `200` with `replayed: true` instead of
+inserting a duplicate capture. `saveClipWithRetry` retries a network
+error/timeout, a 429 (honouring `Retry-After`) and 5xx responses up to three
+attempts with the same key; no other error is retried. A `409
+idempotency_conflict` means the stored key was reused for a different payload;
+the background worker drops the stale record and the popup surfaces the error,
+so a further attempt starts from a fresh key.
 
 Because extension requests carry `Origin: chrome-extension://<id>`, the server
 must allow extension origins for bearer-token requests (or the token request

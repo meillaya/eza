@@ -8,6 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
@@ -19,6 +20,58 @@ jobs:
           name: devenv
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
+      # devenv.nix sets CABAL_DIR to <checkout>/.devenv/cabal, and
+      # scripts/build-web.sh uses a second in-checkout CABAL_DIR,
+      # <checkout>/.devenv/cabal-wasm. Both directories are gitignored, so a
+      # cold runner has no Hackage package index and the first cabal command
+      # dies with "[Cabal-7107] unknown package: aeson". Cache the indexes
+      # here and populate them in the next step.
+      #
+      # The key covers both build plans and the toolchain lockfile: a
+      # dependency or GHC-wasm change gets a fresh index, otherwise a re-run
+      # restores it.
+      - name: Cache Cabal package indexes
+        uses: actions/cache@v4
+        with:
+          path: |
+            .devenv/cabal
+            .devenv/cabal-wasm
+          key: cabal-index-${{ runner.os }}-${{ hashFiles('cabal.project', 'cabal.project.wasm', 'devenv.lock', 'flake.lock') }}
+          restore-keys: |
+            cabal-index-${{ runner.os }}-
+      - name: Bootstrap Cabal package indexes (native and WASM)
+        run: |
+          set -euo pipefail
+          index="packages/hackage.haskell.org/01-index.tar"
+          if [ ! -f ".devenv/cabal/$index" ]; then
+            echo "::notice::Native Cabal index is not cached; running 'cabal update' for devenv's CABAL_DIR."
+            devenv shell -- bash -c 'cabal update' || {
+              echo "::error title=Cabal index bootstrap failed::'cabal update' failed for the native project (CABAL_DIR=$PWD/.devenv/cabal). Check Hackage reachability and re-run the job."
+              exit 1
+            }
+          fi
+          if [ ! -f ".devenv/cabal-wasm/$index" ]; then
+            echo "::notice::WASM Cabal index is not cached; running 'cabal update' for scripts/build-web.sh's CABAL_DIR."
+            devenv shell -- bash -c 'CABAL_DIR="$PWD/.devenv/cabal-wasm" cabal update' || {
+              echo "::error title=WASM Cabal index bootstrap failed::'cabal update' failed for CABAL_DIR=$PWD/.devenv/cabal-wasm, which scripts/build-web.sh uses. Check Hackage reachability and re-run the job."
+              exit 1
+            }
+          fi
+      # Fast failure: resolve both build plans before compiling anything. This
+      # catches a missing/empty package index (the failure class that made
+      # every previous CI run red) in seconds instead of after the first long
+      # build step.
+      - name: Resolve Haskell build plans (fail fast)
+        run: |
+          set -euo pipefail
+          devenv shell -- bash -c 'cabal build all --dry-run' || {
+            echo "::error title=Native dependency resolution failed::cabal could not resolve cabal.project. Run 'devenv shell -- cabal build all --dry-run' locally for the full error."
+            exit 1
+          }
+          devenv shell -- bash -c 'CABAL_DIR="$PWD/.devenv/cabal-wasm" wasm32-wasi-cabal build --project-file=cabal.project.wasm eza-web --dry-run' || {
+            echo "::error title=WASM dependency resolution failed::wasm32-wasi-cabal could not resolve cabal.project.wasm (the same CABAL_DIR problem as the native project)."
+            exit 1
+          }
       - name: Haskell tests
         run: devenv shell -- cabal test all
       # The full 4.5 MB export used by the opt-in EZA_IMPORT_FIXTURE test is
@@ -33,6 +86,12 @@ jobs:
       # not fail this gate.
       - name: GHC warnings gate (-Wall, tests included)
         run: devenv shell -- cabal build all --ghc-options=-Werror
+      # The notices table is a compliance artifact: fail when the pinned
+      # TLS/crypto dependency set in flake.nix and the resolved cabal plan
+      # (dist-newstyle/cache/plan.json, written by the build above) drift from
+      # THIRD-PARTY-NOTICES.md.
+      - name: Third-party notices match the pinned dependency set
+        run: devenv shell -- bash scripts/check-notices.sh --plan
       - name: Build Miso client
         run: devenv shell -- bash scripts/build-web.sh
       - name: Install browser-test dependencies
@@ -43,3 +102,36 @@ jobs:
         run: cd extension && npm ci && npm test
       - name: Browser suite
         run: devenv shell -- bash scripts/e2e.sh
+
+  # The flake checks need no cabal/Haskell toolchain: they evaluate the NixOS
+  # module and the web-asset pin. `checks.eza-module` is the documented
+  # security-posture check (docs/deployment-nixos.md); before this job it was
+  # never run in CI, which is why its brittle greps (and the placeholder web
+  # hash) stayed invisible.
+  nix-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: cachix/cachix-action@v16
+        with:
+          name: devenv
+      - name: NixOS module posture check
+        run: nix build -L .#checks.x86_64-linux.eza-module
+      # Advisory until the first release asset exists: the pin is repaired by
+      # .github/workflows/release.yml (which uploads eza-web-<version>.tar.gz
+      # and commits the SRI hash into nix/web-assets.json). After that this
+      # step prints the pinned URL/hash; the release workflow enforces it with
+      # `--require-pinned`.
+      - name: Web asset pin status
+        run: |
+          set -euo pipefail
+          if nix build -L .#checks.x86_64-linux.eza-web-pin; then
+            echo "web asset pin is set: $(cat result/url) $(cat result/hash)"
+          else
+            echo "::warning title=Web asset not pinned::nix/web-assets.json still pins lib.fakeHash. Run .github/workflows/release.yml (or scripts/release-asset.sh and pin the hash) to publish eza-web-<version>.tar.gz; default Docker/NixOS builds fail until then."
+          fi
