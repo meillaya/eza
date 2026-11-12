@@ -251,11 +251,15 @@ try {
   );
 
   // ------------------------------------------------ undo --------------------
+  // The dedup banner opens the exact snapshot preview; the write happens only
+  // after the confirmation in that dialog.
+  await page.click('[data-testid="dedup-undo"]');
+  await page.waitForSelector(SEL.undoPreview, { timeout: 30000 });
   const undoPromise = page.waitForResponse(
     (response) => response.url().includes("/api/v1/undo") && response.request().method() === "POST",
     { timeout: 30000 }
   );
-  await page.click('[data-testid="dedup-undo"]');
+  await page.locator(SEL.undoConfirm).click();
   const undoResponse = await undoPromise;
   check("the dedup undo answers 200", undoResponse.status() === 200, "status " + undoResponse.status());
 

@@ -128,7 +128,7 @@ loadConfig = do
     allowPrivate <- readBoolEnv "EZA_ALLOW_PRIVATE_FETCH" False
     enrichWorkers <- readIntEnv "EZA_ENRICH_WORKERS" 2
     fetchTimeout <- readIntEnv "EZA_FETCH_TIMEOUT_MS" 8000
-    faviconMax <- readIntEnv "EZA_FAVICON_MAX_BYTES" 65536
+    faviconMax <- readIntEnv "EZA_FAVICON_MAX_BYTES" 262144
     faviconTtl <- readIntEnv "EZA_FAVICON_TTL_DAYS" 90
     faviconBackfill <- readBoolEnv "EZA_FAVICON_BACKFILL" True
     shareTtl <- readIntEnv "EZA_SHARE_TTL_DAYS" 7

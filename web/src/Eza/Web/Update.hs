@@ -37,6 +37,7 @@ import Eza.Types (
     ImportReport,
     SavedSearch (..),
     SearchPage (..),
+    UndoResult (..),
  )
 import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..), UserView (..))
 import qualified Eza.View as EV
@@ -363,6 +364,14 @@ loadRoute route = do
             , mShareUrl = Nothing
             , mSaving = False
             , mDirty = if keepDetail then mDirty m else False
+            , mExtractEditing = if keepDetail then mExtractEditing m else False
+            , mExtractDraft = if keepDetail then mExtractDraft m else ""
+            , mExtractDirty = if keepDetail then mExtractDirty m else False
+            , mExtractSaving = False
+            , mUndoPreview = Nothing
+            , mUndoPreviewLoading = False
+            , mUndoPreviewError = Nothing
+            , mUndoBusy = False
             , mConfirmDelete = Nothing
             , mConfirmMarkAll = False
             , mGraphLoading = route == Graph
@@ -386,6 +395,7 @@ loadRoute route = do
             , mTagDialogError = Nothing
             , mDedupConfirm = Nothing
             , mDedupLast = Nothing
+            , mDedupLastSnapshot = Nothing
             , mDedupMoreBusy = False
             , mDedupBusy = False
             , mDedupMergeAllOpen = False
@@ -440,7 +450,10 @@ loadRoute route = do
         AiTags -> do
             refreshTags
             fetchAiStatus AiStatusLoaded (\_ -> Noop)
-        Maintenance -> fetchPruneCandidates PruneLoaded PruneFailed
+        Maintenance -> do
+            putModel (\x -> x{mUndoLoading = True, mUndoError = Nothing})
+            fetchPruneCandidates PruneLoaded PruneFailed
+            fetchUndoEntries UndoEntriesLoaded UndoEntriesFailed
         Account -> do
             putModel (\x -> x{mTokensLoading = True, mSharesLoading = True, mRulesLoading = True, mWebhooksLoading = True})
             fetchAccount AccountLoaded AccountFailed
@@ -448,7 +461,7 @@ loadRoute route = do
             fetchWebhooks WebhooksLoaded WebhooksFailed
             fetchShares (\shares -> SharesLoaded epoch shares) (SharesFailed epoch)
             fetchRules RulesLoaded RulesFailed
-        Accessions -> pure ()
+        History -> pure ()
         Save sharedTitle sharedText sharedUrl -> do
             let urlFromShare = case fmap (T.strip) sharedUrl of
                     Just url | isHttpUrlText (ms (T.unpack url)) -> ms (T.unpack url)
@@ -608,6 +621,28 @@ insertHighlight highlight highlights =
 
 -- ------------------------------------------------------------- the update --
 
+{- | Any unsaved edit owns the navigation guard: the note/title/tag editor or
+the extracted-text editor. Keep the two flags separate so saving one does not
+claim the other was saved.
+-}
+hasUnsaved :: Model -> Bool
+hasUnsaved m = mDirty m || mExtractDirty m
+
+{- | Reflect a saved manual reading copy in the open record without refetching
+the whole detail (which would discard a pending note edit). The server remains
+the authority; this only keeps the editor and reading header consistent.
+-}
+textEditedDetail :: BookmarkDetail -> MisoString -> BookmarkDetail
+textEditedDetail detail draft =
+    detail
+        { bdExtractedText = fromMisoString draft
+        , bdReadingTimeMinutes =
+            let words' = length (T.words (fromMisoString draft))
+             in if words' == 0 then 0 else (words' + 219) `div` 220
+        , bdEnrichState = "manual"
+        , bdEnrichError = ""
+        }
+
 updateModel :: Action -> Effect () () Model Action
 updateModel = \case
     -- lifecycle -------------------------------------------------------------
@@ -637,7 +672,7 @@ updateModel = \case
                 -- it cannot land after a tab click and undo it.
                 when (route == Account) $
                     putModel (\x -> x{mAccountTab = accountTabFromSlug fragmentText})
-                if mDirty m && route /= mRoute m && isDetailRoute (mRoute m)
+                if hasUnsaved m && route /= mRoute m && isDetailRoute (mRoute m)
                     then
                         -- The browser already changed the address before the
                         -- subscription delivered this route. Remember that so
@@ -655,7 +690,7 @@ updateModel = \case
         if route == mRoute m
             then pure ()
             else
-                if mDirty m && isDetailRoute (mRoute m)
+                if hasUnsaved m && isDetailRoute (mRoute m)
                     then put m{mGuardOpen = True, mPendingRoute = Just route, mGuardFromHistory = False}
                     else withSink $ \_ -> pushRoute route
     ThemeToggled -> withSink $ \sink -> do
@@ -803,6 +838,14 @@ updateModel = \case
             case defaultGraphView (bpViews payload) of
                 Just view -> putModel (applyGraphView view)
                 Nothing -> pure ()
+        m1 <- get
+        -- The boot payload can apply a default graph view after the cold
+        -- /graph route has already asked for the standard layout. Ask for the
+        -- current preset's layout as well; otherwise the preset is selected
+        -- but the plate stays on the previous layout.
+        when (isGraphRoute (mRoute m1)) $
+            when (fmap fst (mGraphLayoutWire m1) /= Just (mGraphPreset m1)) $
+                fetchGraphLayout (mGraphPreset m1) (GraphLayoutLoaded (mGraphPreset m1)) GraphLayoutFailed
         m <- get
         let page = bpInitial payload
             deferred = mListDeferred m
@@ -1094,6 +1137,10 @@ updateModel = \case
                             , mEditNote = ms (bdNoteBody detail)
                             , mEditTags = bdTags detail
                             , mDirty = False
+                            , mExtractEditing = False
+                            , mExtractDraft = ms (bdExtractedText detail)
+                            , mExtractDirty = False
+                            , mExtractSaving = False
                             , mNoteMode = NoteWrite
                             , mLinkQuery = Nothing
                             , mLinkResults = []
@@ -1141,7 +1188,7 @@ updateModel = \case
         case currentDetail m of
             Nothing -> pure ()
             Just detail -> do
-                putModel (\x -> x{mSaving = True})
+                putModel (\x -> x{mSaving = True, mExtractSaving = mExtractEditing m})
                 let fields =
                         [ "title" .= mEditTitle m
                         , "note_body" .= mEditNote m
@@ -1153,14 +1200,110 @@ updateModel = \case
                         [ "is_read" .= bdIsRead detail
                         | not (mReadPending m)
                         ]
-                patchBookmark (bdId detail) (object (fields ++ readField)) SavedOk SaveFailed
-    SavedOk -> do
-        putModel (\m -> m{mSaving = False, mDirty = False})
-        notify "Saved" ToastOk
+                    textField =
+                        [ "extracted_text" .= mExtractDraft m
+                        | mExtractEditing m
+                        ]
+                patchBookmarkWithResult
+                    (bdId detail)
+                    (object (fields ++ readField ++ textField))
+                    SavedOk
+                    SaveFailed
+    SavedOk highlightsRemoved -> do
+        m <- get
+        putModel
+            ( \x ->
+                x
+                    { mSaving = False
+                    , mExtractSaving = False
+                    , mDirty = False
+                    , mExtractDirty = False
+                    }
+            )
+        case (mDetail m, mExtractEditing m) of
+            (Just detail, True) ->
+                putModel
+                    ( \x ->
+                        x
+                            { mDetail = Just (textEditedDetail detail (mExtractDraft m))
+                            , mExtractEditing = False
+                            , mExtractDraft = mExtractDraft m
+                            }
+                    )
+            _ -> pure ()
+        notify
+            ( if highlightsRemoved > 0
+                then ms ("Saved; " <> show highlightsRemoved <> " unmatched highlight(s) removed")
+                else "Saved"
+            )
+            (if highlightsRemoved > 0 then ToastInfo else ToastOk)
+        when (mExtractEditing m) $ do
+            case mDetail m of
+                Just detail -> fetchHighlights (bdId detail) (HighlightsLoaded (mDetailEpoch m)) (HighlightsFailed (mDetailEpoch m))
+                Nothing -> pure ()
         refreshStats
     SaveFailed err -> do
-        putModel (\m -> m{mSaving = False})
+        putModel (\m -> m{mSaving = False, mExtractSaving = False})
         handleApiError err
+    ExtractEditStart -> do
+        m <- get
+        case currentDetail m of
+            Nothing -> pure ()
+            Just detail ->
+                putModel
+                    ( \x ->
+                        x
+                            { mExtractEditing = True
+                            , mExtractDraft = ms (bdExtractedText detail)
+                            , mExtractDirty = False
+                            }
+                    )
+                    >> liftSinkIO (focusAfterRender "extract-text-editor")
+    ExtractEditChanged draft ->
+        putModel (\m -> m{mExtractDraft = draft, mExtractDirty = True})
+    ExtractEditCancel -> do
+        m <- get
+        case currentDetail m of
+            Nothing -> putModel (\x -> x{mExtractEditing = False, mExtractDirty = False})
+            Just detail ->
+                putModel
+                    ( \x ->
+                        x
+                            { mExtractEditing = False
+                            , mExtractDraft = ms (bdExtractedText detail)
+                            , mExtractDirty = False
+                            }
+                    )
+    ExtractSaved _ -> pure ()
+    MarkLinkAlive -> do
+        m <- get
+        case currentDetail m of
+            Nothing -> pure ()
+            Just detail -> markLinkAlive (bdId detail) LinkMarkedAlive (\err -> ApiErrorRaised err)
+    LinkMarkedAlive -> do
+        putModel
+            ( \m ->
+                m
+                    { mDetail =
+                        fmap (\detail -> detail{bdIsDead = False, bdManualAlive = True}) (mDetail m)
+                    }
+            )
+        notify "Kept alive; automatic checks will skip it" ToastOk
+        refreshStats
+    RecheckLink -> do
+        m <- get
+        case currentDetail m of
+            Nothing -> pure ()
+            Just detail -> recheckLink (bdId detail) LinkRechecked (\err -> ApiErrorRaised err)
+    LinkRechecked -> do
+        putModel
+            ( \m ->
+                m
+                    { mDetail =
+                        fmap (\detail -> detail{bdManualAlive = False}) (mDetail m)
+                    }
+            )
+        notify "Automatic checks will run on the next sweep" ToastInfo
     -- A read toggle is its own patch: it must not clear the unsaved note and
     -- it must not claim the note was saved.
     ReadToggled -> do
@@ -1202,7 +1345,7 @@ updateModel = \case
             putModel (\x -> x{mReadPending = False})
             case currentDetail m of
                 Just detail
-                    | mDirty m ->
+                    | hasUnsaved m ->
                         putModel (\x -> x{mDetail = Just detail{bdIsRead = not readFlag}})
                     | otherwise -> updateModel (DetailReload (bdId detail))
                 Nothing -> pure ()
@@ -1280,7 +1423,7 @@ updateModel = \case
         when (mGuardFromHistory m) $ liftSinkIO (replaceBrowserUrl (prettyURI (toURI (mRoute m))))
     DirtyGuardDiscard -> do
         m <- get
-        putModel (\x -> x{mGuardOpen = False, mPendingRoute = Nothing, mGuardFromHistory = False, mDirty = False})
+        putModel (\x -> x{mGuardOpen = False, mPendingRoute = Nothing, mGuardFromHistory = False, mDirty = False, mExtractDirty = False, mExtractEditing = False})
         case mPendingRoute m of
             Nothing -> pure ()
             -- The address already points at the pending route after a history
@@ -1396,9 +1539,15 @@ updateModel = \case
             _ -> do
                 let generation = mGraphGen m + 1
                     preset = mGraphPreset m
+                    wireMismatch =
+                        case mGraphLayoutWire m of
+                            Just (wirePreset, wire) -> wirePreset == preset && lwRevision wire /= gdRevision graph
+                            Nothing -> False
                     hydrated = do
                         (wirePreset, wire) <- mGraphLayoutWire m
-                        if wirePreset == preset then hydrateWire graph wire else Nothing
+                        if wirePreset == preset && lwRevision wire == gdRevision graph
+                            then hydrateWire graph wire
+                            else Nothing
                     whole =
                         case hydrated of
                             Just layout -> layout{glGen = generation}
@@ -1451,6 +1600,8 @@ updateModel = \case
                                 }
                     )
                 scheduleGraphSettle
+                when (wireMismatch || wirePresetDiffers m preset) $
+                    fetchGraphLayout preset (GraphLayoutLoaded preset) GraphLayoutFailed
                 unless (mGraphViewReady m) (measureGraphCanvas GraphMeasured)
                 focusGraphPlate m
     GraphFailed err -> do
@@ -1461,8 +1612,11 @@ updateModel = \case
         handleApiError err
     GraphRefresh -> do
         m <- get
+        -- The layout endpoint carries the library revision. Fetch it first:
+        -- when the revision still matches, the graph payload and plate are
+        -- already current and no repaint is needed; a changed revision makes
+        -- GraphLayoutLoaded fetch the graph before hydrating.
         putModel (\x -> x{mGraphLoading = True, mGraphError = Nothing})
-        fetchGraph GraphLoaded GraphFailed
         fetchGraphLayout (mGraphPreset m) (GraphLayoutLoaded (mGraphPreset m)) GraphLayoutFailed
     OpenGraphAt bookmarkId -> do
         m <- get
@@ -1677,18 +1831,38 @@ updateModel = \case
     GraphLayoutLoaded preset wire -> do
         putModel (\x -> x{mGraphLayoutWire = Just (preset, wire)})
         m <- get
+        when (preset /= mGraphPreset m && isNothing (mGraph m)) $
+            -- A default view or a preset change landed while this request was
+            -- in flight. Fetch the current preset; the stale wire is kept for
+            -- a later switch back.
+            fetchGraphLayout (mGraphPreset m) (GraphLayoutLoaded (mGraphPreset m)) GraphLayoutFailed
         when (preset == mGraphPreset m) $
             case mGraph m of
-                Nothing -> pure ()
-                Just graph -> case hydrateWire graph wire of
-                    Just hydrated -> do
-                        let generation = mGraphGen m + 1
+                -- Layout first on a cold route. The graph request follows the
+                -- known revision, so the first plate is hydrated rather than
+                -- built locally and then thrown away.
+                Nothing -> do
+                    putModel (\x -> x{mGraphLoading = True})
+                    fetchGraph GraphLoaded GraphFailed
+                Just graph
+                    | gdRevision graph /= lwRevision wire -> do
+                        -- The layout is for a newer library than the graph we
+                        -- hold; fetch the records before hydrating.
+                        putModel (\x -> x{mGraphLoading = True})
+                        fetchGraph GraphLoaded GraphFailed
+                    | Just hydrated <- hydrateWire graph wire -> do
+                        let same =
+                                maybe
+                                    False
+                                    (sameGraphLayout (hydrated{glGen = 0}) . (\current -> current{glGen = 0}))
+                                    (mGraphLayout m)
+                            generation = if same then mGraphGen m else mGraphGen m + 1
                             layout = hydrated{glGen = generation}
                             old = mGraphView m
-                            view =
-                                if mGraphViewReady m
-                                    then resizeView layout (gvWidth old) (gvHeight old) (gvDpr old) old
-                                    else fitView layout (gvWidth old) (gvHeight old) (gvDpr old)
+                            view
+                                | same && mGraphViewReady m = old
+                                | mGraphViewReady m = resizeView layout (gvWidth old) (gvHeight old) (gvDpr old) old
+                                | otherwise = fitView layout (gvWidth old) (gvHeight old) (gvDpr old)
                         putModel
                             ( \x ->
                                 let seeded =
@@ -1697,17 +1871,50 @@ updateModel = \case
                                             , mGraphGen = generation
                                             , mGraphLayoutSource = "server"
                                             , mGraphView = view
-                                            , mGraphHover = Nothing
-                                            , mGraphSettled = False
-                                            , mGraphSettleEpoch = mGraphSettleEpoch x + 1
-                                            , mGraphDetailPhase = 0
+                                            , mGraphHover = if same then mGraphHover x else Nothing
+                                            , mGraphSettled = if same then mGraphSettled x else False
+                                            , mGraphSettleEpoch = if same then mGraphSettleEpoch x else mGraphSettleEpoch x + 1
+                                            , mGraphDetailPhase = if same then mGraphDetailPhase x else 0
+                                            , mGraphLoading = False
                                             }
                                  in applyGraphScope (recomputeGraphColors seeded)
                             )
-                        scheduleGraphSettle
-                    Nothing -> putModel (\x -> x{mGraphLayoutSource = "local"})
-    GraphLayoutFailed _ ->
-        putModel (\x -> x{mGraphLayoutSource = "local", mGraphLayoutWire = Nothing})
+                        when (not same || view /= old) scheduleGraphSettle
+                Just _ -> putModel (\x -> x{mGraphLayoutSource = "local", mGraphLoading = False})
+    GraphLayoutFailed err -> do
+        -- A failed refresh of an already-painted graph has no error panel to
+        -- show (the plate is still usable), so surface the failure as a toast.
+        handleApiError err
+        m <- get
+        case mGraph m of
+            Nothing -> do
+                -- No records yet: get them, then GraphLoaded builds the local
+                -- fallback because no layout wire exists.
+                putModel (\x -> x{mGraphLayoutSource = "local", mGraphLayoutWire = Nothing, mGraphLoading = True})
+                fetchGraph GraphLoaded GraphFailed
+            Just graph -> do
+                -- A refresh or preset switch failed. Build the deterministic
+                -- local layout for the current preset rather than leaving a
+                -- plate whose positions belong to the previous preset.
+                let generation = mGraphGen m + 1
+                    whole = buildLayoutWith (presetOptions (mGraphPreset m)) generation graph
+                putModel
+                    ( \x ->
+                        let seeded =
+                                x
+                                    { mGraphLayout = Just whole
+                                    , mGraphGen = generation
+                                    , mGraphLayoutSource = "local"
+                                    , mGraphLoading = False
+                                    , mGraphHover = Nothing
+                                    , mGraphFocus = Nothing
+                                    , mGraphSettled = False
+                                    , mGraphSettleEpoch = mGraphSettleEpoch x + 1
+                                    , mGraphDetailPhase = 0
+                                    }
+                         in fitActiveView (applyGraphScope seeded)
+                    )
+                scheduleGraphSettle
     -- views ---------------------------------------------------------------
     ViewsLoaded views -> do
         putModel (\x -> x{mViews = views, mViewsLoading = False, mViewsError = Nothing})
@@ -1930,29 +2137,10 @@ updateModel = \case
     GraphLabelModeSelected mode -> putModel (\m -> m{mGraphLabelMode = mode})
     GraphPresetSelected preset -> do
         m <- get
-        putModel (\x -> x{mGraphPreset = preset})
+        putModel (\x -> x{mGraphPreset = preset, mGraphLoading = True, mGraphError = Nothing})
         case mGraph m of
             Nothing -> pure ()
-            Just graph -> do
-                -- TODO(M1/task-13): carry the preset through the active view.
-                let generation = mGraphGen m + 1
-                    whole = buildLayoutWith (presetOptions preset) generation graph
-                putModel
-                    ( \x ->
-                        let seeded =
-                                x
-                                    { mGraphLayout = Just whole
-                                    , mGraphGen = generation
-                                    , mGraphHover = Nothing
-                                    , mGraphFocus = Nothing
-                                    , mGraphSettled = False
-                                    , mGraphSettleEpoch = mGraphSettleEpoch x + 1
-                                    , mGraphDetailPhase = 0
-                                    }
-                         in fitActiveView (applyGraphScope seeded)
-                    )
-                scheduleGraphSettle
-                fetchGraphLayout preset (GraphLayoutLoaded preset) GraphLayoutFailed
+            Just _ -> fetchGraphLayout preset (GraphLayoutLoaded preset) GraphLayoutFailed
     GraphScopeToggled -> do
         putModel
             ( \x ->
@@ -2096,15 +2284,16 @@ updateModel = \case
                             mergeDedup
                                 kept
                                 mergeIds
-                                (\merged -> DedupMerged (dgKey group) merged kept)
+                                (\(merged, snapshotId) -> DedupMerged (dgKey group) merged kept (if snapshotId > 0 then Just snapshotId else Nothing))
                                 DedupFailed
-    DedupMerged key merged keeper -> do
+    DedupMerged key merged keeper snapshotId -> do
         putModel
             ( \m ->
                 (dropDedupGroup key m)
                     { mDedupConfirm = Nothing
                     , mDedupBusy = False
                     , mDedupLast = Just (merged, keeper)
+                    , mDedupLastSnapshot = snapshotId
                     }
             )
         notify
@@ -2222,7 +2411,7 @@ updateModel = \case
     FilterByTag tag -> do
         putModel (\m -> m{mTagsFilter = [tag]})
         updateModel (Navigate Index)
-    -- Open the ledger on an explicit query (an accessions year, day or
+    -- Open the ledger on an explicit query (a history year, day or
     -- source, or a tag from the graph). The query replaces the old one so
     -- the total matches the figure the reader clicked.
     FilterByQuery query -> do
@@ -2353,30 +2542,55 @@ updateModel = \case
     DeadCheckRun -> do
         putModel (\m -> m{mMaintBusy = True})
         checkDead
-            (\(checked, dead) -> DeadCheckDone checked dead)
+            (\(checked, newlyDead, totalDead) -> DeadCheckDone checked newlyDead totalDead)
             MaintFailed
-    DeadCheckDone checked dead -> do
-        putModel (\m -> m{mMaintBusy = False, mCheckedCount = Just checked, mDeadCount = Just dead})
-        notify (ms ("Checked " <> show checked <> " links, " <> show dead <> " dead")) ToastOk
+    DeadCheckDone checked newlyDead totalDead -> do
+        putModel (\m -> m{mMaintBusy = False, mCheckedCount = Just checked, mDeadCount = Just totalDead})
+        notify
+            (ms ("Checked " <> show checked <> " links, " <> show newlyDead <> " newly dead, " <> show totalDead <> " marked dead"))
+            ToastOk
         reloadList
         refreshStats
-    UndoRun -> do
-        putModel (\m -> m{mMaintBusy = True})
-        runUndo UndoDone MaintFailed
-    UndoDone restored -> do
+    UndoRefresh -> do
+        putModel (\m -> m{mUndoLoading = True, mUndoError = Nothing})
+        fetchUndoEntries UndoEntriesLoaded UndoEntriesFailed
+    UndoEntriesLoaded entries ->
+        putModel (\m -> m{mUndoEntries = entries, mUndoLoading = False, mUndoError = Nothing})
+    UndoEntriesFailed err ->
+        putModel (\m -> m{mUndoLoading = False, mUndoError = Just (ms (aeMessage err))})
+    UndoPreviewRequest snapshotId -> do
+        putModel (\m -> m{mUndoPreview = Nothing, mUndoPreviewLoading = True, mUndoPreviewError = Nothing})
+        fetchUndoPreview snapshotId UndoPreviewLoaded UndoPreviewFailed
+    UndoPreviewLoaded preview ->
+        putModel (\m -> m{mUndoPreview = Just preview, mUndoPreviewLoading = False, mUndoPreviewError = Nothing})
+    UndoPreviewFailed err ->
+        putModel (\m -> m{mUndoPreviewLoading = False, mUndoPreviewError = Just (ms (aeMessage err))})
+    UndoPreviewClose ->
+        putModel (\m -> m{mUndoPreview = Nothing, mUndoPreviewLoading = False, mUndoPreviewError = Nothing})
+    UndoConfirm snapshotId -> do
+        putModel (\m -> m{mUndoBusy = True, mUndoPreviewError = Nothing})
+        runUndo snapshotId UndoDone UndoFailed
+    UndoDone result -> do
         putModel
             ( \m ->
                 m
-                    { mMaintBusy = False
+                    { mUndoBusy = False
+                    , mUndoPreview = Nothing
                     , mDedupLast = Nothing
+                    , mDedupLastSnapshot = Nothing
                     , mDedupMergeAllReport = Nothing
                     }
             )
-        notify (ms ("Restored " <> show restored <> " record(s)")) ToastOk
+        notify
+            (ms ("Undid " <> T.unpack (urOp result) <> "; restored " <> show (urRestored result) <> " row(s)"))
+            ToastOk
+        fetchUndoEntries UndoEntriesLoaded UndoEntriesFailed
         fetchPruneCandidates PruneLoaded PruneFailed
         dedupFirstPage DedupLoaded DedupFailed
         reloadList
         refreshStats
+    UndoFailed err -> do
+        putModel (\m -> m{mUndoBusy = False, mUndoPreviewError = Just (ms (aeMessage err))})
     MaintFailed err -> do
         putModel (\m -> m{mMaintBusy = False})
         handleApiError err
@@ -2533,7 +2747,7 @@ updateModel = \case
     -- the dirty editor asks first; a clean screen signs out immediately.
     LogoutRequest -> do
         m <- get
-        if mDirty m
+        if hasUnsaved m
             then putModel (\x -> x{mConfirmLogout = True})
             else updateModel Logout
     LogoutCancel -> putModel (\m -> m{mConfirmLogout = False})
@@ -3302,6 +3516,10 @@ updateModel = \case
                 , mEditTags = []
                 , mNewTag = ""
                 , mDirty = False
+                , mExtractEditing = False
+                , mExtractDraft = ""
+                , mExtractDirty = False
+                , mExtractSaving = False
                 , mNoteMode = NoteWrite
                 , mLinkQuery = Nothing
                 , mLinkResults = []
@@ -3363,8 +3581,12 @@ updateModel = \case
             || vuSaveOpen (mViewUi m)
             || vuImportOpen (mViewUi m)
             || isJust (vuExport (mViewUi m))
+            || mUndoPreviewLoading m
+            || isJust (mUndoPreview m)
+            || isJust (mUndoPreviewError m)
 
     closeTopLayer m
+        | mUndoPreviewLoading m || isJust (mUndoPreview m) || isJust (mUndoPreviewError m) = updateModel UndoPreviewClose
         | vuSaveOpen (mViewUi m) = putModel (\x -> x{mViewUi = (mViewUi x){vuSaveOpen = False, vuError = Nothing}})
         | vuImportOpen (mViewUi m) = putModel (\x -> x{mViewUi = (mViewUi x){vuImportOpen = False, vuError = Nothing}})
         | isJust (vuExport (mViewUi m)) = putModel (\x -> x{mViewUi = (mViewUi x){vuExport = Nothing}})
@@ -3922,8 +4144,27 @@ upsertWebhook :: Webhook -> [Webhook] -> [Webhook]
 upsertWebhook webhook webhooks =
     webhook : [existing | existing <- webhooks, whId existing /= whId webhook]
 
+{- | Do two layouts paint the same pixels? Compare the source maps and the
+derived primitives; the generation is deliberately excluded.
+-}
+sameGraphLayout :: GraphLayout -> GraphLayout -> Bool
+wirePresetDiffers :: Model -> LayoutPreset -> Bool
+wirePresetDiffers model preset =
+    case mGraphLayoutWire model of
+        Just (wirePreset, _) -> wirePreset /= preset
+        Nothing -> False
+sameGraphLayout left right =
+    glPos left == glPos right
+        && glRadii left == glRadii right
+        && glLinks left == glLinks right
+        && glMembers left == glMembers right
+        && glTags left == glTags right
+        && glRecords left == glRecords right
+
 {- | Load the graph route. Whole mode keeps the cached view; local mode
-rebuilds the neighbourhood and fits it before the first paint.
+rebuilds the neighbourhood and fits it before the first paint. A warm route
+keeps its layout wire and only refreshes the records; a cold route asks for
+the layout first so the first plate is hydrated instead of painted twice.
 -}
 enterGraphRoute :: Bool -> Maybe Int -> Int -> Effect () () Model Action
 enterGraphRoute localMode root depth = do
@@ -3935,7 +4176,10 @@ enterGraphRoute localMode root depth = do
     putModel
         ( \x ->
             x
-                { mGraphLoading = isNothing (mGraphLayout x)
+                { mGraphLoading =
+                    case mGraphLayoutWire x of
+                        Just (wirePreset, _) | wirePreset == mGraphPreset x && isJust (mGraphLayout x) -> False
+                        _ -> isNothing (mGraphLayout x)
                 , mGraphError = Nothing
                 , mGraphLocal = effectiveLocal
                 , mGraphLocalDepth = effectiveDepth
@@ -3946,17 +4190,15 @@ enterGraphRoute localMode root depth = do
                 , mGraphHover = Nothing
                 }
         )
-    putModel
-        ( \x ->
-            x
-                { mGraphLayoutWire = Nothing
-                , mGraphLayoutSource = "local"
-                }
-        )
     putModel (\x -> if effectiveLocal then fitActiveView (applyGraphScope x) else applyGraphScope x)
     current <- get
-    fetchGraph GraphLoaded GraphFailed
-    fetchGraphLayout (mGraphPreset current) (GraphLayoutLoaded (mGraphPreset current)) GraphLayoutFailed
+    let preset = mGraphPreset current
+        cachedWire = case mGraphLayoutWire current of
+            Just (wirePreset, _) | wirePreset == preset -> True
+            _ -> False
+    if cachedWire
+        then fetchGraph GraphLoaded GraphFailed
+        else fetchGraphLayout preset (GraphLayoutLoaded preset) GraphLayoutFailed
     measureGraphCanvas GraphMeasured
 
 {- | Resolve the row that roots local mode: the explicit root when it still

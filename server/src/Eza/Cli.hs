@@ -382,8 +382,8 @@ runCli cfg passwords cmd = case cmd of
     RestoreCmd opts -> runRestoreCommand cfg opts
     CheckDead opts ->
         withLibrary cfg (cdUser opts) $ \_ conn -> do
-            (checked, dead, alive) <- checkDead conn (cdLimit opts) (cdOlderThan opts) (cdIncludeDead opts)
-            putStrLn (LBS8.unpack (encode (object ["checked" .= checked, "dead" .= dead, "alive" .= alive])))
+            (checked, dead, alive, totalDead) <- checkDead conn (cdLimit opts) (cdOlderThan opts) (cdIncludeDead opts)
+            putStrLn (LBS8.unpack (encode (object ["checked" .= checked, "dead" .= dead, "alive" .= alive, "total_dead" .= totalDead])))
     Bench iterations userSelector ->
         withLibrary cfg userSelector $ \_ conn -> runBench conn iterations
     ExportCmd json userSelector ->

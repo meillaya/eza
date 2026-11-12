@@ -5,6 +5,7 @@ module Eza.Highlights (
     createHighlight,
     updateHighlight,
     deleteHighlight,
+    reanchorHighlights,
 ) where
 
 import Data.Text (Text)
@@ -68,3 +69,56 @@ deleteHighlight conn bookmarkId highlightId = do
         execute conn "DELETE FROM highlights WHERE id = ? AND bookmark_id = ?" (highlightId, bookmarkId)
         changed <- changes conn
         pure (changed > 0)
+
+{- | Re-anchor highlights after the reading text changes. Client offsets are
+hints: keep an offset pair when it still quotes the same text, otherwise find
+the quote (preferring the stored prefix/suffix context), and delete only the
+highlight whose quote is gone. Returns the number deleted.
+-}
+reanchorHighlights :: Connection -> Int -> Text -> IO Int
+reanchorHighlights conn bookmarkId text = do
+    rows <-
+        query
+            conn
+            "SELECT id,quote,prefix,suffix,start_offset,end_offset FROM highlights WHERE bookmark_id = ? ORDER BY id"
+            (Only bookmarkId) ::
+            IO [(Int, Text, Text, Text, Int, Int)]
+    now <- epoch
+    removed <- foldMapM (reanchorOne now) rows
+    pure removed
+  where
+    foldMapM f = fmap sum . mapM f
+    reanchorOne now (highlightId, quote, prefix, suffix, oldStart, oldEnd) =
+        case locate text quote prefix suffix oldStart oldEnd of
+            Nothing -> do
+                execute conn "DELETE FROM highlights WHERE id = ? AND bookmark_id = ?" (highlightId, bookmarkId)
+                pure 1
+            Just (newStart, newEnd) -> do
+                let before = T.takeEnd 32 (T.take (max 0 newStart) text)
+                    after = T.take 32 (T.drop (max 0 newEnd) text)
+                execute
+                    conn
+                    "UPDATE highlights SET start_offset = ?, end_offset = ?, prefix = ?, suffix = ?, updated_at = ? WHERE id = ? AND bookmark_id = ?"
+                    (newStart, newEnd, before, after, now, highlightId, bookmarkId)
+                pure 0
+
+locate :: Text -> Text -> Text -> Text -> Int -> Int -> Maybe (Int, Int)
+locate text quote prefix suffix oldStart oldEnd
+    | oldStart >= 0
+    , oldEnd <= T.length text
+    , T.take (oldEnd - oldStart) (T.drop oldStart text) == quote =
+        Just (oldStart, oldEnd)
+    | otherwise =
+        case uniqueOccurrence (prefix <> quote <> suffix) text of
+            Just start -> Just (start + T.length prefix, start + T.length prefix + T.length quote)
+            Nothing -> case uniqueOccurrence quote text of
+                Just start -> Just (start, start + T.length quote)
+                Nothing -> Nothing
+
+uniqueOccurrence :: Text -> Text -> Maybe Int
+uniqueOccurrence needle haystack
+    | T.null needle = Nothing
+    | T.count needle haystack /= 1 = Nothing
+    | otherwise =
+        let (before, _) = T.breakOn needle haystack
+         in Just (T.length before)

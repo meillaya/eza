@@ -98,6 +98,7 @@ sessionRoutes =
     , ("GET", ["bookmark", "1"])
     , ("GET", ["inbox"])
     , ("GET", ["tags", "ai"])
+    , ("GET", ["history"])
     , ("GET", ["accessions"])
     , ("GET", ["not", "an", "api", "route"])
     ]
@@ -159,6 +160,8 @@ tokenRoutes =
     , ("GET", ["api", "v1", "maintenance", "prune-candidates"])
     , ("POST", ["api", "v1", "maintenance", "prune"])
     , ("POST", ["api", "v1", "undo"])
+    , ("GET", ["api", "v1", "undo"])
+    , ("GET", ["api", "v1", "undo", "1"])
     , ("POST", ["api", "v1", "import"])
     , ("POST", ["api", "v1", "import", "json"])
     , ("GET", ["api", "v1", "export"])

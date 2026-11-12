@@ -4,6 +4,17 @@
   "use strict";
 
   // ---------------------------------------------------------------- SW ---
+  // The client marks unsaved work with data-dirty="1" on its root. The exact
+  // attribute is deliberately the contract: the browser guard and the service
+  // worker must not guess from editor state.
+  function isDocumentDirty() {
+    try {
+      return !!document.querySelector('[data-dirty="1"]');
+    } catch (error) {
+      return false;
+    }
+  }
+
   function canUseServiceWorker() {
     if (!("serviceWorker" in navigator)) return false;
     if (location.protocol === "https:") return true;
@@ -16,6 +27,12 @@
     navigator.serviceWorker.addEventListener("message", function (event) {
       var data = event.data || {};
       if (data.type !== "EZA_SW_UPDATED" || !hadController || !data.version) return;
+      // A new shell must never discard an unsaved note or extracted-text edit.
+      // The next manual reload takes the new build.
+      if (isDocumentDirty()) {
+        console.info("[eza] a new build is ready; keeping unsaved edits");
+        return;
+      }
       // One reload per new build: the worker has just replaced an older shell.
       var key = "eza-reloaded-" + data.version;
       try {
@@ -33,8 +50,27 @@
       });
   }
 
-  if (document.readyState === "complete") registerServiceWorker();
-  else window.addEventListener("load", registerServiceWorker);
+  // Register only after the WASM client has started. Registering on `load`
+  // let the install precache race the loader's app.wasm fetch and download the
+  // binary a second time on a cold visit. The loader dispatches this event
+  // after instantiation; the app-ready class covers an event that fired before
+  // this deferred script ran.
+  function registerWhenAppReady() {
+    if (document.body && document.body.classList.contains("app-ready")) {
+      registerServiceWorker();
+      return;
+    }
+    window.addEventListener("eza-app-ready", registerServiceWorker, { once: true });
+  }
+
+  registerWhenAppReady();
+
+  window.addEventListener("beforeunload", function (event) {
+    if (!isDocumentDirty()) return;
+    event.preventDefault();
+    event.returnValue = "";
+    return "";
+  });
 
   // ------------------------------------------------- install prompt ------
   // The install button only exists after the browser fires
@@ -81,11 +117,17 @@
   // ------------------------------------------------------------ network -----
   // Miso's fetch drops the response body on non-2xx, and the CSP forbids
   // runtime JavaScript (no unsafe-eval), so the client calls these static
-  // helpers instead. Reporting status and body text together keeps the
-  // server's JSON error message: duplicate 409, 403, 404 and so on.
+  // helpers instead. The callback takes the three fields as separate JS
+  // arguments (status number, body text, transport error). The Haskell side
+  // uses asyncCallback3 and decodes the body directly; do not wrap this in a
+  // JSON envelope, which forced a second parse of every large response.
   function report(done, status, text, error) {
     try {
-      done(JSON.stringify({ status: status, text: text, error: error }));
+      done(
+        Number(status) || 0,
+        text == null ? "" : String(text),
+        error == null ? "" : String(error)
+      );
     } catch (failure) {
       /* the page moved on before the request resolved */
     }
@@ -98,7 +140,7 @@
       fetch(url, options)
         .then(function (response) {
           return response.text().then(function (text) {
-            report(done, response.status, text, null);
+            report(done, response.status, text, "");
           });
         })
         .catch(function (error) {
@@ -133,13 +175,111 @@
         })
         .then(function (response) {
           return response.text().then(function (text) {
-            report(done, response.status, text, null);
+            report(done, response.status, text, "");
           });
         })
         .catch(function (error) {
           report(done, 0, "", String((error && error.message) || error));
         });
     }
+  };
+
+  // ------------------------------------------------------- graph painting ---
+  // The Miso app hands the graph painter one compact string per layer instead
+  // of crossing the JSFFI boundary once per primitive. The wire form is
+  // `hex:` followed by little-endian Float32 bytes encoded as hex; the older
+  // whitespace-decimal form is still accepted for compatibility:
+  //   stroke: x1 y1 x2 y2  (repeat)
+  //   fill:   x y r       (repeat)
+  // Parsing and drawing happen entirely in JavaScript; malformed data or a
+  // browser without Path2D returns false so the client can use its old
+  // per-primitive canvas fallback.
+  function parseHexFloats(raw) {
+    var hex = raw.slice(4);
+    if (hex.length % 8 !== 0) return null;
+    var bytes = new Uint8Array(hex.length / 2);
+    for (var i = 0; i < bytes.length; i++) {
+      var byte = parseInt(hex.substr(i * 2, 2), 16);
+      if (!isFinite(byte)) return null;
+      bytes[i] = byte;
+    }
+    var view = new DataView(bytes.buffer);
+    var values = new Float32Array(bytes.length / 4);
+    for (var j = 0; j < values.length; j++) {
+      values[j] = view.getFloat32(j * 4, true);
+    }
+    return values;
+  }
+
+  function parseLayerNumbers(packed) {
+    var raw = packed == null ? "" : String(packed).trim();
+    if (!raw) return new Float32Array(0);
+    if (raw.slice(0, 4) === "hex:") return parseHexFloats(raw);
+    var parts = raw.split(/\s+/);
+    var values = new Float64Array(parts.length);
+    for (var i = 0; i < parts.length; i++) {
+      var value = Number(parts[i]);
+      if (!isFinite(value)) return null;
+      values[i] = value;
+    }
+    return values;
+  }
+
+  function finiteOr(value, fallback) {
+    var number = Number(value);
+    return isFinite(number) ? number : fallback;
+  }
+
+  window.EzaGraph = {
+    available: function () {
+      return typeof Path2D === "function" && typeof Float64Array === "function";
+    },
+    paintLayer: function (ctx, mode, packed, color, alpha, lineWidth) {
+      if (!ctx || !window.EzaGraph.available()) return false;
+      var values = parseLayerNumbers(packed);
+      if (!values) return false;
+      var kind = String(mode || "");
+      var step = kind === "stroke" ? 4 : kind === "fill" ? 3 : 0;
+      if (step === 0 || values.length % step !== 0) return false;
+      var opacity = finiteOr(alpha, 1);
+      if (opacity < 0) opacity = 0;
+      if (opacity > 1) opacity = 1;
+      var width = finiteOr(lineWidth, 1);
+      if (width <= 0) width = 1;
+      try {
+        var path = new Path2D();
+        var i;
+        if (kind === "stroke") {
+          for (i = 0; i < values.length; i += 4) {
+            path.moveTo(values[i], values[i + 1]);
+            path.lineTo(values[i + 2], values[i + 3]);
+          }
+        } else {
+          for (i = 0; i < values.length; i += 3) {
+            var x = values[i];
+            var y = values[i + 1];
+            var radius = values[i + 2];
+            if (!(radius > 0)) continue;
+            path.moveTo(x + radius, y);
+            path.arc(x, y, radius, 0, Math.PI * 2);
+          }
+        }
+        ctx.save();
+        ctx.globalAlpha = opacity;
+        if (kind === "stroke") {
+          ctx.strokeStyle = color || "#000";
+          ctx.lineWidth = width;
+          ctx.stroke(path);
+        } else {
+          ctx.fillStyle = color || "#000";
+          ctx.fill(path);
+        }
+        ctx.restore();
+        return true;
+      } catch (error) {
+        return false;
+      }
+    },
   };
 
   // ------------------------------------------------------ dialog focus ----
@@ -592,9 +732,32 @@
         }
         return text;
       }
-      var quote = countedText().substring(start, end);
+      // The DOM returns UTF-16 code-unit offsets; the stored reading copy and
+      // the server's Data.Text indices count Unicode code points. Convert the
+      // two ends from the same projection, keeping the quote itself in DOM
+      // units (the server stores the visible text, not its coordinates).
+      function codePointLength(value) {
+        var units = 0;
+        var points = 0;
+        while (units < value.length) {
+          var code = value.charCodeAt(units);
+          if (code >= 0xd800 && code <= 0xdbff && units + 1 < value.length) {
+            var next = value.charCodeAt(units + 1);
+            if (next >= 0xdc00 && next <= 0xdfff) {
+              units += 1;
+            }
+          }
+          units += 1;
+          points += 1;
+        }
+        return points;
+      }
+      var text = countedText();
+      var quote = text.substring(start, end);
       if (!quote.trim()) return null;
-      return JSON.stringify({ start: start, end: end, quote: quote });
+      var startPoints = codePointLength(text.substring(0, start));
+      var endPoints = startPoints + codePointLength(text.substring(start, end));
+      return JSON.stringify({ start: startPoints, end: endPoints, quote: quote });
     } catch (error) {
       return null;
     }

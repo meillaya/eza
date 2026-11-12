@@ -126,6 +126,70 @@ the in-app cold plate is still missed on this library. The plate skeleton is
 shown while that work runs. The full reload is within its separate 3,000 ms
 budget.
 
+### Post-batching measurement
+
+The client numbers above predate the batched graph painter, the single-parse API
+callback, and the service-worker boot ordering. Re-run the committed harness
+rather than comparing new code with those old figures:
+
+```bash
+EZA_PERF_RECORDS=9000 EZA_BASE=http://localhost:8210 node tests/e2e/graph-perf.mjs
+EZA_PERF_RECORDS=9000 EZA_PERF_ASSERT=1 EZA_BASE=http://localhost:8210 node tests/e2e/graph-perf.mjs
+EZA_BASE=http://localhost:8210 node tests/e2e/load-perf.mjs
+```
+
+`graph-perf.mjs` now emits `eza:graph:base-start/end` and
+`eza:graph:detail-start/end` marks when `window.__ezaGraphPerf` is set (the
+script sets it), plus the loader's `eza:wasm-*`, `eza:hs-start` and
+`eza:app-ready` marks. It measures the whole-library plate, drag/wheel frames, a
+depth-3 local graph, filter apply, tags toggle, and a warm return. Timing stays
+report-only unless `EZA_PERF_ASSERT=1`; functional failures always exit
+non-zero. `load-perf.mjs` reports the cold first ledger row, cold graph
+in-app/full-reload, warm return, transfer sizes, and service-worker readiness.
+
+Measured on 2026-11-12 with build `a907cdab450a484a` against the 9,000-record
+synthetic library in `tests/e2e/graph-perf.mjs`:
+
+```
+scope/API request:               51 ms (within 400)
+base bitmap paint:               59 ms (was ~1,150 ms with Text-built paths)
+cold plate, in-app:             973 ms (over the 500 ms target)
+cold plate, full reload:      1,126 ms (within 1,500)
+warm return plate:               69 ms (within 400)
+filter apply:                   205 ms (over 100; includes the 120 ms input debounce)
+tags toggle:                    182 ms (within 200)
+cold local depth 3:             927 ms (over 800)
+drag / wheel frame p95:        16.7 ms
+local depth 3 drag p95:        16.7 ms
+```
+
+The in-app cold miss is now before the painter, not in it: the layout request
+(167 ms), graph request (71 ms), payload decode and hydration happen before
+`eza:graph:base-start`; the base paint itself is 59 ms. The whole-library graph
+is kept (it is roughly 2.9x faster than the 2,847 ms pre-change plate), but the
+remaining decode/network time is tracked separately. `filter apply` includes
+the 120 ms debounce; the render itself is below the 100 ms budget.
+
+`tests/e2e/load-perf.mjs` on the small mini fixture reports cold first ledger
+row 236 ms, cold graph in-app 293 ms, cold graph full reload 472 ms, warm graph
+return 306 ms, app.wasm transfer about 2,138,908 bytes cold, and service-worker
+readiness 236 ms after navigation. Those graph numbers are boot/API overhead on
+three records, not the 9k plate; use `graph-perf.mjs` for the graph budgets.
+
+Client budgets for the 9,000-record synthetic library:
+
+| Case | Budget |
+|---|---|
+| cold graph, in-app | <= 500 ms |
+| cold graph, full reload | <= 1,500 ms |
+| warm graph return | <= 400 ms |
+| filter apply | <= 100 ms |
+| tags toggle | <= 200 ms |
+| drag frame p95 | <= 33 ms |
+| depth-3 local drag frame p95 | <= 33 ms |
+| cold first ledger row | <= 1,200 ms |
+| app.wasm over the wire | <= 1.7 MB target; 2.2 MB hard ceiling |
+
 ### Layout endpoint
 
 M1 moves the deterministic layout to the server:
@@ -172,10 +236,16 @@ Post-cleanup, on the 8,905-row copy: `all` 0.77/1.20 ms average/p95,
 
 ## Assets and HTTP
 
-- `static/app/app.wasm` is 6,686,546 bytes raw and 1,540,229 bytes gzipped
-  (4.3x). The server serves `<file>.gz` sidecars with `Content-Encoding: gzip`,
-  `Vary: Accept-Encoding`, and the sidecar's ETag/304; `scripts/build-web.sh`
-  writes sidecars for the WASM, CSS, shell, and loader JavaScript.
+- `static/app/app.wasm` was 6,686,546 bytes raw and 1,540,229 bytes gzipped
+  when the 2026-11-08 release asset was measured; that figure is now stale.
+  On the current checkout `wasm-opt -Oz --strip-debug --strip-producers
+  --strip-dwarf` produces 7,638,603 bytes raw and 2,138,908 bytes gzipped.
+  The build enforces a 2.2 MB gzip / 7.7 MB raw hard ceiling and warns above
+  the 1.7 MB product target. The gap is a known regression (P1), not a success.
+  The server serves `<file>.gz`
+  sidecars with `Content-Encoding: gzip`, `Vary: Accept-Encoding`, and the
+  sidecar's ETag/304; `scripts/build-web.sh` writes sidecars for the WASM,
+  CSS, shell, and loader JavaScript.
 - Dynamic JSON/HTML responses are gzipped above 512 bytes by the WAI middleware
   (the setup page and boot payload drop to a fraction of their JSON size).
 - The WASM loader fetches the precompressed asset; the service worker install
@@ -199,7 +269,7 @@ Post-cleanup, on the 8,905-row copy: `all` 0.77/1.20 ms average/p95,
 | duplicates first page (60 + 40 groups) | < 150 ms | 62.52 ms |
 | bulk merge, 11,290 records | seconds, one snapshot | 2.31 s, one snapshot |
 | import 9,457 anchors | < 2.5 s | 2.4-2.5 s |
-| WASM over the wire | <= 1.6 MB | 1.54 MB |
+| WASM over the wire | <= 1.7 MB target; 2.2 MB hard ceiling | 2.139 MB current (known P1 regression) |
 
 The tag-filtered list remains the slowest page shape because the filtered id
 set is materialised before the year-count scan; the absolute cost is 13 ms and

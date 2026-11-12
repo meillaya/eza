@@ -67,8 +67,15 @@ per source domain, not per bookmark: cached domains are applied with one
 cached icon is probed at the conventional `/favicon.ico`, `/favicon.png` and
 `/apple-touch-icon.png` locations; only when all miss is the homepage fetched
 once to read a declared `<link rel="icon">`. Either way a site with 500 links
-costs one lookup, not 500. Domains with the most unfilled bookmarks go first,
-icon bodies are size-capped and sniffed, and three failures park a domain.
+costs one lookup, not 500; enrichment itself applies only an already cached
+icon and never opens a per-link icon request. Domains with the most unfilled
+bookmarks go first. Downloaded bodies are streamed to the configured byte cap,
+and only complete PNG/JPEG/WebP images or ICOs cropped to a complete entry are
+stored. A startup validation pass repairs old rows: incomplete bodies are
+deleted, affected bookmark URLs are cleared, and stale hash URLs are rewritten.
+Valid icons older than `EZA_FAVICON_TTL_DAYS` are refreshed one domain per
+backfill tick. Three failed fetches park a domain; migration v15 removes old
+failure placeholders once so the current parser gets a retry.
 `EZA_ENRICH_WORKERS` is a process-wide semaphore shared by both loops;
 `EZA_FAVICON_BACKFILL=0` disables the icon loop. A disabled account's workers
 stop on the next supervisor tick. Expired sessions are swept when a database
@@ -138,7 +145,12 @@ limit. Schema v7 adds the lossless undo side tables; v8 adds `captures` and
 `clip_templates`; v12 extends the side snapshot to `captures`, so undoing a
 delete, prune, or merge brings the clipped content back too; v14 stores the
 event kind on each webhook delivery row so the delivery history stays readable
-after the 30-day event purge. The restore path
+after the 30-day event purge; v15 adds the manual dead-link override table,
+copies that override into side snapshots, removes stale favicon failure
+placeholders, and clears non-local or old-cap favicon URLs. The undo read path
+summarizes the same snapshot tables (`op`, `row_count`, affected titles/tags,
+highlight/capture/link counts) for the Maintenance history and preview; only
+the newest usable snapshot can be restored. The restore path
 re-enables `recursive_triggers` and rebuilds the FTS index, so an undo cannot
 leave stale terms behind.
 

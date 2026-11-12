@@ -1,19 +1,21 @@
 # Screenshots
 
 The screenshots come from the real server and the built WASM client, against a
-scratch copy of the live library (9,226 entries, 4,521 sources, 79 tags, filed
-since 2022.08.07). They are not mockups and no record is invented for the
-pictures. The detail and share shots use a real record with real extracted text
-and the note and marks the capture script adds; the note is visible on the share
-page. The figure counts change as the library grows, so a new set can show
-different numbers.
+scratch copy of the live library (the figure counts change as the library grows,
+so a new set can show different numbers). They are not mockups and no record is
+invented for the pictures. The detail and share shots use a real record with
+real extracted text and the note and marks the capture script adds; the note is
+visible on the share page.
+
+The history pair was recaptured from the same scratch library after the archive
+page became History.
 
 The set is sixteen PNGs at 1440 pixels wide with a device pixel ratio of 2, in
-eight light and dark pairs. Every shot is 1440x900 except the cropped accessions
+eight light and dark pairs. Every shot is 1440x900 except the cropped history
 pair (1440x561). Every screen is captured twice with the application's own
 theme switch (the nav control on application screens, `window.EzaTheme.set` on
 the server-rendered pages), so the dark files show the reading-room theme as
-the application renders it, not a CSS override. The accessions pair is cropped
+the application renders it, not a CSS override. The history pair is cropped
 above the ranked-source list so private sources do not appear in the public
 image:
 
@@ -21,7 +23,7 @@ image:
 |---|---|
 | `library.png`, `library-dark.png` | the ledger under a real `tag:literature` query, masthead counting the whole library |
 | `detail.png`, `detail-dark.png` | bookmark 18311, its reading spread and its marks |
-| `accessions.png`, `accessions-dark.png` | the printed index figures and filing days, without source names |
+| `history.png`, `history-dark.png` | the printed index figures and filing days, without source names |
 | `palette.png`, `palette-dark.png` | the command palette over that filtered ledger |
 | `graph.png`, `graph-dark.png` | the local wikilink graph around the record the note links to (1,151 records in view) |
 | `views.png`, `views-dark.png` | the views page: views are data, with import, export, duplicate and delete |

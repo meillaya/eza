@@ -82,7 +82,7 @@ import Eza.Control (ControlUser (..))
 import qualified Eza.Control as Control
 import qualified Eza.Db as Db
 import Eza.DeadLinks (checkDead)
-import Eza.Dedup (DedupQuery (..), dedupCandidates, mergeBookmarks, mergeUrlDuplicatesAll)
+import Eza.Dedup (DedupQuery (..), dedupCandidates, mergeBookmarksWithSnapshot, mergeUrlDuplicatesAll)
 import Eza.Enrich (enqueueEnrichment, runEnrichWorkerFor, runFaviconWorkerFor)
 import Eza.Export (exportBookmarks)
 import Eza.Favicon (Favicon (..), getFavicon)
@@ -102,7 +102,7 @@ import Eza.Tags (consolidationCandidates, deleteTag, deleteTagWithLinks, mergeTa
 import qualified Eza.TokenPrefix as TokenPrefix
 import Eza.Tokens (Token (..), authenticateToken, createToken, listTokens, revokeToken)
 import Eza.Types
-import Eza.Undo (undoLast)
+import Eza.Undo (UndoFailure (..), listUndoEntries, undoById, undoLast, undoPreview)
 import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..))
 import Eza.View (ViewInput (..))
 import Eza.Views (ViewError, ViewPatch (..), createView, deleteView, getView, listViews, updateView, viewErrorCode, viewErrorMessage, viewErrorStatus)
@@ -1579,6 +1579,12 @@ authedRoute rctx req respond conn =
                         "extract" -> do
                             enqueueEnrichment conn bid
                             respond (jsonResponse status200 (object ["ok" .= True, "queued" .= True]))
+                        "mark-alive" -> do
+                            ok <- markLinkAlive conn bid
+                            if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status404 "not_found" "bookmark not found")
+                        "recheck-link" -> do
+                            ok <- recheckLink conn bid
+                            if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status404 "not_found" "bookmark not found")
                         "snapshot" -> do
                             m <- captureSnapshot cfg (usSnapshotDir slot) conn bid
                             case m of
@@ -1693,8 +1699,8 @@ authedRoute rctx req respond conn =
                     Nothing -> respond (jsonError status400 "bad_request" "invalid body")
                     Just o -> case (parseMaybe (.: "keep_id") o, parseMaybe (.: "merge_ids") o) of
                         (Just keep, Just ms) -> do
-                            n <- mergeBookmarks conn keep ms
-                            respond (jsonResponse status200 (object ["merged" .= n]))
+                            (n, snapshotId) <- mergeBookmarksWithSnapshot conn keep ms
+                            respond (jsonResponse status200 (object ["merged" .= n, "snapshot_id" .= snapshotId]))
                         _ -> respond (jsonError status400 "bad_request" "keep_id and merge_ids are required")
         ("GET", ["api", "v1", "tags", "consolidation-candidates"]) -> do
             report <- consolidationCandidates conn
@@ -1757,8 +1763,8 @@ authedRoute rctx req respond conn =
                         limit = fromMaybe 500 (parseMaybe (.: "limit") o :: Maybe Int)
                         older = fromMaybe 0 (parseMaybe (.: "older_than") o :: Maybe Int)
                         includeDead = fromMaybe False (parseMaybe (.: "include_dead") o :: Maybe Bool)
-                    (checked, dead, alive) <- checkDead conn limit older includeDead
-                    respond (jsonResponse status200 (object ["checked" .= checked, "dead" .= dead, "alive" .= alive]))
+                    (checked, dead, alive, totalDead) <- checkDead conn limit older includeDead
+                    respond (jsonResponse status200 (object ["checked" .= checked, "dead" .= dead, "alive" .= alive, "total_dead" .= totalDead]))
         ("GET", ["api", "v1", "maintenance", "prune-candidates"]) -> do
             items <- pruneCandidates conn 365
             respond (jsonResponse status200 (object ["items" .= items]))
@@ -1773,9 +1779,37 @@ authedRoute rctx req respond conn =
                         Just ids -> do
                             n <- pruneApply conn ids
                             respond (jsonResponse status200 (object ["pruned" .= n]))
+        ("GET", ["api", "v1", "undo"]) -> do
+            let limit = fromMaybe 5 (param "limit" req >>= readInt)
+            entries <- listUndoEntries conn limit
+            respond (jsonResponse status200 (object ["entries" .= entries]))
+        ("GET", ["api", "v1", "undo", idTxt]) -> case readInt idTxt of
+            Nothing -> respond (jsonError status400 "bad_request" "invalid snapshot id")
+            Just snapshotId -> do
+                preview <- undoPreview conn snapshotId
+                case preview of
+                    Nothing -> respond (jsonError status404 "not_found" "undo snapshot not found")
+                    Just value -> respond (jsonResponse status200 value)
         ("POST", ["api", "v1", "undo"]) -> do
-            n <- undoLast conn
-            respond (jsonResponse status200 (object ["restored" .= n]))
+            raw <- readBodyBoundedTo (cfgMaxBodyBytes cfg) req
+            case raw of
+                Left response -> respond response
+                Right body
+                    | LBS.null body -> do
+                        n <- undoLast conn
+                        respond (jsonResponse status200 (object ["restored" .= n]))
+                    | otherwise -> case eitherDecode body of
+                        Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+                        Right value -> case (parseMaybe (.: "snapshot_id") value :: Maybe Int) of
+                            Nothing -> do
+                                n <- undoLast conn
+                                respond (jsonResponse status200 (object ["restored" .= n]))
+                            Just snapshotId -> do
+                                result <- undoById conn snapshotId
+                                case result of
+                                    Left UndoNotFound -> respond (jsonError status404 "not_found" "undo snapshot not found")
+                                    Left UndoNotNewest -> respond (jsonError status409 "undo_out_of_order" "Undo the newer actions first")
+                                    Right undoResult -> respond (jsonResponse status200 undoResult)
         ("POST", ["api", "v1", "import"]) -> importHandler cfg conn req respond
         ("POST", ["api", "v1", "import", "json"]) -> do
             body <- jsonBodyTo (cfgImportMaxBytes cfg) req
@@ -2839,24 +2873,27 @@ markAbove cfg conn req respond = do
             n <- markAllAbove conn aid
             respond (jsonResponse status200 (object ["updated" .= n]))
 
-data PatchBody = PatchBody (Maybe Text) (Maybe Text) (Maybe Bool) (Maybe [Text])
+data PatchBody = PatchBody (Maybe Text) (Maybe Text) (Maybe Bool) (Maybe [Text]) (Maybe Text)
 
 instance FromJSON PatchBody where
     parseJSON = withObject "PatchBody" $ \o ->
-        PatchBody <$> o .:? "title" <*> o .:? "note_body" <*> o .:? "is_read" <*> o .:? "tags"
+        PatchBody <$> o .:? "title" <*> o .:? "note_body" <*> o .:? "is_read" <*> o .:? "tags" <*> o .:? "extracted_text"
 
 patchBookmark :: Config -> Connection -> Int -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 patchBookmark cfg conn bid req respond = do
     body <- jsonValue cfg req
     case body of
         Left response -> respond response
-        Right (PatchBody mTitle mNote mRead mTags)
+        Right (PatchBody mTitle mNote mRead mTags mExtracted)
             | maybe False (T.null . T.strip) mTitle -> respond (jsonError status400 "bad_request" "title must not be empty")
-            | all (== Nothing) [fmap (const ()) mTitle, fmap (const ()) mNote, fmap (const ()) mRead, fmap (const ()) mTags] ->
+            | maybe False ((> 2000000) . T.length) mExtracted -> respond (jsonError status400 "bad_request" "extracted text is too long")
+            | all (== Nothing) [fmap (const ()) mTitle, fmap (const ()) mNote, fmap (const ()) mRead, fmap (const ()) mTags, fmap (const ()) mExtracted] ->
                 respond (jsonError status400 "bad_request" "empty patch")
             | otherwise -> do
-                ok <- updateBookmark conn bid mTitle mNote mRead mTags
-                if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status404 "not_found" "bookmark not found")
+                (ok, removedHighlights) <- updateBookmarkDetailed conn bid mTitle mNote mRead mTags mExtracted
+                if ok
+                    then respond (jsonResponse status200 (object ["ok" .= True, "highlights_removed" .= removedHighlights]))
+                    else respond (jsonError status404 "not_found" "bookmark not found")
 
 importHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 importHandler cfg conn req respond =

@@ -28,6 +28,7 @@ import qualified DedupSpec
 import qualified Eza.Auth as Auth
 import Eza.Bookmarks
 import Eza.Db (openDb, queryScalar, schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaVersion, targetSchemaVersion)
+import Eza.DeadLinks (LinkState (..), classifyHttp)
 import Eza.Favicon (Favicon (..), getFavicon, parseDataIcon, parseIconLinks, putFavicon, recordFaviconFailure, sniffImage)
 import Eza.Graph (GraphLayoutPayload (..), emptyLayoutCache, globalGraph, graphLayoutPayload, graphRevision, layoutPresetFromText, layoutPresetText, lookupCachedLayout, storeCachedLayout)
 import Eza.GraphLayout (LayoutPreset (..))
@@ -38,7 +39,8 @@ import qualified Eza.Password as Password
 import Eza.Rules (Rule (..), createRule, listRules, matchingBookmarks)
 import Eza.SearchQuery
 import Eza.Shares (ShareRecord (..), ShareState (..), ShareUnavailable (..), createShare, resolveShare, resolveShareState, revokeShare, shareUnavailablePage)
-import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), GraphData (..), GraphLink (..), GraphRecord (..), GraphTag (..), Highlight (..), ImportReport (..), LibraryStats (..), SearchPage (..))
+import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), GraphData (..), GraphLink (..), GraphRecord (..), GraphTag (..), Highlight (..), ImportReport (..), LibraryStats (..), SearchPage (..), UndoBookmarkRef (..), UndoEntry (..), UndoPreview (..), UndoResult (..))
+import Eza.Undo (UndoFailure (..), listUndoEntries, recordUndoIds, undoById, undoLast, undoPreview)
 import Eza.Url (dedupeKey, dedupeLookupUrls, normalizeUrl)
 import qualified GraphLayoutSpec
 import qualified IsolationSpec
@@ -1014,6 +1016,110 @@ main = hspec $ do
                 left <- Auth.countCredentials conn
                 left `shouldBe` 0
                 close conn
+
+    describe "undo history and link overrides" $ do
+        it "lists the newest snapshots, previews them, and refuses out-of-order undo" $
+            withSystemTempDirectory "eza-undo-stack" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                inserted <- insertBookmark conn "https://example.test/undo" "Undo record" []
+                bid <- case inserted of
+                    Right value -> pure value
+                    Left err -> expectationFailure (T.unpack err) >> pure 0
+                _ <- recordUndoIds conn "bulk_mark_read" [bid]
+                _ <- recordUndoIds conn "prune" [bid]
+                entries <- listUndoEntries conn 5
+                case entries of
+                    (newest : older : _) -> do
+                        unCanUndo newest `shouldBe` True
+                        unCanUndo older `shouldBe` False
+                        unBookmarkCount newest `shouldBe` 1
+                        unOp newest `shouldBe` "prune"
+                        preview <- undoPreview conn (unId newest)
+                        fmap upTruncated preview `shouldBe` Just False
+                        fmap (map ubTitle . upBookmarks) preview `shouldBe` Just ["Undo record"]
+                        refused <- undoById conn (unId older)
+                        refused `shouldBe` Left UndoNotNewest
+                        restored <- undoById conn (unId newest)
+                        case restored of
+                            Right result -> urRestored result `shouldBe` 1
+                            Left failure -> expectationFailure (show failure)
+                        remaining <- listUndoEntries conn 5
+                        length remaining `shouldBe` 1
+                    _ -> expectationFailure "expected two undo entries"
+                close conn
+        it "keeps a manually alive link out of the automatic verdict" $
+            withSystemTempDirectory "eza-dead-override" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                inserted <- insertBookmark conn "https://example.test/alive" "Alive" []
+                bid <- case inserted of
+                    Right value -> pure value
+                    Left err -> expectationFailure (T.unpack err) >> pure 0
+                _ <- markLinkAlive conn bid
+                marked <- getBookmark conn bid
+                fmap bdManualAlive marked `shouldBe` Just True
+                _ <- recheckLink conn bid
+                rechecked <- getBookmark conn bid
+                fmap bdManualAlive rechecked `shouldBe` Just False
+                close conn
+        it "edits extracted text, recomputes reading time, and re-anchors highlights" $
+            withSystemTempDirectory "eza-text-edit" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                inserted <- insertBookmark conn "https://example.test/text" "Text" []
+                bid <- case inserted of
+                    Right value -> pure value
+                    Left err -> expectationFailure (T.unpack err) >> pure 0
+                _ <- createHighlight conn bid "beta" "" "" 6 10 "note" "yellow"
+                (ok, removed) <- updateBookmarkDetailed conn bid Nothing Nothing Nothing Nothing (Just "xx alpha beta gamma")
+                ok `shouldBe` True
+                removed `shouldBe` 0
+                detail <- getBookmark conn bid
+                fmap bdExtractedText detail `shouldBe` Just "xx alpha beta gamma"
+                fmap bdEnrichState detail `shouldBe` Just "manual"
+                fmap bdReadingTimeMinutes detail `shouldBe` Just 1
+                highlights <- listHighlights conn bid
+                case highlights of
+                    (highlight : _) -> hStartOffset highlight `shouldBe` 9
+                    [] -> expectationFailure "expected the highlight to survive"
+                close conn
+        it "restores a manual-alive override with the deleted record" $
+            withSystemTempDirectory "eza-dead-undo" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                inserted <- insertBookmark conn "https://example.test/override-undo" "Override undo" []
+                case inserted of
+                    Left err -> expectationFailure (T.unpack err)
+                    Right bid -> do
+                        _ <- markLinkAlive conn bid
+                        _ <- deleteBookmark conn bid
+                        _ <- undoLast conn
+                        restored <- getBookmark conn bid
+                        fmap bdManualAlive restored `shouldBe` Just True
+                close conn
+        it "lists a prune snapshot after the rows are deleted" $
+            withSystemTempDirectory "eza-undo-prune" $ \dir -> do
+                conn <- openDb (dir </> "test.db")
+                inserted <- insertBookmark conn "https://example.test/pruned" "Pruned" []
+                case inserted of
+                    Left err -> expectationFailure (T.unpack err)
+                    Right bid -> do
+                        attachTag conn bid "pruned-tag"
+                        pruned <- pruneApply conn [bid]
+                        pruned `shouldBe` 1
+                        entries <- listUndoEntries conn 5
+                        length entries `shouldBe` 1
+                        case entries of
+                            (entry : _) -> do
+                                unOp entry `shouldBe` "prune"
+                                unBookmarkCount entry `shouldBe` 1
+                                fmap (map ubTitle . unBookmarks) (Just entry) `shouldBe` Just ["Pruned"]
+                            [] -> expectationFailure "expected a prune snapshot"
+                close conn
+        it "classifies only GET-confirmed 404/410 as dead" $ do
+            classifyHttp 404 `shouldBe` LinkDead
+            classifyHttp 410 `shouldBe` LinkDead
+            classifyHttp 403 `shouldBe` LinkUnknown
+            classifyHttp 429 `shouldBe` LinkUnknown
+            classifyHttp 500 `shouldBe` LinkUnknown
+            classifyHttp 200 `shouldBe` LinkAlive
 
     DataIntegritySpec.spec
     DedupSpec.spec

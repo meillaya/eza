@@ -15,7 +15,7 @@ server-rendered pages keep are used directly. Shared selectors live in
 | `[data-testid="app-shell"]` | booted app root; stays mounted offline |
 | `[data-testid="mast"]` | masthead |
 | `[data-testid="sections"]` | running-head section nav |
-| `[data-testid="section-<name>"]` | section link: ledger, inbox, graph, dedup, tags, ai-tags, maintenance, accessions, account |
+| `[data-testid="section-<name>"]` | section link: ledger, inbox, graph, dedup, tags, ai-tags, maintenance, history, account |
 | `#search-input` | query line input |
 | `[data-testid="theme-toggle"]` | paper/night switch, toggles `data-theme` |
 | `[data-testid="palette"]`, `#palette-input`, `[data-testid="palette-row"]` | command palette; opens on Cmd/Ctrl+K, Shift+K, or the `⇧K` hint button |
@@ -95,9 +95,9 @@ legacy print-only `undo-smoke.mjs` is excluded from the suite, see
 
 | Hook | Element |
 |---|---|
-| `#/accessions` + `[data-testid="accessions"]` | accessions index |
-| `[data-testid="accessions-year"]` (`data-year`), `[data-testid="accessions-day"]` (`data-day`) | year label and filing-day marks; both open the ledger filtered |
-| `[data-testid="accessions-source"]` (`data-source`), `[data-testid="accessions-busiest"]` (`data-day`) | ranked source row and busiest-day row; both open the ledger filtered |
+| `#/history` + `[data-testid="history"]` | history index |
+| `[data-testid="history-year"]` (`data-year`), `[data-testid="history-day"]` (`data-day`) | year label and filing-day marks; both open the ledger filtered |
+| `[data-testid="history-source"]` (`data-source`), `[data-testid="history-busiest"]` (`data-day`) | ranked source row and busiest-day row; both open the ledger filtered |
 | `#/tags/ai` + `[data-testid="ai-banner"]` | AI tags and its provider banner |
 | `[data-testid="share-page"]` / `[data-testid="share-unavailable"]` | server-rendered public share page and its invalid/revoked state |
 | `[data-testid="dedup-url-section"]`, `[data-testid="dedup-title-section"]` | duplicates page: same-URL groups and advisory same-title groups |
@@ -165,7 +165,7 @@ it starts from an empty control database and claims the first account through
 
 `/`, `/inbox`, `/bookmark/<id>`, `/graph`,
 `/graph?focus=<id>&depth=<1-3>&local=1`, `/views`, `/views/<slug>`, `/dedup`,
-`/tags`, `/tags/ai`, `/maintenance`, `/accessions`, `/account`,
+`/tags`, `/tags/ai`, `/maintenance`, `/history`, `/account`,
 `/save?title&text&url`, `/login`, `/setup`, `/recover`,
 `/account/add-passkey`, `/s/<token>`.
 
@@ -176,7 +176,21 @@ empty, or signs in with `EZA_TEST_USER` and `EZA_TEST_PASSWORD`, registers a
 virtual WebAuthn authenticator, POSTs
 `bookmarks_14_08_2026.html` as multipart form data to `/api/v1/import`, and
 writes eight light and dark pairs into `docs/screenshots/`: `library`, `detail`,
-`accessions`, `palette`, `graph`, `views`, `share` and `login`, each as
+`history`, `palette`, `graph`, `views`, `share` and `login`, each as
 `NAME.png` and `NAME-dark.png` at 1440 pixels wide and dpr 2 (all 1440x900
-except the cropped accessions pair). See
+except the cropped history pair). See
 [docs/screenshots/README.md](../../docs/screenshots/README.md).
+
+## Undo, extracted text, and link status
+
+| Selector | Meaning |
+|---|---|
+| `[data-testid="undo-entry"]` | one row in the newest-five undo list; `data-snapshot-id` carries the snapshot id |
+| `[data-testid="undo-inspect"]`, `[data-testid="undo-run"]` | open the preview dialog from a row; `undo-run` is present only for the newest usable snapshot |
+| `[data-testid="undo-preview"]`, `[data-testid="undo-confirm"]`, `[data-testid="undo-cancel"]` | preview overlay, confirm action, cancel |
+| `[data-testid="undo-empty"]`, `[data-testid="undo-refresh"]` | no snapshots and reload the list |
+| `[data-testid="extract-edit"]` | open the extracted-text editor on a record |
+| `[data-testid="extract-editor"]`, `#extract-text-editor` | editor wrapper and textarea |
+| `[data-testid="extract-save"]`, `[data-testid="extract-cancel"]` | save the edited text and discard the draft |
+| `[data-testid="dead-banner"]`, `[data-testid="mark-not-dead"]` | record marked dead and the manual override action |
+| `[data-testid="manual-alive"]`, `[data-testid="recheck-link"]` | manually kept-alive note and the return-to-automatic-checks action |

@@ -226,6 +226,7 @@ required_sidecars=(
   static/app/ghc_wasm_jsffi.js.gz
   static/index.html.gz
   static/eza.css.gz
+  static/pwa.js.gz
 )
 for file in "${required_sidecars[@]}"; do
   if [ ! -s "$file" ]; then

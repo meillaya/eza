@@ -281,10 +281,11 @@ in
 
     faviconMaxBytes = mkOption {
       type = types.int;
-      default = 65536;
+      default = 262144;
       description = ''
         Maximum favicon download size in bytes (EZA_FAVICON_MAX_BYTES); larger
-        responses are discarded. The server clamps values below 4096.
+        responses are discarded. Complete ICO entries are cropped before
+        storage. The server clamps values below 4096.
       '';
     };
 
@@ -292,8 +293,9 @@ in
       type = types.int;
       default = 90;
       description = ''
-        Favicon cache lifetime in days (EZA_FAVICON_TTL_DAYS); expired icons
-        are re-fetched on the next enrichment pass.
+        Favicon cache lifetime in days (EZA_FAVICON_TTL_DAYS); exhausted
+        missing-domain work is followed by one expired-icon refresh per
+        backfill tick.
       '';
     };
 

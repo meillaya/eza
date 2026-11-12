@@ -369,9 +369,9 @@ html[data-theme="dark"] .chip--neg{border-color:var(--chip-neg-rule)}
 .spark i{display:block;width:3px;background:var(--accent);flex:none;opacity:.82}
 html[data-theme="dark"] .spark i{opacity:.72}
 .spark-cap{display:flex;justify-content:space-between;gap:10px;margin:6px 0 0;font-family:var(--mono);font-size:12px;line-height:16px;color:var(--muted);white-space:nowrap}
-.rail-accessions{display:block;margin-top:8px;font-family:var(--mono);font-size:12px;line-height:18px;color:var(--ink);text-decoration:none}
-.rail-accessions:hover{color:var(--accent)}
-.rail-accessions .arr{margin-left:4px}
+.rail-history{display:block;margin-top:8px;font-family:var(--mono);font-size:12px;line-height:18px;color:var(--ink);text-decoration:none}
+.rail-history:hover{color:var(--accent)}
+.rail-history .arr{margin-left:4px}
 
 /* ============================================================
    LEDGER
@@ -2143,10 +2143,10 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
   .read-mark-pin { display: inline-block; }
 }
 
-/* Panels - graph, duplicates, tags, ai tags, maintenance, accessions.
+/* Panels - graph, duplicates, tags, ai tags, maintenance, history.
    Owner: panels group. Direction B, The Catalogue.
    The .acc* / .mc* / .rank* / .tail* block at the top is the approved
-   draft's Accessions styling, kept as the starting point and extended
+   draft history styling, kept as the starting point and extended
    below; everything after it is the panel vocabulary. Tokens only. */
 
 /* ============================================================
@@ -2795,7 +2795,7 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
   .mt-actions{gap:10px}
   .mt-link{min-height:44px;display:inline-flex;align-items:center}
 
-  /* accessions */
+  /* history */
   .acc-title{font-size:36px;line-height:39px}
   .acc-head{flex-direction:column;align-items:flex-start;gap:16px;padding:12px 0 12px}
   .acc-figures{width:100%;justify-content:space-between}
@@ -3695,7 +3695,7 @@ main.auth, main.share { min-height: 100vh; display: flex; flex-direction: column
     height: auto !important;
     max-height: none !important;
   }
-  .accessions {
+  .history {
     display: block !important;
     height: auto !important;
     min-height: 0 !important;
@@ -4009,3 +4009,81 @@ main.auth, main.share { min-height: 100vh; display: flex; flex-direction: column
 .about-sub{font-family:var(--mono);font-size:12px;line-height:18px;color:var(--muted);margin:18px 0 4px;letter-spacing:.02em}
 .pnl-sec-head{border-bottom:0;padding-bottom:2px;margin-bottom:6px}
 .ledg-sort{border-bottom:0}
+
+/* ---------------------------------------------- extracted-text editing --- */
+.read-window-head { gap: 12px; }
+.read-edit {
+  margin-left: auto;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-transform: lowercase;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.read-edit:hover { color: var(--accent); }
+.read-editor { display: flex; flex-direction: column; gap: 10px; min-height: 280px; }
+.read-editor-input {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 240px;
+  resize: vertical;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--card);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 17px;
+  line-height: 28px;
+  padding: 12px 14px;
+}
+.read-editor-input:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.read-editor-warn { margin: 0; color: var(--warn); font-family: var(--mono); font-size: 12px; line-height: 18px; }
+.read-editor-actions { display: flex; align-items: center; gap: 8px; }
+
+/* ------------------------------------------------------- dead/manual --- */
+.detail-dead { gap: 12px; align-items: center; }
+.detail-dead .btn { margin-left: auto; }
+.detail-manual {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 16px;
+  padding: 8px 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 18px;
+}
+.detail-manual-copy { margin: 0; }
+.detail-manual .btn { margin-left: auto; }
+
+/* ------------------------------------------------------- undo history --- */
+.undo-list { list-style: none; margin: 0; padding: 0; max-width: 880px; }
+.undo-row { padding: 10px 0 12px; }
+.undo-row + .undo-row { border-top: 1px solid var(--rule-soft); }
+.undo-row-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.undo-op { font-size: 19px; line-height: 25px; }
+.undo-time { margin-left: auto; }
+.undo-state { color: var(--muted); }
+.undo-state.is-newest { color: var(--ok); }
+.undo-counts { margin: 2px 0 4px; }
+.undo-sample { display: flex; gap: 6px 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.undo-sample-label { text-transform: uppercase; letter-spacing: .06em; }
+.undo-sample-text { color: var(--muted); font-family: var(--mono); font-size: 12px; line-height: 18px; }
+.undo-actions { display: flex; gap: 6px; }
+.undo-preview-list {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  max-height: 220px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 19px;
+}
+.undo-preview-list li { padding: 2px 0; overflow-wrap: anywhere; }
+.undo-preview-list .meta { color: var(--muted); }

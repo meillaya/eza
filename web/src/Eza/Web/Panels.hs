@@ -19,7 +19,7 @@ module Eza.Web.Panels (
 import Data.Char (toUpper)
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet as IS
-import Data.List (sortOn)
+import Data.List (intercalate, sortOn)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
@@ -36,6 +36,9 @@ import Eza.Types (
     LibraryStats (..),
     SavedSearch (..),
     TagStat (..),
+    UndoBookmarkRef (..),
+    UndoEntry (..),
+    UndoPreview (..),
  )
 import Eza.User (UserRole (..), UserView (..), userRoleText)
 import qualified Eza.View as EV
@@ -73,7 +76,7 @@ import qualified Miso.Canvas as Canvas
 import qualified Miso.Html as H
 import qualified Miso.Html.Event as HE
 import qualified Miso.Html.Property as HP
-import Miso.JSON (withObject, (.:))
+import Miso.JSON (withObject, (.!=), (.:), (.:?))
 
 -- ================================================================ helpers ===
 
@@ -506,31 +509,49 @@ graphCanvas m layout =
             preventDefault
             "wheel"
             wheelDecoder
-            (\value _ _ -> GraphWheel (first3 value) (second3 value) (third3 value))
+            ( \value _ _ ->
+                GraphWheel
+                    (first4 value)
+                    (second4 value)
+                    (third4 value * wheelModeFactor (fourth4 value))
+            )
 
-wheelDecoder :: Decoder (Double, Double, Double)
+wheelDecoder :: Decoder (Double, Double, Double, Double)
 wheelDecoder =
     at [] $
         withObject "wheel" $ \o ->
-            (,,)
+            (,,,)
                 <$> o .: "offsetX"
                 <*> o .: "offsetY"
                 <*> o .: "deltaY"
+                <*> o .:? "deltaMode" .!= 0
+
+{- | Firefox reports line/page wheel deltas; convert to the pixel scale the
+graph zoom factor expects. Chromium and Safari normally send mode 0.
+-}
+wheelModeFactor :: Double -> Double
+wheelModeFactor mode
+    | mode == 1 = 16
+    | mode == 2 = 800
+    | otherwise = 1
+
+first4 :: (a, b, c, d) -> a
+first4 (first, _, _, _) = first
+
+second4 :: (a, b, c, d) -> b
+second4 (_, second, _, _) = second
+
+third4 :: (a, b, c, d) -> c
+third4 (_, _, third, _) = third
+
+fourth4 :: (a, b, c, d) -> d
+fourth4 (_, _, _, fourth) = fourth
 
 offsetX :: PointerEvent -> Double
 offsetX = fst . offset
 
 offsetY :: PointerEvent -> Double
 offsetY = snd . offset
-
-first3 :: (a, b, c) -> a
-first3 (first, _, _) = first
-
-second3 :: (a, b, c) -> b
-second3 (_, second, _) = second
-
-third3 :: (a, b, c) -> c
-third3 (_, _, third) = third
 
 -- -------------------------------------------------------------- status -----
 
@@ -1076,6 +1097,9 @@ viewDialogs m =
     [viewSaveDialog m | vuSaveOpen (mViewUi m)]
         ++ [viewImportDialog m | vuImportOpen (mViewUi m)]
         ++ [viewExportDialog m | isJust (vuExport (mViewUi m))]
+        ++ [ undoPreviewDialog m
+           | mUndoPreviewLoading m || isJust (mUndoPreview m) || isJust (mUndoPreviewError m)
+           ]
 
 viewSaveDialog :: Model -> View () () Model Action
 viewSaveDialog m =
@@ -1258,7 +1282,7 @@ dedupAfterBanner m =
     case mDedupMergeAllReport m of
         Just report -> [mergeAllBanner report]
         Nothing -> case mDedupLast m of
-            Just (merged, keeper) -> [singleMergeBanner merged keeper]
+            Just (merged, keeper) -> [singleMergeBanner merged keeper (mDedupLastSnapshot m)]
             Nothing -> []
 
 mergeAllBanner :: DedupMergeAllReport -> View () () Model Action
@@ -1282,16 +1306,16 @@ mergeAllBanner report =
         , H.div_
             [HP.class_ "dd-actions"]
             [ H.button_
-                [HP.class_ "btn btn--sm", HP.type_ "button", HP.data_ "testid" "dedup-undo", HE.onClick UndoRun]
-                [text "undo the merge"]
+                [HP.class_ "btn btn--sm", HP.type_ "button", HP.data_ "testid" "dedup-undo", HE.onClick (UndoPreviewRequest (dmSnapshotId report))]
+                [text "inspect the undo"]
             , H.button_
                 [HP.class_ "btn btn--sm", HP.type_ "button", HP.data_ "testid" "dedup-refresh", HE.onClick DedupRefresh]
                 [text "refresh the candidates"]
             ]
         ]
 
-singleMergeBanner :: Int -> Int -> View () () Model Action
-singleMergeBanner merged keeper =
+singleMergeBanner :: Int -> Int -> Maybe Int -> View () () Model Action
+singleMergeBanner merged keeper snapshotId =
     H.div_
         [HP.class_ "dd-after", HP.role_ "status", HP.data_ "testid" "dedup-after-merge"]
         [ H.p_
@@ -1302,15 +1326,19 @@ singleMergeBanner merged keeper =
                         <> show merged
                         <> (if merged == 1 then " duplicate into " else " duplicates into ")
                         <> fromMisoString (accno keeper)
-                        <> ". Undo lives in Maintenance."
+                        <> ". Inspect the undo before running it."
                     )
                 )
             ]
         , H.div_
             [HP.class_ "dd-actions"]
             [ H.button_
-                [HP.class_ "btn btn--sm", HP.type_ "button", HP.data_ "testid" "dedup-undo", HE.onClick UndoRun]
-                [text "undo the merge"]
+                ( [HP.class_ "btn btn--sm", HP.type_ "button", HP.data_ "testid" "dedup-undo"]
+                    ++ case snapshotId of
+                        Nothing -> attrDisabled True
+                        Just snapshot -> [HE.onClick (UndoPreviewRequest snapshot)]
+                )
+                [text "inspect the undo"]
             , H.button_
                 [HP.class_ "btn btn--sm", HP.type_ "button", HP.data_ "testid" "dedup-refresh", HE.onClick DedupRefresh]
                 [text "refresh the candidates"]
@@ -2248,7 +2276,7 @@ maintenancePage m =
 maintenanceFigures :: Model -> [View () () Model Action]
 maintenanceFigures m =
     [ figure "links checked" (maybe "never" num (mCheckedCount m))
-    , figure "dead links" (maybe "–" num (mDeadCount m))
+    , figure "dead links" (maybe (maybe "–" (num . lsDead) (mStats m)) num (mDeadCount m))
     , figure "prunable" (num (length (mPrune m)))
     ]
 
@@ -2282,7 +2310,7 @@ sweepSection m =
     sweepNote
         | mMaintBusy m = "The sweep is running."
         | mCheckedCount m == Nothing = "No check has run yet."
-        | otherwise = "Dead records stay marked in the ledger until you prune or delete them."
+        | otherwise = "Only a GET-confirmed 404 or 410 marks a link dead. Blocked, rate-limited or auth-walled pages stay unmarked; records kept alive are skipped."
 
 pruneSection :: Model -> View () () Model Action
 pruneSection m =
@@ -2388,16 +2416,242 @@ undoSection m =
             [H.h2_ [HP.class_ "pnl-sec-title"] [text "Undo"]]
         , H.p_
             [HP.class_ "mt-note read"]
-            [text "Merge and prune write an undo snapshot first; undo restores the rows, their tags and read state."]
+            [text "Merge, prune and delete write a snapshot first. Only the newest usable action can be undone."]
+        , if mUndoLoading m
+            then quietNote "Reading the undo record."
+            else case mUndoError m of
+                Just message -> panelError "read failed" "The undo record could not be read." (Just message)
+                Nothing
+                    | null (mUndoEntries m) ->
+                        H.p_ [HP.class_ "pnl-quiet", testId "undo-empty"] [text "No undo snapshots yet."]
+                    | otherwise ->
+                        H.ul_ [HP.class_ "undo-list"] (map undoEntryRow (mUndoEntries m))
         , H.div_
             [HP.class_ "mt-actions"]
             [ H.button_
-                ( [HP.class_ "btn", HP.type_ "button", HE.onClick UndoRun]
-                    ++ attrDisabled (mMaintBusy m)
+                ( [HP.class_ "btn btn--sm", HP.type_ "button", testId "undo-refresh", HE.onClick UndoRefresh]
+                    ++ attrDisabled (mUndoLoading m)
                 )
-                [text "undo last action"]
+                [text (if mUndoLoading m then "reading" else "refresh")]
             ]
         ]
+
+undoEntryRow :: UndoEntry -> View () () Model Action
+undoEntryRow entry =
+    H.li_
+        [ HP.class_ "undo-row"
+        , testId "undo-entry"
+        , HP.data_ "snapshot-id" (ms (show (unId entry)))
+        ]
+        ( [ H.div_
+                [HP.class_ "undo-row-head"]
+                [ H.span_ [HP.class_ "undo-op display"] [text (undoOpLabel (unOp entry))]
+                , H.span_ [HP.class_ "undo-time meta"] [text (formatStampUtc (unCreatedAt entry))]
+                , H.span_
+                    [HP.class_ ("undo-state meta" <> if unCanUndo entry then " is-newest" else "")]
+                    [text (if unCanUndo entry then "newest" else "older")]
+                ]
+          , H.p_ [HP.class_ "undo-counts meta"] [text (undoCounts entry)]
+          , undoSampleView entry
+          , H.div_
+                [HP.class_ "undo-actions"]
+                [ H.button_
+                    [ HP.class_ "btn btn--sm"
+                    , HP.type_ "button"
+                    , testId "undo-inspect"
+                    , HE.onClick (UndoPreviewRequest (unId entry))
+                    ]
+                    [text "inspect"]
+                , H.button_
+                    ( [ HP.class_ "btn btn--sm"
+                      , HP.type_ "button"
+                      , testId "undo-run"
+                      , HE.onClick (UndoPreviewRequest (unId entry))
+                      ]
+                        ++ attrDisabled (not (unCanUndo entry))
+                    )
+                    [text "undo"]
+                ]
+          ]
+            ++ concat
+                [ [H.p_ [HP.class_ "undo-note meta"] [text "undo the newer action first"]]
+                | not (unCanUndo entry)
+                ]
+        )
+
+undoOpLabel :: Text -> MisoString
+undoOpLabel op = case T.toLower op of
+    "merge" -> "merge duplicates"
+    "merge_all" -> "merge all duplicates"
+    "prune" -> "prune"
+    "delete" -> "delete"
+    "bulk" -> "bulk edit"
+    other -> ms (T.unpack (T.replace "_" " " other))
+
+undoCounts :: UndoEntry -> MisoString
+undoCounts entry =
+    ms
+        ( joinCounts
+            [ (unBookmarkCount entry, "record")
+            , (unTagCount entry, "tag")
+            , (unHighlightCount entry, "highlight")
+            , (unCaptureCount entry, "capture")
+            , (unLinkCount entry, "wikilink")
+            ]
+        )
+  where
+    joinCounts parts =
+        case [showCount count name | (count, name) <- parts, count > 0] of
+            [] -> show (unRowCount entry) <> " rows"
+            values -> intercalate " · " values
+    showCount count name = show count <> " " <> name <> (if count == 1 then "" else "s")
+
+undoSampleView :: UndoEntry -> View () () Model Action
+undoSampleView entry =
+    H.div_
+        [HP.class_ "undo-sample"]
+        ( concat
+            [ [ H.span_ [HP.class_ "undo-sample-label meta"] [text "records"]
+              , H.span_ [HP.class_ "undo-sample-text"] [text (sampleTitles (unBookmarks entry))]
+              ]
+            | not (null (unBookmarks entry))
+            ]
+            ++ concat
+                [ [ H.span_ [HP.class_ "undo-sample-label meta"] [text "tags"]
+                  , H.span_ [HP.class_ "undo-sample-text"] [text (sampleTags (unTags entry))]
+                  ]
+                | not (null (unTags entry))
+                ]
+        )
+
+sampleTitles :: [UndoBookmarkRef] -> MisoString
+sampleTitles refs =
+    ms
+        ( T.unpack
+            (T.intercalate ", " [titleOf ref | ref <- take 3 refs])
+        )
+  where
+    titleOf ref =
+        let title = ubTitle ref
+         in if T.null (T.strip title) then ubDomain ref else title
+
+sampleTags :: [Text] -> MisoString
+sampleTags tags = ms (T.unpack (T.intercalate ", " (take 4 tags)))
+
+undoPreviewDialog :: Model -> View () () Model Action
+undoPreviewDialog m
+    | mUndoPreviewLoading m =
+        H.div_
+            [HP.class_ "overlay is-open", testId "undo-preview", HE.onClick UndoPreviewClose]
+            [ H.div_
+                [ HP.class_ "dialog"
+                , HP.role_ "dialog"
+                , HP.aria_ "modal" "true"
+                , HP.aria_ "label" "Undo preview"
+                , HE.onClickWithOptions stopPropagation Noop
+                ]
+                [ confirmationHead "Undo preview"
+                , H.div_
+                    [HP.class_ "dialog__body"]
+                    [H.p_ [HP.class_ "read"] [text "Reading the snapshot."]]
+                , H.div_
+                    [HP.class_ "dialog__foot"]
+                    [ H.span_ [HP.class_ "spacer"] []
+                    , H.button_ [HP.class_ "btn", HP.type_ "button", testId "undo-cancel", HP.autofocus_ True, HE.onClick UndoPreviewClose] [text "cancel"]
+                    ]
+                ]
+            ]
+    | Just preview <- mUndoPreview m =
+        let entry = upEntry preview
+            canUndo = unCanUndo entry
+         in H.div_
+                [HP.class_ "overlay is-open", testId "undo-preview", HE.onClick UndoPreviewClose]
+                [ H.div_
+                    [ HP.class_ "dialog"
+                    , HP.role_ "dialog"
+                    , HP.aria_ "modal" "true"
+                    , HP.aria_ "label" "Undo preview"
+                    , HE.onClickWithOptions stopPropagation Noop
+                    ]
+                    [ confirmationHead ("Undo " <> undoOpLabel (unOp entry) <> "?")
+                    , H.div_
+                        [HP.class_ "dialog__body"]
+                        ( [ H.p_
+                                [HP.class_ "read"]
+                                [ text
+                                    ( "This restores "
+                                        <> undoCounts entry
+                                        <> " from "
+                                        <> formatStampUtc (unCreatedAt entry)
+                                        <> "."
+                                    )
+                                ]
+                          , H.ul_
+                                [HP.class_ "undo-preview-list"]
+                                ( [ H.li_ [] [H.span_ [] [text (ms (T.unpack (ubTitle ref)))], H.span_ [HP.class_ "meta"] [text (ms (" " <> T.unpack (ubDomain ref)))]]
+                                  | ref <- take 12 (upBookmarks preview)
+                                  ]
+                                    ++ [ H.li_ [HP.class_ "meta"] [text (ms ("+ " <> show (length (upBookmarks preview) - 12) <> " more"))]
+                                       | length (upBookmarks preview) > 12
+                                       ]
+                                )
+                          , if null (upTags preview)
+                                then H.span_ [] []
+                                else H.p_ [HP.class_ "read"] [text ("Tags: " <> sampleTags (upTags preview))]
+                          , if canUndo
+                                then H.span_ [] []
+                                else H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text "This is not the newest usable action. Undo the newer action first."]
+                          ]
+                            ++ concat
+                                [ [H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]]
+                                | Just message <- [mUndoPreviewError m]
+                                ]
+                        )
+                    , H.div_
+                        [HP.class_ "dialog__foot"]
+                        [ H.span_ [HP.class_ "spacer"] []
+                        , H.button_
+                            [ HP.class_ "btn"
+                            , HP.type_ "button"
+                            , testId "undo-cancel"
+                            , HP.autofocus_ True
+                            , HE.onClick UndoPreviewClose
+                            ]
+                            [text "cancel"]
+                        , H.button_
+                            ( [ HP.class_ "btn btn--strong"
+                              , HP.type_ "button"
+                              , testId "undo-confirm"
+                              , HE.onClick (UndoConfirm (unId entry))
+                              ]
+                                ++ attrDisabled (not canUndo || mUndoBusy m)
+                            )
+                            [text (if mUndoBusy m then "undoing..." else "undo")]
+                        ]
+                    ]
+                ]
+    | Just message <- mUndoPreviewError m =
+        H.div_
+            [HP.class_ "overlay is-open", testId "undo-preview", HE.onClick UndoPreviewClose]
+            [ H.div_
+                [ HP.class_ "dialog"
+                , HP.role_ "dialog"
+                , HP.aria_ "modal" "true"
+                , HP.aria_ "label" "Undo preview"
+                , HE.onClickWithOptions stopPropagation Noop
+                ]
+                [ confirmationHead "Undo preview"
+                , H.div_
+                    [HP.class_ "dialog__body"]
+                    [H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]]
+                , H.div_
+                    [HP.class_ "dialog__foot"]
+                    [ H.span_ [HP.class_ "spacer"] []
+                    , H.button_ [HP.class_ "btn", HP.type_ "button", testId "undo-cancel", HP.autofocus_ True, HE.onClick UndoPreviewClose] [text "close"]
+                    ]
+                ]
+            ]
+    | otherwise = H.span_ [] []
 
 -- ================================================================ account ===
 

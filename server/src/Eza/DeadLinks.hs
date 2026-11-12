@@ -7,6 +7,8 @@ limiting, and 5xx responses are transient and leave the flag untouched.
 -}
 module Eza.DeadLinks (
     checkDead,
+    LinkState (..),
+    classifyHttp,
 ) where
 
 import Control.Concurrent.Async (mapConcurrently)
@@ -20,39 +22,59 @@ import Network.HTTP.Client.TLS (newTlsManager)
 
 import Eza.Fetch
 
-{- | Outcome of one check.  'LinkUnknown' is a transient failure: the row's
-@is_dead@ value is preserved.
+{- | Outcome of one check.  'LinkUnknown' is a transient/blocked answer: the
+row's @is_dead@ value is preserved.  Only a GET-confirmed 404 or 410 is
+definitive enough to mark a link dead.
 -}
 data LinkState = LinkAlive | LinkDead | LinkUnknown
     deriving (Show, Eq)
 
-{- | Bounded HEAD sweep.  A link is dead when the final response is a
-definitive 4xx.  HEAD 403/405 gets a GET fallback (matching the old Python
-behaviour).  Network and transient failures count as unchecked, not dead.
+{- | A definitive dead status. A 401/403/405/407/429/451 is an access or
+rate-limit answer, not proof that the page is gone.
 -}
-checkDead :: Connection -> Int -> Int -> Bool -> IO (Int, Int, Int)
+classifyHttp :: Int -> LinkState
+classifyHttp code
+    | code == 404 || code == 410 = LinkDead
+    | code >= 200 && code < 300 = LinkAlive
+    | otherwise = LinkUnknown
+
+{- | Bounded HEAD sweep. HEAD 4xx is confirmed with GET; only a GET-confirmed
+404/410 changes @is_dead@. Already-dead rows are checked first when
+@includeDead@ is set, so an explicit recheck repairs old false positives before
+the unchecked tail. The shared executor keeps at most 16 requests in flight.
+-}
+checkDead :: Connection -> Int -> Int -> Bool -> IO (Int, Int, Int, Int)
 checkDead conn limit olderThan includeDead = do
     now <- floor <$> getPOSIXTime
     let cutoff = now - max 0 olderThan
         lim = max 1 (min 500 limit)
+        include = if includeDead then (1 :: Int) else 0
     rows <-
         query
             conn
-            "SELECT id,url FROM bookmarks WHERE (is_dead = 0 OR ? = 1) AND (last_checked_at IS NULL OR last_checked_at < ?) ORDER BY last_checked_at IS NOT NULL, last_checked_at LIMIT ?"
-            ((if includeDead then 1 else 0) :: Int, cutoff, lim) ::
+            "SELECT id,url FROM bookmarks WHERE (is_dead = 0 OR ? = 1) AND (last_checked_at IS NULL OR last_checked_at < ?) AND NOT EXISTS (SELECT 1 FROM bookmark_dead_overrides o WHERE o.bookmark_id = bookmarks.id) ORDER BY CASE WHEN ? = 1 AND is_dead = 1 THEN 0 ELSE 1 END, last_checked_at IS NOT NULL, last_checked_at LIMIT ?"
+            (include, cutoff, include, lim) ::
             IO [(Int, Text)]
     if null rows
-        then pure (0, 0, 0)
+        then do
+            total <- totalDead conn
+            pure (0, 0, 0, total)
         else do
             manager <- newTlsManager
             sem <- newQSem 16
             results <- mapConcurrently (checkOne manager sem) rows
             let checked = length results
-                dead = length (filter (== LinkDead) results)
+                newlyDead = length (filter (== LinkDead) results)
                 alive = length (filter (== LinkAlive) results)
             withImmediateTransaction conn $
                 mapM_ (recordResult conn now) (zip rows results)
-            pure (checked, dead, alive)
+            total <- totalDead conn
+            pure (checked, newlyDead, alive, total)
+
+totalDead :: Connection -> IO Int
+totalDead conn = do
+    rows <- query_ conn "SELECT COUNT(*) FROM bookmarks WHERE is_dead = 1" :: IO [Only Int]
+    pure (case rows of [Only n] -> n; _ -> 0)
 
 recordResult :: Connection -> Int -> ((Int, Text), LinkState) -> IO ()
 recordResult conn now ((bid, _), state) = case state of
@@ -63,7 +85,7 @@ recordResult conn now ((bid, _), state) = case state of
     setDead dead =
         execute
             conn
-            "UPDATE bookmarks SET is_dead = ?, last_checked_at = ? WHERE id = ?"
+            "UPDATE bookmarks SET is_dead = ?, last_checked_at = ? WHERE id = ? AND NOT EXISTS (SELECT 1 FROM bookmark_dead_overrides o WHERE o.bookmark_id = bookmarks.id)"
             ((dead :: Int), now, bid)
 
 checkOne :: Manager -> QSem -> (Int, Text) -> IO LinkState
@@ -74,19 +96,13 @@ checkOne manager sem (_, url) =
         case headResult of
             Right _ -> pure LinkAlive
             Left (FetchHttp code)
-                | code `elem` [403, 405] -> do
+                | code >= 400 && code < 500 && code `notElem` [408, 425, 429] -> do
                     getResult <- fetchUrl (base{foMethod = "GET"}) url
-                    pure (classify getResult)
-                | code >= 500 -> pure LinkUnknown
-                | code `elem` [408, 425, 429] -> pure LinkUnknown
-                | code >= 400 -> pure LinkDead
+                    pure (classifyResult getResult)
                 | otherwise -> pure LinkUnknown
             Left _ -> pure LinkUnknown
   where
-    classify result = case result of
+    classifyResult result = case result of
         Right _ -> LinkAlive
-        Left (FetchHttp code)
-            | code >= 500 -> LinkUnknown
-            | code `elem` [408, 425, 429] -> LinkUnknown
-            | code >= 400 -> LinkDead
+        Left (FetchHttp code) -> classifyHttp code
         Left _ -> LinkUnknown

@@ -1,9 +1,9 @@
-{- | Accessions: the archive by year, source and filing day.
+{- | History: the archive by year, source and filing day.
 
 The page reads 'Eza.Types.LibraryStats' only. Every figure, mark and row is
 cut from the library's own database: no sample data, no estimated numbers.
 -}
-module Eza.Web.Accessions (accessionsPage) where
+module Eza.Web.History (historyPage) where
 
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe)
@@ -22,11 +22,11 @@ import Eza.Web.Model
 {- | The printed index page: archive figures, one mark per filing day per
 year, sources ranked with leader dots, the long tail and a date span.
 -}
-accessionsPage :: Model -> View () () Model Action
-accessionsPage m =
+historyPage :: Model -> View () () Model Action
+historyPage m =
     H.section_
-        [ HP.class_ "accessions"
-        , HP.data_ "testid" "accessions"
+        [ HP.class_ "history"
+        , HP.data_ "testid" "history"
         , C.styleInline_ "display:flex;flex-direction:column;flex:1 1 auto;min-height:0"
         ]
         [ H.div_
@@ -82,7 +82,7 @@ headShell extras =
         [HP.class_ "acc-head"]
         [ H.div_
             [HP.class_ "acc-head-left"]
-            ([H.h1_ [HP.class_ "acc-title"] [text "Accessions by year"]] <> extras)
+            ([H.h1_ [HP.class_ "acc-title"] [text "History by year"]] <> extras)
         ]
 
 headView :: LibraryStats -> View () () Model Action
@@ -91,7 +91,7 @@ headView stats =
         [HP.class_ "acc-head"]
         [ H.div_
             [HP.class_ "acc-head-left"]
-            [ H.h1_ [HP.class_ "acc-title"] [text "Accessions by year"]
+            [ H.h1_ [HP.class_ "acc-title"] [text "History by year"]
             , H.p_
                 [HP.class_ "acc-hint meta"]
                 [text "A year, a filing day or a source opens the ledger filtered to it."]
@@ -166,7 +166,7 @@ yearRow m stats (year, entries) =
             , HP.type_ "button"
             , HP.title_ (ms ("Open the ledger filtered to " <> yearText))
             , HP.aria_ "label" (ms (yearText <> ", " <> countPhrase entries))
-            , HP.data_ "testid" "accessions-year"
+            , HP.data_ "testid" "history-year"
             , HP.data_ "year" (ms yearText)
             , HE.onClick (FilterByQuery (T.pack ("year:" <> yearText)))
             ]
@@ -204,7 +204,7 @@ markView m (day, position, height, count)
             , C.style_ [C.left (C.pct position), C.height (C.px height)]
             , HP.title_ tip
             , HP.data_ "tip" tip
-            , HP.data_ "testid" "accessions-day"
+            , HP.data_ "testid" "history-day"
             , HP.data_ "day" (ms (T.unpack day))
             , HP.aria_ "label" tip
             , HE.onClick (FilterByQuery ("day:" <> day))
@@ -248,7 +248,7 @@ rankRow index (domain, count) =
             , HP.type_ "button"
             , HP.title_ (ms ("Open the ledger filtered to " <> source))
             , HP.aria_ "label" (ms (source <> ", " <> countPhrase count))
-            , HP.data_ "testid" "accessions-source"
+            , HP.data_ "testid" "history-source"
             , HP.data_ "source" (ms source)
             , HE.onClick (FilterByQuery (T.pack source))
             ]
@@ -319,7 +319,7 @@ busiestRow (day, count) =
             , HP.type_ "button"
             , HP.title_ (ms ("Open the ledger filtered to " <> displayDay day))
             , HP.aria_ "label" (ms (displayDay day <> ", " <> countPhrase count))
-            , HP.data_ "testid" "accessions-busiest"
+            , HP.data_ "testid" "history-busiest"
             , HP.data_ "day" (ms (T.unpack day))
             , HE.onClick (FilterByQuery ("day:" <> day))
             ]

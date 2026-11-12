@@ -1,4 +1,5 @@
-// Graph performance check (report-only, not part of the default e2e suite).
+// Graph performance check (report-only by default, not part of the default
+// e2e suite).
 //
 // Measures the whole-library /graph against a scratch server with a synthetic
 // library sized by EZA_PERF_RECORDS (default 9000, close to the reference
@@ -6,13 +7,15 @@
 // scripts/e2e.sh runs one, or point EZA_BASE at a staging instance:
 //
 //   EZA_PERF_RECORDS=9000 EZA_BASE=http://localhost:8210 node tests/e2e/graph-perf.mjs
+//   EZA_PERF_ASSERT=1 ... same command ...   # exit non-zero on a budget miss
 //
-// The script prints the measurements and a budget verdict. It exits non-zero
-// only for functional failures; timing is reported so variance on a busy
-// machine does not turn into a false red.
+// The script prints the measurements and a budget verdict. Timing is
+// report-only unless EZA_PERF_ASSERT=1, so variance on a busy machine does not
+// turn a normal run into a false red. Functional failures always fail.
 import { BASE, SEL, launchBrowser, launchPage, enterLibrary, makeApi } from "./lib/dom.mjs";
 
 const RECORDS = Number(process.env.EZA_PERF_RECORDS || 9000);
+const ASSERT = process.env.EZA_PERF_ASSERT === "1";
 const GRAPH = '[data-testid="graph"]';
 const STATUS = '[data-testid="graph-status"]';
 const CANVAS = "canvas.g-canvas-el";
@@ -23,18 +26,44 @@ const ZOOM_VALUE = '[data-testid="graph-zoom-value"]';
 
 const browser = await launchBrowser();
 const { page, errors } = await launchPage(browser, { viewport: { width: 1440, height: 950 } });
+// The Graph.hs painter emits performance marks only when this flag is set;
+// production frames do not pay for the extra JS calls.
+await page.addInitScript(() => {
+  window.__ezaGraphPerf = true;
+});
 const results = [];
 let failed = false;
 
 function record(name, value, unit, budget) {
-  results.push({ name, value, unit, budget });
-  const verdict = budget === null ? "" : value <= budget ? " (within " + budget + unit + ")" : " (OVER " + budget + unit + ")";
+  const over = budget !== null && value > budget;
+  results.push({ name, value, unit, budget, over });
+  const verdict = budget === null ? "" : !over ? " (within " + budget + unit + ")" : " (OVER " + budget + unit + ")";
   console.log(name + ": " + Math.round(value * 10) / 10 + unit + verdict);
+  if (over && ASSERT) failed = true;
 }
 
 function fail(message) {
   failed = true;
   console.log("FUNCTIONAL FAIL " + message);
+}
+
+async function graphMarks() {
+  return page.evaluate(() => {
+    const marks = {};
+    for (const entry of performance.getEntriesByType("mark")) {
+      if (entry.name.startsWith("eza:")) marks[entry.name] = Math.round(entry.startTime * 10) / 10;
+    }
+    const resources = performance
+      .getEntriesByType("resource")
+      .filter((entry) => /app\.wasm|\/api\/v1\/graph|\/api\/v1\/boot/.test(entry.name))
+      .map((entry) => ({
+        name: new URL(entry.name).pathname,
+        transferSize: entry.transferSize || 0,
+        encodedBodySize: entry.encodedBodySize || 0,
+        duration: Math.round(entry.duration * 10) / 10,
+      }));
+    return { marks, resources };
+  });
 }
 
 async function canvasHasPixels() {
@@ -106,9 +135,16 @@ function netscape(count) {
 try {
   await enterLibrary(page);
   await page.waitForSelector(SEL.appShell, { timeout: 60000 });
+  const graphSupport = await page.evaluate(() => ({
+    ezaGraph: typeof window.EzaGraph,
+    available: window.EzaGraph ? window.EzaGraph.available() : null,
+    path2d: typeof Path2D,
+  }));
+  console.log("graph support:", JSON.stringify(graphSupport));
 
   const api = makeApi(page);
   const before = await api("/api/v1/boot");
+  const focusId = before.body?.initial?.items?.[0]?.id;
   if ((before.body?.initial?.total || 0) < RECORDS) {
     console.log("seeding " + RECORDS + " records");
     const status = await page.evaluate(async (html) => {
@@ -142,14 +178,16 @@ try {
   await page.click(SEL.section("graph"));
   await page.waitForSelector(GRAPH, { timeout: 60000 });
   await waitForPlate();
-  record("cold plate (in-app)", Date.now() - spaStart, "ms", 1500);
+  record("cold plate (in-app)", Date.now() - spaStart, "ms", 500);
 
   // A full reload is the worst case: WASM boot, then the graph request.
   const coldStart = Date.now();
   await page.goto(BASE + "/graph", { waitUntil: "domcontentloaded" });
   await page.waitForSelector(GRAPH, { timeout: 60000 });
   await waitForPlate();
-  record("cold plate (full reload)", Date.now() - coldStart, "ms", 3000);
+  record("cold plate (full reload)", Date.now() - coldStart, "ms", 1500);
+  const coldMarks = await graphMarks();
+  console.log("cold phase marks/resources:", JSON.stringify(coldMarks));
 
   await page.waitForTimeout(300);
   const statusText = await page.locator(STATUS).innerText();
@@ -195,7 +233,7 @@ try {
     },
     { timeout: 5000 }
   ).catch(() => {});
-  record("filter apply", Date.now() - filterStart, "ms", 400);
+  record("filter apply", Date.now() - filterStart, "ms", 100);
   await page.fill(FILTER, "");
 
   const toggleStart = Date.now();
@@ -215,6 +253,32 @@ try {
   await page.waitForSelector(STATUS, { timeout: 60000 });
   await waitForPlate();
   record("warm return plate (in-app)", Date.now() - warmStart, "ms", 400);
+
+  // Local neighbourhoods bypass the whole-library cache in the old painter.
+  // Depth 3 is the realistic worst case; the batched painter should keep both
+  // the first plate and drag frames in the same budget as the whole graph.
+  if (focusId) {
+    const localStart = Date.now();
+    await page.goto(BASE + "/graph?focus=" + focusId + "&depth=3&local=1", { waitUntil: "domcontentloaded" });
+    await page.waitForSelector(STATUS, { timeout: 60000 });
+    await waitForPlate();
+    record("cold local depth 3", Date.now() - localStart, "ms", 800);
+    const localBox = await page.locator(CANVAS).boundingBox();
+    if (localBox) {
+      const lx = localBox.x + localBox.width / 2;
+      const ly = localBox.y + localBox.height / 2;
+      await page.mouse.move(lx, ly);
+      const localFrames = await framesDuring(async () => {
+        await page.mouse.down();
+        for (let i = 1; i <= 60; i += 1) {
+          await page.mouse.move(lx + Math.sin(i / 7) * 120, ly + Math.cos(i / 9) * 80);
+        }
+        await page.mouse.up();
+      });
+      record("local depth 3 drag p95", localFrames.p95, "ms", 33);
+      console.log("local depth 3 frames:", JSON.stringify(localFrames));
+    }
+  }
 
   console.log("");
   console.log(JSON.stringify({ records: RECORDS, results }, null, 2));

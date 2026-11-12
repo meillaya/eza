@@ -1,4 +1,4 @@
-// Accessions smoke test: the printed index opens the ledger filtered to the
+// History smoke test: the printed index opens the ledger filtered to the
 // year, filing day and source it prints.
 //
 // The mini fixture (tests/fixtures/mini-bookmarks.html) holds three records,
@@ -7,7 +7,7 @@
 //
 // Run from the repo root in the dev shell, against a scratch server seeded
 // with the mini fixture:
-//   EZA_BASE=http://localhost:8100 node tests/e2e/accessions-smoke.mjs
+//   EZA_BASE=http://localhost:8100 node tests/e2e/history-smoke.mjs
 import { BASE, SEL, launchBrowser, launchPage, enterLibrary, newChecker } from "./lib/dom.mjs";
 
 const YEAR = "2023";
@@ -21,11 +21,11 @@ const { page, errors } = await launchPage(browser, { viewport: { width: 1360, he
 const { check, report } = newChecker();
 // The page can be reached from any list route through the section link, which
 // also exercises the client navigation instead of a full reload.
-async function openAccessions() {
-  if ((await page.locator(SEL.accessions).count()) === 0) {
-    await page.click('[data-testid="section-accessions"]');
+async function openHistory() {
+  if ((await page.locator(SEL.history).count()) === 0) {
+    await page.click('[data-testid="section-history"]');
   }
-  await page.waitForSelector('[data-testid="accessions-year"]', { timeout: 20000 });
+  await page.waitForSelector('[data-testid="history-year"]', { timeout: 20000 });
 }
 
 async function onLedger() {
@@ -85,11 +85,11 @@ try {
   await page.waitForSelector(SEL.appShell, { timeout: 30000 });
 
   // --------------------------------------------------------- year label ---
-  await openAccessions();
-  const year = page.locator(`[data-testid="accessions-year"][data-year="${YEAR}"]`);
+  await openHistory();
+  const year = page.locator(`[data-testid="history-year"][data-year="${YEAR}"]`);
   check("the year label is a button with data-year", (await year.count()) === 1);
   check("the year label names its count", ((await year.getAttribute("aria-label")) || "").includes("3 entries"));
-  const yearFigure = await figureFor(`[data-testid="accessions-year"][data-year="${YEAR}"]`, "mc-n");
+  const yearFigure = await figureFor(`[data-testid="history-year"][data-year="${YEAR}"]`, "mc-n");
   check("the year row prints the same figure", yearFigure === TOTAL, yearFigure);
 
   await year.click();
@@ -102,9 +102,9 @@ try {
   check("the year click lists the year's records", (await rowCount()) === 3, String(await rowCount()));
 
   // ------------------------------------------------------------ day mark ---
-  await openAccessions();
-  await page.waitForSelector('[data-testid="accessions-day"]', { timeout: 20000 });
-  const mark = page.locator(`[data-testid="accessions-day"][data-day="${DAY}"]`);
+  await openHistory();
+  await page.waitForSelector('[data-testid="history-day"]', { timeout: 20000 });
+  const mark = page.locator(`[data-testid="history-day"][data-day="${DAY}"]`);
   check("the filing day is a mark button with data-day", (await mark.count()) === 1);
   check("the mark is pointer only", (await mark.getAttribute("tabindex")) === "-1");
   const markTitle = (await mark.getAttribute("title")) || "";
@@ -121,11 +121,11 @@ try {
   check("the day click lists the day's records", (await rowCount()) === 3, String(await rowCount()));
 
   // -------------------------------------------------------- source row ----
-  await openAccessions();
-  const source = page.locator(`[data-testid="accessions-source"][data-source="${SOURCE}"]`);
+  await openHistory();
+  const source = page.locator(`[data-testid="history-source"][data-source="${SOURCE}"]`);
   check("the ranked source is a row button with data-source", (await source.count()) === 1);
   check("the source row names its count", ((await source.getAttribute("aria-label")) || "").includes("3 entries"));
-  const sourceFigure = await figureFor(`[data-testid="accessions-source"][data-source="${SOURCE}"]`, "rank-n");
+  const sourceFigure = await figureFor(`[data-testid="history-source"][data-source="${SOURCE}"]`, "rank-n");
   check("the source row prints the same figure", sourceFigure === TOTAL, sourceFigure);
 
   await source.click();
@@ -136,11 +136,11 @@ try {
   check("the source click lists the source's records", (await rowCount()) === 3, String(await rowCount()));
 
   // ------------------------------------------------------- busiest day ----
-  await openAccessions();
-  const busiest = page.locator(`[data-testid="accessions-busiest"][data-day="${DAY}"]`);
+  await openHistory();
+  const busiest = page.locator(`[data-testid="history-busiest"][data-day="${DAY}"]`);
   check("the busiest day row is a button with data-day", (await busiest.count()) === 1);
   check("the busiest row names its count", ((await busiest.getAttribute("aria-label")) || "").includes("3 entries"));
-  const busiestFigure = await figureFor(`[data-testid="accessions-busiest"][data-day="${DAY}"]`, "mono");
+  const busiestFigure = await figureFor(`[data-testid="history-busiest"][data-day="${DAY}"]`, "mono");
   check("the busiest row prints the same figure", busiestFigure === TOTAL, busiestFigure);
 
   await busiest.click();
@@ -150,8 +150,8 @@ try {
   check("the busiest click total matches the printed day figure", (await total()) === busiestFigure, await total());
 
   // ------------------------------------------------------- keyboard use ---
-  await openAccessions();
-  const focusableYear = page.locator(`[data-testid="accessions-year"][data-year="${YEAR}"]`);
+  await openHistory();
+  const focusableYear = page.locator(`[data-testid="history-year"][data-year="${YEAR}"]`);
   await focusableYear.focus();
   check("the year label takes keyboard focus", await focusableYear.evaluate((node) => node === document.activeElement));
   await page.keyboard.press("Enter");
@@ -162,17 +162,17 @@ try {
 
   // ------------------------------------------------------------ mobile ---
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(BASE + "/accessions", { waitUntil: "domcontentloaded" });
-  await page.waitForSelector('[data-testid="accessions-year"]', { timeout: 30000 });
-  await page.waitForFunction(() => document.querySelectorAll('[data-testid="accessions-day"]').length === 0, null, {
+  await page.goto(BASE + "/history", { waitUntil: "domcontentloaded" });
+  await page.waitForSelector('[data-testid="history-year"]', { timeout: 30000 });
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="history-day"]').length === 0, null, {
     timeout: 20000,
   });
   check("under 768px the day marks are not buttons", (await page.locator(".mc-track button").count()) === 0);
   check("under 768px the marks are decorative", (await page.locator(".mc-track i").count()) > 0);
   const targets = [
-    ["year label", '[data-testid="accessions-year"]'],
-    ["source row", '[data-testid="accessions-source"]'],
-    ["busiest row", '[data-testid="accessions-busiest"]'],
+    ["year label", '[data-testid="history-year"]'],
+    ["source row", '[data-testid="history-source"]'],
+    ["busiest row", '[data-testid="history-busiest"]'],
   ];
   for (const [label, selector] of targets) {
     const box = await page.locator(selector).first().boundingBox();

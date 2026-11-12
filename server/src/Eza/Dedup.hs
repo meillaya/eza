@@ -23,6 +23,7 @@ module Eza.Dedup (
     dedupeGroups,
     dedupCandidates,
     mergeBookmarks,
+    mergeBookmarksWithSnapshot,
     mergeUrlDuplicatesAll,
 ) where
 
@@ -280,22 +281,29 @@ number of absorbed rows (0 when the keeper is missing or nothing was absorbed).
 No automatic merge: this only runs for an explicit confirmed request.
 -}
 mergeBookmarks :: Connection -> Int -> [Int] -> IO Int
-mergeBookmarks conn keep mergeIds = do
+mergeBookmarks conn keep mergeIds = fst <$> mergeBookmarksWithSnapshot conn keep mergeIds
+
+{- | The confirmed-merge path also reports the snapshot id so the interface can
+offer to undo exactly this merge, not whatever happened last.
+-}
+mergeBookmarksWithSnapshot :: Connection -> Int -> [Int] -> IO (Int, Int)
+mergeBookmarksWithSnapshot conn keep mergeIds = do
     let merges = filter (/= keep) mergeIds
     if null merges
-        then pure 0
+        then pure (0, 0)
         else withImmediateTransaction conn $ do
             exists <- query conn "SELECT 1 FROM bookmarks WHERE id = ?" (Only keep) :: IO [Only Int]
             case exists of
-                [] -> pure 0
+                [] -> pure (0, 0)
                 _ -> do
                     found <- existingBookmarkIds conn merges
                     if null found
-                        then pure 0
+                        then pure (0, 0)
                         else do
                             -- Snapshot first: bookmark rows, tags, highlights and links.
-                            _ <- recordUndoIds conn "merge" (keep : found)
-                            mergeGroupTx conn keep found False
+                            snapshotId <- recordUndoIds conn "merge" (keep : found)
+                            merged <- mergeGroupTx conn keep found False
+                            pure (merged, snapshotId)
 
 {- | Fold @merges@ into @keep@ inside the caller's write transaction. The
 caller has already recorded the undo snapshot. When @preferHttps@ is set (the
@@ -317,6 +325,23 @@ mergeGroupTx conn keep merges preferHttps = do
         then pure 0
         else do
             now <- (floor <$> getPOSIXTime) :: IO Int
+            -- Manual "kept alive" intent follows the merge to the keeper: the
+            -- absorbed override would otherwise cascade away with its row.
+            let overrideMarks = marksFor (keep : merges)
+            overrideRows <-
+                query
+                    conn
+                    (Query ("SELECT reason,created_at FROM bookmark_dead_overrides WHERE bookmark_id IN (" <> overrideMarks <> ") LIMIT 1"))
+                    (keep : merges) ::
+                    IO [(Text, Int)]
+            let manualAlive = not (null overrideRows)
+            case overrideRows of
+                ((reason, createdAt) : _) ->
+                    execute
+                        conn
+                        "INSERT OR IGNORE INTO bookmark_dead_overrides (bookmark_id,reason,created_at,updated_at) VALUES (?,?,?,?)"
+                        (keep, reason, createdAt, now)
+                [] -> pure ()
             -- The deleted events carry the absorbed rows as they are before
             -- the merge touches them; this runs in the caller's transaction.
             deletedData <- bookmarkEventDataMany conn found
@@ -432,6 +457,8 @@ mergeGroupTx conn keep merges preferHttps = do
                         , ":keep" := keep
                         ]
                     execute conn (Query ("DELETE FROM bookmarks WHERE id IN (" <> marks <> ")")) merges
+                    when manualAlive $
+                        execute conn "UPDATE bookmarks SET is_dead = 0 WHERE id = ?" (Only keep)
                     when preferHttps $
                         upgradeKeeperUrl conn keep now (keeperUrlRows, noteRows)
                     -- Extension outbox: the keeper's post-merge state and the

@@ -17,6 +17,7 @@ module Eza.Fetch (
     FetchError (..),
     fetchUrl,
     postJson,
+    readCappedBody,
     documentOptions,
     anyOptions,
     assertPublicHost,
@@ -29,7 +30,6 @@ import Control.Exception (SomeException, try)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
-import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum, toLower)
 import Data.List (find)
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
@@ -178,11 +178,13 @@ fetchUrl opts rawUrl
             case parseURI (T.unpack url) of
                 Nothing -> pure (Left (FetchInvalidUrl url))
                 Just uri
-                    | scheme /= "http" && scheme /= "https" -> pure (Left (FetchInvalidUrl url))
+                    | schemeOf uri /= "http" && schemeOf uri /= "https" ->
+                        pure (Left (FetchInvalidUrl url))
                     | otherwise -> do
                         requestResult <- try (parseRequest (T.unpack url))
                         case requestResult of
-                            Left (err :: SomeException) -> pure (Left (FetchInvalidUrl (T.pack (show err))))
+                            Left (err :: SomeException) ->
+                                pure (Left (FetchInvalidUrl (T.pack (show err))))
                             Right request -> do
                                 let hostName = TE.decodeUtf8 (host request)
                                 allowed <- assertPublicHost opts hostName
@@ -198,7 +200,7 @@ fetchUrl opts rawUrl
                                             Right () -> do
                                                 responseResult <-
                                                     try
-                                                        ( httpLbs
+                                                        ( withResponse
                                                             ( request
                                                                 { method = foMethod opts
                                                                 , redirectCount = 0
@@ -207,46 +209,50 @@ fetchUrl opts rawUrl
                                                                 }
                                                             )
                                                             (foManager opts)
+                                                            (handleResponse url)
                                                         )
                                                 case responseResult of
-                                                    Left (err :: HttpException) -> pure (Left (FetchNetwork (T.pack (show err))))
-                                                    Right response ->
-                                                        let code = statusCode (responseStatus response)
-                                                            headers = responseHeaders response
-                                                         in if code >= 300 && code < 400
-                                                                then case lookup hLocation headers of
-                                                                    Nothing -> pure (Left (FetchHttp code))
-                                                                    Just location -> case resolve url (TE.decodeUtf8 location) of
-                                                                        Nothing -> pure (Left (FetchInvalidUrl (TE.decodeUtf8 location)))
-                                                                        Just next -> go (hops + 1) next
-                                                                else
-                                                                    if code >= 400
-                                                                        then pure (Left (FetchHttp code))
-                                                                        else do
-                                                                            let fullBody = LBS.toStrict (LBS.take (fromIntegral (foMaxBytes opts) + 1) (responseBody response))
-                                                                                truncated = BS.length fullBody > foMaxBytes opts
-                                                                                body = BS.take (foMaxBytes opts) fullBody
-                                                                                rawContentType = maybe "" TE.decodeUtf8 (lookup hContentType headers)
-                                                                                (contentType, headerCharset) = parseContentType rawContentType
-                                                                            if foDocument opts && BS.null body
-                                                                                then pure (Left FetchEmpty)
-                                                                                else
-                                                                                    if foDocument opts && not (supportedContentType contentType)
-                                                                                        then pure (Left (FetchUnsupported contentType))
-                                                                                        else
-                                                                                            pure
-                                                                                                ( Right
-                                                                                                    FetchPage
-                                                                                                        { fpFinalUrl = url
-                                                                                                        , fpStatus = code
-                                                                                                        , fpContentType = contentType
-                                                                                                        , fpCharset = detectCharset body headerCharset
-                                                                                                        , fpBody = body
-                                                                                                        , fpTruncated = truncated
-                                                                                                        }
-                                                                                                )
-                  where
-                    scheme = map toLower (takeWhile (/= ':') (uriScheme uri))
+                                                    Left (err :: HttpException) ->
+                                                        pure (Left (FetchNetwork (T.pack (show err))))
+                                                    Right (Left err) -> pure (Left err)
+                                                    Right (Right (Left next)) -> go (hops + 1) next
+                                                    Right (Right (Right page)) -> pure (Right page)
+
+    handleResponse url response = do
+        let code = statusCode (responseStatus response)
+            headers = responseHeaders response
+        if code >= 300 && code < 400
+            then case lookup hLocation headers of
+                Nothing -> pure (Left (FetchHttp code))
+                Just location -> case resolveUrl url (TE.decodeUtf8 location) of
+                    Nothing -> pure (Left (FetchInvalidUrl (TE.decodeUtf8 location)))
+                    Just next -> pure (Right (Left next))
+            else
+                if code >= 400
+                    then pure (Left (FetchHttp code))
+                    else do
+                        (body, truncated) <- readCappedBody (foMaxBytes opts) (brRead (responseBody response))
+                        let rawContentType = maybe "" TE.decodeUtf8 (lookup hContentType headers)
+                            (contentType, headerCharset) = parseContentType rawContentType
+                        if foDocument opts && BS.null body
+                            then pure (Left FetchEmpty)
+                            else
+                                if foDocument opts && not (supportedContentType contentType)
+                                    then pure (Left (FetchUnsupported contentType))
+                                    else
+                                        pure
+                                            ( Right
+                                                ( Right
+                                                    FetchPage
+                                                        { fpFinalUrl = url
+                                                        , fpStatus = code
+                                                        , fpContentType = contentType
+                                                        , fpCharset = detectCharset body headerCharset
+                                                        , fpBody = body
+                                                        , fpTruncated = truncated
+                                                        }
+                                                )
+                                            )
 
     mergeHeaders existing =
         [ (hUserAgent, userAgent)
@@ -255,7 +261,7 @@ fetchUrl opts rawUrl
         ]
             <> filter (\(name, _) -> name `notElem` [hUserAgent, hAccept, hAcceptLanguage, hContentType]) existing
 
-    resolve base reference =
+    resolveUrl base reference =
         case parseURIReference (T.unpack reference) of
             Just uri
                 | uriScheme uri /= "" -> Just (T.pack (show uri))
@@ -264,6 +270,33 @@ fetchUrl opts rawUrl
                     Just resolved -> Just (T.pack (show (resolved `relativeTo` baseUri)))
                     Nothing -> Nothing
                 Nothing -> Nothing
+
+    schemeOf uri = map toLower (takeWhile (/= ':') (uriScheme uri))
+
+{- | Read at most @limit@ bytes from a chunk reader and report whether more
+bytes were available. Keeping the loop separate makes the cap testable without
+a live HTTP server; the reader is a single @brRead@-style action.
+-}
+readCappedBody :: Int -> IO BS.ByteString -> IO (BS.ByteString, Bool)
+readCappedBody limit readChunk
+    | limit <= 0 = do
+        chunk <- readChunk
+        pure (BS.empty, not (BS.null chunk))
+    | otherwise = go 0 []
+  where
+    target = limit + 1
+    go total chunks = do
+        chunk <- readChunk
+        if BS.null chunk
+            then pure (BS.concat (reverse chunks), False)
+            else
+                if total + BS.length chunk >= target
+                    then
+                        let remaining = max 0 (target - total)
+                            kept = BS.take remaining chunk
+                            body = BS.take limit (BS.concat (reverse (kept : chunks)))
+                         in pure (body, total + BS.length chunk > limit)
+                    else go (total + BS.length chunk) (chunk : chunks)
 
 userAgent :: BS.ByteString
 userAgent = "eza-bookmarks/0.1 (+https://github.com/meillaya/eza)"

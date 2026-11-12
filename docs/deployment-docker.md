@@ -98,7 +98,7 @@ WebAuthn passkeys require a **secure origin**, so plain
 | `EZA_LOG_LEVEL` | `info` | `debug` logs a development request line, `info` one access line per request, `warn`/`error` disable access logging (error lines still reach stderr). |
 | `EZA_ENRICH_WORKERS` | `2` | Process-wide enrichment concurrency; `0` disables the per-account enrichment loop. |
 | `EZA_FETCH_TIMEOUT_MS` | `8000` | Timeout per outbound fetch (server clamps below 1000). |
-| `EZA_FAVICON_MAX_BYTES` | `65536` | Maximum favicon download size. |
+| `EZA_FAVICON_MAX_BYTES` | `262144` | Maximum favicon download size. Complete ICO entries are cropped before storage. |
 | `EZA_FAVICON_TTL_DAYS` | `90` | Favicon cache lifetime. |
 | `EZA_FAVICON_BACKFILL` | `1` | Background per-domain favicon cache fill (one request per source, not per link); `0` disables it. |
 | `EZA_SHARE_TTL_DAYS` | `7` | Public share-link lifetime. |

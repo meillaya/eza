@@ -9,7 +9,7 @@
 //
 // Every screen is captured twice, light then dark, through the shell's real
 // theme control, so the committed set is eight light/dark pairs. The
-// accessions pair is cropped above the ranked-source list so private sources
+// history pair is cropped above the ranked-source list so private sources
 // stay out of the public image.
 //
 // The detail shot uses the real enrichment output. A legacy fallback can seed
@@ -63,7 +63,7 @@ const SEL = {
   appShell: '[data-testid="app-shell"]',
   ledgerRow: '[data-testid="ledger-row"]',
   record: '[data-testid="record"]',
-  accessions: '[data-testid="accessions"]',
+  history: '[data-testid="history"]',
   palette: '[data-testid="palette"]',
   paletteInput: "#palette-input",
   readerText: "#reader-text",
@@ -498,16 +498,16 @@ try {
     .catch(() => {});
   await shotPair("detail");
 
-  // accessions.png + accessions-dark.png: the printed index route.
-  await page.goto(BASE + "/accessions", { waitUntil: "domcontentloaded" });
-  await page.waitForSelector(SEL.accessions, { timeout: 30000 });
+  // history.png + history-dark.png: the printed index route.
+  await page.goto(BASE + "/history", { waitUntil: "domcontentloaded" });
+  await page.waitForSelector(SEL.history, { timeout: 30000 });
   // Keep the public index shot above the ranked-source list: that list can
   // contain private saves that have no place in a public repository.
-  const filing = await page.locator(".accessions .mc").boundingBox();
-  const accessionsHeight = filing
+  const filing = await page.locator(".history .mc").boundingBox();
+  const historyHeight = filing
     ? Math.max(560, Math.min(900, Math.floor(filing.y + filing.height + 24)))
     : 700;
-  await shotPair("accessions", { x: 0, y: 0, width: VIEWPORT.width, height: accessionsHeight });
+  await shotPair("history", { x: 0, y: 0, width: VIEWPORT.width, height: historyHeight });
 
   // palette.png + palette-dark.png: the command palette over the same ledger.
   await showLedger();

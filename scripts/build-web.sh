@@ -18,6 +18,13 @@ if ! command -v gzip >/dev/null 2>&1; then
   echo "gzip not found; enter the dev environment with 'devenv shell'" >&2
   exit 1
 fi
+# wasm-opt is part of the supported devenv toolchain (binaryen). A release
+# build without it is ~40% larger than the documented client, which is a
+# user-visible cold-load regression; fail instead of silently shipping it.
+if ! command -v wasm-opt >/dev/null 2>&1; then
+  echo "wasm-opt not found; enter the dev environment with 'devenv shell' (binaryen)" >&2
+  exit 1
+fi
 
 # The native and WASM builds use separate Cabal dirs: devenv.nix points the
 # native one at <checkout>/.devenv/cabal, this script defaults to
@@ -50,9 +57,10 @@ GHC_LIBDIR="$(wasm32-wasi-ghc --print-libdir)"
 node "$GHC_LIBDIR/post-link.mjs" --input "$BIN" --output static/app/ghc_wasm_jsffi.js
 cp "$BIN" static/app/app.wasm
 
-if command -v wasm-opt >/dev/null 2>&1; then
-  wasm-opt -O2 --strip-debug static/app/app.wasm -o static/app/app.wasm
-fi
+# -Oz is the size-first Binaryen pass: this binary is transferred and compiled
+# on every cold client start, and the graph/ledger compute is dominated by JS
+# and SQLite rather than this code. --strip-debug removes the DWARF section.
+wasm-opt -Oz --strip-debug --strip-producers --strip-dwarf static/app/app.wasm -o static/app/app.wasm
 
 # gzip_asset FILE compresses FILE to FILE.gz atomically.
 #
@@ -80,6 +88,30 @@ gzip_asset() {
 }
 
 gzip_asset static/app/app.wasm
+
+# A cold client downloads this sidecar before it can start. The 1.7 MB target
+# is the product goal; the hard ceiling guards against an accidental debug or
+# dependency build while the known 2.04 MB regression is tracked separately.
+# Override only for a deliberate experiment.
+WASM_GZIP_TARGET_BYTES="${EZA_WASM_GZIP_TARGET_BYTES:-1700000}"
+WASM_GZIP_MAX_BYTES="${EZA_WASM_GZIP_MAX_BYTES:-2200000}"
+WASM_RAW_MAX_BYTES="${EZA_WASM_RAW_MAX_BYTES:-7700000}"
+WASM_RAW_BYTES="$(wc -c < static/app/app.wasm)"
+WASM_GZIP_BYTES="$(wc -c < static/app/app.wasm.gz)"
+if (( WASM_RAW_BYTES > WASM_RAW_MAX_BYTES )); then
+  echo "build-web: app.wasm is ${WASM_RAW_BYTES} bytes, over the ${WASM_RAW_MAX_BYTES}-byte hard ceiling" >&2
+  echo "build-web: check that wasm-opt ran and that no debug build was copied into static/app" >&2
+  exit 1
+fi
+if (( WASM_GZIP_BYTES > WASM_GZIP_MAX_BYTES )); then
+  echo "build-web: app.wasm.gz is ${WASM_GZIP_BYTES} bytes, over the ${WASM_GZIP_MAX_BYTES}-byte hard ceiling" >&2
+  echo "build-web: check that wasm-opt ran and that no debug build was copied into static/app" >&2
+  exit 1
+fi
+if (( WASM_GZIP_BYTES > WASM_GZIP_TARGET_BYTES )); then
+  echo "build-web: warning: app.wasm.gz is ${WASM_GZIP_BYTES} bytes, over the ${WASM_GZIP_TARGET_BYTES}-byte target; review WASM growth" >&2
+fi
+echo "wasm: ${WASM_RAW_BYTES} raw / ${WASM_GZIP_BYTES} gzip (target ${WASM_GZIP_TARGET_BYTES}, max ${WASM_GZIP_MAX_BYTES})"
 
 # Precompressed sidecars for the text assets. The server serves <file>.gz with
 # Content-Encoding: gzip when the client accepts it, so a cold load does not pay

@@ -6,7 +6,7 @@
 //   EZA_BASE=http://localhost:8100 node tests/e2e/deeplink-smoke.mjs
 import { BASE, SEL, launchBrowser, launchPage, enterLibrary, makeApi, newChecker } from "./lib/dom.mjs";
 
-const ROUTES = ["/", "/graph", "/inbox", "/bookmark/1", "/tags/ai", "/account", "/accessions", "/save?title=Deep%20link"];
+const ROUTES = ["/", "/graph", "/inbox", "/bookmark/1", "/tags/ai", "/account", "/history", "/accessions", "/save?title=Deep%20link"];
 
 const browser = await launchBrowser();
 const { page, errors } = await launchPage(browser);

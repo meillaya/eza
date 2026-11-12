@@ -60,8 +60,10 @@ module Eza.Web.Graph (
     detailChunkCount,
 ) where
 
-import Control.Monad (foldM, forM_, unless, when)
+import Control.Monad (foldM, foldM_, forM_, unless, when)
 import Control.Monad.Reader (runReaderT)
+import qualified Data.ByteString.Builder as BB
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet as IS
 import Data.List (sortOn)
@@ -69,9 +71,10 @@ import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 
 import Miso
-import Miso.CSS.Color (Color, hex, rgba)
+import Miso.CSS.Color (Color, hex, renderColor, rgba)
 import Miso.Canvas (Canvas)
 import qualified Miso.Canvas as Canvas
 
@@ -369,6 +372,108 @@ cacheKeyFor layout palette tagsShown viewKey =
         <> ":"
         <> viewKey
 
+-- ----------------------------------------------------------- batch bridge ---
+
+{- | Ask the static JS helper whether it can batch a layer. The helper lives in
+pwa.js, which the page loads before the Miso module, so this is normally true;
+an old cached shell or a browser without Path2D falls back to the original
+per-primitive painter.
+-}
+graphBatchAvailable :: IO Bool
+graphBatchAvailable = do
+    window' <- jsg ("window" :: MisoString)
+    graph <- window' ! ("EzaGraph" :: MisoString)
+    missing <- (||) <$> isUndefined graph <*> isNull graph
+    if missing
+        then pure False
+        else do
+            value <- graph # ("available" :: MisoString) $ (() :: ())
+            fromMaybe False <$> (fromJSValUnchecked value :: IO (Maybe Bool))
+
+{- | Emit a mark only while the perf harness has opted in. Production frames
+never pay for an extra performance entry.
+-}
+graphPerfMark :: MisoString -> IO ()
+graphPerfMark name = do
+    window' <- jsg ("window" :: MisoString)
+    enabled <- (fromJSValUnchecked =<< window' ! ("__ezaGraphPerf" :: MisoString)) :: IO (Maybe Bool)
+    when (fromMaybe False enabled) $ do
+        perf <- jsg ("performance" :: MisoString)
+        _ <- perf # ("mark" :: MisoString) $ ("eza:graph:" <> name)
+        pure ()
+
+paintLayer :: MisoString -> MisoString -> MisoString -> Double -> Double -> Canvas Bool
+paintLayer mode packed color alpha lineWidth = do
+    ctx <- ask
+    result <-
+        liftIO $ do
+            window' <- jsg ("window" :: MisoString)
+            graph <- window' ! ("EzaGraph" :: MisoString)
+            value <-
+                graph # ("paintLayer" :: MisoString) $
+                    (ctx, mode, packed, color, alpha, lineWidth)
+            (fromJSValUnchecked value :: IO (Maybe Bool))
+    pure (fromMaybe False result)
+
+{- | Pack one layer as little-endian Float32 bytes and hex-encode them. A
+human-readable decimal list cost ~1.15 s in the WASM build for the 9k-record
+plate because every coordinate went through `showFFloat`; the byte builder is
+only a few thousand machine operations and JS decodes the hex once per layer.
+-}
+packBuilder :: BB.Builder -> MisoString
+packBuilder builder =
+    ms
+        ( "hex:"
+            <> TE.decodeUtf8
+                ( LBS.toStrict
+                    (BB.toLazyByteString (BB.byteStringHex raw))
+                )
+        )
+  where
+    raw = LBS.toStrict (BB.toLazyByteString builder)
+
+coordB :: Double -> BB.Builder
+coordB value = BB.floatLE (realToFrac value)
+
+-- | One world-space segment in the cached bitmap's own pixel space.
+baseSegmentB :: XForm -> GraphLayout -> (Int, Int) -> BB.Builder
+baseSegmentB xform layout (source, target) =
+    case (IM.lookup source (glPos layout), IM.lookup target (glPos layout)) of
+        (Just (x1, y1), Just (x2, y2)) ->
+            let (px1, py1) = xformPoint xform x1 y1
+                (px2, py2) = xformPoint xform x2 y2
+             in coordB px1 <> coordB py1 <> coordB px2 <> coordB py2
+        _ -> mempty
+
+-- | One world-space circle in the cached bitmap's own pixel space.
+baseCircleB :: XForm -> GraphLayout -> Int -> BB.Builder
+baseCircleB xform layout key =
+    case IM.lookup key (glPos layout) of
+        Just (x, y) ->
+            let (px, py) = xformPoint xform x y
+                radius = max 0.4 (nodeRadius layout key * xfScale xform)
+             in coordB px <> coordB py <> coordB radius
+        Nothing -> mempty
+
+{- | One visible world-space segment in screen space, used by the detail plate
+and the filter overlay.
+-}
+detailSegmentB :: GraphView -> (Double, Double, Double, Double) -> BB.Builder
+detailSegmentB view (x1, y1, x2, y2) =
+    let (px1, py1) = worldToScreen view (x1, y1)
+        (px2, py2) = worldToScreen view (x2, y2)
+     in coordB px1 <> coordB py1 <> coordB px2 <> coordB py2
+
+detailCircleB :: GraphView -> Double -> Double -> Double -> BB.Builder
+detailCircleB view x y worldRadius =
+    let (px, py) = worldToScreen view (x, y)
+        radius = max 0.4 (worldRadius * gvScale view)
+     in coordB px <> coordB py <> coordB radius
+
+{- | A malformed/empty packed layer is a no-op in JS; an empty builder simply
+produces an empty string. The helper accepts that.
+-}
+
 {- | Paint one frame. Two caches keep motion cheap and still crisp at rest:
 the world bitmap is blitted while the view moves, and after a pause a
 screen-resolution detail plate is rastered once and drawn 1:1.
@@ -386,7 +491,13 @@ drawGraph GraphDraw{..} = do
     Canvas.fillStyle (Canvas.color (pPaper palette))
     Canvas.fillRect (0, 0, width, height)
     if drLocal
-        then drawDetailChunk palette drLayout view drTagsShown drRecordColors drTagColors 1 1
+        then do
+            fast <- liftIO graphBatchAvailable
+            ok <-
+                if fast
+                    then drawDetailFast palette drLayout view drTagsShown drRecordColors drTagColors
+                    else drawDetailChunk palette drLayout view drTagsShown drRecordColors drTagColors 1 1 >> pure True
+            unless ok (drawDetailChunk palette drLayout view drTagsShown drRecordColors drTagColors 1 1)
         else
             if drDetailPhase > 0 && drDetailChunks > 0
                 then do
@@ -530,18 +641,40 @@ fallback uses every chunk in one go; the settle path draws one per frame.
 -}
 buildDetailCache :: Palette -> GraphLayout -> GraphView -> Bool -> MisoString -> IM.IntMap Text -> M.Map Text Text -> IO (Maybe DetailCache)
 buildDetailCache palette layout view tagsShown viewKey recordColors tagColors = do
+    graphPerfMark "detail-start"
     cached <- ensureDetailCanvas (detailKeyFor layout palette tagsShown viewKey view) view
     case cached of
         Nothing -> pure Nothing
         Just (canvas, ctx2d, dpr, _) -> do
-            let chunks = detailChunkCount layout
-            runReaderT
-                ( do
-                    Canvas.setTransform (dpr, 0, 0, dpr, 0, 0)
-                    forM_ [1 .. chunks] $
-                        drawDetailChunk palette layout view tagsShown recordColors tagColors chunks
-                )
-                ctx2d
+            fast <- graphBatchAvailable
+            if fast
+                then do
+                    painted <-
+                        runReaderT
+                            ( do
+                                Canvas.setTransform (dpr, 0, 0, dpr, 0, 0)
+                                drawDetailFast palette layout view tagsShown recordColors tagColors
+                            )
+                            ctx2d
+                    unless painted $ do
+                        let chunks = detailChunkCount layout
+                        runReaderT
+                            ( do
+                                Canvas.setTransform (dpr, 0, 0, dpr, 0, 0)
+                                forM_ [1 .. chunks] $
+                                    drawDetailChunk palette layout view tagsShown recordColors tagColors chunks
+                            )
+                            ctx2d
+                else do
+                    let chunks = detailChunkCount layout
+                    runReaderT
+                        ( do
+                            Canvas.setTransform (dpr, 0, 0, dpr, 0, 0)
+                            forM_ [1 .. chunks] $
+                                drawDetailChunk palette layout view tagsShown recordColors tagColors chunks
+                        )
+                        ctx2d
+            graphPerfMark "detail-end"
             pure
                 ( Just
                     (DetailCache canvas (detailKeyFor layout palette tagsShown viewKey view) (round (gvWidth view)) (round (gvHeight view)))
@@ -554,16 +687,34 @@ paintDetailChunk palette layout view tagsShown viewKey recordColors tagColors ph
     case cached of
         Nothing -> pure ()
         Just (_, ctx2d, dpr, fresh) -> do
-            runReaderT
-                ( do
-                    Canvas.setTransform (dpr, 0, 0, dpr, 0, 0)
-                    if fresh
-                        then
-                            forM_ [1 .. phase] $
-                                drawDetailChunk palette layout view tagsShown recordColors tagColors chunks
-                        else drawDetailChunk palette layout view tagsShown recordColors tagColors chunks phase
-                )
-                ctx2d
+            fast <- graphBatchAvailable
+            if fast
+                then when fresh $ do
+                    painted <-
+                        runReaderT
+                            ( do
+                                Canvas.setTransform (dpr, 0, 0, dpr, 0, 0)
+                                drawDetailFast palette layout view tagsShown recordColors tagColors
+                            )
+                            ctx2d
+                    unless painted $
+                        runReaderT
+                            ( do
+                                Canvas.setTransform (dpr, 0, 0, dpr, 0, 0)
+                                drawDetailChunk palette layout view tagsShown recordColors tagColors chunks phase
+                            )
+                            ctx2d
+                else
+                    runReaderT
+                        ( do
+                            Canvas.setTransform (dpr, 0, 0, dpr, 0, 0)
+                            if fresh
+                                then
+                                    forM_ [1 .. phase] $
+                                        drawDetailChunk palette layout view tagsShown recordColors tagColors chunks
+                                else drawDetailChunk palette layout view tagsShown recordColors tagColors chunks phase
+                        )
+                        ctx2d
 
 {- | The detail canvas for a key, creating and registering it on first use.
 The context is fetched each chunk, which is one FFI call per frame.
@@ -747,6 +898,7 @@ device pixels so the cache stays around 16 MB.
 -}
 buildBaseCache :: Palette -> GraphLayout -> Bool -> MisoString -> IM.IntMap Text -> M.Map Text Text -> IO (Maybe BaseCache)
 buildBaseCache palette layout tagsShown viewKey recordColors tagColors = do
+    graphPerfMark "base-start"
     document <- jsg ("document" :: MisoString)
     canvas <- document # ("createElement" :: MisoString) $ (["canvas"] :: [MisoString])
     let (minX, minY) = glMin layout
@@ -756,14 +908,28 @@ buildBaseCache palette layout tagsShown viewKey recordColors tagColors = do
         y0 = minY - padding
         worldWidth = max 1 (maxX - minX + 2 * padding)
         worldHeight = max 1 (maxY - minY + 2 * padding)
-        scale = 1024 / max worldWidth worldHeight
+        scale = 1536 / max worldWidth worldHeight
         width = max 1 (ceiling (worldWidth * scale) :: Int)
         height = max 1 (ceiling (worldHeight * scale) :: Int)
     setField canvas ("width" :: MisoString) width
     setField canvas ("height" :: MisoString) height
     offscreen <- canvas # ("getContext" :: MisoString) $ (["2d"] :: [MisoString])
     let xform = XForm x0 y0 scale
-    runReaderT (drawBase palette layout tagsShown xform recordColors tagColors) offscreen
+    fast <- graphBatchAvailable
+    if fast
+        then do
+            painted <- runReaderT (drawBaseFast palette layout tagsShown xform recordColors tagColors) offscreen
+            unless painted $ do
+                graphPerfMark "base-fallback"
+                runReaderT
+                    ( do
+                        Canvas.clearRect (0, 0, fromIntegral width, fromIntegral height)
+                        drawBase palette layout tagsShown xform recordColors tagColors
+                    )
+                    offscreen
+        else do
+            graphPerfMark "base-no-helper"
+            runReaderT (drawBase palette layout tagsShown xform recordColors tagColors) offscreen
     let cached =
             BaseCache
                 { bcCanvas = canvas
@@ -784,6 +950,7 @@ buildBaseCache palette layout tagsShown viewKey recordColors tagColors = do
     setField holder ("width" :: MisoString) (bcWidth cached)
     setField holder ("height" :: MisoString) (bcHeight cached)
     setField window' cacheGlobal holder
+    graphPerfMark "base-end"
     pure (Just cached)
 
 -- ------------------------------------------------------------ base paint ---
@@ -912,6 +1079,199 @@ addCircle xform x y radius = do
         pxRadius = radius * xfScale xform
     Canvas.moveTo (px + pxRadius, py)
     Canvas.arc (px, py, max 0.4 pxRadius, 0, 2 * pi)
+
+-- --------------------------------------------------------- fast painters ---
+
+paintAll :: [Canvas Bool] -> Canvas Bool
+paintAll = foldM (\ok action -> if ok then action else pure False) True
+
+strokeLayer :: MisoString -> MisoString -> Double -> Double -> Canvas Bool
+strokeLayer packed color alpha width =
+    paintLayer "stroke" packed color alpha width
+
+fillLayer :: MisoString -> MisoString -> Double -> Canvas Bool
+fillLayer packed color alpha =
+    paintLayer "fill" packed color alpha 1
+
+{- | The batched cache painter. It keeps the old draw order (links, members,
+plain records, colour-group records, plain tags, colour-group tags) so the
+bitmap is pixel-compatible with the fallback path.
+-}
+drawBaseFast :: Palette -> GraphLayout -> Bool -> XForm -> IM.IntMap Text -> M.Map Text Text -> Canvas Bool
+drawBaseFast palette layout tagsShown xform recordColors tagColors =
+    paintAll $
+        [ strokeLayer
+            (packBuilder (foldMap (baseSegmentB xform layout) (glLinks layout)))
+            (renderColor (pRule palette))
+            0.72
+            1
+        ]
+            ++ [ strokeLayer
+                    (packBuilder (foldMap (baseSegmentB xform layout) (glMembers layout)))
+                    (renderColor (pMuted palette))
+                    0.32
+                    1
+               | tagsShown
+               ]
+            ++ [ fillLayer
+                    (packBuilder (foldMap (baseCircleB xform layout) plainRecordKeys))
+                    (renderColor (pInk palette))
+                    0.82
+               ]
+            ++ [ fillLayer
+                    (packBuilder (foldMap (baseCircleB xform layout) keys))
+                    (renderColor (colorOfHex color))
+                    0.92
+               | (color, keys) <- M.toAscList (groupColorsByKey (glPos layout) recordColors)
+               ]
+            ++ [ fillLayer
+                    (packBuilder (foldMap (baseCircleB xform layout) plainTagKeys))
+                    (renderColor (pAccent palette))
+                    0.92
+               | tagsShown
+               ]
+            ++ [ fillLayer
+                    (packBuilder (foldMap (baseCircleB xform layout) keys))
+                    (renderColor (colorOfHex color))
+                    0.95
+               | tagsShown
+               , (color, keys) <- M.toAscList (groupColorsByKey (glPos layout) tagColorKeysByKey)
+               ]
+  where
+    tagColorKeysByKey = tagColorKeys layout tagColors
+    recordKeys = [key | key <- IM.keys (glPos layout), not (isTagKey key)]
+    plainRecordKeys = [key | key <- recordKeys, IM.notMember key recordColors]
+    tagKeys = [key | key <- IM.keys (glPos layout), isTagKey key]
+    plainTagKeys = [key | key <- tagKeys, IM.notMember key tagColorKeysByKey]
+
+{- | The batched detail/local painter. It draws every visible primitive in one
+pass; the old chunk plan remains the fallback.
+-}
+drawDetailFast :: Palette -> GraphLayout -> GraphView -> Bool -> IM.IntMap Text -> M.Map Text Text -> Canvas Bool
+drawDetailFast palette layout view tagsShown recordColors tagColors = do
+    Canvas.globalAlpha 1
+    Canvas.fillStyle (Canvas.color (pPaper palette))
+    Canvas.fillRect (0, 0, gvWidth view, gvHeight view)
+    paintAll $
+        [ strokeLayer
+            (packBuilder (foldMap (detailSegmentB view) visibleLinks))
+            (renderColor (pRule palette))
+            0.72
+            1
+        ]
+            ++ [ strokeLayer
+                    (packBuilder (foldMap (detailSegmentB view) visibleMembers))
+                    (renderColor (pMuted palette))
+                    0.32
+                    1
+               | tagsShown
+               ]
+            ++ [ fillLayer
+                    (packBuilder (foldMap (detailCircleKeyB view layout) plainRecordKeys))
+                    (renderColor (pInk palette))
+                    0.82
+               ]
+            ++ [ fillLayer
+                    (packBuilder (foldMap (detailCircleKeyB view layout) (visibleKeys keys)))
+                    (renderColor (colorOfHex color))
+                    0.95
+               | (color, keys) <- M.toAscList (groupColorsByKey (glPos layout) recordColors)
+               ]
+            ++ [ fillLayer
+                    (packBuilder (foldMap (detailCircleKeyB view layout) plainTagKeys))
+                    (renderColor (pAccent palette))
+                    0.92
+               | tagsShown
+               ]
+            ++ [ fillLayer
+                    (packBuilder (foldMap (detailCircleKeyB view layout) (visibleKeys keys)))
+                    (renderColor (colorOfHex color))
+                    0.95
+               | tagsShown
+               , (color, keys) <- M.toAscList (groupColorsByKey (glPos layout) tagColorKeysByKey)
+               ]
+  where
+    (minX, minY, maxX, maxY) = visibleWorld view
+    segmentVisible (x1, y1, x2, y2) =
+        max x1 x2 >= minX
+            && min x1 x2 <= maxX
+            && max y1 y2 >= minY
+            && min y1 y2 <= maxY
+    pointVisible key =
+        case IM.lookup key (glPos layout) of
+            Just (x, y) ->
+                let radius = nodeRadius layout key
+                 in pointWithin (minX - radius) (minY - radius) (maxX + radius) (maxY + radius) (x, y)
+            Nothing -> False
+    visibleKeys keys = [key | key <- keys, pointVisible key]
+    visibleLinks = filter segmentVisible (glLinkSegments layout)
+    visibleMembers = filter segmentVisible (glMemberSegments layout)
+    tagColorKeysByKey = tagColorKeys layout tagColors
+    recordKeys = [key | key <- pointKeys layout False, pointVisible key]
+    tagKeys = [key | key <- pointKeys layout True, pointVisible key]
+    plainRecordKeys = [key | key <- recordKeys, IM.notMember key recordColors]
+    plainTagKeys = [key | key <- tagKeys, IM.notMember key tagColorKeysByKey]
+
+detailCircleKeyB :: GraphView -> GraphLayout -> Int -> BB.Builder
+detailCircleKeyB view layout key =
+    case IM.lookup key (glPos layout) of
+        Just (x, y) -> detailCircleB view x y (nodeRadius layout key)
+        Nothing -> mempty
+
+{- | Filter overlay in one stroke + one fill. Labels still use the old
+screen-space pass, which is capped at 60.
+-}
+drawFilterOverlayFast :: Palette -> GraphLayout -> GraphView -> GraphMatches -> Bool -> Canvas ()
+drawFilterOverlayFast palette layout view matches tagsShown = do
+    drawVeil palette view
+    let matchIds = gmIds matches
+        tagIds = gmTags matches
+        (minX, minY, maxX, maxY) = visibleWorld view
+        inView (x, y) = pointWithin minX minY maxX maxY (x, y)
+        scale = gvScale view
+        matchedLinks =
+            [ (x1, y1, x2, y2)
+            | (source, target) <- glLinks layout
+            , IS.member source matchIds
+            , IS.member target matchIds
+            , Just a <- [IM.lookup source (glPos layout)]
+            , let (x1, y1) = a
+            , Just b <- [IM.lookup target (glPos layout)]
+            , let (x2, y2) = b
+            ]
+        recordKeys =
+            take
+                2000
+                [ key
+                | key <- IS.toList matchIds
+                , Just (x, y) <- [IM.lookup key (glPos layout)]
+                , inView (x, y)
+                ]
+        tagKeys =
+            [ key
+            | key <- IS.toList tagIds
+            , Just (x, y) <- [IM.lookup key (glPos layout)]
+            , inView (x, y)
+            ]
+        recordCircle key =
+            case IM.lookup key (glPos layout) of
+                Just (x, y) ->
+                    let radius = max 2.4 (nodeRadius layout key * scale)
+                     in detailCircleB view x y (radius / max 1e-9 scale)
+                Nothing -> mempty
+        tagCircle key =
+            case IM.lookup key (glPos layout) of
+                Just (x, y) ->
+                    let radius = max 2 (nodeRadius layout key * scale)
+                     in detailCircleB view x y (radius / max 1e-9 scale)
+                Nothing -> mempty
+    _ <- strokeLayer (packBuilder (foldMap (detailSegmentB view) matchedLinks)) (renderColor (pAccent palette)) 0.45 1
+    _ <- fillLayer (packBuilder (foldMap recordCircle recordKeys)) (renderColor (pAccent palette)) 1
+    _ <-
+        if tagsShown
+            then fillLayer (packBuilder (foldMap tagCircle tagKeys)) (renderColor (pAccent palette)) 0.9
+            else pure True
+    drawMatchLabels palette layout view matchIds
 
 {- | A rough rectangle used for label collision. Text width is estimated from
 the monospace glyph count; measuring every label would cost an FFI roundtrip
@@ -1117,15 +1477,22 @@ drawLabels palette layout view tagsShown mode = do
     Canvas.textAlign Canvas.TextAlignCenter
     Canvas.textBaseline Canvas.TextBaselineMiddle
     Canvas.globalAlpha alpha
-    forM_ items $ \item -> do
-        Canvas.font (labelFont (liSize item))
-        Canvas.strokeStyle (Canvas.color (pPaper palette))
-        Canvas.lineWidth 3
-        let value = labelText (liLabel item)
-        Canvas.strokeText (value, liX item, liBaseline item)
-        Canvas.fillStyle (Canvas.color (if liIsTag item then pMuted palette else pInk palette))
-        Canvas.fillText (value, liX item, liBaseline item)
+    Canvas.strokeStyle (Canvas.color (pPaper palette))
+    Canvas.lineWidth 3
+    foldM_ drawOne (Nothing, Nothing) items
     Canvas.globalAlpha 1
+  where
+    drawOne (lastSize, lastTag) item = do
+        let size = round (liSize item) :: Int
+            isTag = liIsTag item
+            value = labelText (liLabel item)
+        when (lastSize /= Just size) $
+            Canvas.font (labelFont (fromIntegral size))
+        when (lastTag /= Just isTag) $
+            Canvas.fillStyle (Canvas.color (if isTag then pMuted palette else pInk palette))
+        Canvas.strokeText (value, liX item, liBaseline item)
+        Canvas.fillText (value, liX item, liBaseline item)
+        pure (Just size, Just isTag)
 
 drawScreenLabels ::
     Palette ->
@@ -1190,6 +1557,13 @@ match set, not the library.
 -}
 drawFilterOverlay :: Palette -> GraphLayout -> GraphView -> GraphMatches -> Bool -> Canvas ()
 drawFilterOverlay palette layout view matches tagsShown = do
+    fast <- liftIO graphBatchAvailable
+    if fast
+        then drawFilterOverlayFast palette layout view matches tagsShown
+        else drawFilterOverlaySlow palette layout view matches tagsShown
+
+drawFilterOverlaySlow :: Palette -> GraphLayout -> GraphView -> GraphMatches -> Bool -> Canvas ()
+drawFilterOverlaySlow palette layout view matches tagsShown = do
     drawVeil palette view
     let matchIds = gmIds matches
         tagIds = gmTags matches

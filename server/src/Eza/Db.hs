@@ -27,6 +27,7 @@ module Eza.Db (
     schemaV12,
     schemaV13,
     schemaV14,
+    schemaV15,
     maxStoredTimestamp,
     normaliseTimestamp,
     databaseClaimed,
@@ -58,7 +59,7 @@ newtype DbError = DbError Text
 instance Exception DbError
 
 targetSchemaVersion :: Int
-targetSchemaVersion = 14
+targetSchemaVersion = 15
 
 {- | The last POSIX second SQLite can render as a calendar date: 9999-12-31
 23:59:59 UTC. A stored @created_at@ above this makes @strftime@ and @date@
@@ -307,6 +308,7 @@ migrations =
     , (12, schemaV12)
     , (13, schemaV13)
     , (14, schemaV14)
+    , (15, schemaV15)
     ]
 
 schemaV1 :: [Query]
@@ -531,4 +533,28 @@ schemaV14 :: [Query]
 schemaV14 =
     [ "ALTER TABLE webhook_deliveries ADD COLUMN event_kind TEXT NOT NULL DEFAULT ''"
     , "UPDATE webhook_deliveries SET event_kind = COALESCE((SELECT e.kind FROM event_log e WHERE e.id = webhook_deliveries.event_id), '')"
+    ]
+
+{- | v15 holds two pieces of repair that share a release.
+
+The dead override is user intent, separate from the machine @is_dead@ column:
+it keeps a link out of the sweep without teaching every row-copy path about a
+new bookmark column. The undo table makes delete/prune undo restore that
+intent too.
+
+The favicon cleanup is cache repair, not user data. Failure rows only hold a
+one-byte placeholder; deleting them lets the worker retry domains that were
+parked before the declared-icon parser landed. Absolute/remote icon URLs are
+cleared because the client now only renders the local per-domain cache.
+Bookmark rows whose cached icon is at the old 64 KiB cap are reset so a broken
+image cannot be served while the worker validates and refetches; the code path
+in "Eza.Enrich" crops complete ICOs and rejects anything still incomplete.
+-}
+schemaV15 :: [Query]
+schemaV15 =
+    [ "CREATE TABLE IF NOT EXISTS bookmark_dead_overrides ( bookmark_id INTEGER PRIMARY KEY REFERENCES bookmarks(id) ON DELETE CASCADE, reason TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL )"
+    , "CREATE TABLE IF NOT EXISTS undo_dead_override_rows ( snapshot_id INTEGER NOT NULL REFERENCES undo_snapshots(id) ON DELETE CASCADE, bookmark_id INTEGER NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (snapshot_id, bookmark_id) )"
+    , "DELETE FROM favicons WHERE fail_count > 0 OR length(bytes) <= 1"
+    , "UPDATE bookmarks SET favicon_url = '' WHERE favicon_url <> '' AND favicon_url NOT LIKE '/api/v1/favicons/%'"
+    , "UPDATE bookmarks SET favicon_url = '' WHERE domain IN (SELECT domain FROM favicons WHERE length(bytes) >= 65536)"
     ]

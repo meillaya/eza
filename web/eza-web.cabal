@@ -30,7 +30,7 @@ executable eza-web
   import:           web-common
   hs-source-dirs:   src
   main-is:          Main.hs
-  other-modules:    Eza.Web.Accessions
+  other-modules:    Eza.Web.History
                     Eza.Web.Api
                     Eza.Web.Detail
                     Eza.Web.Graph

@@ -215,14 +215,23 @@ domain. Icons are stored per domain, not per bookmark: the background
 `EZA_FAVICON_BACKFILL` loop fills one icon for a domain and applies it to every
 record on that domain with one update, so a site with hundreds of links costs
 one request. It tries the conventional icon paths first and parses the
-homepage once only if they all miss. A domain with no cached icon redirects to the static fallback;
-checksum-busted `?v=` links are used by the ledger rows.
+homepage once only if they all miss. A body is stored only when it is a
+complete PNG/JPEG/WebP or a complete-entry ICO (multi-entry ICOs are cropped);
+incomplete, truncated, SVG, and failure-placeholder bodies are never served.
+A domain with no cached icon redirects to the static fallback;
+checksum-busted `?v=` links are used by the ledger rows. Bookmark rows only
+ever point at this local route; absolute remote icon URLs are ignored and
+cleared by the v15 repair.
 
 `GET /api/v1/bookmarks/{id}` returns a `BookmarkDetail`, including
-`enrich_state`, `enrich_error`, and `reading_time_minutes`. `PATCH` accepts
-any of `title`, `note_body`, `is_read`, and `tags`, and returns
-`{"ok":true}`. When `note_body` is present, the server rebuilds the
-`[[wikilink]]` rows for that bookmark.
+`enrich_state`, `enrich_error`, `reading_time_minutes`, and `manual_alive`.
+`PATCH` accepts any of `title`, `note_body`, `is_read`, `tags`, and
+`extracted_text`, and returns `{"ok":true,"highlights_removed":N}`. When
+`note_body` is present, the server rebuilds the `[[wikilink]]` rows for that
+bookmark. When `extracted_text` is present, the server recomputes the reading
+time, marks the extraction as manual (`enrich_state = "manual"`) so background
+enrichment does not replace it, and re-anchors highlights against the new text;
+highlights whose quote no longer appears are removed and counted.
 
 ## Tags, searches, and navigation
 
@@ -334,6 +343,8 @@ Rules:
 GET    /api/v1/maintenance/prune-candidates
 POST   /api/v1/maintenance/prune
 POST   /api/v1/maintenance/check-dead
+GET    /api/v1/undo?limit=5
+GET    /api/v1/undo/{id}
 POST   /api/v1/undo
 GET    /api/v1/dedup/candidates?url_offset=0&url_limit=60&title_offset=0&title_limit=40
 POST   /api/v1/dedup/merge
@@ -341,6 +352,8 @@ POST   /api/v1/dedup/merge-all
 POST   /api/v1/bookmarks/{id}/open
 POST   /api/v1/bookmarks/{id}/enrich
 POST   /api/v1/bookmarks/{id}/extract
+POST   /api/v1/bookmarks/{id}/mark-alive
+POST   /api/v1/bookmarks/{id}/recheck-link
 POST   /api/v1/bookmarks/{id}/snapshot
 POST   /api/v1/import
 POST   /api/v1/import/json
@@ -349,8 +362,27 @@ GET    /api/v1/export
 ```
 
 `POST /api/v1/maintenance/prune` takes `{"ids":[N]}` and writes an undo
-snapshot before deleting. `POST /api/v1/undo` restores the most recent
-snapshot and returns `{"restored":N}`.
+snapshot before deleting. `POST /api/v1/maintenance/check-dead` accepts
+`{"limit","older_than","include_dead"}` and returns
+`{"checked","dead","alive","total_dead"}`; `dead` is the number newly marked in
+this run, `total_dead` is the library total, and `include_dead:true` rechecks
+records already marked dead before the unchecked tail, so an explicit sweep can
+repair a 403 false positive. Only a GET-confirmed 404 or 410 marks a link dead;
+401/403/405/407/429/451, 5xx, and network/timeout answers leave the flag alone.
+
+Undo is a stack. `GET /api/v1/undo?limit=5` returns the newest usable
+snapshots as `{"entries":[UndoEntry]}`, newest first; only the first entry has
+`can_undo:true`. `GET /api/v1/undo/{id}` returns an `UndoPreview` with up to
+100 record/tag samples and `truncated`. `POST /api/v1/undo` takes an optional
+`{"snapshot_id":N}`; without one it restores the newest usable snapshot for
+compatibility, and with one it returns `409 undo_out_of_order` unless that
+snapshot is the newest usable one. A successful undo returns
+`{"restored","skipped","snapshot_id","op"}` and removes the snapshot.
+
+`POST /bookmarks/{id}/mark-alive` records a user override, keeps
+`is_dead = 0`, and excludes the record from later sweeps until
+`POST /bookmarks/{id}/recheck-link` clears the override. The override is
+restored by undo and follows a merge to the keeper.
 
 `GET /api/v1/dedup/candidates` pages the duplicate report. `url_limit`
 (default 60) and `title_limit` (default 40) are clamped to 1-200 and both
@@ -366,7 +398,9 @@ pages); bulk merging never touches them.
 
 `POST /api/v1/dedup/merge` merges one group: `{"keep_id":N,"merge_ids":[N]}`.
 Every absorbed row's tags, notes, highlights and wikilinks are folded onto the
-keeper, and a `merge` undo snapshot is written first.
+keeper, and a `merge` undo snapshot is written first. It returns
+`{"merged":N,"snapshot_id":N}` so the interface can preview and undo exactly
+that merge.
 
 `POST /api/v1/dedup/merge-all` requires `{"confirm":true}`. It recomputes every
 canonical-URL duplicate group, merges them all in one transaction behind one
@@ -658,7 +692,14 @@ SessionInfo     {created_at: Int, last_seen_at: Maybe Int, expires_at: Int,
 BookmarkDetail  {summary fields except snippet, note_body, extracted_text,
                  author, sitename, published_at, language, image_url,
                  final_url, snapshot_path, snapshot_kind, last_opened_at,
-                 last_checked_at, links: [Backlink]}
+                 last_checked_at, manual_alive: Bool, links: [Backlink]}
+UndoBookmarkRef {id, title, url, domain}
+UndoEntry       {id, op, created_at, row_count, bookmark_count, tag_count,
+                 highlight_count, capture_count, link_count, can_undo,
+                 legacy, bookmarks: [UndoBookmarkRef], tags: [Text]}
+UndoPreview     {entry: UndoEntry, bookmarks: [UndoBookmarkRef],
+                 tags: [Text], truncated: Bool}
+UndoResult      {restored, skipped, snapshot_id, op}
 Backlink        {source_id, source_title, snippet, line: Maybe Int,
                  resolved: Bool}
 GraphData       {tags: [[Text, Int]],

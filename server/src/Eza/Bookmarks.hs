@@ -12,6 +12,9 @@ module Eza.Bookmarks (
     findBookmarkIdByUrl,
     quickSave,
     updateBookmark,
+    updateBookmarkDetailed,
+    markLinkAlive,
+    recheckLink,
     addTagsToBookmark,
     deleteBookmark,
     BulkAction (..),
@@ -41,6 +44,7 @@ import Text.Read (readMaybe)
 
 import Eza.Db (maxStoredTimestamp)
 import Eza.Events (bookmarkEventData, bookmarkEventDataMany, recordEvent, recordEventMany)
+import Eza.Highlights (reanchorHighlights)
 import Eza.Links (syncLinks)
 import Eza.Rules (applyRules)
 import Eza.SearchQuery
@@ -429,6 +433,7 @@ getBookmark conn bid = do
                         , bdEnrichError = drEnrichError r
                         , bdReadingTimeMinutes = drReadingTimeMinutes r
                         , bdLinks = links
+                        , bdManualAlive = drManualAlive r /= 0
                         }
                 )
 
@@ -437,7 +442,8 @@ detailColumns =
     "b.id, b.url, b.title, b.domain, b.favicon_url, b.created_at, b.added_at, "
         <> "b.is_read, b.is_dead, b.note_body, b.extracted_text, b.author, b.sitename, "
         <> "b.published_at, b.language, b.image_url, b.final_url, b.snapshot_path, "
-        <> "b.snapshot_kind, b.last_opened_at, b.last_checked_at, b.enrich_state, b.enrich_error, b.reading_time_minutes"
+        <> "b.snapshot_kind, b.last_opened_at, b.last_checked_at, b.enrich_state, b.enrich_error, b.reading_time_minutes, "
+        <> "(SELECT COUNT(*) FROM bookmark_dead_overrides o WHERE o.bookmark_id = b.id)"
 
 data DetailRow = DetailRow
     { drId :: Int
@@ -464,12 +470,14 @@ data DetailRow = DetailRow
     , drEnrichState :: Text
     , drEnrichError :: Text
     , drReadingTimeMinutes :: Int
+    , drManualAlive :: Int
     }
 
 instance FromRow DetailRow where
     fromRow =
         DetailRow
             <$> field
+            <*> field
             <*> field
             <*> field
             <*> field
@@ -734,13 +742,22 @@ resolveIncomingLinks conn targetId newTitle =
 tags are authoritative when supplied.  Returns False when the row is gone.
 -}
 updateBookmark :: Connection -> Int -> Maybe Text -> Maybe Text -> Maybe Bool -> Maybe [Text] -> IO Bool
-updateBookmark conn bid mTitle mNote mRead mTags = do
+updateBookmark conn bid mTitle mNote mRead mTags =
+    fst <$> updateBookmarkDetailed conn bid mTitle mNote mRead mTags Nothing
+
+{- | The PATCH path. Extracted text is edited alongside the other fields; a
+manual edit sets @enrich_state = 'manual'@ so background enrichment does not
+replace it, recomputes the reading time, re-anchors highlights, and emits the
+same bookmark.updated event as any other edit.
+-}
+updateBookmarkDetailed :: Connection -> Int -> Maybe Text -> Maybe Text -> Maybe Bool -> Maybe [Text] -> Maybe Text -> IO (Bool, Int)
+updateBookmarkDetailed conn bid mTitle mNote mRead mTags mExtracted = do
     now <- (floor <$> getPOSIXTime) :: IO Int
     exists <- query conn "SELECT 1 FROM bookmarks WHERE id = ?" (Only bid) :: IO [Only Int]
     if null exists
-        then pure False
+        then pure (False, 0)
         else do
-            withImmediateTransaction conn $ do
+            removedHighlights <- withImmediateTransaction conn $ do
                 case mTitle of
                     Just t -> do
                         execute conn "UPDATE bookmarks SET title = ? WHERE id = ?" (t, bid)
@@ -764,14 +781,66 @@ updateBookmark conn bid mTitle mNote mRead mTags = do
                             case idRows of
                                 (Only tid : _) -> execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (bid, tid)
                                 _ -> pure ()
+                removed <- case mExtracted of
+                    Nothing -> pure 0
+                    Just text -> do
+                        removedCount <- reanchorHighlights conn bid text
+                        execute
+                            conn
+                            "UPDATE bookmarks SET extracted_text = ?, reading_time_minutes = ?, enrich_state = 'manual', enrich_error = '', updated_at = ? WHERE id = ?"
+                            (text, readingMinutes text, now, bid)
+                        pure removedCount
                 execute conn "UPDATE bookmarks SET updated_at = ? WHERE id = ?" (now, bid)
                 whenChanged
-            pure True
+                pure removed
+            pure (True, removedHighlights)
   where
     whenChanged =
-        when (isJust mTitle || isJust mNote || isJust mRead || isJust mTags) $ do
+        when (isJust mTitle || isJust mNote || isJust mRead || isJust mTags || isJust mExtracted) $ do
             updatedData <- bookmarkEventData conn bid
             forM_ updatedData $ \value -> recordEvent conn BookmarkUpdated value
+    readingMinutes text =
+        let words' = length (T.words text)
+         in if words' == 0 then 0 else (words' + 219) `div` 220
+
+{- | The reader has decided a link is alive. Keep the machine @is_dead@ flag
+false, record user intent separately so the sweep skips it, and leave the
+automatic check timestamp meaningful for a later explicit recheck.
+-}
+markLinkAlive :: Connection -> Int -> IO Bool
+markLinkAlive conn bid = do
+    now <- (floor <$> getPOSIXTime) :: IO Int
+    withImmediateTransaction conn $ do
+        exists <- query conn "SELECT 1 FROM bookmarks WHERE id = ?" (Only bid) :: IO [Only Int]
+        if null exists
+            then pure False
+            else do
+                execute
+                    conn
+                    "INSERT INTO bookmark_dead_overrides (bookmark_id, reason, created_at, updated_at) VALUES (?, '', ?, ?) ON CONFLICT(bookmark_id) DO UPDATE SET updated_at = excluded.updated_at"
+                    (bid, now, now)
+                execute
+                    conn
+                    "UPDATE bookmarks SET is_dead = 0, last_checked_at = ?, updated_at = ? WHERE id = ?"
+                    (now, now, bid)
+                updatedData <- bookmarkEventData conn bid
+                forM_ updatedData $ \value -> recordEvent conn BookmarkUpdated value
+                pure True
+
+{- | Return one link to automatic checking. The next sweep may mark it dead
+again if the page really answers 404/410; until then it stays live.
+-}
+recheckLink :: Connection -> Int -> IO Bool
+recheckLink conn bid = do
+    now <- (floor <$> getPOSIXTime) :: IO Int
+    withImmediateTransaction conn $ do
+        exists <- query conn "SELECT 1 FROM bookmarks WHERE id = ?" (Only bid) :: IO [Only Int]
+        if null exists
+            then pure False
+            else do
+                execute conn "DELETE FROM bookmark_dead_overrides WHERE bookmark_id = ?" (Only bid)
+                execute conn "UPDATE bookmarks SET last_checked_at = NULL, updated_at = ? WHERE id = ?" (now, bid)
+                pure True
 
 addTagsToBookmark :: Connection -> Int -> [Text] -> IO Int
 addTagsToBookmark conn bid tags = do

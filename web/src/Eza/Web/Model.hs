@@ -25,6 +25,7 @@ module Eza.Web.Model (
     yearOf,
     isoDay,
     formatStamp,
+    formatStampUtc,
     formatFiled,
     formatProseDate,
     sortLabel,
@@ -67,6 +68,9 @@ import Eza.Types (
     SavedSearch (..),
     SearchPage,
     TagStat,
+    UndoEntry,
+    UndoPreview,
+    UndoResult,
  )
 import Eza.User (UserCreateResult, UserRole (..), UserView (..))
 import Eza.View (
@@ -123,7 +127,7 @@ data Route
     | AiTags
     | Maintenance
     | Account
-    | Accessions
+    | History
     | Save (Maybe Text) (Maybe Text) (Maybe Text)
     | NotFound
     deriving (Eq, Show)
@@ -150,7 +154,7 @@ instance Router Route where
         AiTags -> [toPath "tags", toPath "ai"]
         Maintenance -> [toPath "maintenance"]
         Account -> [toPath "account"]
-        Accessions -> [toPath "accessions"]
+        History -> [toPath "history"]
         Save title body url ->
             [toPath "save"]
                 ++ concat
@@ -234,7 +238,8 @@ classifyRoute uri = case splitPath (fromMisoString (uriPath uri)) of
     ["tags", "ai"] -> AiTags
     ["maintenance"] -> Maintenance
     ["account"] -> Account
-    ["accessions"] -> Accessions
+    ["history"] -> History
+    ["accessions"] -> History
     -- PWA share_target landing page: /save?title=..&text=..&url=..
     ["save"] -> Save (query "title") (query "text") (query "url")
     _ -> NotFound
@@ -280,7 +285,7 @@ routeTitle = \case
     AiTags -> "AI tags"
     Maintenance -> "Maintenance"
     Account -> "Account"
-    Accessions -> "Accessions by year"
+    History -> "History by year"
     Save _ _ _ -> "Save bookmark"
     NotFound -> "Not found"
 
@@ -298,7 +303,7 @@ routeSubtitle = \case
     AiTags -> "Tag suggestions."
     Maintenance -> "Dead links, prune, undo."
     Account -> "Account settings."
-    Accessions -> "Filing by year and source."
+    History -> "Filing by year and source."
     Save _ _ _ -> "File a record."
     NotFound -> "Not found."
 
@@ -492,7 +497,15 @@ data Action
     | TagAdd
     | TagRemove Text
     | SaveBookmark
-    | SavedOk
+    | ExtractEditStart
+    | ExtractEditChanged MisoString
+    | ExtractEditCancel
+    | ExtractSaved Int
+    | MarkLinkAlive
+    | LinkMarkedAlive
+    | RecheckLink
+    | LinkRechecked
+    | SavedOk Int
     | SaveFailed ApiError
     | ReadToggled
     | ReadPatched Int Bool
@@ -602,7 +615,7 @@ data Action
     | DedupMergeConfirm
     | DedupMergeCancel
     | DedupRefresh
-    | DedupMerged Text Int Int
+    | DedupMerged Text Int Int (Maybe Int)
     | DedupMergeAllOpen
     | DedupMergeAllCancel
     | DedupMergeAllConfirm
@@ -642,9 +655,17 @@ data Action
     | PruneCancel
     | PruneDone Int
     | DeadCheckRun
-    | DeadCheckDone Int Int
-    | UndoRun
-    | UndoDone Int
+    | DeadCheckDone Int Int Int
+    | UndoRefresh
+    | UndoEntriesLoaded [UndoEntry]
+    | UndoEntriesFailed ApiError
+    | UndoPreviewRequest Int
+    | UndoPreviewLoaded UndoPreview
+    | UndoPreviewFailed ApiError
+    | UndoPreviewClose
+    | UndoConfirm Int
+    | UndoDone UndoResult
+    | UndoFailed ApiError
     | MaintFailed ApiError
     | -- account
       AccountLoaded AccountInfo
@@ -1027,6 +1048,7 @@ data Model = Model
     , mDedupChoice :: M.Map Text Int
     , mDedupConfirm :: Maybe Text
     , mDedupLast :: Maybe (Int, Int)
+    , mDedupLastSnapshot :: Maybe Int
     , mDedupMoreBusy :: Bool
     , mDedupBusy :: Bool
     , mDedupMergeAllOpen :: Bool
@@ -1044,6 +1066,11 @@ data Model = Model
     , mSuggestionsLoading :: Bool
     , mSuggestionNotice :: Maybe MisoString
     , mSuggestionError :: Maybe MisoString
+    , -- extracted text editor
+      mExtractEditing :: Bool
+    , mExtractDraft :: MisoString
+    , mExtractDirty :: Bool
+    , mExtractSaving :: Bool
     , -- maintenance
       mPrune :: [BookmarkSummary]
     , mPruneSel :: [Int]
@@ -1052,6 +1079,13 @@ data Model = Model
     , mMaintBusy :: Bool
     , mConfirmPrune :: Bool
     , mPruneError :: Maybe MisoString
+    , mUndoEntries :: [UndoEntry]
+    , mUndoLoading :: Bool
+    , mUndoError :: Maybe MisoString
+    , mUndoPreview :: Maybe UndoPreview
+    , mUndoPreviewLoading :: Bool
+    , mUndoPreviewError :: Maybe MisoString
+    , mUndoBusy :: Bool
     , -- account
       mAccount :: Maybe AccountInfo
     , mAccountLoading :: Bool
@@ -1281,6 +1315,7 @@ initialModel =
         , mDedupChoice = M.empty
         , mDedupConfirm = Nothing
         , mDedupLast = Nothing
+        , mDedupLastSnapshot = Nothing
         , mDedupMoreBusy = False
         , mDedupBusy = False
         , mDedupMergeAllOpen = False
@@ -1297,6 +1332,10 @@ initialModel =
         , mSuggestionsLoading = False
         , mSuggestionNotice = Nothing
         , mSuggestionError = Nothing
+        , mExtractEditing = False
+        , mExtractDraft = ""
+        , mExtractDirty = False
+        , mExtractSaving = False
         , mPrune = []
         , mPruneSel = []
         , mDeadCount = Nothing
@@ -1304,6 +1343,13 @@ initialModel =
         , mMaintBusy = False
         , mConfirmPrune = False
         , mPruneError = Nothing
+        , mUndoEntries = []
+        , mUndoLoading = False
+        , mUndoError = Nothing
+        , mUndoPreview = Nothing
+        , mUndoPreviewLoading = False
+        , mUndoPreviewError = Nothing
+        , mUndoBusy = False
         , mAccount = Nothing
         , mAccountLoading = False
         , mAccountError = Nothing
@@ -1439,7 +1485,7 @@ paletteEntries m = filter matches (fileRecord ++ savedSearches ++ bookmarks ++ s
         , ("tags", "vocabulary", Navigate Tags)
         , ("ai tags", "suggestions", Navigate AiTags)
         , ("maintenance", "dead links and prune", Navigate Maintenance)
-        , ("accessions", "by year", Navigate Accessions)
+        , ("history", "by year", Navigate History)
         , ("account", "security", Navigate Account)
         ]
 
@@ -1480,6 +1526,16 @@ formatStamp t0
         , (11, "Nov")
         , (12, "Dec")
         ]
+
+-- | Undo history timestamp in UTC: 2026.11.09 18:42 UTC.
+formatStampUtc :: Int -> MisoString
+formatStampUtc t
+    | t <= 0 = ""
+    | otherwise =
+        let (y, mo, d) = civilFromDays (t `div` 86400)
+            seconds = t `mod` 86400
+            two n = if n < 10 then '0' : show n else show n
+         in ms (show y <> "." <> two mo <> "." <> two d <> " " <> two (seconds `div` 3600) <> ":" <> two ((seconds `mod` 3600) `div` 60) <> " UTC")
 
 -- | Filed date in data contexts: 2025.11.03.
 formatFiled :: Int -> MisoString

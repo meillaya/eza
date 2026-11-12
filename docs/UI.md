@@ -66,18 +66,25 @@ fixed optical size so every browser draws the same letterforms.
 |---|---|
 | `/` | The ledger: masthead, facets, year dividers, rows, field drawer, selection |
 | `/inbox` | Unread ledger with mark loaded unread read |
-| `/bookmark/:id` | Record: bounded reading window, catalogue record, note, see also, actions |
-| `/accessions` | The archive as an index: filing days per year, ranked sources, long tail; a year, day or source opens the ledger filtered |
+| `/bookmark/:id` | Record: bounded reading window with editable extracted text, catalogue record, link health, note, see also, actions |
+| `/history` | The archive as an index: filing days per year, ranked sources, long tail; a year, day or source opens the ledger filtered |
 | `/graph` | The whole library or a local neighbourhood as a canvas: records, tags, resolved wikilinks and tag memberships, layout presets, label modes and colour groups, with pan, zoom, fit, hover preview, click to open, filter and tags toggle |
 | `/views` | Saved graph and ledger views: open, set default, rename, duplicate, export and import |
 | `/dedup` | Duplicate groups: paged same-URL groups with a one-shot merge, and advisory same-title groups |
 | `/tags` | Tag table, case duplicates, near-duplicate pairs |
 | `/tags/ai` | Advisory tag suggestions, applied one bookmark at a time |
-| `/maintenance` | Dead-link sweep, prune candidates, undo |
+| `/maintenance` | Dead-link sweep, manual link health, prune candidates, undo history and preview |
 | `/account` | Username and role, password, optional passkey second factor, recovery, sessions, tokens, share links, webhooks, rules, import / export, capture; admins also get a users tab |
 | `/save` | Quick save from the PWA share target or bookmarklet |
 | `/login`, `/setup`, `/recover`, `/account/add-passkey` | Username/password sign-in, optional passkey second factor, first claim, recovery reset |
 | `/s/:token` | Read-only share page for a bookmark or saved search |
+
+Maintenance shows the newest five usable undo snapshots. Each row names the
+operation and its UTC time, counts the rows it would restore, and samples the
+records or tags. Inspecting a row opens the confirmation preview; the newest
+snapshot is the only one whose undo button is enabled, because undo is a
+stack. Duplicate merge banners open that same preview for their exact
+snapshot.
 
 Ledger rows expose a tick control once the row is hovered or focused. The
 sticky selection bar then shows the count and the bulk actions, and keeps
@@ -119,19 +126,19 @@ off by default.
 
 The masthead carries the wordmark, the provenance line, the search line and the
 section links: ledger, inbox, graph, views, duplicates, tags, ai tags,
-maintenance, accessions and account. A sign-out control sits at the end of the
+maintenance, history and account. A sign-out control sits at the end of the
 section links and in the mobile bar, and every account tab repeats it in the
 page head. The command palette also offers "Sign out"; an unsaved note asks for
 confirmation first. The ledger's facet rail lists the top sources and tags, saved
 searches, the unread and dead counts and a weekly filing sparkline; all sources
-opens the accessions index.
+opens the history index.
 
 States are part of the design: fresh library, filtered to nothing, loading, API
 error, no extraction, enrichment queued and failed, dead link, no note, no
 backlinks, empty inbox, never-run sweep, empty account panels, expired share
 link. Every one has copy.
 
-## Graph and accessions
+## Graph and history
 
 `/graph` draws the whole library on one canvas: a node for every record and
 every tag, and a line for each resolved wikilink and each tag membership. The
@@ -166,7 +173,7 @@ each preset's positions from the server: the client asks
 layout revision matches the graph payload it holds, and falls back to its own
 deterministic builder when it does not.
 
-The accessions index turns its marks into the search line: a year opens
+The history index turns its marks into the search line: a year opens
 `year:2025`, a filing day or busiest-day row opens `day:2025-11-03`, and a
 source opens the ledger filtered by that domain. The date operators read the
 UTC filing date, and the chips above the ledger name the operators and can be
@@ -297,6 +304,6 @@ instead of showing a zero that looks like a result.
 Copy earns its place: it states a fact the reader cannot already see, asks for a
 decision, or names a control. Explanatory paragraphs about how the software
 works, colophon lines, marketing words and repeated figures are left out. The
-structural vocabulary of the catalogue stays (ledger, filed, record, accessions,
+structural vocabulary of the catalogue stays (ledger, filed, record, history,
 marks) because it names the interface, not because it decorates it. There is no
 exclamation mark and no emoji.

@@ -85,6 +85,7 @@ recordPage m detail =
         ]
         ( [recordTop detail, recordHead m detail]
             ++ [deadBanner | bdIsDead detail]
+            ++ [manualAliveNote | bdManualAlive detail]
             ++ [ H.div_
                     [HP.class_ "detail-grid"]
                     [ H.div_
@@ -220,12 +221,12 @@ extractAction detail
     | hasText detail = []
     | stringEq (bdEnrichState detail) "failed" =
         [ H.button_
-            [HP.class_ "btn", HE.onClick (RunBookmarkAction (bdId detail) "extract")]
+            [HP.class_ "btn", HE.onClick (RetryEnrich (bdId detail))]
             [text "extract again"]
         ]
     | otherwise =
         [ H.button_
-            [HP.class_ "btn", HE.onClick (RunBookmarkAction (bdId detail) "extract")]
+            [HP.class_ "btn", HE.onClick (RetryEnrich (bdId detail))]
             [text "extract text"]
         ]
 
@@ -234,15 +235,40 @@ extractAction detail
 deadBanner :: View () () Model Action
 deadBanner =
     H.div_
-        [HP.class_ "detail-dead", C.styleInline_ "display:flex"]
+        [HP.class_ "detail-dead", C.styleInline_ "display:flex", HP.data_ "testid" "dead-banner"]
         [ H.span_
             [HP.class_ "detail-dead-mark", HP.aria_ "hidden" "true"]
             [text "!"]
         , H.p_
             [HP.class_ "detail-dead-copy"]
             [ H.strong_ [] [text "This link is marked dead."]
-            , text " The page no longer answers."
+            , text " A check did not reach the page, or the page answered as removed."
             ]
+        , H.button_
+            [ HP.class_ "btn btn--sm"
+            , HP.type_ "button"
+            , HP.data_ "testid" "mark-not-dead"
+            , HE.onClick MarkLinkAlive
+            ]
+            [text "mark not dead"]
+        ]
+
+manualAliveNote :: View () () Model Action
+manualAliveNote =
+    H.div_
+        [HP.class_ "detail-manual", HP.role_ "status", HP.data_ "testid" "manual-alive"]
+        [ H.p_
+            [HP.class_ "detail-manual-copy"]
+            [ H.strong_ [] [text "Kept alive manually."]
+            , text " Automatic checks skip this record."
+            ]
+        , H.button_
+            [ HP.class_ "btn btn--sm"
+            , HP.type_ "button"
+            , HP.data_ "testid" "recheck-link"
+            , HE.onClick RecheckLink
+            ]
+            [text "use automatic checks"]
         ]
 
 -- --------------------------------------------------------------- reading --
@@ -257,11 +283,25 @@ readingColumn m detail =
                 [HP.class_ "read-window"]
                 ( [ H.header_
                         [HP.class_ "read-window-head"]
-                        [ H.span_ [HP.class_ "sc"] [text "Extracted text"]
-                        , H.span_ [HP.class_ "read-count"] [text (readCount detail)]
-                        ]
+                        ( [ H.span_ [HP.class_ "sc"] [text "Extracted text"]
+                          , H.span_ [HP.class_ "read-count"] [text (readCount m detail)]
+                          ]
+                            ++ [ H.button_
+                                    [ HP.class_ "read-edit"
+                                    , HP.type_ "button"
+                                    , HP.data_ "testid" "extract-edit"
+                                    , HP.aria_ "label" "Edit extracted text"
+                                    , HE.onClick ExtractEditStart
+                                    ]
+                                    [text "edit"]
+                               | not (mExtractEditing m)
+                               ]
+                        )
                   ]
-                    ++ [readingCardBody m detail]
+                    ++ [ if mExtractEditing m
+                            then extractEditor m detail
+                            else readingCardBody m detail
+                       ]
                 )
            ]
         ++ selectionBar m
@@ -269,17 +309,60 @@ readingColumn m detail =
   where
     numbered = numberedHighlights (bdExtractedText detail) (mHighlights m)
 
-readCount :: BookmarkDetail -> MisoString
-readCount detail
+extractEditor :: Model -> BookmarkDetail -> View () () Model Action
+extractEditor m _detail =
+    H.div_
+        [HP.class_ "read-editor", HP.data_ "testid" "extract-editor"]
+        [ H.textarea_
+            [ HP.id_ "extract-text-editor"
+            , HP.class_ "read-editor-input"
+            , HP.value_ (mExtractDraft m)
+            , HP.placeholder_ "Paste or correct the extracted text"
+            , HP.aria_ "label" "Extracted text editor"
+            , HP.spellcheck_ False
+            , HE.onInput ExtractEditChanged
+            ]
+        , if null (mHighlights m)
+            then H.span_ [] []
+            else
+                H.p_
+                    [HP.class_ "read-editor-warn"]
+                    [text "Saving re-anchors this record's highlights. A quote that no longer appears is removed."]
+        , H.div_
+            [HP.class_ "read-editor-actions"]
+            [ H.button_
+                ( [ HP.class_ "btn btn--sm btn--strong"
+                  , HP.type_ "button"
+                  , HP.data_ "testid" "extract-save"
+                  , HE.onClick SaveBookmark
+                  ]
+                    ++ disabledAttr (mSaving m)
+                )
+                [text (if mSaving m then "saving..." else "save text")]
+            , H.button_
+                [ HP.class_ "btn btn--sm"
+                , HP.type_ "button"
+                , HP.data_ "testid" "extract-cancel"
+                , HE.onClick ExtractEditCancel
+                ]
+                [text "cancel"]
+            ]
+        ]
+
+readCount :: Model -> BookmarkDetail -> MisoString
+readCount m detail
+    | mExtractEditing m = ms ("editing" :: MisoString)
     | hasText detail =
         ms
             ( paragraphCount (length (visibleParagraphs (bdExtractedText detail)))
                 <> " · "
                 <> T.pack (show (bdReadingTimeMinutes detail))
                 <> " min"
+                <> (if stringEq (bdEnrichState detail) "manual" then " · edited" else "")
             )
     | stringEq (bdEnrichState detail) "queued" = ms ("queued" :: MisoString)
     | stringEq (bdEnrichState detail) "failed" = ms ("failed" :: MisoString)
+    | stringEq (bdEnrichState detail) "manual" = ms ("manual" :: MisoString)
     | otherwise = ms ("none" :: MisoString)
 
 readingCardBody :: Model -> BookmarkDetail -> View () () Model Action
@@ -294,11 +377,16 @@ readingCardBody m detail
     | stringEq (bdEnrichState detail) "queued" =
         readNote "Extraction is queued."
     | stringEq (bdEnrichState detail) "failed" =
-        readNote "Extraction failed."
+        readNote (ms ("Extraction failed" <> errorSuffix (bdEnrichError detail) <> "."))
     | otherwise =
         readNote "No text extracted yet."
   where
     numbered = numberedHighlights (bdExtractedText detail) (mHighlights m)
+
+errorSuffix :: Text -> String
+errorSuffix raw =
+    let line = T.strip (T.take 180 (T.replace "\n" " " raw))
+     in if T.null line then "" else ": " <> T.unpack line
 
 readNote :: MisoString -> View () () Model Action
 readNote message =
@@ -774,7 +862,7 @@ extractAgain detail
         [ H.button_
             [ HP.class_ "action"
             , HP.type_ "button"
-            , HE.onClick (RunBookmarkAction (bdId detail) "extract")
+            , HE.onClick (RetryEnrich (bdId detail))
             ]
             [text "extract again"]
         ]

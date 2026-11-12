@@ -10,18 +10,21 @@ module Eza.Enrich (
     runFaviconWorkerFor,
     backfillCachedFavicons,
     backfillFaviconStep,
+    repairStoredFavicons,
 ) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
 import Control.Exception (SomeException, bracket_, try)
-import Control.Monad (forever)
+import Control.Monad (forM_, forever)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
 import Network.HTTP.Client (Manager)
 import Network.URI (URIAuth (..), parseURI, parseURIReference, relativeTo, uriAuthority, uriRegName, uriScheme)
@@ -32,6 +35,7 @@ import qualified Eza.Db as Db
 import Eza.Extract (Extracted (..), extractHtml)
 import Eza.Favicon
 import Eza.Fetch
+import Eza.Highlights (reanchorHighlights)
 import Eza.Jobs
 import Eza.Sidecar (sidecarExtract)
 
@@ -43,60 +47,82 @@ enqueueEnrichment conn bookmarkId = do
 
 enrichBookmark :: Manager -> Config -> Connection -> Int -> IO (Either Text ())
 enrichBookmark manager cfg conn bookmarkId = do
-    rows <- query conn "SELECT url, enrich_attempts FROM bookmarks WHERE id = ?" (Only bookmarkId) :: IO [(Text, Int)]
+    rows <- query conn "SELECT url, enrich_attempts, enrich_state FROM bookmarks WHERE id = ?" (Only bookmarkId) :: IO [(Text, Int, Text)]
     case rows of
         [] -> pure (Left "bookmark not found")
-        ((url, attempts) : _) -> do
-            pageResult <- fetchUrl (pageFetchOptions manager cfg) url
-            case pageResult of
-                Left err -> do
-                    markFailed conn bookmarkId (T.pack (show err)) attempts
-                    pure (Left (T.pack (show err)))
-                Right page -> do
-                    let html = decodeBody (fpCharset page) (fpBody page)
-                        finalUrl = if T.null (fpFinalUrl page) then url else fpFinalUrl page
-                    extracted <- case cfgSidecarCmd cfg of
-                        Just command -> do
-                            sidecar <- sidecarExtract (T.pack command) finalUrl html
-                            pure (either (const (extractHtml html)) id sidecar)
-                        Nothing -> pure (extractHtml html)
-                    let text = exText extracted
-                        wordCount = length (T.words text)
-                        reading = if wordCount == 0 then 0 else (wordCount + 219) `div` 220
-                        image = resolveAgainst finalUrl (exImage extracted)
-                    if T.null (T.strip text)
-                        then do
-                            markFailed conn bookmarkId "empty extraction" attempts
-                            pure (Left "empty extraction")
-                        else do
-                            favicon <- fetchIcon manager cfg html finalUrl
-                            -- Two statements inside one transaction: sqlite-simple only has
-                            -- ToRow instances up to 10-tuples, and the FTS triggers only fire
-                            -- for the columns that actually changed.
-                            withImmediateTransaction conn $ do
-                                execute
-                                    conn
-                                    "UPDATE bookmarks SET title = CASE WHEN trim(title) = '' THEN ? ELSE title END, description = CASE WHEN trim(description) = '' THEN ? ELSE description END, author = CASE WHEN trim(author) = '' THEN ? ELSE author END, sitename = CASE WHEN trim(sitename) = '' THEN ? ELSE sitename END, published_at = CASE WHEN published_at IS NULL THEN ? ELSE published_at END, language = CASE WHEN trim(language) = '' THEN ? ELSE language END, image_url = CASE WHEN trim(image_url) = '' THEN ? ELSE image_url END, enrich_attempts = enrich_attempts + 1, updated_at = strftime('%s','now') WHERE id = ?"
-                                    ( exTitle extracted
-                                    , exDescription extracted
-                                    , exAuthor extracted
-                                    , exSitename extracted
-                                    , exPublished extracted
-                                    , exLanguage extracted
-                                    , image
-                                    , bookmarkId
-                                    )
-                                execute
-                                    conn
-                                    "UPDATE bookmarks SET extracted_text = ?, final_url = ?, reading_time_minutes = ?, enrich_state = 'ok', enrich_error = '', enriched_at = strftime('%s','now'), updated_at = strftime('%s','now') WHERE id = ?"
-                                    (text, finalUrl, reading, bookmarkId)
-                            case favicon of
-                                Nothing -> pure ()
-                                Just (mime, bytes, source) -> do
-                                    hashText <- putFavicon conn (domainOfUrl finalUrl) source mime bytes
-                                    withImmediateTransaction conn $
-                                        execute conn "UPDATE bookmarks SET favicon_url = ? WHERE id = ?" (iconUrlFor (domainOfUrl finalUrl) hashText, bookmarkId)
-                            pure (Right ())
+        ((url, attempts, state) : _)
+            | state == "manual" -> pure (Right ())
+            | otherwise -> do
+                pageResult <- fetchUrl (pageFetchOptions manager cfg) url
+                case pageResult of
+                    Left err -> do
+                        markFailed conn bookmarkId (T.pack (show err)) attempts
+                        pure (Left (T.pack (show err)))
+                    Right page -> do
+                        let html = decodeBody (fpCharset page) (fpBody page)
+                            finalUrl = if T.null (fpFinalUrl page) then url else fpFinalUrl page
+                        extracted <- case cfgSidecarCmd cfg of
+                            Just command -> do
+                                sidecar <- sidecarExtract (T.pack command) finalUrl html
+                                pure (either (const (extractHtml html)) id sidecar)
+                            Nothing -> pure (extractHtml html)
+                        let text = exText extracted
+                            wordCount = length (T.words text)
+                            reading = if wordCount == 0 then 0 else (wordCount + 219) `div` 220
+                            image = resolveAgainst finalUrl (exImage extracted)
+                        if T.null (T.strip text)
+                            then do
+                                markFailed conn bookmarkId "empty extraction" attempts
+                                pure (Left "empty extraction")
+                            else do
+                                -- Enrichment and a manual text edit may race. The
+                                -- write transaction re-checks the state: if the
+                                -- reader saved manual text while this fetch was in
+                                -- flight, their text wins and no extraction fields
+                                -- are overwritten.
+                                withImmediateTransaction conn $ do
+                                    states <- query conn "SELECT enrich_state FROM bookmarks WHERE id = ?" (Only bookmarkId) :: IO [Only Text]
+                                    case states of
+                                        (Only current : _)
+                                            | current == "manual" -> pure ()
+                                        _ -> do
+                                            execute
+                                                conn
+                                                "UPDATE bookmarks SET title = CASE WHEN trim(title) = '' THEN ? ELSE title END, description = CASE WHEN trim(description) = '' THEN ? ELSE description END, author = CASE WHEN trim(author) = '' THEN ? ELSE author END, sitename = CASE WHEN trim(sitename) = '' THEN ? ELSE sitename END, published_at = CASE WHEN published_at IS NULL THEN ? ELSE published_at END, language = CASE WHEN trim(language) = '' THEN ? ELSE language END, image_url = CASE WHEN trim(image_url) = '' THEN ? ELSE image_url END, enrich_attempts = enrich_attempts + 1, updated_at = strftime('%s','now') WHERE id = ?"
+                                                ( exTitle extracted
+                                                , exDescription extracted
+                                                , exAuthor extracted
+                                                , exSitename extracted
+                                                , exPublished extracted
+                                                , exLanguage extracted
+                                                , image
+                                                , bookmarkId
+                                                )
+                                            _ <- reanchorHighlights conn bookmarkId text
+                                            execute
+                                                conn
+                                                "UPDATE bookmarks SET extracted_text = ?, final_url = ?, reading_time_minutes = ?, enrich_state = 'ok', enrich_error = '', enriched_at = strftime('%s','now'), updated_at = strftime('%s','now') WHERE id = ?"
+                                                (text, finalUrl, reading, bookmarkId)
+                                applyCachedFavicon conn (domainOfUrl finalUrl) bookmarkId
+                                pure (Right ())
+
+{- | Apply an icon that is already cached for the bookmark's domain. This is
+the only icon work enrichment does; a missing domain is the backfill worker's
+job, so one domain is never requested once per link.
+-}
+applyCachedFavicon :: Connection -> Text -> Int -> IO ()
+applyCachedFavicon conn domain bookmarkId
+    | T.null domain = pure ()
+    | otherwise = do
+        rows <- query conn "SELECT content_hash FROM favicons WHERE domain = ? AND fail_count = 0 AND length(bytes) > 1" (Only domain) :: IO [Only Text]
+        case rows of
+            (Only contentHash : _) ->
+                withImmediateTransaction conn $
+                    execute
+                        conn
+                        "UPDATE bookmarks SET favicon_url = ? WHERE id = ? AND (favicon_url = '' OR favicon_url NOT LIKE '/api/v1/favicons/%')"
+                        (iconUrlFor domain contentHash, bookmarkId)
+            [] -> pure ()
 
 {- | Page fetch: a document, with a cap in the 2-5 MiB range and the standard
 timeout and private-address guard.
@@ -145,21 +171,6 @@ resolveAgainst base value
                     Nothing -> value
                 Nothing -> value
 
-fetchIcon :: Manager -> Config -> Text -> Text -> IO (Maybe (Text, ByteString, Text))
-fetchIcon manager cfg html finalUrl = do
-    let candidates = take 4 (parseIconLinks html finalUrl) <> fallbackCandidates finalUrl
-    tryCandidates (dedupe candidates)
-  where
-    tryCandidates [] = pure Nothing
-    tryCandidates (url : rest) = do
-        result <- fetchUrl (iconFetchOptions manager cfg) url
-        case result of
-            Left _ -> tryCandidates rest
-            Right page ->
-                case sniffImage (fpBody page) of
-                    Nothing -> tryCandidates rest
-                    Just mime -> pure (Just (mime, fpBody page, url))
-
 iconFetchOptions :: Manager -> Config -> FetchOptions
 iconFetchOptions manager cfg = anyOptions manager (cfgFetchTimeoutMs cfg) (cfgFaviconMaxBytes cfg) (cfgAllowPrivateFetch cfg)
 
@@ -194,7 +205,7 @@ markFailed conn bookmarkId message attempts = do
     withImmediateTransaction conn $
         execute
             conn
-            "UPDATE bookmarks SET enrich_state = 'failed', enrich_error = ?, enrich_attempts = ?, updated_at = strftime('%s','now') WHERE id = ?"
+            "UPDATE bookmarks SET enrich_state = 'failed', enrich_error = ?, enrich_attempts = ?, updated_at = strftime('%s','now') WHERE id = ? AND enrich_state <> 'manual'"
             (message, attempts + 1, bookmarkId)
 
 {- | The single database worker kept for the CLI and old call sites: it opens
@@ -241,44 +252,80 @@ newQSemFor cfg = newQSem (max 1 (cfgEnrichWorkers cfg))
 
 {- | Fill @bookmarks.favicon_url@ from an icon already cached for that domain.
 One SQL update covers every bookmark on the domain, so a site with 500 links
-costs one lookup and no network request. Returns 'True' when it changed rows.
+costs one lookup and no network request. A stale hash or a remote/empty URL is
+repaired too, not just the empty case. Returns 'True' when it changed rows.
 -}
 backfillCachedFavicons :: Connection -> IO Bool
 backfillCachedFavicons conn = do
     rows <-
         query
             conn
-            "SELECT f.domain, f.content_hash FROM favicons f WHERE f.fail_count = 0 AND length(f.bytes) > 0 AND EXISTS (SELECT 1 FROM bookmarks b WHERE b.domain = f.domain AND b.favicon_url = '') ORDER BY f.domain LIMIT 1"
+            "SELECT f.domain, f.content_hash FROM favicons f WHERE f.fail_count = 0 AND length(f.bytes) > 1 AND EXISTS (SELECT 1 FROM bookmarks b WHERE b.domain = f.domain AND b.favicon_url <> ('/api/v1/favicons/' || f.domain || '?v=' || substr(f.content_hash,1,8))) ORDER BY f.domain LIMIT 1"
             () ::
             IO [(Text, Text)]
     case rows of
         [] -> pure False
         ((domain, contentHash) : _) -> do
-            withImmediateTransaction conn $
-                execute
-                    conn
-                    "UPDATE bookmarks SET favicon_url = ? WHERE domain = ? AND favicon_url = ''"
-                    (iconUrlFor domain contentHash, domain)
+            updateDomainFaviconUrls conn domain contentHash
             pure True
+
+updateDomainFaviconUrls :: Connection -> Text -> Text -> IO ()
+updateDomainFaviconUrls conn domain contentHash =
+    withImmediateTransaction conn $
+        execute
+            conn
+            "UPDATE bookmarks SET favicon_url = ? WHERE domain = ? AND favicon_url <> ?"
+            (iconUrlFor domain contentHash, domain, iconUrlFor domain contentHash)
+
+{- | One-time cache validation at worker start. ICOs are cropped to a complete
+entry and rewritten; any other incomplete or unsupported body is deleted and
+its bookmark rows are cleared so the normal backfill can refetch it. Stale hash
+URLs for valid icons are repaired at the same time. This is the part that
+repairs rows written before truncation was rejected; it is not a schema marker.
+-}
+repairStoredFavicons :: Connection -> IO ()
+repairStoredFavicons conn = do
+    rows <-
+        query
+            conn
+            "SELECT domain, mime, bytes, source_url, content_hash FROM favicons WHERE fail_count = 0 AND length(bytes) > 1"
+            () ::
+            IO [(Text, Text, ByteString, Text, Text)]
+    forM_ rows $ \(domain, mime, bytes, source, contentHash) ->
+        case normalizeIcon bytes of
+            Nothing -> do
+                withImmediateTransaction conn $ do
+                    execute conn "DELETE FROM favicons WHERE domain = ?" (Only domain)
+                    execute conn "UPDATE bookmarks SET favicon_url = '' WHERE domain = ?" (Only domain)
+            Just (mime', bytes')
+                | mime' == mime && bytes' == bytes && not (T.null contentHash) -> pure ()
+                | otherwise -> do
+                    hashText <- putFavicon conn domain source mime' bytes'
+                    updateDomainFaviconUrls conn domain hashText
 
 {- | Fetch one missing domain icon and apply it to every bookmark on that
 domain. The domain with the most unfilled bookmarks goes first, so the visible
 rows improve early. Domains with no icon at the usual paths are parked after
-three attempts. Returns 'True' when this step did something.
+three attempts. A cached icon with an expired TTL is refreshed after missing
+domains have been served. Returns 'True' when this step did something.
 -}
 backfillFaviconStep :: Manager -> Config -> Connection -> IO Bool
 backfillFaviconStep manager cfg conn = do
     cached <- backfillCachedFavicons conn
     if cached
         then pure True
-        else backfillRemoteFavicon manager cfg conn
+        else do
+            remote <- backfillRemoteFavicon manager cfg conn
+            if remote
+                then pure True
+                else backfillExpiredFavicon manager cfg conn
 
 backfillRemoteFavicon :: Manager -> Config -> Connection -> IO Bool
 backfillRemoteFavicon manager cfg conn = do
     rows <-
         query
             conn
-            "SELECT b.domain FROM bookmarks b LEFT JOIN favicons f ON f.domain = b.domain WHERE b.domain <> '' AND b.favicon_url = '' AND (f.domain IS NULL OR (f.fail_count < 3 AND f.last_error <> '')) GROUP BY b.domain ORDER BY COUNT(*) DESC, b.domain LIMIT 1"
+            "SELECT b.domain FROM bookmarks b LEFT JOIN favicons f ON f.domain = b.domain WHERE b.domain <> '' AND (b.favicon_url = '' OR b.favicon_url NOT LIKE '/api/v1/favicons/%') AND (f.domain IS NULL OR (f.fail_count < 3 AND f.last_error <> '')) GROUP BY b.domain ORDER BY COUNT(*) DESC, b.domain LIMIT 1"
             () ::
             IO [Only Text]
     case rows of
@@ -295,18 +342,50 @@ backfillRemoteFavicon manager cfg conn = do
                             pure True
                         Just (mime, bytes, source) -> do
                             hashText <- putFavicon conn domain source mime bytes
+                            updateDomainFaviconUrls conn domain hashText
+                            pure True
+
+{- | Refresh one valid icon whose @fetched_at@ is older than the configured
+TTL, after missing domains have been exhausted. A failed refresh advances the
+timestamp instead of parking a good icon, so the retry does not spin.
+-}
+backfillExpiredFavicon :: Manager -> Config -> Connection -> IO Bool
+backfillExpiredFavicon manager cfg conn = do
+    now <- floor <$> getPOSIXTime
+    let cutoff = now - max 1 (cfgFaviconTtlDays cfg) * 86400
+    rows <-
+        query
+            conn
+            "SELECT f.domain FROM favicons f WHERE f.fail_count = 0 AND length(f.bytes) > 1 AND f.fetched_at < ? AND EXISTS (SELECT 1 FROM bookmarks b WHERE b.domain = f.domain) ORDER BY f.fetched_at LIMIT 1"
+            (Only cutoff) ::
+            IO [Only Text]
+    case rows of
+        [] -> pure False
+        (Only domain : _) -> do
+            sample <- query conn "SELECT url FROM bookmarks WHERE domain = ? LIMIT 1" (Only domain) :: IO [Only Text]
+            case sample of
+                [] -> do
+                    withImmediateTransaction conn $
+                        execute conn "UPDATE favicons SET fetched_at = ? WHERE domain = ?" (now, domain)
+                    pure True
+                (Only sampleUrl : _) -> do
+                    fetched <- fetchDomainIcon manager cfg sampleUrl
+                    case fetched of
+                        Nothing -> do
                             withImmediateTransaction conn $
-                                execute
-                                    conn
-                                    "UPDATE bookmarks SET favicon_url = ? WHERE domain = ?"
-                                    (iconUrlFor domain hashText, domain)
+                                execute conn "UPDATE favicons SET fetched_at = ? WHERE domain = ?" (now, domain)
+                            pure True
+                        Just (mime, bytes, source) -> do
+                            hashText <- putFavicon conn domain source mime bytes
+                            updateDomainFaviconUrls conn domain hashText
                             pure True
 
 {- | Find one icon for a domain, cheapest path first. Conventional locations
 cover most sites with zero page parsing; when they all miss, one homepage fetch
 (and, if that fails, the sampled bookmark page) can still expose a declared
-@<link rel="icon">@. This stays a per-domain cost: the icon is then cached and
-applied to every bookmark on the domain.
+@<link rel="icon">@. Inline data:image links are parsed locally. This stays a
+per-domain cost: the icon is then cached and applied to every bookmark on the
+domain.
 -}
 fetchDomainIcon :: Manager -> Config -> Text -> IO (Maybe (Text, ByteString, Text))
 fetchDomainIcon manager cfg sampleUrl = do
@@ -318,14 +397,24 @@ fetchDomainIcon manager cfg sampleUrl = do
     options = iconFetchOptions manager cfg
 
     tryIcons [] = pure Nothing
-    tryIcons (url : rest) = do
-        result <- fetchUrl options url
-        case result of
-            Left _ -> tryIcons rest
-            Right page ->
-                case sniffImage (fpBody page) of
-                    Nothing -> tryIcons rest
-                    Just mime -> pure (Just (mime, fpBody page, url))
+    tryIcons (url : rest)
+        | "data:image/" `T.isPrefixOf` T.toLower url =
+            case parseDataIcon url of
+                Just (_, raw)
+                    | BS.length raw <= cfgFaviconMaxBytes cfg ->
+                        case normalizeIcon raw of
+                            Just (mime, bytes) -> pure (Just (mime, bytes, "data:image"))
+                            Nothing -> tryIcons rest
+                    | otherwise -> tryIcons rest
+                Nothing -> tryIcons rest
+        | otherwise = do
+            result <- fetchUrl options url
+            case result of
+                Left _ -> tryIcons rest
+                Right page ->
+                    case normalizeIcon (fpBody page) of
+                        Nothing -> tryIcons rest
+                        Just (mime, bytes) -> pure (Just (mime, bytes, url))
 
     -- The homepage is the canonical place for a declared icon; the sampled
     -- bookmark URL is a fallback for sites whose root is a redirect or shell.
@@ -339,7 +428,7 @@ fetchDomainIcon manager cfg sampleUrl = do
                 Right page -> do
                     let html = decodeBody (fpCharset page) (fpBody page)
                         finalUrl = if T.null (fpFinalUrl page) then pageUrl else fpFinalUrl page
-                    declared <- tryIcons (take 4 (parseIconLinks html finalUrl))
+                    declared <- tryIcons (take 6 (parseIconLinks html finalUrl))
                     case declared of
                         Just icon -> pure (Just icon)
                         Nothing -> go rest
@@ -362,6 +451,10 @@ many bookmarks use it.
 runFaviconWorkerFor :: Manager -> Config -> FilePath -> QSem -> IO ()
 runFaviconWorkerFor manager cfg databasePath sem = do
     conn <- Db.openDb databasePath
+    repaired <- try (repairStoredFavicons conn) :: IO (Either SomeException ())
+    case repaired of
+        Left err -> hPutStrLn stderr ("eza: favicon repair: " <> show err)
+        Right () -> pure ()
     forever $ do
         outcome <-
             bracket_ (waitQSem sem) (signalQSem sem) $

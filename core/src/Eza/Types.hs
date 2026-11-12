@@ -22,6 +22,10 @@ module Eza.Types (
     DedupCounts (..),
     DedupReport (..),
     DedupMergeAllReport (..),
+    UndoBookmarkRef (..),
+    UndoEntry (..),
+    UndoPreview (..),
+    UndoResult (..),
 ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON, genericToJSON, object, withObject, (.!=), (.:), (.:?), (.=))
@@ -78,6 +82,7 @@ data BookmarkDetail = BookmarkDetail
     , bdEnrichError :: Text
     , bdReadingTimeMinutes :: Int
     , bdLinks :: [Backlink]
+    , bdManualAlive :: Bool
     }
     deriving stock (Show, Eq, Generic)
 
@@ -391,3 +396,75 @@ instance ToJSON DedupMergeAllReport where
     toJSON = genericToJSON (jsonOptions "dm")
 instance FromJSON DedupMergeAllReport where
     parseJSON = genericParseJSON (jsonOptions "dm")
+
+{- | One record named by an undo snapshot. Used by the Maintenance undo
+preview; only the identifying fields are sent, never a full bookmark.
+-}
+data UndoBookmarkRef = UndoBookmarkRef
+    { ubId :: Int
+    , ubTitle :: Text
+    , ubUrl :: Text
+    , ubDomain :: Text
+    }
+    deriving stock (Show, Eq, Generic)
+
+instance ToJSON UndoBookmarkRef where
+    toJSON = genericToJSON (jsonOptions "ub")
+instance FromJSON UndoBookmarkRef where
+    parseJSON = genericParseJSON (jsonOptions "ub")
+
+{- | One action in the visible undo stack. Counts describe the rows the
+snapshot would restore; only the newest usable snapshot is undoable. Samples
+are capped by the server and repeated in 'UndoPreview' for the full view.
+-}
+data UndoEntry = UndoEntry
+    { unId :: Int
+    , unOp :: Text
+    , unCreatedAt :: Int
+    , unRowCount :: Int
+    , unBookmarkCount :: Int
+    , unTagCount :: Int
+    , unHighlightCount :: Int
+    , unCaptureCount :: Int
+    , unLinkCount :: Int
+    , unCanUndo :: Bool
+    , unLegacy :: Bool
+    , unBookmarks :: [UndoBookmarkRef]
+    , unTags :: [Text]
+    }
+    deriving stock (Show, Eq, Generic)
+
+instance ToJSON UndoEntry where
+    toJSON = genericToJSON (jsonOptions "un")
+instance FromJSON UndoEntry where
+    parseJSON = genericParseJSON (jsonOptions "un")
+
+{- | The confirmation view for one snapshot: the same summary plus up to a
+hundred affected records and tag names, and whether either list was capped.
+-}
+data UndoPreview = UndoPreview
+    { upEntry :: UndoEntry
+    , upBookmarks :: [UndoBookmarkRef]
+    , upTags :: [Text]
+    , upTruncated :: Bool
+    }
+    deriving stock (Show, Eq, Generic)
+
+instance ToJSON UndoPreview where
+    toJSON = genericToJSON (jsonOptions "up")
+instance FromJSON UndoPreview where
+    parseJSON = genericParseJSON (jsonOptions "up")
+
+-- | Result of one undo write.
+data UndoResult = UndoResult
+    { urRestored :: Int
+    , urSkipped :: Int
+    , urSnapshotId :: Int
+    , urOp :: Text
+    }
+    deriving stock (Show, Eq, Generic)
+
+instance ToJSON UndoResult where
+    toJSON = genericToJSON (jsonOptions "ur")
+instance FromJSON UndoResult where
+    parseJSON = genericParseJSON (jsonOptions "ur")

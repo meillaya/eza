@@ -51,7 +51,7 @@ services:
       # fetch limits, favicon cache, and the public-share lifetime.
       EZA_ENRICH_WORKERS: ${EZA_ENRICH_WORKERS:-2}
       EZA_FETCH_TIMEOUT_MS: ${EZA_FETCH_TIMEOUT_MS:-8000}
-      EZA_FAVICON_MAX_BYTES: ${EZA_FAVICON_MAX_BYTES:-65536}
+      EZA_FAVICON_MAX_BYTES: ${EZA_FAVICON_MAX_BYTES:-262144}
       EZA_FAVICON_TTL_DAYS: ${EZA_FAVICON_TTL_DAYS:-90}
       # One cached icon per source domain, fetched in the background; 0 disables.
       EZA_FAVICON_BACKFILL: ${EZA_FAVICON_BACKFILL:-1}

@@ -33,13 +33,17 @@ module Eza.Undo (
     restoreBookmarks,
     undoLast,
     undoLastDetailed,
+    listUndoEntries,
+    undoPreview,
+    undoById,
+    UndoFailure (..),
 ) where
 
 import Control.Monad (foldM, forM_, when)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Lazy as LBS
-import Data.Maybe (fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -49,6 +53,13 @@ import GHC.Generics (Generic)
 
 import Eza.Clip (captureColumns)
 import Eza.Json (jsonOptions)
+import Eza.Types (UndoBookmarkRef (..), UndoEntry (..), UndoPreview (..), UndoResult (..))
+
+{- | Why an explicit undo request was refused. A missing snapshot is a 404;
+an older snapshot is a 409 because undo is a stack.
+-}
+data UndoFailure = UndoNotFound | UndoNotNewest
+    deriving (Show, Eq)
 
 {- | The row shape of a legacy JSON snapshot. Kept byte-compatible with old
 payloads; do not add fields or old snapshots stop decoding.
@@ -407,6 +418,10 @@ recordUndoIds conn op ids = do
                 params
             execute
                 conn
+                (Query ("INSERT OR IGNORE INTO undo_dead_override_rows (snapshot_id,bookmark_id,reason,created_at,updated_at) SELECT ?, o.bookmark_id, o.reason, o.created_at, o.updated_at FROM bookmark_dead_overrides o WHERE o.bookmark_id IN " <> inMarks))
+                params
+            execute
+                conn
                 (Query ("INSERT OR IGNORE INTO undo_bookmark_tags (snapshot_id,bookmark_id,tag_name) SELECT ?, bt.bookmark_id, t.name FROM bookmark_tags bt JOIN tags t ON t.id = bt.tag_id WHERE bt.bookmark_id IN " <> inMarks))
                 params
             execute
@@ -455,12 +470,240 @@ recordTagUndo conn op names = do
             (snapshotId, name)
     pure snapshotId
 
-{- | Restore a bookmark side snapshot. The caller owns the transaction:
-'undoLastDetailed' wraps the whole restore in one immediate transaction. Bookmark
-rows are restored first (per-id update, or insert when id and URL are free),
-then the tag/highlight/link/capture rows recorded by the snapshot, and finally
-the FTS index is rebuilt and the marker row is removed.
+{- | List the newest usable snapshots for the Maintenance undo stack. Sample
+records/tags are capped at four; the caller marks only the first entry
+undoable. Empty side snapshots and legacy payloads with no rows are skipped.
 -}
+listUndoEntries :: Connection -> Int -> IO [UndoEntry]
+listUndoEntries conn requestedLimit = do
+    let limit = max 1 (min 20 requestedLimit)
+        scan = max 25 (limit * 5 + 10)
+    metas <-
+        query
+            conn
+            "SELECT id,op,row_count,created_at,CAST(payload_json AS TEXT) FROM undo_snapshots ORDER BY id DESC LIMIT ?"
+            (Only scan) ::
+            IO [(Int, Text, Int, Int, Text)]
+    entries <- catMaybes <$> mapM (snapshotEntry conn) metas
+    let usable = take limit (filter entryUsable entries)
+    pure [entry{unCanUndo = index == 0} | (index, entry) <- zip [0 :: Int ..] usable]
+
+{- | The details behind one confirmation dialog. The summary counts stay
+exact; the record and tag lists are capped at 100 each.
+-}
+undoPreview :: Connection -> Int -> IO (Maybe UndoPreview)
+undoPreview conn snapshotId = do
+    meta <- snapshotMetaById conn snapshotId
+    case meta of
+        Nothing -> pure Nothing
+        Just m -> do
+            entryMaybe <- snapshotEntry conn m
+            case entryMaybe of
+                Nothing -> pure Nothing
+                Just entry -> do
+                    latest <- latestUsableId conn
+                    bookmarks <- sampleBookmarksIO conn snapshotId (unBookmarkCount entry) (max 100 (unBookmarkCount entry))
+                    tags <- sampleTagsIO conn snapshotId (unTagCount entry) (max 100 (unTagCount entry))
+                    let truncated = unBookmarkCount entry > length bookmarks || unTagCount entry > length tags
+                        entry' = entry{unCanUndo = latest == Just snapshotId}
+                    pure (Just (UndoPreview entry' bookmarks tags truncated))
+
+{- | Restore one snapshot by id. Only the newest usable snapshot may be
+restored: undo is a stack, so an older request returns 'UndoNotNewest' and the
+client keeps the list intact.
+-}
+undoById :: Connection -> Int -> IO (Either UndoFailure UndoResult)
+undoById conn snapshotId = withImmediateTransaction conn $ do
+    meta <- snapshotMetaById conn snapshotId
+    case meta of
+        Nothing -> pure (Left UndoNotFound)
+        Just _ -> do
+            latest <- latestUsableId conn
+            case latest of
+                Nothing -> pure (Left UndoNotFound)
+                Just newest
+                    | newest /= snapshotId -> pure (Left UndoNotNewest)
+                    | otherwise -> do
+                        op <- snapshotOp conn snapshotId
+                        (restored, skipped) <- restoreSnapshot conn snapshotId
+                        pure (Right (UndoResult restored skipped snapshotId op))
+
+-- ------------------------------------------------------------ undo summaries ---
+
+snapshotMetaById :: Connection -> Int -> IO (Maybe (Int, Text, Int, Int, Text))
+snapshotMetaById conn snapshotId = do
+    rows <-
+        query
+            conn
+            "SELECT id,op,row_count,created_at,CAST(payload_json AS TEXT) FROM undo_snapshots WHERE id = ?"
+            (Only snapshotId) ::
+            IO [(Int, Text, Int, Int, Text)]
+    pure (case rows of [meta] -> Just meta; _ -> Nothing)
+
+snapshotOp :: Connection -> Int -> IO Text
+snapshotOp conn snapshotId = do
+    rows <- query conn "SELECT op FROM undo_snapshots WHERE id = ?" (Only snapshotId) :: IO [Only Text]
+    pure (case rows of [Only op] -> op; _ -> "")
+
+snapshotPayload :: Connection -> Int -> IO Text
+snapshotPayload conn snapshotId = do
+    rows <- query conn "SELECT CAST(payload_json AS TEXT) FROM undo_snapshots WHERE id = ?" (Only snapshotId) :: IO [Only Text]
+    pure (case rows of [Only raw] -> raw; _ -> "")
+
+snapshotEntry :: Connection -> (Int, Text, Int, Int, Text) -> IO (Maybe UndoEntry)
+snapshotEntry conn (snapshotId, op, rowCount, createdAt, raw) = do
+    bookmarkRows <- countRows conn "undo_bookmark_rows" snapshotId
+    tagLinks <- countRows conn "undo_bookmark_tags" snapshotId
+    tagRows <- countRows conn "undo_tag_rows" snapshotId
+    highlightRows <- countRows conn "undo_highlight_rows" snapshotId
+    captureRows <- countRows conn "undo_capture_rows" snapshotId
+    linkRows <- countRows conn "undo_link_rows" snapshotId
+    let (legacyRows, legacyTags) = legacyData raw
+        sideSnapshot = bookmarkRows > 0 || tagRows > 0 || tagLinks > 0
+        legacy = not sideSnapshot && (not (null legacyRows) || not (null legacyTags))
+        bookmarkCount
+            | bookmarkRows > 0 = bookmarkRows
+            | not (null legacyRows) = length legacyRows
+            | otherwise = tagLinks
+        tagCount = max tagRows (length legacyTags)
+        snapshotLabel = if T.null (T.strip op) then legacyOp raw else op
+    bookmarks <- sampleBookmarksIO conn snapshotId bookmarkCount 4
+    tags <- sampleTagsIO conn snapshotId tagCount 4
+    pure
+        ( Just
+            UndoEntry
+                { unId = snapshotId
+                , unOp = snapshotLabel
+                , unCreatedAt = createdAt
+                , unRowCount = max rowCount (max bookmarkCount tagCount)
+                , unBookmarkCount = bookmarkCount
+                , unTagCount = tagCount
+                , unHighlightCount = highlightRows
+                , unCaptureCount = captureRows
+                , unLinkCount = linkRows
+                , unCanUndo = False
+                , unLegacy = legacy
+                , unBookmarks = bookmarks
+                , unTags = tags
+                }
+        )
+
+entryUsable :: UndoEntry -> Bool
+entryUsable entry =
+    unBookmarkCount entry > 0
+        || unTagCount entry > 0
+        || unHighlightCount entry > 0
+        || unCaptureCount entry > 0
+        || unLinkCount entry > 0
+
+latestUsableId :: Connection -> IO (Maybe Int)
+latestUsableId conn = do
+    ids <-
+        query_ conn "SELECT id,op,row_count,created_at,CAST(payload_json AS TEXT) FROM undo_snapshots ORDER BY id DESC" ::
+            IO [(Int, Text, Int, Int, Text)]
+    go ids
+  where
+    go [] = pure Nothing
+    go (meta@(snapshotId, _, _, _, _) : rest) = do
+        entry <- snapshotEntry conn meta
+        case entry of
+            Just value | entryUsable value -> pure (Just snapshotId)
+            _ -> go rest
+
+restoreSnapshot :: Connection -> Int -> IO (Int, Int)
+restoreSnapshot conn snapshotId = do
+    bookmarkRows <- countRows conn "undo_bookmark_rows" snapshotId
+    if bookmarkRows > 0
+        then restoreSideSnapshot conn snapshotId
+        else do
+            tagRows <- countRows conn "undo_tag_rows" snapshotId
+            tagLinks <- countRows conn "undo_bookmark_tags" snapshotId
+            if tagRows > 0 || tagLinks > 0
+                then do
+                    restored <- restoreTagSnapshot conn snapshotId
+                    pure (restored, 0)
+                else do
+                    raw <- snapshotPayload conn snapshotId
+                    case legacySnapshot raw of
+                        Just snapshot -> do
+                            (restored, skipped) <- restoreLegacyPayload conn snapshot
+                            discardSnapshot conn snapshotId
+                            pure (restored, skipped)
+                        Nothing -> pure (0, 0)
+
+legacyData :: Text -> ([SnapshotRow], [Text])
+legacyData raw = case legacySnapshot raw of
+    Nothing -> ([], [])
+    Just snapshot ->
+        let rows = fromMaybe [] (parseMaybe (withObject "snapshot" (.: "rows")) snapshot :: Maybe [SnapshotRow])
+            tags = fromMaybe [] (parseMaybe (withObject "snapshot" (.: "tags")) snapshot :: Maybe [(Int, Text)])
+         in (rows, map snd tags)
+
+legacyOp :: Text -> Text
+legacyOp raw = case (decode (LBS.fromStrict (TE.encodeUtf8 raw)) :: Maybe Value) of
+    Nothing -> ""
+    Just value -> fromMaybe "" (joinMaybe (parseMaybe (withObject "undo" (.:? "op")) value :: Maybe (Maybe Text)))
+  where
+    joinMaybe (Just value') = value'
+    joinMaybe Nothing = Nothing
+
+{- | Sample up to @limit@ bookmark references. Side bookmark snapshots use
+their frozen rows; tag snapshots name the currently linked records; legacy
+payloads use the rows recorded in the payload.
+-}
+sampleBookmarksIO :: Connection -> Int -> Int -> Int -> IO [UndoBookmarkRef]
+sampleBookmarksIO conn snapshotId bookmarkCount limit
+    | limit <= 0 || bookmarkCount <= 0 = pure []
+    | otherwise = do
+        side <-
+            query
+                conn
+                "SELECT id,title,url,domain FROM undo_bookmark_rows WHERE snapshot_id = ? ORDER BY id LIMIT ?"
+                (snapshotId, limit) ::
+                IO [(Int, Text, Text, Text)]
+        case side of
+            (_ : _) -> pure [UndoBookmarkRef bid title url domain | (bid, title, url, domain) <- side]
+            [] -> do
+                tagRows <-
+                    query
+                        conn
+                        "SELECT ub.bookmark_id,b.title,b.url,b.domain FROM undo_bookmark_tags ub LEFT JOIN bookmarks b ON b.id = ub.bookmark_id WHERE ub.snapshot_id = ? ORDER BY ub.bookmark_id LIMIT ?"
+                        (snapshotId, limit) ::
+                        IO [(Int, Maybe Text, Maybe Text, Maybe Text)]
+                case tagRows of
+                    (_ : _) ->
+                        pure
+                            [ UndoBookmarkRef bid (fromMaybe "" title) (fromMaybe "" url) (fromMaybe "" domain)
+                            | (bid, title, url, domain) <- tagRows
+                            ]
+                    [] -> do
+                        raw <- snapshotPayload conn snapshotId
+                        let rows = fst (legacyData raw)
+                        pure (take limit [UndoBookmarkRef (srId row) (srTitle row) (srUrl row) (srDomain row) | row <- rows])
+
+sampleTagsIO :: Connection -> Int -> Int -> Int -> IO [Text]
+sampleTagsIO conn snapshotId tagCount limit
+    | limit <= 0 || tagCount <= 0 = pure []
+    | otherwise = do
+        raw <- snapshotPayload conn snapshotId
+        let legacyTags = snd (legacyData raw)
+        stored <-
+            query
+                conn
+                "SELECT name FROM undo_tag_rows WHERE snapshot_id = ? ORDER BY name LIMIT ?"
+                (snapshotId, limit) ::
+                IO [Only Text]
+        let names = stableNub ([name | Only name <- stored] <> legacyTags)
+        pure (take limit names)
+
+stableNub :: [Text] -> [Text]
+stableNub = go []
+  where
+    go _ [] = []
+    go seen (value : rest)
+        | value `elem` seen = go seen rest
+        | otherwise = value : go (value : seen) rest
+
 restoreSideSnapshot :: Connection -> Int -> IO (Int, Int)
 restoreSideSnapshot conn snapshotId = do
     rows <- query conn sideBookmarkSelectSql (Only snapshotId) :: IO [SideBookmark]
@@ -502,6 +745,7 @@ deleteRestoredChildren conn snapshotId = do
             "SELECT u.id FROM undo_bookmark_rows u WHERE u.snapshot_id = ? AND EXISTS (SELECT 1 FROM bookmarks b WHERE b.id = u.id)"
     execute conn (Query ("DELETE FROM bookmark_tags WHERE bookmark_id IN (" <> restoredIds <> ")")) (Only snapshotId)
     execute conn (Query ("DELETE FROM highlights WHERE bookmark_id IN (" <> restoredIds <> ")")) (Only snapshotId)
+    execute conn (Query ("DELETE FROM bookmark_dead_overrides WHERE bookmark_id IN (" <> restoredIds <> ")")) (Only snapshotId)
     execute conn (Query ("DELETE FROM captures WHERE bookmark_id IN (" <> restoredIds <> ")")) (Only snapshotId)
     execute conn (Query ("DELETE FROM links WHERE source_id IN (" <> restoredIds <> ") OR target_id IN (" <> restoredIds <> ")")) (snapshotId, snapshotId)
 
@@ -532,6 +776,16 @@ restoreSideChildren conn snapshotId = do
                 <> "SELECT id,bookmark_id,quote,prefix,suffix,start_offset,end_offset,note,color,created_at,updated_at "
                 <> "FROM undo_highlight_rows WHERE snapshot_id = ? AND "
                 <> existsBookmark "undo_highlight_rows.bookmark_id"
+            )
+        )
+        (Only snapshotId)
+    execute
+        conn
+        ( Query
+            ( "INSERT OR REPLACE INTO bookmark_dead_overrides (bookmark_id,reason,created_at,updated_at) "
+                <> "SELECT o.bookmark_id,o.reason,o.created_at,o.updated_at FROM undo_dead_override_rows o "
+                <> "WHERE o.snapshot_id = ? AND "
+                <> existsBookmark "o.bookmark_id"
             )
         )
         (Only snapshotId)
@@ -684,41 +938,37 @@ Returns the number of rows restored and the number of snapshot rows skipped
 because their URL now belongs to a different row.
 -}
 undoLastDetailed :: Connection -> IO (Int, Int)
-undoLastDetailed conn = withImmediateTransaction conn (restoreLatest conn)
+undoLastDetailed conn = withImmediateTransaction conn $ do
+    cleanupUnusableSnapshots conn
+    latest <- latestUsableId conn
+    case latest of
+        Nothing -> pure (0, 0)
+        Just snapshotId -> do
+            restored <- restoreSnapshot conn snapshotId
+            cleanupUnusableSnapshots conn
+            pure restored
+
+{- | A snapshot with no side rows and no usable legacy payload cannot restore
+anything. Discard it instead of letting it wedge or clutter the stack. This is
+the old `restoreLatest` behaviour, applied to the whole tail.
+-}
+cleanupUnusableSnapshots :: Connection -> IO ()
+cleanupUnusableSnapshots conn = do
+    metas <-
+        query_ conn "SELECT id,op,row_count,created_at,CAST(payload_json AS TEXT) FROM undo_snapshots ORDER BY id DESC" ::
+            IO [(Int, Text, Int, Int, Text)]
+    mapM_
+        ( \meta -> do
+            entry <- snapshotEntry conn meta
+            case entry of
+                Just value | not (entryUsable value) -> discardSnapshot conn (unId value)
+                _ -> pure ()
+        )
+        metas
 
 -- | Compatibility wrapper for callers that only need the restored count.
 undoLast :: Connection -> IO Int
 undoLast conn = fst <$> undoLastDetailed conn
-
--- | The body of 'undoLastDetailed'. Runs inside one immediate transaction.
-restoreLatest :: Connection -> IO (Int, Int)
-restoreLatest conn = do
-    rows <-
-        query_ conn "SELECT id, CAST(payload_json AS TEXT) FROM undo_snapshots ORDER BY id DESC LIMIT 1" :: IO [(Int, Text)]
-    case rows of
-        [] -> pure (0, 0)
-        (snapshotId, raw) : _ -> do
-            bookmarkRows <- countRows conn "undo_bookmark_rows" snapshotId
-            if bookmarkRows > 0
-                then restoreSideSnapshot conn snapshotId
-                else do
-                    tagRows <- countRows conn "undo_tag_rows" snapshotId
-                    tagLinks <- countRows conn "undo_bookmark_tags" snapshotId
-                    if tagRows > 0 || tagLinks > 0
-                        then do
-                            restored <- restoreTagSnapshot conn snapshotId
-                            pure (restored, 0)
-                        else case legacySnapshot raw of
-                            Just snapshot -> do
-                                (restored, skipped) <- restoreLegacyPayload conn snapshot
-                                discardSnapshot conn snapshotId
-                                -- An empty legacy snapshot is not a restore: keep looking.
-                                if restored > 0 || skipped > 0
-                                    then pure (restored, skipped)
-                                    else restoreLatest conn
-                            Nothing -> do
-                                discardSnapshot conn snapshotId
-                                restoreLatest conn
 
 {- | A legacy JSON snapshot, if the payload holds one. A side snapshot stores
 @{}@, which decodes fine but has no @snapshot@ key.

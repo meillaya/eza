@@ -68,7 +68,10 @@ SCRIPTS=(
   prune-undo-smoke.mjs
   rules-ui-smoke.mjs
   deeplink-smoke.mjs
-  accessions-smoke.mjs
+  history-smoke.mjs
+  undo-history-smoke.mjs
+  extract-edit-smoke.mjs
+  dead-link-smoke.mjs
   graph-smoke.mjs
   graph-views-smoke.mjs
   pwa-smoke.mjs
@@ -98,6 +101,7 @@ EXCLUDED_SCRIPTS=(
   # Utilities, not assertions.
   capture-screenshots.mjs
   graph-perf.mjs
+  load-perf.mjs
   login-visual-check.mjs
   wasm-fetch.mjs
 )
@@ -183,6 +187,9 @@ run_one() {
     fi
     if [[ "$name" == "highlight-ui-smoke" ]]; then
       sqlite3 "$data/users/1/eza.db" "UPDATE bookmarks SET extracted_text = 'The first paragraph of the smoke record is long enough to select.' || char(10) || char(10) || 'The second paragraph is also selectable for a highlight.' WHERE id = (SELECT MIN(id) FROM bookmarks);" || true
+    fi
+    if [[ "$name" == "extract-edit-smoke" ]]; then
+      sqlite3 "$data/users/1/eza.db" "UPDATE bookmarks SET extracted_text = 'Seeded extraction copy for the editor smoke test.' || char(10) || char(10) || 'A second paragraph keeps the reading window non-trivial.', enrich_state = 'ok', reading_time_minutes = 1 WHERE id = (SELECT MIN(id) FROM bookmarks);" || true
     fi
   fi
 

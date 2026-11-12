@@ -43,7 +43,7 @@ reference library. Paper on the left, the reading room at night on the right.
 | <img src="docs/screenshots/library.png" alt="The ledger under a tag:literature query: search line, provenance figures, year dividers and five column rows" width="100%"> | <img src="docs/screenshots/library-dark.png" alt="The same ledger in the reading-room theme" width="100%"> |
 | <img src="docs/screenshots/detail.png" alt="A record: the extracted reading copy in a bounded window beside the catalogue card" width="100%"> | <img src="docs/screenshots/detail-dark.png" alt="The same record in the reading-room theme" width="100%"> |
 | <img src="docs/screenshots/graph.png" alt="The local graph around a wikilink, with layout presets and the colour-group panel" width="100%"> | <img src="docs/screenshots/graph-dark.png" alt="The graph in the reading-room theme" width="100%"> |
-| <img src="docs/screenshots/accessions.png" alt="The accessions index: archive figures and one mark per filing day" width="100%"> | <img src="docs/screenshots/accessions-dark.png" alt="The accessions index in the reading-room theme" width="100%"> |
+| <img src="docs/screenshots/history.png" alt="The history index: archive figures and one mark per filing day" width="100%"> | <img src="docs/screenshots/history-dark.png" alt="The history index in the reading-room theme" width="100%"> |
 | <img src="docs/screenshots/palette.png" alt="The command palette open over the filtered ledger" width="100%"> | <img src="docs/screenshots/palette-dark.png" alt="The command palette in the reading-room theme" width="100%"> |
 | <img src="docs/screenshots/share.png" alt="A read-only share page for one record" width="100%"> | <img src="docs/screenshots/share-dark.png" alt="The share page in the reading-room theme" width="100%"> |
 | <img src="docs/screenshots/login.png" alt="The password sign-in card" width="100%"> | <img src="docs/screenshots/login-dark.png" alt="The sign-in card in the reading-room theme" width="100%"> |
@@ -239,17 +239,17 @@ docker compose run --rm eza /bin/eza-bookmarks restore /data/backups/<stamp> --y
 - [x] `tag:`, `is:unread`, `is:dead`, `link:`, `year:`, `day:` and `-term` filters, ordered by bm25
 - [x] Ledger with accession numbers, year dividers, source and tag facets and a field drawer
 - [x] Inbox, saved searches and a command palette
-- [x] Accessions index by year, filing day and source
+- [x] History index by year, filing day and source
 - [x] Graph of records, tags and wikilinks with pan, zoom, focus and layout presets
 - [x] One cached favicon per source domain, with a printed monogram fallback
-- [x] Extracted reading copy in a bounded reading window
+- [x] Extracted reading copy in a bounded window, editable when extraction is mangled
 - [x] Highlights with notes and colours
 - [x] Markdown notes with `[[wikilinks]]`, backlinks and unlinked mentions
 - [x] Page snapshots with a CSP-sandboxed viewer
 - [x] Duplicate groups with merge and merge-all
 - [x] Tag merge, rename and detach, with snapshots
-- [x] Bounded dead-link sweeps and prune candidates
-- [x] Undo snapshots for merges, tag changes, prune and deletes
+- [x] Bounded dead-link sweeps, manual keep-alive, and prune candidates
+- [x] Undo history with per-action preview, plus snapshots for merges, tag changes, prune and deletes
 - [x] Chromium MV3 clipper, clip and quick-save APIs, bookmarklet and PWA share target
 - [x] JSON-lines extraction sidecar for the clipper
 - [x] Read-only share links for records and searches, and Atom feeds for searches

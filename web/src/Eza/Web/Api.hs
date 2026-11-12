@@ -86,7 +86,12 @@ module Eza.Web.Api (
     applyTagSuggestion,
     runPrune,
     checkDead,
+    fetchUndoEntries,
+    fetchUndoPreview,
     runUndo,
+    markLinkAlive,
+    recheckLink,
+    patchBookmarkWithResult,
     regenerateRecovery,
     renameCredential,
     deleteCredential,
@@ -112,6 +117,7 @@ import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 
 import Miso
 import qualified Miso.JSON as MJ
@@ -131,6 +137,9 @@ import Eza.Types (
     SavedSearch,
     SearchPage,
     TagStat,
+    UndoEntry,
+    UndoPreview,
+    UndoResult,
  )
 import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..), UserView (..))
 import qualified Eza.View as EV
@@ -202,17 +211,19 @@ data RawResponse = RawResponse
     , rfError :: Maybe Text
     }
 
-instance FromJSON RawResponse where
-    parseJSON = withObject "RawResponse" $ \o ->
-        RawResponse
-            <$> o .:? "status" .!= 0
-            <*> o .:? "text" .!= ""
-            <*> o .:? "error"
-
-decodeRawResponse :: MisoString -> RawResponse
-decodeRawResponse raw = case MJ.eitherDecode raw of
-    Right response -> response
-    Left err -> RawResponse 0 "" (Just (toText err))
+{- | The network helper reports the three fields as separate JS arguments.
+Keeping the body out of a JSON envelope avoids stringifying, parsing,
+unpacking and re-encoding every response before the real decoder sees it.
+-}
+rawResponse :: Int -> MisoString -> MisoString -> RawResponse
+rawResponse status body transportError =
+    RawResponse
+        { rfStatus = status
+        , rfText = toText body
+        , rfError =
+            let message = toText transportError
+             in if T.null (T.strip message) then Nothing else Just message
+        }
 
 {- | Build the request headers: JSON in and JSON out, plus the CSRF token
 when the cookie is present.
@@ -235,13 +246,13 @@ rawOutcome responseType raw = case (rfStatus raw, rfError raw) of
     (status, _)
         | status < 200 || status >= 300 -> Left (statusError status raw)
         | responseType == JSON ->
-            case (MJ.eitherDecode (ms (T.unpack (rfText raw))) :: Either MisoString Value) of
+            case A.eitherDecodeStrict' (TE.encodeUtf8 (rfText raw)) :: Either String Value of
                 Right value -> Right value
                 Left err ->
                     Left
                         ( mkApiError
                             (Just status)
-                            (Just ("the server sent a response the client could not read: " <> toText err))
+                            (Just ("the server sent a response the client could not read: " <> T.pack err))
                         )
         | otherwise -> Right Null
 
@@ -256,7 +267,7 @@ serverMessage :: Text -> Maybe Text
 serverMessage body
     | T.null trimmed = Nothing
     | "{" `T.isPrefixOf` trimmed =
-        case (MJ.eitherDecode (ms (T.unpack trimmed)) :: Either MisoString Value) of
+        case A.eitherDecodeStrict' (TE.encodeUtf8 trimmed) :: Either String Value of
             Right value -> firstText [["error", "message"], ["message"], ["error", "code"]] value
             Left _ -> Nothing
     | "<" `T.isPrefixOf` trimmed = Nothing
@@ -299,9 +310,12 @@ sendValue method url requestedBody extraHeaders responseType onOk onErr = withSi
             case rawOutcome responseType raw of
                 Left err -> onErr err
                 Right value -> onOk value
-    finish <- asyncCallback1 $ \raw -> do
-        rawText <- fromJSVal raw
-        sink (report (decodeRawResponse (fromMaybe "" (rawText :: Maybe MisoString))))
+    finish <- asyncCallback3 $ \statusValue textValue errorValue -> do
+        statusNumber <- fromJSVal statusValue :: IO (Maybe Double)
+        body <- fromMaybe "" <$> (fromJSVal textValue :: IO (Maybe MisoString))
+        transportError <- fromMaybe "" <$> (fromJSVal errorValue :: IO (Maybe MisoString))
+        let status = maybe 0 round statusNumber
+        sink (report (rawResponse status body transportError))
     net <- jsg ("EzaNet" :: MisoString)
     urlValue <- toJSVal url
     methodValue <- toJSVal method
@@ -975,6 +989,25 @@ patchBookmark ::
 patchBookmark bid payload =
     apiWrite "PATCH" ("/api/v1/bookmarks/" <> ms (show bid)) (Just payload)
 
+{- | PATCH with the server's highlight-repair count. The note/title/read editor
+keeps the simple 'patchBookmark'; the extracted-text save uses this one.
+-}
+patchBookmarkWithResult ::
+    Int ->
+    Value ->
+    (Int -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+patchBookmarkWithResult bid payload onOk onErr =
+    sendValue
+        "PATCH"
+        ("/api/v1/bookmarks/" <> ms (show bid))
+        (Just payload)
+        []
+        JSON
+        (\v -> onOk (fieldInt "highlights_removed" v))
+        onErr
+
 deleteBookmark :: Int -> action -> (ApiError -> action) -> Eff model action
 deleteBookmark bid = apiDelete ("/api/v1/bookmarks/" <> ms (show bid))
 
@@ -1025,7 +1058,7 @@ deleteSavedSearch sid = apiDelete ("/api/v1/saved-searches/" <> ms (show sid))
 mergeDedup ::
     Int ->
     [Int] ->
-    (Int -> action) ->
+    ((Int, Int) -> action) ->
     (ApiError -> action) ->
     Eff model action
 mergeDedup keep mergeIds onOk onErr =
@@ -1035,7 +1068,7 @@ mergeDedup keep mergeIds onOk onErr =
         (Just (object ["keep_id" .= keep, "merge_ids" .= mergeIds]))
         []
         JSON
-        (\v -> onOk (fieldInt "merged" v))
+        (\v -> onOk (fieldInt "merged" v, fieldInt "snapshot_id" v))
         onErr
 
 mergeTags ::
@@ -1085,28 +1118,51 @@ runPrune ids onOk onErr =
         (\v -> onOk (fieldInt "pruned" v))
         onErr
 
-checkDead :: ((Int, Int) -> action) -> (ApiError -> action) -> Eff model action
+checkDead :: ((Int, Int, Int) -> action) -> (ApiError -> action) -> Eff model action
 checkDead onOk onErr =
     sendValue
         "POST"
         "/api/v1/maintenance/check-dead"
-        -- the handler parses a JSON object even though every field is optional
-        (Just (object []))
+        -- The handler parses a JSON object; include_dead makes the explicit
+        -- maintenance recheck revisit records that are already marked dead.
+        (Just (object ["include_dead" .= True]))
         []
         JSON
-        (\v -> onOk (fieldInt "checked" v, fieldInt "dead" v))
+        (\v -> onOk (fieldInt "checked" v, fieldInt "dead" v, fieldInt "total_dead" v))
         onErr
 
-runUndo :: (Int -> action) -> (ApiError -> action) -> Eff model action
-runUndo onOk onErr =
+fetchUndoEntries :: ([UndoEntry] -> action) -> (ApiError -> action) -> Eff model action
+fetchUndoEntries onOk onErr =
+    getValue
+        "/api/v1/undo?limit=5"
+        []
+        (\v -> onOk (fieldList "entries" v))
+        onErr
+
+fetchUndoPreview :: Int -> (UndoPreview -> action) -> (ApiError -> action) -> Eff model action
+fetchUndoPreview snapshotId onOk onErr =
+    getValue
+        ("/api/v1/undo/" <> ms (show snapshotId))
+        []
+        (\v -> either onErr onOk (decode v))
+        onErr
+
+runUndo :: Int -> (UndoResult -> action) -> (ApiError -> action) -> Eff model action
+runUndo snapshotId onOk onErr =
     sendValue
         "POST"
         "/api/v1/undo"
-        (Nothing :: Maybe Value)
+        (Just (object ["snapshot_id" .= snapshotId]))
         []
         JSON
-        (\v -> onOk (fieldInt "restored" v))
+        (\v -> either onErr onOk (decode v))
         onErr
+
+markLinkAlive :: Int -> action -> (ApiError -> action) -> Eff model action
+markLinkAlive bid = apiWrite "POST" ("/api/v1/bookmarks/" <> ms (show bid) <> "/mark-alive") (Nothing :: Maybe Value)
+
+recheckLink :: Int -> action -> (ApiError -> action) -> Eff model action
+recheckLink bid = apiWrite "POST" ("/api/v1/bookmarks/" <> ms (show bid) <> "/recheck-link") (Nothing :: Maybe Value)
 
 regenerateRecovery :: ([Text] -> action) -> (ApiError -> action) -> Eff model action
 regenerateRecovery onOk onErr =
@@ -1215,10 +1271,12 @@ submitImport onOk onErr = withSink $ \sink -> do
     -- The file input and the multipart FormData live in the external
     -- @EzaNet.upload@ helper (static/pwa.js): the CSP forbids eval, so the
     -- client cannot build JavaScript at runtime.
-    finish <- asyncCallback1 $ \raw -> do
-        rawText <- fromJSVal raw
-        let raw' = decodeRawResponse (fromMaybe "" (rawText :: Maybe MisoString))
-        sink $ case rawOutcome JSON raw' of
+    finish <- asyncCallback3 $ \statusValue textValue errorValue -> do
+        statusNumber <- fromJSVal statusValue :: IO (Maybe Double)
+        body <- fromMaybe "" <$> (fromJSVal textValue :: IO (Maybe MisoString))
+        transportError <- fromMaybe "" <$> (fromJSVal errorValue :: IO (Maybe MisoString))
+        let status = maybe 0 round statusNumber
+        sink $ case rawOutcome JSON (rawResponse status body transportError) of
             Left err -> onErr err
             Right value -> onOk value
     net <- jsg ("EzaNet" :: MisoString)

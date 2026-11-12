@@ -136,7 +136,7 @@ All options live under `services.eza`:
 | `allowPrivateFetch` | `false` | `EZA_ALLOW_PRIVATE_FETCH`; permits fetching private/RFC1918 URLs. Leave off (SSRF guard). |
 | `enrichWorkers` | `2` | `EZA_ENRICH_WORKERS`: in-process background enrichment workers; 0 disables them. |
 | `fetchTimeoutMs` | `8000` | `EZA_FETCH_TIMEOUT_MS`: timeout per outbound fetch (server clamps below 1000). |
-| `faviconMaxBytes` | `65536` | `EZA_FAVICON_MAX_BYTES`: maximum favicon download size. |
+| `faviconMaxBytes` | `262144` | `EZA_FAVICON_MAX_BYTES`: maximum favicon download size. Complete ICO entries are cropped before storage. |
 | `faviconTtlDays` | `90` | `EZA_FAVICON_TTL_DAYS`: favicon cache lifetime. |
 | `shareTtlDays` | `7` | `EZA_SHARE_TTL_DAYS`: public share-link lifetime. |
 | `aiProvider` | `none` | `EZA_AI_PROVIDER`: `none`, `ollama`, `openai`, `openai-compatible`, `anthropic`. |

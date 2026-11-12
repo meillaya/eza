@@ -24,8 +24,8 @@ import Text.Read (readMaybe)
 
 import Eza.SearchQuery (SearchQuery (..), parseSearchQuery)
 import Eza.Types (BookmarkSummary (..), LibraryStats (..), SavedSearch (..), TagStat (..))
-import Eza.Web.Accessions (accessionsPage)
 import Eza.Web.Detail (detailPage)
+import Eza.Web.History (historyPage)
 import Eza.Web.Model
 import Eza.Web.Panels (accountPage, aiTagsPage, dedupPage, graphPage, maintenancePage, tagsPage, viewDialogs, viewsPage)
 import Eza.Web.Types (ShareView (..))
@@ -33,11 +33,15 @@ import Eza.Web.Widgets (disabledAttr, formatCount)
 
 -- ------------------------------------------------------------------ shell --
 
+hasUnsavedForView :: Model -> Bool
+hasUnsavedForView m = mDirty m || mExtractDirty m
+
 viewModel :: Model -> View () () Model Action
 viewModel m =
     H.div_
         [ HP.class_ "app ledg-app app-frame"
         , HP.data_ "testid" "app-shell"
+        , HP.data_ "dirty" (if hasUnsavedForView m then "1" else "0")
         ]
         ( [ H.a_ [HP.class_ "skip-link", HP.href_ "#main"] [text "Skip to content"]
           , mast m
@@ -299,7 +303,7 @@ sectionsNav m =
         , ("tags", "section-tags", Tags)
         , ("ai tags", "section-ai-tags", AiTags)
         , ("maintenance", "section-maintenance", Maintenance)
-        , ("accessions", "section-accessions", Accessions)
+        , ("history", "section-history", History)
         , ("account", "section-account", Account)
         ]
     sectionLink (label, hook, route) =
@@ -339,7 +343,7 @@ routePath = \case
     AiTags -> "/tags/ai"
     Maintenance -> "/maintenance"
     Account -> "/account"
-    Accessions -> "/accessions"
+    History -> "/history"
     Save{} -> "/save"
     NotFound -> "/not-found"
 
@@ -386,7 +390,7 @@ routeBody m = case mRoute m of
     AiTags -> fullPage (aiTagsPage m)
     Maintenance -> fullPage (maintenancePage m)
     Account -> fullPage (accountPage m)
-    Accessions -> fullPage (accessionsPage m)
+    History -> fullPage (historyPage m)
     NotFound -> fullPage notFoundPage
 
 isListRoute :: Model -> Bool
@@ -509,8 +513,8 @@ railView m =
         ( H.ul_ [HP.class_ "facets"] (map (sourceRow m) (take 7 sources))
             : [ H.a_
                     [ HP.class_ "facet-all"
-                    , HP.href_ "/accessions"
-                    , HE.onClickPrevent (Navigate Accessions)
+                    , HP.href_ "/history"
+                    , HE.onClickPrevent (Navigate History)
                     ]
                     [text "all sources"]
               ]
