@@ -20,7 +20,7 @@ name: eza
 services:
   eza:
     # Tag of `nix build .#docker` (flake version). Override with EZA_IMAGE.
-    image: ${EZA_IMAGE:-eza:0.1.0.0}
+    image: ${EZA_IMAGE:-eza:0.2.0.0}
     container_name: eza
     restart: unless-stopped
     ports:

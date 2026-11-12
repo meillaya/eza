@@ -12,7 +12,7 @@
 #   SHA256SUMS                            checksums for both
 #
 # Version: derived from flake.nix via scripts/version.sh, which also verifies
-# the Cabal packages agree (0.1.0.0). There is no separate release version.
+# the Cabal packages agree (0.2.0.0). There is no separate release version.
 #
 # Binary: built through the deployment flake (`nix build .#eza-bookmarks`) when
 # Nix is available, so the artifact is the reproducible package rather than an

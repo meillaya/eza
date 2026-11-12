@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               eza-server
-version:            0.1.0.0
+version:            0.2.0.0
 synopsis:           eza bookmark server
 description:        Warp/WAI server, SQLite data layer, WebAuthn auth, and
                     command-line tools for eza.

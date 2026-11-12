@@ -16,13 +16,13 @@ stores all state under **/data**, and exposes **/healthz** for health checks.
 # flake only sees tracked files. `.#docker-local` builds the same image with
 # the locally built web bundle instead of the released one.)
 nix build .#docker              # -> ./result is a gzip'd image tarball
-docker load < result            # -> Loaded image: eza:0.1.0.0 (some Docker
-                                #    versions report localhost/eza:0.1.0.0)
+docker load < result            # -> Loaded image: eza:0.2.0.0 (some Docker
+                                #    versions report localhost/eza:0.2.0.0)
 docker image ls | grep eza
 
 # Tag/push to your registry:
-docker tag eza:0.1.0.0 registry.example.com/eza:0.1.0.0
-docker push registry.example.com/eza:0.1.0.0
+docker tag eza:0.2.0.0 registry.example.com/eza:0.2.0.0
+docker push registry.example.com/eza:0.2.0.0
 ```
 
 The image contains: `eza-bookmarks`, the web bundle
@@ -60,7 +60,7 @@ docker run -d --name eza \
   -e EZA_RP_ID=eza.example.com \
   --read-only --tmpfs /tmp \
   --cap-drop ALL --security-opt no-new-privileges \
-  eza:0.1.0.0
+  eza:0.2.0.0
 ```
 
 Put a TLS terminator in front (Caddy, nginx, Tailscale Serve) on the same host:
@@ -250,7 +250,7 @@ in one place, `nix/web-assets.json`:
 
 ```json
 {
-  "url": "https://github.com/meillaya/eza/releases/download/v0.1.0.0/eza-web-0.1.0.0.tar.gz",
+  "url": "https://github.com/meillaya/eza/releases/download/v0.2.0.0/eza-web-0.2.0.0.tar.gz",
   "hash": "sha256-..."
 }
 ```
@@ -280,7 +280,7 @@ Publish the asset with the release workflow or locally:
 # Local route: build the deterministic tarball, then upload it to a v<version>
 # release (the release workflow does the same on a v* tag and updates the pin):
 bash scripts/build-web.sh
-bash scripts/release-asset.sh            # writes dist/release/eza-web-0.1.0.0.tar.gz
+bash scripts/release-asset.sh            # writes dist/release/eza-web-0.2.0.0.tar.gz
 bash scripts/release-asset.sh --check    # prints the SRI hash
 # put the printed sha256-... into nix/web-assets.json "hash", then:
 nix build .#eza-web

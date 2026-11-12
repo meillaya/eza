@@ -17,7 +17,7 @@
       ];
       forAllSystems = lib.genAttrs systems;
 
-      version = "0.1.0.0";
+      version = "0.2.0.0";
 
       # ---------------------------------------------------------------------
       # Web assets (the static/ tree: index.html, eza.css, theme.js, and the

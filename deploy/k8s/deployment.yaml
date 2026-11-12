@@ -35,7 +35,7 @@ spec:
       containers:
         - name: eza
           # Tag of `nix build .#docker`; push it to your registry and update here.
-          image: eza:0.1.0.0
+          image: eza:0.2.0.0
           imagePullPolicy: IfNotPresent
           # Resolve the optional AI keys through SecretSpec's env provider; keys
           # come from eza-secrets via envFrom below. The IMAGE's default Cmd is

@@ -1,5 +1,5 @@
 {
   "_comment": "Pinned CI-built web bundle for the deployment flake. The release workflow (.github/workflows/release.yml) builds eza-web-<version>.tar.gz on a v* tag, uploads it to the GitHub release and rewrites the hash below with the asset's SRI sha256. To pin by hand: bash scripts/release-asset.sh --out dist/release (prints the SRI hash), copy it over the placeholder, then run bash scripts/release-asset.sh --check --require-pinned. Keep url in step with flake.nix version and the repository name; checks.eza-web-pin fails while the hash is the lib.fakeHash placeholder.",
-  "url": "https://github.com/meillaya/eza/releases/download/v0.1.0.0/eza-web-0.1.0.0.tar.gz",
-  "hash": "sha256-omDht34evShNnIKTFvQVn+JMhp592NfAk3z0XstdlGs="
+  "url": "https://github.com/meillaya/eza/releases/download/v0.2.0.0/eza-web-0.2.0.0.tar.gz",
+  "hash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 }

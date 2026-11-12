@@ -9,8 +9,8 @@
 #
 # The image is built and loaded/pushed outside the cluster:
 #   nix build .#docker && docker load < result
-#   docker tag eza:0.1.0.0 registry.example.com/eza:0.1.0.0
-#   docker push registry.example.com/eza:0.1.0.0
+#   docker tag eza:0.2.0.0 registry.example.com/eza:0.2.0.0
+#   docker push registry.example.com/eza:0.2.0.0
 # Then set the image in deployment.yaml (or with kustomize edit set image).
 #
 # Full runbook (Secret/ConfigMap, probes, backups, Tailscale): docs/deployment-k8s.md

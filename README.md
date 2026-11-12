@@ -156,7 +156,7 @@ container build step:
 ```bash
 devenv shell -- web              # once, if the release asset is not available
 nix build path:.#docker-local
-docker load < result             # eza:0.1.0.0
+docker load < result             # eza:0.2.0.0
 ```
 
 Then start the checked-in stack:
@@ -175,7 +175,7 @@ serves the `/healthz` probe. Put a TLS proxy in front for passkeys.
 Set the image and apply the kustomization:
 
 ```bash
-(cd deploy/k8s && kustomize edit set image eza=registry.example.com/eza:0.1.0.0)
+(cd deploy/k8s && kustomize edit set image eza=registry.example.com/eza:0.2.0.0)
 kubectl apply -k deploy/k8s
 kubectl -n eza rollout status deployment/eza
 ```

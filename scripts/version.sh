@@ -2,7 +2,7 @@
 # Print the single eza version shared by the deployment flake and the Cabal
 # packages, and fail when they disagree.
 #
-#   bash scripts/version.sh          # print 0.1.0.0 (checks cabal files)
+#   bash scripts/version.sh          # print 0.2.0.0 (checks cabal files)
 #   bash scripts/version.sh --check  # same, but only validates
 #
 # The deployment flake is the source of truth: `version = "x"` in flake.nix

@@ -27,8 +27,8 @@ Manifests live in [`deploy/k8s/`](../deploy/k8s/):
 ```bash
 nix build .#docker
 docker load < result
-docker tag eza:0.1.0.0 registry.example.com/eza:0.1.0.0
-docker push registry.example.com/eza:0.1.0.0
+docker tag eza:0.2.0.0 registry.example.com/eza:0.2.0.0
+docker push registry.example.com/eza:0.2.0.0
 ```
 
 Point the deployment at it, either by editing `deploy/k8s/deployment.yaml`
@@ -36,7 +36,7 @@ Point the deployment at it, either by editing `deploy/k8s/deployment.yaml`
 
 ```bash
 cd deploy/k8s
-kustomize edit set image eza=registry.example.com/eza:0.1.0.0
+kustomize edit set image eza=registry.example.com/eza:0.2.0.0
 ```
 
 ## 2. Configure origin and secrets
@@ -183,8 +183,8 @@ rewrites paths when the data root moved), then scale back up:
 ```bash
 kubectl -n eza scale deployment/eza --replicas=0
 kubectl -n eza run eza-restore --rm -it --restart=Never \
-  --image=registry.example.com/eza:0.1.0.0 --overrides='
-  {"spec":{"containers":[{"name":"eza-restore","image":"registry.example.com/eza:0.1.0.0",
+  --image=registry.example.com/eza:0.2.0.0 --overrides='
+  {"spec":{"containers":[{"name":"eza-restore","image":"registry.example.com/eza:0.2.0.0",
   "command":["/bin/eza-bookmarks","restore","/data/backups/<stamp>","--yes"],
   "env":[{"name":"EZA_DATA_DIR","value":"/data"}],
   "volumeMounts":[{"name":"data","mountPath":"/data"}]}],
@@ -204,8 +204,8 @@ matter. (Adjust the `--overrides` JSON to your registry/tag; running as uid
 ```bash
 nix build .#docker
 docker load < result
-docker tag eza:0.1.0.0 registry.example.com/eza:0.1.0.0 && docker push registry.example.com/eza:0.1.0.0
-kubectl -n eza set image deployment/eza eza=registry.example.com/eza:0.1.0.0
+docker tag eza:0.2.0.0 registry.example.com/eza:0.2.0.0 && docker push registry.example.com/eza:0.2.0.0
+kubectl -n eza set image deployment/eza eza=registry.example.com/eza:0.2.0.0
 kubectl -n eza rollout status deployment/eza
 ```
 
