@@ -83,6 +83,40 @@ docker run -d --name eza --restart unless-stopped \
   ghcr.io/meillaya/eza:latest
 ```
 
+### Quick start (Nix)
+
+With flakes enabled, build the server and the pinned web bundle without Docker:
+
+```bash
+nix build github:meillaya/eza/v0.2.0.0#eza-bookmarks --out-link eza-server
+nix build github:meillaya/eza/v0.2.0.0#eza-web --out-link eza-web
+
+EZA_STATIC_DIR=$PWD/eza-web/share/eza/static \
+EZA_DATA_DIR=$PWD/eza-data \
+PUBLIC_ORIGIN=http://localhost:8080 \
+./eza-server/bin/eza-bookmarks serve
+```
+
+Open <http://localhost:8080/setup>. The `eza-data` directory is the persistent
+state; back it up like any other SQLite data directory. For a permanent NixOS
+install use the module below instead.
+
+### Quick start (devenv / source)
+
+For development or a source checkout:
+
+```bash
+git clone --branch v0.2.0.0 https://github.com/meillaya/eza
+cd eza
+devenv shell -- build      # native server + Miso/WASM client
+devenv shell -- dev        # http://localhost:8000
+```
+
+Open <http://localhost:8000> and claim the first account at `/setup`. The dev
+server stores data under the checkout's `data/` directory. See
+[From source](#from-source) for the individual `web`, `test`, `lint` and `e2e`
+commands.
+
 > [!IMPORTANT]
 > The Nix and Docker outputs pin the web client as a CI-built release asset; the
 > URL and SRI hash live in `nix/web-assets.json`. The GitHub release's
@@ -215,12 +249,22 @@ Nix and devenv provide GHC 9.10, the WASM toolchain and the command surface.
 There is no Makefile:
 
 ```bash
-devenv shell -- build   # server and Miso/WASM client
+git clone --branch v0.2.0.0 https://github.com/meillaya/eza
+cd eza
+devenv shell -- build   # native server + Miso/WASM client
+devenv shell -- web     # client only, if you already built the server
 devenv shell -- dev     # http://localhost:8000
 ```
 
-Open <http://localhost:8000> and claim the first account at `/setup`. The checks
-are `devenv shell -- test`, `lint`, `e2e` and `spec`.
+Open <http://localhost:8000> and claim the first account at `/setup`. The
+individual checks are:
+
+```bash
+devenv shell -- test    # server tests
+devenv shell -- lint    # fourmolu + hlint
+devenv shell -- spec    # TLA+ models and JSON schemas
+devenv shell -- e2e     # Playwright browser suite
+```
 
 ### Configuration
 

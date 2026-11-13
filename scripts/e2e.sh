@@ -98,6 +98,9 @@ EXCLUDED_SCRIPTS=(
   # Superseded by dedup-smoke.mjs (merge) and prune-undo-smoke.mjs (undo);
   # kept as a manual debugging script.
   undo-smoke.mjs
+  # Container-only first-run test; the release workflow runs it inside the
+  # built image, not against the scratch server harness.
+  docker-first-run.mjs
   # Utilities, not assertions.
   capture-screenshots.mjs
   graph-perf.mjs
