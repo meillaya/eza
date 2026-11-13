@@ -119,13 +119,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The tag predates the pin commit created by the web-asset workflow.
+          # A tag predates the pin commit created by the web-asset workflow;
+          # a workflow_dispatch from the default branch already has the pin.
           gh api "repos/${GITHUB_REPOSITORY}/contents/nix/web-assets.json?ref=${DEFAULT_BRANCH}" \
             --jq .content | base64 -d > nix/web-assets.json
           bash scripts/release-asset.sh --check --require-pinned
+          if ! git diff --quiet -- nix/web-assets.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add nix/web-assets.json
+            git commit -m "release: inject web asset pin for image build"
+          fi
 
       - name: Build the container image
-        run: nix build -L path:.#docker
+        run: nix build -L .#docker
 
       - name: Load the image and remember its tarball tag
         shell: bash
