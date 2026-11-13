@@ -135,3 +135,20 @@ jobs:
           else
             echo "::warning title=Web asset not pinned::nix/web-assets.json still pins lib.fakeHash. Run .github/workflows/release.yml (or scripts/release-asset.sh and pin the hash) to publish eza-web-<version>.tar.gz; default Docker/NixOS builds fail until then."
           fi
+
+  # The published artifact is a container image, so build and smoke-test it on
+  # every CI run. This catches a broken entrypoint, missing static bundle,
+  # unwritable /data, or a healthcheck regression before a release tag.
+  docker-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Build the release container
+        run: nix build -L .#docker
+      - name: Smoke-test the release container
+        run: bash scripts/docker-smoke.sh result

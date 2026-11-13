@@ -130,9 +130,50 @@ jobs:
           asset="dist/release/${{ steps.version.outputs.asset }}"
           version="${{ steps.version.outputs.version }}"
           if ! gh release view "$tag" >/dev/null 2>&1; then
+            notes="$(cat <<EOF
+          ## Quick start
+
+          \`\`\`bash
+          docker run -d --name eza --restart unless-stopped \\
+            -p 8080:8080 -v eza-data:/data \\
+            ghcr.io/meillaya/eza:${version}
+          \`\`\`
+
+          Open <http://localhost:8080/setup> and create the first account. The named
+          \`eza-data\` volume keeps the control database, account libraries, snapshots and
+          backups across container upgrades. For a remote host, set
+          \`PUBLIC_ORIGIN=https://your-host\` and put a TLS proxy in front of port 8080;
+          passkeys require a secure origin (or localhost).
+
+          ## Updating
+
+          Back up first, pull the new image, and recreate the container with the same
+          volume:
+
+          \`\`\`bash
+          docker exec eza eza-bookmarks backup
+          docker pull ghcr.io/meillaya/eza:${version}
+          docker rm -f eza
+          docker run -d --name eza --restart unless-stopped \\
+            -p 8080:8080 -v eza-data:/data \\
+            ghcr.io/meillaya/eza:${version}
+          \`\`\`
+
+          A version-pinned \`eza-${version}-compose.yml\` is attached to this release for
+          Compose users. Migrations run automatically on first start; see the upgrade
+          notes below.
+
+          ## Assets
+
+          The container image is the installable artifact. The attached
+          \`eza-web-${version}.tar.gz\` is the CI-built web client bundle used by the
+          deployment flake (\`nix/web-assets.json\`); it is not a standalone installer.
+
+          EOF
+          )"
             gh release create "$tag" \
               --title "eza $tag" \
-              --notes "Web bundle for eza $version (the deployment flake pins it in nix/web-assets.json)." || {
+              --notes "$notes" || {
               echo "::error title=Release creation failed::could not create GitHub release $tag."
               exit 1
             }

@@ -1,39 +1,30 @@
 # Deploying eza with Docker
 
+The published image is `ghcr.io/meillaya/eza`, built for `linux/amd64` and
+`linux/arm64`. It contains the **eza-bookmarks** server, the Miso/WASM web
+client, curl, sqlite3, monolith (snapshot capture), rclone (offsite backups) and
+SecretSpec. The container runs as non-root **uid/gid 10001**, stores all state
+under **/data**, and exposes **/healthz** for health checks.
+
 The image is produced by Nix (`packages.<system>.docker` in the deployment
-flake) using `dockerTools.buildLayeredImage`. There is no Dockerfile, because
+flake) using `dockerTools.buildLayeredImage`; there is no Dockerfile because
 the web client is a CI-built WASM release asset and the server is a GHC
 derivation.
 
-The container runs the **eza-bookmarks** binary as non-root **uid/gid 10001**,
-stores all state under **/data**, and exposes **/healthz** for health checks.
-
-## Build and load the image
+## Quick start
 
 ```bash
-# In the eza checkout (deployment flake):
-# (Use `nix build path:.#docker` if the tree has uncommitted files, a git
-# flake only sees tracked files. `.#docker-local` builds the same image with
-# the locally built web bundle instead of the released one.)
-nix build .#docker              # -> ./result is a gzip'd image tarball
-docker load < result            # -> Loaded image: eza:0.2.0.0 (some Docker
-                                #    versions report localhost/eza:0.2.0.0)
-docker image ls | grep eza
-
-# Tag/push to your registry:
-docker tag eza:0.2.0.0 registry.example.com/eza:0.2.0.0
-docker push registry.example.com/eza:0.2.0.0
+docker run -d --name eza --restart unless-stopped \
+  -p 8080:8080 -v eza-data:/data \
+  ghcr.io/meillaya/eza:latest
 ```
 
-The image contains: `eza-bookmarks`, the web bundle
-(`/share/eza/static`, pointed to by `EZA_STATIC_DIR`), `/etc/eza/secretspec.toml`,
-curl, sqlite3, monolith (snapshot capture), rclone (offsite backups) and
-SecretSpec. `/bin/eza-bookmarks`, `/bin/secretspec`, `/bin/sqlite3`, ...
-are symlinks into the Nix store.
-
-The container CMD is `eza-bookmarks serve`; the same binary also provides
-`healthcheck` (for HEALTHCHECK / probes), `backup`, `verify`, `stats`,
-`check-dead`, `repair-domains`, `import`, `init` and `version`.
+Open <http://localhost:8080/setup> and create the first account. The named
+`eza-data` volume holds the control database, account libraries, snapshots and
+backups; keep it across upgrades. On a remote host set
+`-e PUBLIC_ORIGIN=https://your-host` and terminate TLS in front of port 8080:
+passkeys require a secure origin, and origin checks reject a browser origin
+that differs from `PUBLIC_ORIGIN`.
 
 ## Docker Compose (recommended for a single host)
 
@@ -44,10 +35,12 @@ docker compose up -d
 docker compose logs -f eza
 ```
 
-`deploy/docker-compose.yml` uses a named volume `eza-data:/data`. The image
-pre-creates `/data` owned by 10001:10001, so a fresh named volume is already
-writable by the container user. Do not add another replica: SQLite is a
-single-writer database and the server serializes all writes.
+The checked-in compose file defaults to
+`ghcr.io/meillaya/eza:latest`; pin `EZA_IMAGE` for reproducible deployments.
+It uses a named volume `eza-data:/data`. The image pre-creates `/data` owned by
+10001:10001, so a fresh named volume is already writable by the container user.
+Do not add another replica: SQLite is a single-writer database and the server
+serializes all writes.
 
 ## Plain `docker run`
 
@@ -60,12 +53,30 @@ docker run -d --name eza \
   -e EZA_RP_ID=eza.example.com \
   --read-only --tmpfs /tmp \
   --cap-drop ALL --security-opt no-new-privileges \
-  eza:0.2.0.0
+  ghcr.io/meillaya/eza:0.2.0.0
 ```
 
 Put a TLS terminator in front (Caddy, nginx, Tailscale Serve) on the same host:
 WebAuthn passkeys require a **secure origin**, so plain
 `http://<host>:8080` will not work except on `http://localhost`.
+
+## Build the image from source
+
+```bash
+# In the eza checkout (deployment flake):
+# (Use `nix build path:.#docker` if the tree has uncommitted files, a git
+# flake only sees tracked files. `.#docker-local` builds the same image with
+# the locally built web bundle instead of the released one.)
+nix build .#docker              # -> ./result is a gzip'd image tarball
+docker load < result            # -> Loaded image: eza:0.2.0.0 (some Docker
+                                #    versions report localhost/eza:0.2.0.0)
+docker image ls | grep eza
+EZA_IMAGE=eza:0.2.0.0 docker compose up -d
+```
+
+The same binary provides `healthcheck` (for HEALTHCHECK / probes), `backup`,
+`verify`, `stats`, `check-dead`, `repair-domains`, `import`, `init` and
+`version`.
 
 ## Environment variables
 
@@ -302,13 +313,25 @@ nix build path:.#eza-web-local   # or: git add -f static/app && nix build .#eza-
 
 ## Upgrades
 
+Back up first, pull the new published image, and recreate the container with
+the same volume:
+
 ```bash
-git pull && nix build .#docker && docker load < result
+docker exec eza eza-bookmarks backup
+docker compose pull
 docker compose up -d            # recreated container keeps the eza-data volume
 ```
 
+Local build users can rebuild instead:
+
+```bash
+git pull && nix build .#docker && docker load < result
+EZA_IMAGE=eza:<version> docker compose up -d
+```
+
 The SQLite schema/migrations run on server start (`init`/migrations are
-idempotent); take a backup first for major upgrades.
+idempotent). For the v0.2.0.0 migration, run one explicit dead-link recheck
+after upgrading so records previously marked dead by a 403 become live.
 
 ## Troubleshooting
 

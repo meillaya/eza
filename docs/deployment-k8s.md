@@ -22,13 +22,12 @@ Manifests live in [`deploy/k8s/`](../deploy/k8s/):
 | `deployment.yaml` | 1 replica, Recreate, probes, securityContext |
 | `service.yaml` | ClusterIP on port 80 → container `http` (8080) |
 
-## 1. Build and publish the image
+## 1. Use the published image
+
+The release publishes a multi-arch image (`linux/amd64` and `linux/arm64`):
 
 ```bash
-nix build .#docker
-docker load < result
-docker tag eza:0.2.0.0 registry.example.com/eza:0.2.0.0
-docker push registry.example.com/eza:0.2.0.0
+docker pull ghcr.io/meillaya/eza:0.2.0.0
 ```
 
 Point the deployment at it, either by editing `deploy/k8s/deployment.yaml`
@@ -36,6 +35,14 @@ Point the deployment at it, either by editing `deploy/k8s/deployment.yaml`
 
 ```bash
 cd deploy/k8s
+kustomize edit set image eza=ghcr.io/meillaya/eza:0.2.0.0
+```
+
+To mirror it into a private registry instead:
+
+```bash
+docker tag ghcr.io/meillaya/eza:0.2.0.0 registry.example.com/eza:0.2.0.0
+docker push registry.example.com/eza:0.2.0.0
 kustomize edit set image eza=registry.example.com/eza:0.2.0.0
 ```
 
@@ -201,15 +208,16 @@ matter. (Adjust the `--overrides` JSON to your registry/tag; running as uid
 
 ## Upgrades
 
+Take a backup first, then point the deployment at the new published tag and let
+the Recreate rollout finish:
+
 ```bash
-nix build .#docker
-docker load < result
-docker tag eza:0.2.0.0 registry.example.com/eza:0.2.0.0 && docker push registry.example.com/eza:0.2.0.0
-kubectl -n eza set image deployment/eza eza=registry.example.com/eza:0.2.0.0
+kubectl -n eza set image deployment/eza eza=ghcr.io/meillaya/eza:0.2.0.0
 kubectl -n eza rollout status deployment/eza
 ```
 
-Take a backup first; database migrations run automatically at server start.
+If you mirror the image, update the image in your registry first. Database
+migrations run automatically at server start.
 
 ## Troubleshooting
 

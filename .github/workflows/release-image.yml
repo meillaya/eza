@@ -1,0 +1,236 @@
+name: Release container image
+
+# Publish the multi-architecture container image after a web-asset release.
+#
+# The web asset workflow runs first because the image's flake derivation fetches
+# the pinned web bundle from nix/web-assets.json. The tag commit still contains
+# the placeholder pin, so this workflow injects the real pin from the default
+# branch before building. The image is built natively on amd64 and arm64 (no
+# QEMU), smoke-tested, pushed as architecture tags, then merged into one
+# manifest with the version tag and :latest.
+#
+# workflow_dispatch exists so an existing release can be backfilled, or a failed
+# image publish retried, without rebuilding the web asset.
+on:
+  workflow_run:
+    workflows: ["Release web assets"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.2.0.0); the tag v<version> must exist"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/meillaya/eza
+  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+
+jobs:
+  prepare:
+    # A workflow_run for a branch-backed release dispatch has head_branch=main;
+    # only tag releases publish an image. Use workflow_dispatch for backfills.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      ref: ${{ steps.resolve.outputs.ref }}
+    steps:
+      - name: Resolve and validate the release version
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+            # Build backfills from the default branch so they include the
+            # current flake/packaging fixes. Normal tag releases build the tag.
+            ref="${{ github.event.repository.default_branch }}"
+          else
+            tag="${{ github.event.workflow_run.head_branch }}"
+            version="${tag#v}"
+            ref="refs/tags/${tag}"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error title=Invalid release version::'$version' is not a four-part eza version."
+            exit 1
+          fi
+          tag="v${version}"
+          if ! git ls-remote --exit-code --tags "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "::error title=Missing release tag::tag ${tag} does not exist; refusing to publish an image from an untagged tree."
+            exit 1
+          fi
+          {
+            echo "version=${version}"
+            echo "tag=${tag}"
+            echo "ref=${ref}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::publishing ${IMAGE}:${version} and :latest from ${tag}"
+
+  image:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+          fetch-depth: 1
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Verify the checked-out tree matches the release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(bash scripts/version.sh)"
+          expected="${{ needs.prepare.outputs.version }}"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error title=Version mismatch::tag v${expected} contains scripts/version.sh '${actual}'."
+            exit 1
+          fi
+
+      - name: Inject the published web-asset pin from the default branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The tag predates the pin commit created by the web-asset workflow.
+          gh api "repos/${GITHUB_REPOSITORY}/contents/nix/web-assets.json?ref=${DEFAULT_BRANCH}" \
+            --jq .content | base64 -d > nix/web-assets.json
+          bash scripts/release-asset.sh --check --require-pinned
+
+      - name: Build the container image
+        run: nix build -L path:.#docker
+
+      - name: Load the image and remember its tarball tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if tar -tzf result >/dev/null 2>&1; then
+            manifest="$(tar -xzOf result manifest.json)"
+          else
+            manifest="$(tar -xOf result manifest.json)"
+          fi
+          image="$(
+            printf '%s' "$manifest" |
+              python3 -c 'import json,sys; tags=json.load(sys.stdin)[0].get("RepoTags") or []; print(tags[0] if tags else "")'
+          )"
+          if [ -z "$image" ]; then
+            echo "::error title=Image tag missing::the Nix image tarball has no RepoTags."
+            exit 1
+          fi
+          docker load -i result
+          echo "IMAGE_REF=${image}" >> "$GITHUB_ENV"
+          echo "::notice::loaded ${image}"
+
+      - name: Install the first-run browser test (amd64 only)
+        if: matrix.arch == 'amd64'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install Playwright Chromium (amd64 only)
+        if: matrix.arch == 'amd64'
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bunx playwright install --with-deps chromium
+
+      - name: Smoke-test the image and first-run journey
+        shell: bash
+        env:
+          EZA_DOCKER_BROWSER: ${{ matrix.arch == 'amd64' && '1' || '0' }}
+        run: bash scripts/docker-smoke.sh "$IMAGE_REF"
+
+      - name: Log in to GHCR
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Push the architecture image
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          arch="${{ matrix.arch }}"
+          docker tag "$IMAGE_REF" "${IMAGE}:${version}-${arch}"
+          docker push "${IMAGE}:${version}-${arch}"
+          echo "::notice::pushed ${IMAGE}:${version}-${arch}"
+
+  manifest:
+    needs: [prepare, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+          fetch-depth: 1
+
+      - name: Log in to GHCR
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Create the multi-architecture manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          docker buildx imagetools create \
+            -t "${IMAGE}:${version}" \
+            -t "${IMAGE}:latest" \
+            "${IMAGE}:${version}-amd64" \
+            "${IMAGE}:${version}-arm64"
+          docker buildx imagetools inspect "${IMAGE}:${version}"
+
+      - name: Upload the versioned compose file
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          tag="${{ needs.prepare.outputs.tag }}"
+          compose="eza-${version}-compose.yml"
+          sed "s|^[[:space:]]*image:.*|    image: ${IMAGE}:${version}|" deploy/docker-compose.yml > "$compose"
+          gh release upload "$tag" "$compose" --clobber
+          echo "::notice::uploaded $compose to $tag"
+
+      - name: Try to make the GHCR package public
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh api --method PATCH "/user/packages/container/eza" -f visibility=public >/dev/null; then
+            echo "::notice::GHCR package eza is public."
+          else
+            echo "::warning title=GHCR package may be private::The token could not set package visibility. Set https://github.com/users/meillaya/packages/container/eza/settings to Public once; the image push itself succeeded."
+          fi

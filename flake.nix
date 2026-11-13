@@ -144,10 +144,23 @@
           # Haskell builder enables tests by default (doCheck = !isCross) and
           # some of these releases have tests that fail in the sandbox or need
           # extra tooling; only the library is needed here.
+          hackagePkgWith = self: pkg: ver: hash: extraArgs:
+            let
+              revisedCabal = (./nix/hackage-cabal) + "/${pkg}-${ver}.cabal";
+            in
+            (pkgs.haskell.lib.overrideCabal
+              (self.callCabal2nix pkg (hackageSrc pkg ver hash) extraArgs)
+              (orig: { doCheck = false; })
+            ).overrideAttrs
+              (old: {
+                prePatch = lib.optionalString (builtins.pathExists revisedCabal) ''
+                  cp ${revisedCabal} ${pkg}.cabal
+                  sed -i -e 's/\r$//' *.cabal
+                '';
+              });
+
           hackagePkg = self: pkg: ver: hash:
-            pkgs.haskell.lib.overrideCabal
-              (self.callCabal2nix pkg (hackageSrc pkg ver hash) { })
-              (orig: { doCheck = false; });
+            hackagePkgWith self pkg ver hash { };
 
           hpkgsUpgraded = hpkgs.extend (self: super: {
             crypton = hackagePkg self "crypton" "1.1.5" "sha256-vP+EalN0Keqj1kweqIjC37JIBcs62c5sV7GuDzlGI5Q=";
@@ -157,7 +170,10 @@
             crypton-x509-system = hackagePkg self "crypton-x509-system" "1.9.0" "sha256-ie6Bm3iWOlySX9qtgOLmS+bA/t9PJPwrle3bZJuGzv4=";
             crypton-x509-validation = hackagePkg self "crypton-x509-validation" "1.9.1" "sha256-j8uDQBEUx/aU2ExUPo9/ls6mDFQ6MKdwkDdB0zbuzj0=";
             hpke = hackagePkg self "hpke" "0.2.0" "sha256-dyDnQC5bg6u/wi7JiqPjqwCCZOMswGtLzbnelQEmkt0=";
-            http-client-tls = hackagePkg self "http-client-tls" "0.4.0" "sha256-YRzxTPBGZXuxeIpNrAlxC0sQTAN9QrGJFIwC5t2Erjw=";
+            http-client-tls = hackagePkgWith self "http-client-tls" "0.4.0" "sha256-YRzxTPBGZXuxeIpNrAlxC0sQTAN9QrGJFIwC5t2Erjw=" {
+              crypton-connection = self.crypton-connection;
+              tls = self.tls;
+            };
             http-semantics = hackagePkg self "http-semantics" "0.4.2" "sha256-iIth1K6bZHNEbkki04wcNb5JnLnCwGrenD7291hXGwc=";
             http-types = hackagePkg self "http-types" "0.12.6" "sha256-togEKstOU/H17+0mBWzx/cOuXca4XPvjIe3/wwecEGw=";
             http2 = hackagePkg self "http2" "5.4.13" "sha256-WZbpyfq5cQNoXiDH68iBvhKmuHlQNDB3CENGupiD5zc=";
@@ -166,7 +182,9 @@
             network = hackagePkg self "network" "3.2.12.0" "sha256-yPASjlfUFJeuncTmQW1FxoSnqNqqzHrp9U4EcWOG2Rk=";
             recv = hackagePkg self "recv" "0.1.3" "sha256-Y1+lxvw2LjUSHE0zXVpKlLv4zanqP3fdmYT3rnxkeMU=";
             time-manager = hackagePkg self "time-manager" "0.5.2" "sha256-Sfigdv9vF5WBoFDVn+ez+lpK1NczLXSjjBcaO5T0Zoc=";
-            tls = hackagePkg self "tls" "2.4.6" "sha256-YPUxo4GJgRg8+7ohr8VKuZydUyGjHxK4CD4sWIPx528=";
+            tls = hackagePkgWith self "tls" "2.4.6" "sha256-YPUxo4GJgRg8+7ohr8VKuZydUyGjHxK4CD4sWIPx528=" {
+              crypton-x509-validation = self.crypton-x509-validation;
+            };
             wai = hackagePkg self "wai" "3.2.5" "sha256-et0Z9TcaGFD414XbJAHtsUTfsnVaexrE0jN+vHce1Go=";
             warp = hackagePkg self "warp" "3.4.21" "sha256-/lGA2G08FrxhHJU1OVynGJ1eI6hlHUPi88TdJPOvYmM=";
             webauthn = hackagePkg self "webauthn" "0.12.0.0" "sha256-nheT2/kPMTKJMPQvMTnKd3suaXE/ci7KezPRfILgga8=";
@@ -286,6 +304,13 @@
               Cmd = [ "${eza-bookmarks}/bin/eza-bookmarks" "serve" ];
               User = "10001:10001";
               WorkingDir = "/data";
+              Labels = {
+                "org.opencontainers.image.title" = "eza";
+                "org.opencontainers.image.description" = "Self-hosted, tag-based bookmark manager (Haskell/Warp server, SQLite+FTS5, Miso web client).";
+                "org.opencontainers.image.source" = "https://github.com/meillaya/eza";
+                "org.opencontainers.image.version" = version;
+                "org.opencontainers.image.licenses" = "Apache-2.0";
+              };
               Env = [
                 "EZA_DATA_DIR=/data"
                 "EZA_BIND=0.0.0.0:8080"

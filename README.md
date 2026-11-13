@@ -52,14 +52,45 @@ reference library. Paper on the left, the reading room at night on the right.
 
 ## 📦 Installation
 
+### Quick start (Docker)
+
+The published image is multi-arch (`linux/amd64` and `linux/arm64`). A fresh
+install is one command:
+
+```bash
+docker run -d --name eza --restart unless-stopped \
+  -p 8080:8080 -v eza-data:/data \
+  ghcr.io/meillaya/eza:latest
+```
+
+Open <http://localhost:8080/setup> and create the first account. The named
+`eza-data` volume holds the control database, account libraries, snapshots and
+backups; keep it across upgrades. For a remote host, set
+`-e PUBLIC_ORIGIN=https://your-host` and put a TLS proxy in front; passkeys
+need a secure origin or localhost. See
+[docs/deployment-docker.md](docs/deployment-docker.md) for Compose, backups,
+upgrades and troubleshooting.
+
+Existing installs upgrade by backing up, pulling the new image and recreating
+the container with the same volume:
+
+```bash
+docker exec eza eza-bookmarks backup
+docker pull ghcr.io/meillaya/eza:latest
+docker rm -f eza
+docker run -d --name eza --restart unless-stopped \
+  -p 8080:8080 -v eza-data:/data \
+  ghcr.io/meillaya/eza:latest
+```
+
 > [!IMPORTANT]
 > The Nix and Docker outputs pin the web client as a CI-built release asset; the
-> URL and SRI hash live in `nix/web-assets.json`. A `v*` tag runs
-> `.github/workflows/release.yml`, which builds and uploads
-> `eza-web-<version>.tar.gz` and commits the resolved hash. Until that asset is
-> published and pinned, build the client once from a checkout with
-> `devenv shell -- web`, then use the local image or the built `static/`
-> directory as shown below. The source route needs nothing extra.
+> URL and SRI hash live in `nix/web-assets.json`. The GitHub release's
+> `eza-web-<version>.tar.gz` asset is that web bundle for the deployment flake,
+> not a standalone installer. A `v*` tag runs
+> `.github/workflows/release.yml` to build/upload the bundle, then
+> `.github/workflows/release-image.yml` to publish the container image and its
+> versioned compose file.
 
 One Warp and WAI process serves the client assets, the auth and share pages and
 `/api/v1`. The control database owns identity only; each account has a private
@@ -150,32 +181,25 @@ The module owns `dataDir` (`/var/lib/eza`), `bind` (`127.0.0.1:8080`),
 
 ### Docker Compose
 
-The image is built with Nix, because the web client is a WASM build rather than a
-container build step:
-
-```bash
-devenv shell -- web              # once, if the release asset is not available
-nix build path:.#docker-local
-docker load < result             # eza:0.2.0.0
-```
-
-Then start the checked-in stack:
+The checked-in stack pulls the published image:
 
 ```bash
 cp deploy/docker-compose.yml docker-compose.yml
-# edit PUBLIC_ORIGIN and EZA_RP_ID in the file, then:
+# edit PUBLIC_ORIGIN in the file, then:
 docker compose up -d
 ```
 
 The container runs as uid and gid 10001, keeps `/data` on a named volume and
-serves the `/healthz` probe. Put a TLS proxy in front for passkeys.
+serves the `/healthz` probe. Put a TLS proxy in front for passkeys. To build
+the image locally instead, run `devenv shell -- web`, `nix build path:.#docker-local`,
+and set `EZA_IMAGE=eza:0.2.0.0`.
 
 ### Kubernetes
 
-Set the image and apply the kustomization:
+Use the published image and apply the kustomization:
 
 ```bash
-(cd deploy/k8s && kustomize edit set image eza=registry.example.com/eza:0.2.0.0)
+(cd deploy/k8s && kustomize edit set image eza=ghcr.io/meillaya/eza:0.2.0.0)
 kubectl apply -k deploy/k8s
 kubectl -n eza rollout status deployment/eza
 ```
