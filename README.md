@@ -88,8 +88,8 @@ docker run -d --name eza --restart unless-stopped \
 With flakes enabled, build the server and the pinned web bundle without Docker:
 
 ```bash
-nix build github:meillaya/eza/v0.2.0.0#eza-bookmarks --out-link eza-server
-nix build github:meillaya/eza/v0.2.0.0#eza-web --out-link eza-web
+nix build github:meillaya/eza#eza-bookmarks --out-link eza-server
+nix build github:meillaya/eza#eza-web --out-link eza-web
 
 EZA_STATIC_DIR=$PWD/eza-web/share/eza/static \
 EZA_DATA_DIR=$PWD/eza-data \
@@ -106,7 +106,7 @@ install use the module below instead.
 For development or a source checkout:
 
 ```bash
-git clone --branch v0.2.0.0 https://github.com/meillaya/eza
+git clone https://github.com/meillaya/eza
 cd eza
 devenv shell -- build      # native server + Miso/WASM client
 devenv shell -- dev        # http://localhost:8000
@@ -249,7 +249,7 @@ Nix and devenv provide GHC 9.10, the WASM toolchain and the command surface.
 There is no Makefile:
 
 ```bash
-git clone --branch v0.2.0.0 https://github.com/meillaya/eza
+git clone https://github.com/meillaya/eza
 cd eza
 devenv shell -- build   # native server + Miso/WASM client
 devenv shell -- web     # client only, if you already built the server
