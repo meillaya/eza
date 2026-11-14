@@ -67,8 +67,7 @@ import Eza.Web.Logic.Graph (
     emptyMatches,
     initialGraphView,
  )
-import Eza.Web.Logic.Route (Route (..), isGraphRoute)
-import qualified Eza.Web.Logic.Route as ClientRoute
+import Eza.Web.Logic.Route (Route (..))
 import Eza.Web.Logic.Wire (ImportResponse (..), ListParams, WebhookTest (..))
 
 {- | A text selection inside the reader, with character offsets relative to
