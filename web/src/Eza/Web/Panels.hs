@@ -64,6 +64,7 @@ import Eza.Web.Graph (
 import Eza.Web.Logic.Model
 import Eza.Web.Logic.Requests (exportJsonUrl, exportUrl)
 import Eza.Web.Logic.Route (Route (..))
+import Eza.Web.Logic.Update.ViewDefs (effectiveGraphLabelMode)
 import Eza.Web.Logic.Wire (WebhookTest (..))
 import Eza.Web.Render (txt)
 import qualified Eza.Web.Render.Event as HE
@@ -490,7 +491,7 @@ graphCanvas m layout =
             , drFocus = mGraphFocus m
             , drMatches = mGraphMatches m
             , drTagsShown = mGraphTagsShown m
-            , drLabelMode = mGraphLabelMode m
+            , drLabelMode = effectiveGraphLabelMode m
             , drRecordColors = maybe IM.empty caRecordColors (mGraphColors m)
             , drTagColors = maybe M.empty caTagColors (mGraphColors m)
             , drViewKey = graphViewCacheKey m
@@ -571,7 +572,7 @@ same pure plan as the painter, so it counts what is on screen.
 -}
 graphLabelCount :: Model -> GraphLayout -> Int
 graphLabelCount m layout =
-    labelCount layout (mGraphView m) (mGraphTagsShown m) (mGraphLabelMode m)
+    labelCount layout (mGraphView m) (mGraphTagsShown m) (effectiveGraphLabelMode m)
 
 graphStatusText :: Model -> GraphLayout -> MisoString
 graphStatusText m layout

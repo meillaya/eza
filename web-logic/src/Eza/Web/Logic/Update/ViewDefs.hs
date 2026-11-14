@@ -7,6 +7,7 @@ module Eza.Web.Logic.Update.ViewDefs (
     currentGraphDefinition,
     currentLedgerDefinition,
     defaultGraphView,
+    effectiveGraphLabelMode,
     findViewBySlug,
     isLocalGraphRoute,
     isUserEnabled,
@@ -125,6 +126,16 @@ setAt index update list = [if position == index then update value else value | (
 
 removeAt :: Int -> [a] -> [a]
 removeAt index list = [value | (position, value) <- zip [0 :: Int ..] list, position /= index]
+
+{- | The label mode the graph should paint. An active saved view's definition
+owns the mode (so opening a view with a different @label_mode@ updates the
+rendered labels); otherwise the shell's current choice is kept.
+-}
+effectiveGraphLabelMode :: Model -> EV.LabelMode
+effectiveGraphLabelMode m =
+    case activeGraphDefinition m of
+        Just definition -> EV.gvdLabelMode definition
+        Nothing -> mGraphLabelMode m
 
 -- | The definition of the active saved graph view, when one is selected.
 activeGraphDefinition :: Model -> Maybe EV.GraphViewDefinition

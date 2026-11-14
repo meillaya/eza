@@ -71,6 +71,7 @@ test-suite eza-web-logic-test
                     JobSpec
                     ModelSpec
                     UpdateSpec
+                    ViewSpec
                     PuritySpec
                     RouteSpec
   build-depends:    base >=4.18 && <5

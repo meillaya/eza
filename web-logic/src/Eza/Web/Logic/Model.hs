@@ -875,8 +875,11 @@ data Model = Model
     , mGraphMatches :: GraphMatches
     , mGraphFilter :: Text
     , mGraphFilterTimer :: Maybe Int
-    , -- TODO(M1/task-13): the label mode comes from the active graph view.
-      mGraphLabelMode :: LabelMode
+    , mGraphLabelMode :: LabelMode
+    {- ^ The reader's last label-mode choice. While a saved view is active,
+    its definition supplies the rendered mode (see
+    'effectiveGraphLabelMode'); this field is the fallback.
+    -}
     , mGraphPreset :: LayoutPreset
     , mGraphLayoutWire :: Maybe (LayoutPreset, GraphLayoutWire)
     , mGraphLayoutSource :: Text

@@ -10,6 +10,7 @@ import ModelSpec (modelSpec)
 import PuritySpec (puritySpec)
 import RouteSpec (routeSpec)
 import UpdateSpec (updateSpec)
+import ViewSpec (viewSpec)
 
 main :: IO ()
 main = hspec $ do
@@ -19,5 +20,6 @@ main = hspec $ do
     modelSpec
     updateSpec
     jobSpec
+    viewSpec
     helperSpec
     puritySpec
