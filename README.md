@@ -33,7 +33,7 @@ search at 0.92 to 2.00 ms p95.
 
 ---
 
-## 📸 Screenshots
+## Screenshots
 
 The real server and the built WASM client, against a scratch copy of the
 reference library. Paper on the left, the reading room at night on the right.
@@ -50,7 +50,7 @@ reference library. Paper on the left, the reading room at night on the right.
 
 ---
 
-## 📦 Installation
+## Installation
 
 ### Quick start (Docker)
 
@@ -132,8 +132,6 @@ One Warp and WAI process serves the client assets, the auth and share pages and
 SQLite library in WAL mode under `EZA_DATA_DIR/users/<id>/`, and a request
 resolves its account before it reads a row. Backups are directory stamps of the
 control database and every account library.
-
-<img src="docs/figures/architecture.png" alt="Architecture: one process, one control database, one library per account" width="100%">
 
 | Route | Best for | What you get |
 |---|---|---|
@@ -278,7 +276,7 @@ docker compose run --rm eza /bin/eza-bookmarks restore /data/backups/<stamp> --y
 
 ---
 
-## ✨ Features
+## Features
 
 - [x] Full-text search over title, description, URL, note, extracted text and source domain
 - [x] `tag:`, `is:unread`, `is:dead`, `link:`, `year:`, `day:` and `-term` filters, ordered by bm25
@@ -308,7 +306,7 @@ docker compose run --rm eza /bin/eza-bookmarks restore /data/backups/<stamp> --y
 
 ---
 
-## 🧩 Extensions
+## Extensions
 
 Extensions v1 are data, not code. A view is a JSON document that the server
 validates and the client renders; a webhook is a URL the server posts signed
@@ -394,7 +392,7 @@ Node sidecar (`EZA_DEFUDDLE_CMD`) handles extraction for the server. See
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 | Document | What is in it |
 |---|---|
@@ -418,7 +416,7 @@ Node sidecar (`EZA_DEFUDDLE_CMD`) handles extraction for the server. See
 ---
 
 <details>
-<summary><b>⌨️ Keyboard shortcuts</b></summary>
+<summary><b>Keyboard shortcuts</b></summary>
 
 | Key | Action |
 |---|---|
@@ -440,15 +438,15 @@ section links, in the mobile bar, on the account page and in the palette.
 
 ---
 
-## 🆘 Help
+## Help
 
-- Read the [documentation](#-documentation) above, especially the deployment
+- Read the [documentation](#documentation) above, especially the deployment
   guides.
 - The server logs to stderr; `EZA_LOG_LEVEL=debug` turns on access logging, and
   `/healthz` is the container probe.
 - Bugs and questions: [open an issue](https://github.com/meillaya/eza/issues).
 
-## 💖 Credits
+## Credits
 
 eza stands on a lot of good work:
 
