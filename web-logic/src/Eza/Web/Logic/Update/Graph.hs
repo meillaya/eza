@@ -26,7 +26,7 @@ import Control.Monad
 import qualified Data.IntMap.Strict as IM
 import Data.Maybe
 import qualified Data.Text as T
-import Eza.Web.Logic.Effect (RequestId (..), nextRequestId, requestIsCurrent)
+import Eza.Web.Logic.Effect (nextRequestId, requestIsCurrent)
 
 import Data.Text (Text)
 import Eza.GraphLayout
@@ -34,13 +34,13 @@ import Eza.Types
 import qualified Eza.View as EV
 import Eza.Web.Logic.Browser
 import Eza.Web.Logic.Error
-import Eza.Web.Logic.Graph (GraphDrag (..), GraphMatches (..), GraphView (..), emptyMatches)
+import Eza.Web.Logic.Graph (GraphDrag (..), GraphView (..), emptyMatches)
 import Eza.Web.Logic.Graph.Geometry
 import Eza.Web.Logic.Model
 import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Route (Route (..), isGraphRoute)
 import Eza.Web.Logic.Update.Common
-import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
+import Eza.Web.Logic.Update.Monad (Update, dispatch, get)
 import Eza.Web.Logic.Update.ViewDefs (activeGraphDefinition, recomputeGraphColors)
 
 graphZoom :: Double -> Update ()

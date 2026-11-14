@@ -22,13 +22,16 @@ import qualified Miso.Html.Property as HP
 import qualified Miso.JSON as MJ
 import Text.Read (readMaybe)
 
+import Eza.Ledger (LedgerEntry (..))
 import Eza.SearchQuery (SearchQuery (..), parseSearchQuery)
 import Eza.Share (ShareView (..))
 import Eza.Types (BookmarkSummary (..), LibraryStats (..), SavedSearch (..), TagStat (..))
 import Eza.Web.Detail (detailPage)
 import Eza.Web.History (historyPage)
-import Eza.Web.Model
+import Eza.Web.Logic.Model
+import Eza.Web.Logic.Route (Route (..), isGraphRoute)
 import Eza.Web.Panels (accountPage, aiTagsPage, dedupPage, graphPage, maintenancePage, tagsPage, viewDialogs, viewsPage)
+import Eza.Web.Render (txt)
 import Eza.Web.Widgets (disabledAttr, formatCount)
 
 -- ------------------------------------------------------------------ shell --
@@ -68,7 +71,7 @@ viewModel m = case mBlockingError m of
 (wire-version mismatch). It replaces the whole interface and offers a reload,
 the one action that can load a matching build.
 -}
-blockingPage :: MisoString -> View () () Model Action
+blockingPage :: Text -> View () () Model Action
 blockingPage message =
     H.div_
         [ HP.class_ "app ledg-app app-frame"
@@ -85,7 +88,7 @@ blockingPage message =
                         [ H.div_
                             [HP.class_ "empty-note"]
                             [ H.h2_ [HP.class_ "empty-title"] [text "This page is out of date."]
-                            , H.p_ [HP.class_ "empty-body"] [text message]
+                            , H.p_ [HP.class_ "empty-body"] [txt message]
                             , H.p_
                                 [HP.class_ "empty-try"]
                                 [ H.a_
@@ -163,7 +166,7 @@ queryLine m =
                 , HP.class_ "query-input"
                 , HP.type_ "search"
                 , HP.placeholder_ "search the library"
-                , HP.value_ (mQ m)
+                , HP.value_ (ms (mQ m))
                 , HP.autocomplete_ "off"
                 , HP.spellcheck_ False
                 , HP.aria_ "label" "Search the library"
@@ -353,7 +356,7 @@ sectionsNav m =
               ]
                 ++ [HP.aria_ "current" "page" | routeActive route]
             )
-            [text label]
+            [txt label]
     routeActive route
         | route == Index = case mRoute m of
             Index -> True
@@ -515,7 +518,7 @@ facetStrip m =
     fgroup label items =
         H.div_
             [HP.class_ "fstrip-group"]
-            (H.span_ [HP.class_ "fstrip-key sc"] [text label] : items)
+            (H.span_ [HP.class_ "fstrip-key sc"] [txt label] : items)
     stripSource (domain, count) =
         H.a_
             ( [ HP.class_ "fstrip-item"
@@ -540,7 +543,7 @@ facetStrip m =
             , HP.href_ "/"
             , HE.onClickPrevent action
             ]
-            [text label, H.span_ [HP.class_ "n"] [text value]]
+            [txt label, H.span_ [HP.class_ "n"] [text value]]
 
 -- ------------------------------------------------------------- facet rail ---
 
@@ -782,7 +785,7 @@ staleError m = case mError m of
             , H.span_
                 [HP.class_ "offline-banner-text"]
                 [ text "The list could not be refreshed. "
-                , text message
+                , txt message
                 ]
             , H.span_
                 [HP.class_ "offline-banner-actions"]
@@ -917,7 +920,7 @@ rowView m bookmark =
                 ( faviconView bookmark
                     ++ [H.span_ [HP.class_ "dom"] [text (msText (bsDomain bookmark))]]
                 )
-            , H.span_ [HP.class_ "c-filed meta"] [text (formatFiled (bsCreatedAt bookmark))]
+            , H.span_ [HP.class_ "c-filed meta"] [txt (formatFiled (bsCreatedAt bookmark))]
             , H.span_ [HP.class_ "c-tags meta"] (tagsCell m (bsTags bookmark))
             ]
         ]
@@ -1057,7 +1060,7 @@ selectionBar m =
             ( [HP.class_ "ledg-act", HP.type_ "button", HE.onClick action]
                 ++ disabledAttr (mSelectingAll m)
             )
-            [text label]
+            [txt label]
 
 -- ---------------------------------------------------------------- drawer ---
 
@@ -1097,7 +1100,7 @@ drawerView m = case mDrawer m >>= findBookmark m of
                 [HP.class_ "stamped"]
                 ( [ stampedField "filed" (formatFiled (bsCreatedAt bookmark))
                   , stampedField "added" (formatFiled (bsAddedAt bookmark))
-                  , stampedField "source" (msText (bsDomain bookmark))
+                  , stampedField "source" (fromMisoString (msText (bsDomain bookmark)))
                   , stampedField "read" (if bsIsRead bookmark then "read" else "unread")
                   ]
                     ++ [stampedField "link" "dead" | bsIsDead bookmark]
@@ -1138,9 +1141,9 @@ findBookmark m bid = case filter ((== bid) . bsId) (mItems m) of
     (bookmark : _) -> Just bookmark
     [] -> Nothing
 
-stampedField :: MisoString -> MisoString -> View () () Model Action
+stampedField :: Text -> Text -> View () () Model Action
 stampedField label value =
-    H.div_ [HP.class_ "field"] [H.dt_ [] [text label], H.dd_ [] [text value]]
+    H.div_ [HP.class_ "field"] [H.dt_ [] [txt label], H.dd_ [] [txt value]]
 
 -- --------------------------------------------------------- empty / error ---
 
@@ -1230,7 +1233,7 @@ errorState m =
             , H.p_
                 [HP.class_ "empty-body"]
                 [text "The server did not answer the list request."]
-            , H.p_ [HP.class_ "ledg-error-code mono"] [text (fromMaybe "" (mError m))]
+            , H.p_ [HP.class_ "ledg-error-code mono"] [txt (fromMaybe "" (mError m))]
             , H.p_
                 [HP.class_ "ledg-error-actions"]
                 [ H.button_
@@ -1409,7 +1412,7 @@ savePage m =
                                 [ HP.id_ "save-note"
                                 , HP.class_ "save-input save-input--note"
                                 , HP.rows_ "3"
-                                , HP.value_ (mAddNote m)
+                                , HP.value_ (ms (mAddNote m))
                                 , HP.placeholder_ "optional"
                                 , HP.aria_ "label" "Note"
                                 , HE.onInput AddNoteInput
@@ -1443,7 +1446,7 @@ notice, so only unrelated failures appear here.
 saveErrorMessage :: Model -> View () () Model Action
 saveErrorMessage m = case (duplicateId m, mAddError m) of
     (Nothing, Just message) ->
-        H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]
+        H.p_ [HP.class_ "add-error", HP.role_ "alert"] [txt message]
     _ -> H.span_ [] []
 
 duplicateNote :: Model -> View () () Model Action
@@ -1464,16 +1467,16 @@ duplicateNote m = case duplicateId m of
                 ]
             ]
 
-saveField :: MisoString -> MisoString -> MisoString -> MisoString -> (Text -> Action) -> Bool -> View () () Model Action
+saveField :: Text -> Text -> MisoString -> Text -> (Text -> Action) -> Bool -> View () () Model Action
 saveField label domId inputType value onInput wide =
     H.div_
         [HP.class_ "save-field"]
-        [ H.label_ [HP.class_ "save-label", HP.for_ domId] [text label]
+        [ H.label_ [HP.class_ "save-label", HP.for_ (ms domId)] [txt label]
         , H.input_
-            [ HP.id_ domId
+            [ HP.id_ (ms domId)
             , HP.class_ ("save-input" <> if wide then " save-input--title" else "")
-            , HP.type_ inputType
-            , HP.value_ value
+            , HP.type_ (ms inputType)
+            , HP.value_ (ms value)
             , HP.autocomplete_ "off"
             , HP.spellcheck_ False
             , HE.onInput onInput
@@ -1509,7 +1512,7 @@ paletteView m =
                         , HP.placeholder_ "search or type a command"
                         , HP.aria_ "label" "Search commands and records"
                         , HP.autofocus_ True
-                        , HP.value_ (mPaletteQ m)
+                        , HP.value_ (ms (mPaletteQ m))
                         , HP.autocomplete_ "off"
                         , HP.spellcheck_ False
                         , HE.onInput PaletteInput
@@ -1529,16 +1532,16 @@ paletteView m =
             ]
         ]
 
-paletteRow :: Model -> Int -> (MisoString, MisoString, Action) -> View () () Model Action
+paletteRow :: Model -> Int -> (Text, Text, Action) -> View () () Model Action
 paletteRow m index (label, hint, _) =
     H.button_
         [ HP.class_ ("slip-row" <> if index == mPaletteSel m then " is-sel" else "")
         , HP.type_ "button"
         , HP.data_ "testid" "palette-row"
-        , HP.title_ hint
+        , HP.title_ (ms hint)
         , HE.onClick (PaletteChoose index)
         ]
-        [ H.span_ [HP.class_ "sr-title"] [text label]
+        [ H.span_ [HP.class_ "sr-title"] [txt label]
         ]
 
 toastsView :: Model -> View () () Model Action
@@ -1699,7 +1702,7 @@ savedShareExpiryOption current days =
 savedSearchShareLinks :: Model -> SavedSearch -> View () () Model Action
 savedSearchShareLinks m saved
     | Just message <- mSharesError m =
-        H.p_ [HP.class_ "dshare-note"] [text "existing links could not be read: ", text message]
+        H.p_ [HP.class_ "dshare-note"] [text "existing links could not be read: ", txt message]
     | null activeLinks = H.span_ [] []
     | otherwise =
         H.div_
@@ -1721,7 +1724,7 @@ savedSearchShareLinks m saved
         H.span_
             [HP.class_ "record-tags", HP.data_ "testid" "saved-share-row"]
             [ H.span_ [HP.class_ "mono"] [text (ms (svPrefix share))]
-            , H.span_ [HP.class_ "status--warn"] [text "expires ", text (formatFiled (svExpiresAt share))]
+            , H.span_ [HP.class_ "status--warn"] [text "expires ", txt (formatFiled (svExpiresAt share))]
             , H.button_
                 [ HP.class_ "btn btn--sm"
                 , HP.data_ "testid" "saved-share-revoke"
@@ -1758,7 +1761,7 @@ addDialog m =
                       , addField "title" "add-title" "text" (mAddTitle m) AddTitleInput " add-field-title"
                       , addField "tags" "add-tags" "text" (mAddTags m) AddTagsInput " add-field-tags"
                       ]
-                        ++ [ H.p_ [HP.class_ "add-error"] [text message]
+                        ++ [ H.p_ [HP.class_ "add-error"] [txt message]
                            | isNothingMaybe (duplicateId m)
                            , Just message <- [mAddError m]
                            ]
@@ -1801,16 +1804,16 @@ addDialog m =
         | isJust (duplicateId model) = "duplicate"
         | otherwise = "idle"
 
-addField :: MisoString -> MisoString -> MisoString -> MisoString -> (Text -> Action) -> MisoString -> View () () Model Action
+addField :: Text -> Text -> MisoString -> Text -> (Text -> Action) -> MisoString -> View () () Model Action
 addField label domId inputType value onInput extraClass =
     H.div_
         [HP.class_ ("field" <> extraClass)]
-        [ H.label_ [HP.class_ "field-label", HP.for_ domId] [text label]
+        [ H.label_ [HP.class_ "field-label", HP.for_ (ms domId)] [txt label]
         , H.input_
-            ( [ HP.id_ domId
+            ( [ HP.id_ (ms domId)
               , HP.class_ "input"
-              , HP.type_ inputType
-              , HP.value_ value
+              , HP.type_ (ms inputType)
+              , HP.value_ (ms value)
               , HP.autocomplete_ "off"
               , HP.spellcheck_ False
               , HE.onInput onInput
@@ -1923,7 +1926,7 @@ tagPromptDialog m =
                         [ HP.id_ "bulk-tag-input"
                         , HP.class_ "input"
                         , HP.type_ "text"
-                        , HP.value_ (mTagPromptValue m)
+                        , HP.value_ (ms (mTagPromptValue m))
                         , HP.placeholder_ "comma-separated tags"
                         , HP.autocomplete_ "off"
                         , HE.onInput BulkTagInput
@@ -2019,7 +2022,7 @@ msText :: Text -> MisoString
 msText = ms . T.unpack
 
 qText :: Model -> Text
-qText m = T.pack (fromMisoString (mQ m))
+qText m = mQ m
 
 hasActiveFilters :: Model -> Bool
 hasActiveFilters m = not (T.null (T.strip (qText m))) || not (null (mTagsFilter m))
@@ -2189,8 +2192,7 @@ stripScheme u = case T.stripPrefix "https://" u of
 duplicateId :: Model -> Maybe Int
 duplicateId m = do
     message <- mAddError m
-    let raw = T.pack (fromMisoString message)
-    rest <- T.stripPrefix "already saved as bookmark " raw
+    rest <- T.stripPrefix "already saved as bookmark " message
     readMaybe (T.unpack (T.strip rest))
 
 {- | Days since the Unix epoch for a @YYYY-MM-DD@ day, matching the model's

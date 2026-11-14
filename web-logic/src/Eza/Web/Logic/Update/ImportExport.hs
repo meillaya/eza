@@ -9,7 +9,7 @@ import Eza.Web.Logic.Browser
 import Eza.Web.Logic.Model
 import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Update.Common
-import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
+import Eza.Web.Logic.Update.Monad (Update)
 
 handle :: Action -> Update ()
 handle = \case

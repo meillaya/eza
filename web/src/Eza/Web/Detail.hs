@@ -22,9 +22,11 @@ import Eza.Types (
     BookmarkSummary (..),
     Highlight (..),
  )
+import Eza.Web.Logic.Model
 import Eza.Web.Logic.Requests (bookmarkSnapshotUrl)
+import Eza.Web.Logic.Route (Route (..))
 import Eza.Web.Markdown (renderMarkdown)
-import Eza.Web.Model
+import Eza.Web.Render (txt)
 import Eza.Web.Widgets (disabledAttr)
 
 -- ------------------------------------------------------------------ page --
@@ -58,7 +60,7 @@ failedView m =
         , H.h1_ [HP.class_ "empty-title"] [text "This record could not be opened."]
         , H.p_
             [HP.class_ "ledg-error-code mono"]
-            [text (fromMaybe "the record request failed" (mDetailError m))]
+            [txt (fromMaybe "the record request failed" (mDetailError m))]
         , H.p_
             [HP.class_ "empty-try"]
             ( H.button_
@@ -137,8 +139,8 @@ recordHead m detail =
 
 displayTitle :: Model -> BookmarkDetail -> MisoString
 displayTitle m detail
-    | T.null (T.strip (prose (mEditTitle m))) = ms (bdTitle detail)
-    | otherwise = mEditTitle m
+    | T.null (T.strip (mEditTitle m)) = ms (bdTitle detail)
+    | otherwise = ms (mEditTitle m)
 
 metaLine :: BookmarkDetail -> View () () Model Action
 metaLine detail =
@@ -152,7 +154,7 @@ metaLine detail =
             [ ms author
             , ms (bdDomain detail)
             ]
-                ++ [ ms ("published " <> prose (formatProseDate stamp))
+                ++ [ ms ("published " <> prose (ms (formatProseDate stamp)))
                    | Just stamp <- [bdPublishedAt detail]
                    , stamp > 0
                    ]
@@ -317,7 +319,7 @@ extractEditor m _detail =
         [ H.textarea_
             [ HP.id_ "extract-text-editor"
             , HP.class_ "read-editor-input"
-            , HP.value_ (mExtractDraft m)
+            , HP.value_ (ms (mExtractDraft m))
             , HP.placeholder_ "Paste or correct the extracted text"
             , HP.aria_ "label" "Extracted text editor"
             , HP.spellcheck_ False
@@ -607,15 +609,15 @@ noteEditor m detail =
                     , HP.aria_ "label" "Note text"
                     , HP.placeholder_ "Write in markdown. Type [[ to link another record."
                     , HP.spellcheck_ False
-                    , HP.value_ (mEditNote m)
+                    , HP.value_ (ms (mEditNote m))
                     , HE.onInput NoteChanged
                     ]
                 ]
     previewViews model
-        | T.null (T.strip (prose (mEditNote model))) =
+        | T.null (T.strip (prose (ms (mEditNote model)))) =
             [ H.p_ [HP.class_ "record-empty"] [text "No note yet."]
             ]
-        | otherwise = renderMarkdown (prose (mEditNote model))
+        | otherwise = renderMarkdown (prose (ms (mEditNote model)))
     foot =
         H.div_
             [HP.class_ "noteed-foot"]
@@ -697,7 +699,7 @@ tagRow m =
                     [ HP.id_ "new-tag"
                     , HP.class_ "record-tagadd"
                     , C.styleInline_ "width:78px;background:transparent"
-                    , HP.value_ (mNewTag m)
+                    , HP.value_ (ms (mNewTag m))
                     , HP.placeholder_ "+ tag"
                     , HP.aria_ "label" "Add a tag"
                     , HP.autocomplete_ "off"
@@ -742,7 +744,7 @@ filedStamp detail =
         [ H.span_ [HP.class_ "record-stamp-k sc"] [text "filed"]
         , H.span_
             [HP.class_ "record-stamp-d"]
-            [text (formatFiled (bdCreatedAt detail))]
+            [txt (formatFiled (bdCreatedAt detail))]
         ]
 
 lastOpened :: BookmarkDetail -> View () () Model Action
@@ -767,7 +769,7 @@ titleField m =
             [ HP.id_ "record-title"
             , HP.class_ "input input--serif"
             , HP.aria_ "label" "Bookmark title"
-            , HP.value_ (mEditTitle m)
+            , HP.value_ (ms (mEditTitle m))
             , HP.placeholder_ "Untitled bookmark"
             , HE.onInput TitleInput
             ]
@@ -775,7 +777,7 @@ titleField m =
 
 openedText :: BookmarkDetail -> MisoString
 openedText detail = case bdLastOpenedAt detail of
-    Just stamp | stamp > 0 -> formatFiled stamp
+    Just stamp | stamp > 0 -> ms (formatFiled stamp)
     _ -> ms ("never" :: MisoString)
 
 seeSection :: Model -> BookmarkDetail -> [View () () Model Action]
@@ -1055,7 +1057,7 @@ expiryOption current days =
 shareLinksSection :: Model -> BookmarkDetail -> View () () Model Action
 shareLinksSection m detail
     | Just message <- mSharesError m =
-        H.p_ [HP.class_ "dshare-note"] [text ("existing links could not be read: " <> message)]
+        H.p_ [HP.class_ "dshare-note"] [txt ("existing links could not be read: " <> message)]
     | null activeLinks = H.span_ [] []
     | otherwise =
         H.div_
@@ -1079,7 +1081,7 @@ shareLinksSection m detail
                 [text (ms (svPrefix share))]
             , H.span_
                 [HP.class_ "dshare-link-expiry meta"]
-                [text (ms ("expires " <> prose (formatFiled (svExpiresAt share))))]
+                [text (ms ("expires " <> prose (ms (formatFiled (svExpiresAt share)))))]
             , H.button_
                 [ HP.class_ "btn btn--sm"
                 , HP.data_ "testid" "share-revoke"
@@ -1175,7 +1177,7 @@ highlightNoteDialog m
                 , H.textarea_
                     [ HP.id_ "highlight-note"
                     , HP.class_ "textarea"
-                    , HP.value_ (mHighlightNote m)
+                    , HP.value_ (ms (mHighlightNote m))
                     , HP.placeholder_ "Why this passage matters"
                     , HE.onInput HighlightNoteInput
                     ]
@@ -1238,7 +1240,7 @@ highlightEditDialog m
             , H.textarea_
                 [ HP.id_ "highlight-edit-note"
                 , HP.class_ "textarea"
-                , HP.value_ (mHighlightEditNote m)
+                , HP.value_ (ms (mHighlightEditNote m))
                 , HP.placeholder_ "Why this passage matters"
                 , HE.onInput HighlightEditInput
                 ]

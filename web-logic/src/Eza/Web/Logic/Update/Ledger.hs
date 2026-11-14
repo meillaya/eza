@@ -7,7 +7,7 @@ module Eza.Web.Logic.Update.Ledger (handle) where
 import Control.Monad
 import qualified Data.IntSet as IS
 import qualified Data.Text as T
-import Eza.Web.Logic.Effect (RequestId (..), nextRequestId, requestIsCurrent)
+import Eza.Web.Logic.Effect (nextRequestId, requestIsCurrent)
 
 import Eza.Types
 import Eza.Web.Logic.Browser
@@ -17,7 +17,7 @@ import Eza.Web.Logic.Model
 import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Update.Common
 import Eza.Web.Logic.Update.Detail (reloadDetail)
-import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
+import Eza.Web.Logic.Update.Monad (Update, get, put)
 
 handle :: Action -> Update ()
 handle = \case

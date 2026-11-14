@@ -12,7 +12,7 @@ module Eza.Web.Widgets (
 import Miso
 import qualified Miso.Html.Property as HP
 
-import Eza.Web.Model (Action, Model)
+import Eza.Web.Logic.Model (Action, Model)
 
 -- | Group digits: 8988 becomes 8,988.
 formatCount :: Int -> MisoString

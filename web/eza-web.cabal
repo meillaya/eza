@@ -32,7 +32,6 @@ executable eza-web
   main-is:          Main.hs
   other-modules:    Eza.Web.History
                     Eza.Web.Detail
-                    Eza.Web.Error
                     Eza.Web.Graph
                     Eza.Web.Interpreter
                     Eza.Web.Transport

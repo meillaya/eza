@@ -22,17 +22,16 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 
-import Miso hiding (CancelTimer, Effect, Schedule)
+import Miso hiding (Effect, Schedule)
 import qualified Miso
 import qualified Miso.JSON as MJ
 import Miso.Router (toURI)
 
 import Eza.Web.Logic.Api (ClientRequest (..), requestPath)
 import Eza.Web.Logic.Effect (Effect (..), RequestId (..), TimerId (..))
-import Eza.Web.Logic.Error (ApiError (..))
 import Eza.Web.Logic.Model
 import Eza.Web.Logic.Requests (decodeResponseAt, decodeStatsAt)
-import Eza.Web.Logic.Route (Route (..), routeTitle)
+import Eza.Web.Logic.Route (Route (..))
 import qualified Eza.Web.Logic.Route as ClientRoute
 import Eza.Web.Model ()
 import Eza.Web.Transport (performRequest, uploadImport)

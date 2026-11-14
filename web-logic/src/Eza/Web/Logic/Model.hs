@@ -66,7 +66,7 @@ import Eza.Web.Logic.Graph (
     emptyMatches,
     initialGraphView,
  )
-import Eza.Web.Logic.Ids (RequestId (..), TimerId)
+import Eza.Web.Logic.Ids (RequestId (..), TimerId (..))
 import Eza.Web.Logic.Route (Route (..))
 import Eza.Web.Logic.Wire (ImportResponse (..), ListParams, WebhookTest (..))
 
@@ -721,10 +721,16 @@ data Model = Model
     , mError :: Maybe Text
     , mNotice :: Maybe Text
     , -- the browser timeout handle of the pending search debounce
+
       mDebounce :: Maybe Int
+    {- ^ Browser timeout handle for the search debounce. Owned by the shell
+    interpreter (it is what @clearTimeout@ needs); the native reducer owns
+    the logical TimerId in @mDebounceTimer@.
+    -}
     , -- the native ledger's debounce TimerId and the last allocated timer id
       mDebounceTimer :: Maybe TimerId
-    , mTimerSeq :: Int
+    , mTimerSeq :: TimerId
+    -- ^ Next logical timer id, owned by the native ledger reducer.
     , mTags :: [TagStat]
     , mStats :: Maybe LibraryStats
     , mStatsError :: Maybe Text
@@ -1022,7 +1028,7 @@ initialModel =
         , mNotice = Nothing
         , mDebounce = Nothing
         , mDebounceTimer = Nothing
-        , mTimerSeq = 0
+        , mTimerSeq = TimerId 0
         , mTags = []
         , mStats = Nothing
         , mStatsError = Nothing

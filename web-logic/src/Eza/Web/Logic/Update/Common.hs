@@ -53,7 +53,7 @@ import Eza.Ledger (LedgerEntry (..))
 import Eza.Types
 
 import Eza.Web.Logic.Browser (scrollLedger, scrollRowIntoView)
-import Eza.Web.Logic.Effect (TimerId, nextRequestId)
+import Eza.Web.Logic.Effect (TimerId (..), nextRequestId)
 import Eza.Web.Logic.Error (ApiError)
 import qualified Eza.Web.Logic.Input as LogicInput
 import qualified Eza.Web.Logic.Ledger as Ledger
@@ -92,7 +92,7 @@ projectLedger model =
         , Ledger.ldError = mError model
         , Ledger.ldListRequest = mListEpoch model
         , Ledger.ldDebounceTimer = mDebounceTimer model
-        , Ledger.ldTimerSeq = mTimerSeq model
+        , Ledger.ldTimerSeq = unTimerId (mTimerSeq model)
         , Ledger.ldStats = mStats model
         , Ledger.ldStatsError = mStatsError model
         , Ledger.ldStatsRequest = mStatsEpoch model
@@ -115,7 +115,7 @@ embedLedger ledger model =
         , mError = Ledger.ldError ledger
         , mListEpoch = Ledger.ldListRequest ledger
         , mDebounceTimer = Ledger.ldDebounceTimer ledger
-        , mTimerSeq = Ledger.ldTimerSeq ledger
+        , mTimerSeq = TimerId (Ledger.ldTimerSeq ledger)
         , mStats = Ledger.ldStats ledger
         , mStatsError = Ledger.ldStatsError ledger
         , mStatsEpoch = Ledger.ldStatsRequest ledger

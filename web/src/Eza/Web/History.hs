@@ -17,7 +17,7 @@ import qualified Miso.Html as H
 import qualified Miso.Html.Property as HP
 
 import Eza.Types (LibraryStats (..))
-import Eza.Web.Model
+import Eza.Web.Logic.Model
 
 {- | The printed index page: archive figures, one mark per filing day per
 year, sources ranked with leader dots, the long tail and a date span.

@@ -18,8 +18,6 @@ module Eza.Web.Logic.Update.ViewDefs (
     upsertWebhook,
 ) where
 
-import Control.Monad
-
 import Data.Maybe
 import Data.Text (Text)
 import qualified Eza.Web.Logic.Route as ClientRoute
@@ -31,7 +29,6 @@ import Eza.User
 import qualified Eza.View as EV
 import Eza.Web.Logic.Model
 import Eza.Web.Logic.Route (Route (..))
-import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
 import Eza.Webhook
 
 findViewBySlug :: Text -> [EV.View] -> Maybe EV.View

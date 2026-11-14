@@ -19,7 +19,7 @@ import Eza.Web.Logic.Error
 import Eza.Web.Logic.Model
 import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Update.Common
-import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
+import Eza.Web.Logic.Update.Monad (Update, dispatch, get)
 import Eza.Web.Logic.Update.ViewDefs (isUserEnabled, upsertUser, upsertWebhook)
 import Eza.Webhook
 

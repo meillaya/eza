@@ -1,4 +1,3 @@
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- | The client request surface: every JSON endpoint the Miso client calls, as
@@ -144,8 +143,7 @@ module Eza.Web.Logic.Requests (
 import Data.Aeson (FromJSON (..), ToJSON, Value (..), object, toJSON, withObject, (.:), (.:?), (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
-import qualified Data.Aeson.KeyMap as KM
-import Data.Aeson.Types (parseMaybe, (.!=))
+import Data.Aeson.Types (parseMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 
@@ -177,7 +175,7 @@ import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..), Use
 import qualified Eza.View as EV
 import Eza.Webhook (DeliveryView, Webhook, WebhookInput (..))
 
-import Eza.Web.Logic.Api (BookmarkListQuery (..), ClientRequest (..), DedupCandidateQuery (..), requestMethod, requestPath)
+import Eza.Web.Logic.Api (BookmarkListQuery (..), ClientRequest (..), DedupCandidateQuery (..), requestPath)
 import Eza.Web.Logic.Effect (Effect (..))
 import Eza.Web.Logic.Error (ApiError (..), mkApiError)
 import Eza.Web.Logic.Model (Action)
@@ -1259,8 +1257,8 @@ patchRule ::
     Action ->
     (ApiError -> Action) ->
     Update ()
-patchRule ruleId rule onOk onErr =
-    requestWriteNone (ApiPatchRule ruleId) (Just body) onOk onErr
+patchRule ruleKey rule onOk onErr =
+    requestWriteNone (ApiPatchRule ruleKey) (Just body) onOk onErr
   where
     body =
         ruleBody
@@ -1271,7 +1269,7 @@ patchRule ruleId rule onOk onErr =
             (ruleAddTags rule)
             (ruleMarkRead rule)
 deleteRule :: Int -> Action -> (ApiError -> Action) -> Update ()
-deleteRule ruleId = requestDeleteNone (ApiDeleteRule ruleId)
+deleteRule ruleKey = requestDeleteNone (ApiDeleteRule ruleKey)
 testRule ::
     Text ->
     Text ->

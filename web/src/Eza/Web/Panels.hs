@@ -61,9 +61,11 @@ import Eza.Web.Graph (
     isTagKey,
     labelCount,
  )
+import Eza.Web.Logic.Model
 import Eza.Web.Logic.Requests (exportJsonUrl, exportUrl)
+import Eza.Web.Logic.Route (Route (..))
 import Eza.Web.Logic.Wire (WebhookTest (..))
-import Eza.Web.Model
+import Eza.Web.Render (txt)
 import qualified Eza.Web.Render.Event as HE
 import Eza.Webhook (DeliveryView (..), Webhook (..), allEventTypes, eventTypeText, maxWebhooks)
 import Miso
@@ -264,7 +266,7 @@ graphBody :: Model -> [View () () Model Action]
 graphBody m
     | mGraphLayout m == Nothing
     , Just message <- mGraphError m =
-        [ panelError "read failed" "The graph did not load." (Just message)
+        [ panelError "read failed" "The graph did not load." (Just (ms message))
         ]
     | mGraphLayout m == Nothing =
         [graphLoadingPlate m]
@@ -315,7 +317,7 @@ graphToolbar m =
                 , HP.id_ "graph-filter"
                 , HP.type_ "search"
                 , HP.placeholder_ "title, domain, or tag"
-                , HP.value_ (mGraphFilter m)
+                , HP.value_ (ms (mGraphFilter m))
                 , HP.autocomplete_ "off"
                 , HP.spellcheck_ False
                 , HP.aria_ "label" "Filter the graph by title, domain, or tag"
@@ -708,7 +710,7 @@ graphPreview m layout =
             ]
         , H.p_
             [HP.class_ "g-preview-meta meta"]
-            [ text (formatFiled (grCreatedAt record))
+            [ txt (formatFiled (grCreatedAt record))
             , text " · "
             , text (countNoun (recordLinks layout (grId record)) "wikilink" "wikilinks")
             , text " · "
@@ -1249,7 +1251,7 @@ dedupBody m
         [H.p_ [HP.class_ "pnl-quiet"] [text "Finding duplicate candidates."]]
     | Just message <- mDedupError m
     , isNothing (mDedupCounts m) =
-        [panelError "read failed" "The duplicate test did not run." (Just message)]
+        [panelError "read failed" "The duplicate test did not run." (Just (ms message))]
     | dedupIsEmpty m =
         [ emptyPanel
             "0 groups"
@@ -1514,7 +1516,7 @@ dedupRow _m key kept item =
             [ H.span_ [HP.class_ "mono-badge", HP.aria_ "hidden" "true"] [text (ms (monogram (bsDomain item)))]
             , H.span_ [HP.class_ "dom meta"] [text (showDomain (bsDomain item))]
             ]
-        , H.span_ [HP.class_ "dd-c-filed meta"] [text (formatFiled (bsCreatedAt item))]
+        , H.span_ [HP.class_ "dd-c-filed meta"] [txt (formatFiled (bsCreatedAt item))]
         , H.span_ [HP.class_ "dd-c-tags meta"] [text (tagLine (bsTags item))]
         ]
 
@@ -1806,7 +1808,7 @@ consolidationBlock m =
         [ secHead "Consolidation" (Just (ms (show (length (mConsol m)) <> " groups")))
         , case mConsolError m of
             Just message ->
-                panelError "read failed" "The consolidation scan did not run." (Just message)
+                panelError "read failed" "The consolidation scan did not run." (Just (ms message))
             Nothing -> case mConsol m of
                 _
                     | mConsolLoading m && null (mConsol m) -> quietNote "Scanning tags."
@@ -1936,7 +1938,7 @@ tagDialogView m = case mTagDialog m of
                     [ confirmationHead title
                     , H.div_
                         [HP.class_ "dialog__body", HP.data_ "testid" "dialog-body"]
-                        (tagDialogBody m dialog ++ confirmationError (mTagDialogError m))
+                        (tagDialogBody m dialog ++ confirmationError (fmap ms (mTagDialogError m)))
                     , H.div_
                         [HP.class_ "dialog__foot"]
                         ( [ H.span_ [HP.class_ "spacer"] []
@@ -1979,7 +1981,7 @@ tagDialogBody m dialog = case dialog of
                 , HP.type_ "text"
                 , HP.autofocus_ True
                 , HP.autocomplete_ "off"
-                , HP.value_ (mTagDialogInput m)
+                , HP.value_ (ms (mTagDialogInput m))
                 , HE.onInput TagDialogInput
                 , HE.onKeyDown
                     ( \code -> case code of
@@ -2172,7 +2174,7 @@ suggestionBody m
         H.div_
             [HP.class_ "ai-provider-error", HP.role_ "alert"]
             [ H.p_ [HP.class_ "ai-error-title display"] [text "The provider did not answer."]
-            , H.p_ [HP.class_ "ai-error-body read"] [text message]
+            , H.p_ [HP.class_ "ai-error-body read"] [txt message]
             , H.div_
                 [HP.class_ "ai-tools"]
                 [ smallAction "try again" AiSuggestRetry
@@ -2182,14 +2184,14 @@ suggestionBody m
         H.div_
             []
             ( quietNote (noSuggestionsText m)
-                : [ H.p_ [HP.class_ "ai-notice read"] [text notice]
+                : [ H.p_ [HP.class_ "ai-notice read"] [txt notice]
                   | Just notice <- [mSuggestionNotice m]
                   ]
             )
     | otherwise =
         H.div_
             []
-            ( [ H.p_ [HP.class_ "ai-notice read"] [text notice]
+            ( [ H.p_ [HP.class_ "ai-notice read"] [txt notice]
               | Just notice <- [mSuggestionNotice m]
               ]
                 ++ [ H.div_
@@ -2336,7 +2338,7 @@ pruneSection m =
             ]
         , case mPruneError m of
             Just message ->
-                panelError "read failed" "The prune candidates could not be read." (Just message)
+                panelError "read failed" "The prune candidates could not be read." (Just (ms message))
             Nothing ->
                 if null (mPrune m)
                     then quietNote "No prune candidates right now."
@@ -2389,7 +2391,7 @@ pruneRow m bookmark =
                 [text (ms (bsTitle bookmark))]
             , H.span_ [HP.class_ "meta"] [text (showDomain (bsDomain bookmark))]
             ]
-        , H.td_ [HP.class_ "mono"] [text (formatFiled (bsCreatedAt bookmark))]
+        , H.td_ [HP.class_ "mono"] [txt (formatFiled (bsCreatedAt bookmark))]
         , H.td_ [HP.class_ "mono r"] [text (if bsIsRead bookmark then "read" else "unread")]
         ]
 
@@ -2406,7 +2408,7 @@ undoSection m =
         , if mUndoLoading m
             then quietNote "Reading the undo record."
             else case mUndoError m of
-                Just message -> panelError "read failed" "The undo record could not be read." (Just message)
+                Just message -> panelError "read failed" "The undo record could not be read." (Just (ms message))
                 Nothing
                     | null (mUndoEntries m) ->
                         H.p_ [HP.class_ "pnl-quiet", testId "undo-empty"] [text "No undo snapshots yet."]
@@ -2432,7 +2434,7 @@ undoEntryRow entry =
         ( [ H.div_
                 [HP.class_ "undo-row-head"]
                 [ H.span_ [HP.class_ "undo-op display"] [text (undoOpLabel (unOp entry))]
-                , H.span_ [HP.class_ "undo-time meta"] [text (formatStampUtc (unCreatedAt entry))]
+                , H.span_ [HP.class_ "undo-time meta"] [txt (formatStampUtc (unCreatedAt entry))]
                 , H.span_
                     [HP.class_ ("undo-state meta" <> if unCanUndo entry then " is-newest" else "")]
                     [text (if unCanUndo entry then "newest" else "older")]
@@ -2568,7 +2570,7 @@ undoPreviewDialog m
                                     ( "This restores "
                                         <> undoCounts entry
                                         <> " from "
-                                        <> formatStampUtc (unCreatedAt entry)
+                                        <> ms (formatStampUtc (unCreatedAt entry))
                                         <> "."
                                     )
                                 ]
@@ -2589,7 +2591,7 @@ undoPreviewDialog m
                                 else H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text "This is not the newest usable action. Undo the newer action first."]
                           ]
                             ++ concat
-                                [ [H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]]
+                                [ [H.p_ [HP.class_ "add-error", HP.role_ "alert"] [txt message]]
                                 | Just message <- [mUndoPreviewError m]
                                 ]
                         )
@@ -2629,7 +2631,7 @@ undoPreviewDialog m
                 [ confirmationHead "Undo preview"
                 , H.div_
                     [HP.class_ "dialog__body"]
-                    [H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]]
+                    [H.p_ [HP.class_ "add-error", HP.role_ "alert"] [txt message]]
                 , H.div_
                     [HP.class_ "dialog__foot"]
                     [ H.span_ [HP.class_ "spacer"] []
@@ -2764,7 +2766,7 @@ securityPanel m =
     body Nothing
         | mAccountLoading m = [quietNote "Loading the account."]
         | isJust (mAccountError m) =
-            [accountReadError "The account could not be read." (mAccountError m)]
+            [accountReadError "The account could not be read." (fmap ms (mAccountError m))]
         | otherwise = [unavailable m]
     body (Just account) =
         [ H.dl_
@@ -2779,7 +2781,7 @@ securityPanel m =
                     [ H.h3_ [HP.class_ "account-h3 display"] [text "Current password"]
                     , H.div_
                         [HP.class_ "account-form-grid"]
-                        [field "current password" "security-current-password" "password" "current-password" (mSecurityCurrent m) SecurityCurrentPasswordInput]
+                        [field "current password" "security-current-password" "password" "current-password" (ms (mSecurityCurrent m)) SecurityCurrentPasswordInput]
                     , H.p_
                         [HP.class_ "account-note meta"]
                         [text "Used to confirm the changes below."]
@@ -2790,7 +2792,7 @@ securityPanel m =
             ( [ H.h3_ [HP.class_ "account-h3 display"] [text "Username"]
               , H.div_
                     [HP.class_ "account-form-grid"]
-                    [field "username" "security-username" "text" "username" (mSecurityUsername m) SecurityUsernameInput]
+                    [field "username" "security-username" "text" "username" (ms (mSecurityUsername m)) SecurityUsernameInput]
               , H.p_
                     [HP.class_ "account-note meta"]
                     [text "The password still opens it after a rename."]
@@ -2806,8 +2808,8 @@ securityPanel m =
                 [text (if aiHasPassword account then "Change the password" else "Set a password")]
             , H.div_
                 [HP.class_ "account-form-grid"]
-                [ field "new password" "security-new-password" "password" "new-password" (mSecurityNew m) SecurityNewPasswordInput
-                , field "confirm new password" "security-confirm-password" "password" "new-password" (mSecurityConfirm m) SecurityConfirmPasswordInput
+                [ field "new password" "security-new-password" "password" "new-password" (ms (mSecurityNew m)) SecurityNewPasswordInput
+                , field "confirm new password" "security-confirm-password" "password" "new-password" (ms (mSecurityConfirm m)) SecurityConfirmPasswordInput
                 ]
             , H.p_
                 [HP.class_ "account-note meta"]
@@ -2875,7 +2877,7 @@ securityPanel m =
             Just message ->
                 H.p_
                     [HP.class_ "account-error", HP.role_ "alert", HP.data_ "testid" "security-error"]
-                    [text message]
+                    [txt message]
             Nothing -> H.span_ [] []
         ]
 
@@ -2930,7 +2932,7 @@ passkeysPanel m =
     body Nothing
         | mAccountLoading m = [quietNote "Loading the account."]
         | isJust (mAccountError m) =
-            [accountReadError "The account could not be read." (mAccountError m)]
+            [accountReadError "The account could not be read." (fmap ms (mAccountError m))]
         | otherwise = [unavailable m]
     body (Just account) =
         ( if aiHasPassword account
@@ -3014,7 +3016,7 @@ credentialRecord m credential =
             | editingId == crId credential ->
                 [ H.input_
                     [ HP.class_ "input"
-                    , HP.value_ draft
+                    , HP.value_ (ms draft)
                     , HP.placeholder_ "Passkey nickname"
                     , HP.aria_ "label" "Passkey nickname"
                     , HE.onInput CredentialNameInput
@@ -3140,7 +3142,7 @@ webhooksPanel m =
     accountPanel "webhooks" "Webhooks" panelNote $
         secretReveal
             ++ case mWebhooksError m of
-                Just message -> [accountReadError "The webhooks could not be read." (Just message)]
+                Just message -> [accountReadError "The webhooks could not be read." (Just (ms message))]
                 Nothing ->
                     [ H.div_ [HP.class_ "account-list"] webhookRows
                     , H.div_ [HP.class_ "account-list"] (deliveriesView m)
@@ -3273,7 +3275,7 @@ deliveriesView m =
     case mWebhookDeliveries m of
         Nothing ->
             case mWebhookDeliveriesError m of
-                Just message -> [accountReadError "The deliveries could not be read." (Just message)]
+                Just message -> [accountReadError "The deliveries could not be read." (Just (ms message))]
                 Nothing -> []
         Just (webhookId, deliveries) ->
             case [webhook | webhook <- mWebhooks m, whId webhook == webhookId] of
@@ -3297,7 +3299,7 @@ deliveryRow delivery =
         [ H.span_ [HP.class_ "mono webhook-delivery-event"] [text (ms (T.unpack (eventTypeText (dvEvent delivery))))]
         , H.span_ [HP.class_ ("status webhook-state webhook-state--" <> stateClass (dvState delivery))] [text (ms (T.unpack (dvState delivery)))]
         , H.span_ [HP.class_ "meta mono"] [text (ms ("attempts " <> show (dvAttempts delivery)))]
-        , H.span_ [HP.class_ "meta mono"] [text (ms (fromMisoString' (formatFiled (dvCreatedAt delivery))))]
+        , H.span_ [HP.class_ "meta mono"] [txt (formatFiled (dvCreatedAt delivery))]
         ]
   where
     stateClass state = case state of
@@ -3320,7 +3322,7 @@ webhookForm m =
                     [ HP.id_ "webhook-name"
                     , HP.class_ "input"
                     , HP.placeholder_ "e.g. Archive bot"
-                    , HP.value_ (mWebhookName m)
+                    , HP.value_ (ms (mWebhookName m))
                     , HP.autocomplete_ "off"
                     , testId "webhook-name"
                     , HE.onInput WebhookNameInput
@@ -3334,7 +3336,7 @@ webhookForm m =
                     , HP.class_ "input"
                     , HP.type_ "url"
                     , HP.placeholder_ "https://example.com/hooks/eza"
-                    , HP.value_ (mWebhookUrl m)
+                    , HP.value_ (ms (mWebhookUrl m))
                     , HP.autocomplete_ "off"
                     , testId "webhook-url"
                     , HE.onInput WebhookUrlInput
@@ -3398,11 +3400,11 @@ usersPanel m
     body =
         recoveryReveal
             ++ resetReveal
-            ++ [ H.p_ [HP.class_ "add-error", HP.role_ "alert", testId "user-action-error"] [text message]
+            ++ [ H.p_ [HP.class_ "add-error", HP.role_ "alert", testId "user-action-error"] [txt message]
                | Just message <- [mUserActionError m]
                ]
             ++ case mAdminUsersError m of
-                Just message -> [accountReadError "The accounts could not be read." (Just message)]
+                Just message -> [accountReadError "The accounts could not be read." (Just (ms message))]
                 Nothing ->
                     [ H.div_
                         [HP.class_ "account-list users-table", testId "users-table"]
@@ -3523,7 +3525,7 @@ resetPasswordForm m user =
             [ HP.class_ "input"
             , HP.type_ "password"
             , HP.placeholder_ "temporary password"
-            , HP.value_ (mUserResetPassword m)
+            , HP.value_ (ms (mUserResetPassword m))
             , HP.autocomplete_ "new-password"
             , testId "user-reset-password"
             , HE.onInput UserResetPasswordInput
@@ -3561,7 +3563,7 @@ deleteAccountForm m user =
             [ HP.class_ "input"
             , HP.type_ "text"
             , HP.placeholder_ (ms (T.unpack (uvUsername user)))
-            , HP.value_ (mUserDeleteName m)
+            , HP.value_ (ms (mUserDeleteName m))
             , HP.autocomplete_ "off"
             , testId "user-delete-name"
             , HE.onInput UserDeleteNameInput
@@ -3610,7 +3612,7 @@ userCreateForm m =
                     [ HP.id_ "user-name"
                     , HP.class_ "input"
                     , HP.placeholder_ "e.g. river"
-                    , HP.value_ (mUserName m)
+                    , HP.value_ (ms (mUserName m))
                     , HP.autocomplete_ "off"
                     , testId "user-name"
                     , HE.onInput UserNameInput
@@ -3624,7 +3626,7 @@ userCreateForm m =
                     , HP.class_ "input"
                     , HP.type_ "password"
                     , HP.autocomplete_ "new-password"
-                    , HP.value_ (mUserPassword m)
+                    , HP.value_ (ms (mUserPassword m))
                     , testId "user-password"
                     , HE.onInput UserPasswordInput
                     ]
@@ -3644,7 +3646,7 @@ userCreateForm m =
                 ]
             ]
         , case mUserFormError m of
-            Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert", testId "user-form-error"] [text message]
+            Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert", testId "user-form-error"] [txt message]
             Nothing -> H.span_ [] []
         , H.button_
             ( [ HP.class_ "btn btn--sm btn--strong"
@@ -3662,7 +3664,7 @@ tokensPanel m =
     accountPanel "tokens" "API tokens" Nothing $
         created
             ++ case mTokensError m of
-                Just message -> [accountReadError "The tokens could not be read." (Just message)]
+                Just message -> [accountReadError "The tokens could not be read." (Just (ms message))]
                 Nothing ->
                     [ H.div_ [HP.class_ "account-list"] tokenRows
                     , if null (mTokens m) then tokenEmpty m else H.span_ [] []
@@ -3758,7 +3760,7 @@ tokenForm m =
                     [ HP.id_ "token-name"
                     , HP.class_ "input"
                     , HP.placeholder_ "e.g. Laptop command line"
-                    , HP.value_ (mTokenName m)
+                    , HP.value_ (ms (mTokenName m))
                     , HP.autocomplete_ "off"
                     , HE.onInput TokenNameInput
                     ]
@@ -3805,7 +3807,7 @@ sharesPanel :: Model -> View () () Model Action
 sharesPanel m =
     accountPanel "shares" "Share links" Nothing $
         ( case mSharesError m of
-            Just message -> [accountReadError "The share links could not be read." (Just message)]
+            Just message -> [accountReadError "The share links could not be read." (Just (ms message))]
             Nothing ->
                 if null (activeShares m)
                     then [shareEmpty m]
@@ -3926,7 +3928,7 @@ rulesPanel m =
     accountPanel "rules" "Rules" Nothing $
         ( case mRulesError m of
             Just message ->
-                [accountReadError "The rules could not be read." (Just message)]
+                [accountReadError "The rules could not be read." (Just (ms message))]
             Nothing ->
                 [ H.div_ [HP.class_ "account-list", testId "rules-table"] (map ruleRecord (mRules m))
                 ]
@@ -4024,7 +4026,7 @@ ruleForm m =
                 , H.input_
                     [ HP.id_ "rule-name"
                     , HP.class_ "input"
-                    , HP.value_ (mRuleName m)
+                    , HP.value_ (ms (mRuleName m))
                     , HP.autocomplete_ "off"
                     , HE.onInput RuleNameInput
                     ]
@@ -4048,7 +4050,7 @@ ruleForm m =
                 , H.input_
                     [ HP.id_ "rule-pattern"
                     , HP.class_ "input"
-                    , HP.value_ (mRulePattern m)
+                    , HP.value_ (ms (mRulePattern m))
                     , HP.autocomplete_ "off"
                     , HE.onInput RulePatternInput
                     ]
@@ -4059,7 +4061,7 @@ ruleForm m =
                 , H.input_
                     [ HP.id_ "rule-tags"
                     , HP.class_ "input"
-                    , HP.value_ (mRuleTags m)
+                    , HP.value_ (ms (mRuleTags m))
                     , HP.autocomplete_ "off"
                     , HE.onInput RuleTagsInput
                     ]
@@ -4282,7 +4284,7 @@ hasBookmarklet m = not (T.null (T.strip (fromMisoString (captureBookmarklet m) :
 
 captureBookmarklet :: Model -> MisoString
 captureBookmarklet m
-    | T.null (T.strip (fromMisoString rawOrigin :: Text)) = ""
+    | T.null (T.strip (fromMisoString (ms rawOrigin) :: Text)) = ""
     | otherwise =
         ms
             ( "javascript:(function(){var u=encodeURIComponent(location.href),t=encodeURIComponent(document.title);"
@@ -4293,7 +4295,7 @@ captureBookmarklet m
             )
   where
     rawOrigin = mWindowOrigin m
-    origin = fromMisoString rawOrigin :: String
+    origin = fromMisoString (ms rawOrigin) :: String
 
 -- ------------------------------------------------------------ appearance ---
 
@@ -4373,7 +4375,7 @@ aboutRow (label, value) =
 aboutSourceLinks :: Model -> [(MisoString, MisoString, MisoString)]
 aboutSourceLinks m =
     [ ("repository", "github.com/meillaya/eza", "https://github.com/meillaya/eza")
-    , ("version " <> mVersion m, "releases", "https://github.com/meillaya/eza/releases")
+    , ("version " <> (ms (mVersion m)), "releases", "https://github.com/meillaya/eza/releases")
     , ("license", "Apache-2.0", "https://github.com/meillaya/eza/blob/main/LICENSE")
     , ("third-party notices", "dependencies, typefaces and their licenses", "https://github.com/meillaya/eza/blob/main/THIRD-PARTY-NOTICES.md")
     ]
@@ -4406,8 +4408,8 @@ aboutLink (label, host, href) =
 -- ================================================================ helpers ===
 
 -- | Render a MisoString as a plain String for concatenation into copy.
-fromMisoString' :: MisoString -> String
-fromMisoString' value = T.unpack (fromMisoString value)
+fromMisoString' :: Text -> String
+fromMisoString' = T.unpack
 
 keyCodeIsEnter :: KeyCode -> Bool
 keyCodeIsEnter (KeyCode code) = code == 13

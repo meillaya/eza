@@ -8,6 +8,7 @@ import LedgerSpec (ledgerSpec)
 import ModelSpec (modelSpec)
 import PuritySpec (puritySpec)
 import RouteSpec (routeSpec)
+import UpdateSpec (updateSpec)
 
 main :: IO ()
 main = hspec $ do
@@ -15,5 +16,6 @@ main = hspec $ do
     apiSpec
     ledgerSpec
     modelSpec
+    updateSpec
     helperSpec
     puritySpec

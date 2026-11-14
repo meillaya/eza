@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {- | The pure graph geometry the reducers need: viewport fitting and zoom,
 hit-testing, neighbourhood subsets and matching.
 
