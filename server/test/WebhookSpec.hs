@@ -345,7 +345,7 @@ spec = do
                 queryScalar migrated "SELECT COUNT(*) FROM views" `shouldReturn` (1 :: Int)
                 queryScalar migrated "SELECT COUNT(*) FROM captures" `shouldReturn` (1 :: Int)
                 tables <- tableNames migrated
-                mapM_ (\name -> name `elem` tables `shouldBe` True) ["event_log", "webhooks", "webhook_deliveries", "undo_capture_rows"]
+                mapM_ (\name -> name `elem` tables `shouldBe` True) ["event_log", "webhooks", "webhook_deliveries", "journal", "journal_rows"]
                 queryScalar migrated "SELECT event_cursor FROM app_state WHERE id = 1" `shouldReturn` (0 :: Int)
                 Sqlite.close migrated
 

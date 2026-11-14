@@ -8,10 +8,15 @@ auth and data workstreams do not touch the same test file.
 module DataIntegritySpec (spec) where
 
 import Control.Exception (bracket)
-import Data.Aeson (object, (.=))
+import Data.Aeson (Value (..), decode, object, (.=))
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Lazy as LBS
+import Data.List (sort)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Database.SQLite.Simple
 import qualified Database.SQLite.Simple as Sqlite
 import System.FilePath ((</>))
@@ -26,12 +31,12 @@ import Eza.Import (ImportItem (..), ParsedImport (..), defaultImportOptions, imp
 import Eza.JsonExport (JsonImportReport (..), importJson)
 import Eza.Tags (deleteTag, deleteTagWithLinks, mergeTags, renameTag)
 import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), Highlight (..), ImportReport (..), LibraryStats (..), SearchPage (..))
-import Eza.Undo (recordUndo, recordUndoIds, snapshotBookmarks, undoLast, undoLastDetailed)
+import Eza.Undo (recordUndoIds, undoLast, undoLastDetailed)
 
 spec :: Spec
 spec = do
     describe "schema v7" $ do
-        it "migrates v6 to v7 and adds the undo side tables" $
+        it "migrates v6 to v7 and the journal replaces the undo side tables" $
             withSystemTempDirectory "eza-v7-migrate" $ \dir -> do
                 let path = dir </> "test.db"
                 bracket (Sqlite.open path) Sqlite.close $ \conn -> do
@@ -48,13 +53,25 @@ spec = do
                 tagged <- queryScalar migrated "SELECT COUNT(*) FROM bookmark_tags"
                 tagged `shouldBe` 1
                 tables <- tableNames migrated
-                ("undo_highlight_rows" `elem` tables) `shouldBe` True
-                ("undo_link_rows" `elem` tables) `shouldBe` True
-                ("undo_tag_rows" `elem` tables) `shouldBe` True
-                -- undo_bookmark_rows must mirror every current bookmarks column.
-                bookmarkColumns <- columnNames migrated "bookmarks"
-                undoColumns <- columnNames migrated "undo_bookmark_rows"
-                filter (/= "snapshot_id") undoColumns `shouldBe` bookmarkColumns
+                ("journal" `elem` tables) `shouldBe` True
+                ("journal_rows" `elem` tables) `shouldBe` True
+                ("undo_snapshots" `elem` tables) `shouldBe` False
+                ("undo_highlight_rows" `elem` tables) `shouldBe` False
+                -- A journaled bookmark before-image carries every bookmarks column.
+                _ <- recordUndoIds migrated "delete" [1]
+                captured <-
+                    query_
+                        migrated
+                        "SELECT before_json FROM journal_rows WHERE table_name = 'bookmarks'" ::
+                        IO [Only Text]
+                bookmarkNames <- columnNames migrated "bookmarks"
+                case captured of
+                    (Only raw : _) -> case decode (LBS.fromStrict (TE.encodeUtf8 raw)) :: Maybe Value of
+                        Just (Object image) ->
+                            sort (map Key.toText (KeyMap.keys image))
+                                `shouldBe` sort bookmarkNames
+                        _ -> expectationFailure "bookmark before-image is not a JSON object"
+                    [] -> expectationFailure "expected a journaled bookmark row"
                 close migrated
 
     describe "delete undo" $ do
@@ -247,41 +264,29 @@ spec = do
                 countRows conn "SELECT COUNT(*) FROM tags WHERE name = 'detachable'" `shouldReturn` 1
 
     describe "undo robustness" $ do
-        it "discards empty side snapshots instead of wedging the record" $
+        it "records nothing for an empty change instead of wedging the stack" $
             withDb $ \conn -> do
                 _ <- recordUndoIds conn "delete" []
                 restored <- undoLast conn
                 restored `shouldBe` 0
-                remaining <- countRows conn "SELECT COUNT(*) FROM undo_snapshots"
+                remaining <- countRows conn "SELECT COUNT(*) FROM journal"
                 remaining `shouldBe` 0
 
-        it "skips malformed snapshots and still restores the older one" $
+        it "skips malformed journal rows and still restores the older change" $
             withDb $ \conn -> do
                 bid <- addBookmark conn "https://example.test/malformed" "Malformed"
                 _ <- deleteBookmark conn bid
-                execute_ conn "INSERT INTO undo_snapshots (payload_json,created_at) VALUES ('not json',1)"
+                execute_ conn "INSERT INTO journal (op,created_at,label) VALUES ('bad',1,'bad')"
+                execute_ conn "INSERT INTO journal_rows (change_id,table_name,row_key,before_json) SELECT MAX(id),'bookmarks',1,'not json' FROM journal"
                 restored <- undoLast conn
                 restored `shouldBe` 1
                 detail <- requireBookmark conn bid
                 bdTitle detail `shouldBe` "Malformed"
-                remaining <- countRows conn "SELECT COUNT(*) FROM undo_snapshots"
+                remaining <- countRows conn "SELECT COUNT(*) FROM journal"
                 remaining `shouldBe` 0
 
-        it "still restores a legacy JSON snapshot" $
-            withDb $ \conn -> do
-                bid <- addBookmark conn "https://example.test/legacy" "Legacy"
-                tagBookmark conn bid "legacy-tag"
-                payload <- snapshotBookmarks conn [bid]
-                recordUndo conn "legacy" payload
-                execute conn "DELETE FROM bookmarks WHERE id = ?" (Only bid)
-                restored <- undoLast conn
-                restored `shouldBe` 1
-                detail <- requireBookmark conn bid
-                bdTitle detail `shouldBe` "Legacy"
-                bdTags detail `shouldBe` ["legacy-tag"]
-
     describe "schema v12" $ do
-        it "migrates v11 to v12 and mirrors every captures column in undo_capture_rows" $
+        it "migrates v11 to v12 and keeps the capture rows through v17" $
             withSystemTempDirectory "eza-v12-migrate" $ \dir -> do
                 let path = dir </> "test.db"
                 bracket (Sqlite.open path) Sqlite.close $ \conn -> do
@@ -310,10 +315,8 @@ spec = do
                 captureCount <- queryScalar migrated "SELECT COUNT(*) FROM captures"
                 captureCount `shouldBe` 1
                 tables <- tableNames migrated
-                ("undo_capture_rows" `elem` tables) `shouldBe` True
-                captureColumns <- columnNames migrated "captures"
-                undoCaptureColumns <- columnNames migrated "undo_capture_rows"
-                filter (/= "snapshot_id") undoCaptureColumns `shouldBe` captureColumns
+                ("journal" `elem` tables) `shouldBe` True
+                ("undo_capture_rows" `elem` tables) `shouldBe` False
                 close migrated
 
     describe "schema v13" $ do

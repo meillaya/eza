@@ -82,8 +82,8 @@ spec = do
                 dmAffected report `shouldBe` 4
                 dmSnapshotId report `shouldSatisfy` (> 0)
                 countBookmarks conn `shouldReturn` 4
-                snapshots <- query_ conn "SELECT op, row_count FROM undo_snapshots" :: IO [(Text, Int)]
-                snapshots `shouldBe` [("merge_all", 4)]
+                snapshots <- query_ conn "SELECT op, label FROM journal" :: IO [(Text, Text)]
+                snapshots `shouldBe` [("merge_all", "merge_all")]
                 keeperAUrl <- bookmarkUrl conn keeperA
                 keeperAUrl `shouldBe` "https://example.com/a"
                 keeperBUrl <- bookmarkUrl conn keeperB
@@ -172,5 +172,5 @@ countBookmarks conn = do
 
 countSnapshots :: Connection -> IO Int
 countSnapshots conn = do
-    rows <- query_ conn "SELECT COUNT(*) FROM undo_snapshots" :: IO [Only Int]
+    rows <- query_ conn "SELECT COUNT(*) FROM journal" :: IO [Only Int]
     pure (case rows of (Only n : _) -> n; [] -> 0)

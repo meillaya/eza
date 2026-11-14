@@ -32,6 +32,7 @@ module Eza.Db (
     schemaV14,
     schemaV15,
     schemaV16,
+    schemaV17,
     dbMigrationPlan,
     checkSchema,
     maxStoredTimestamp,
@@ -68,7 +69,7 @@ newtype DbError = DbError Text
 instance Exception DbError
 
 targetSchemaVersion :: Int
-targetSchemaVersion = 16
+targetSchemaVersion = 17
 
 {- | The last POSIX second SQLite can render as a calendar date: 9999-12-31
 23:59:59 UTC. A stored @created_at@ above this makes @strftime@ and @date@
@@ -366,11 +367,31 @@ dbMigrations =
     , Migrate.Migration 14 "delivery event kind" schemaV14
     , Migrate.Migration 15 "bookmark dead overrides" schemaV15
     , Migrate.Migration 16 "schema metadata" schemaV16
+    , Migrate.Migration 17 "change journal" schemaV17
     ]
 
 -- | Migration v16: the shared @schema_meta@ checksum table.
 schemaV16 :: [Query]
 schemaV16 = [Migrate.schemaMetaStatement]
+
+{- | Migration v17: the append-only change journal replaces the per-feature
+undo side tables and the legacy JSON-payload undo snapshots. The dropped
+history is ephemeral: no undo entries are carried across the upgrade.
+-}
+schemaV17 :: [Query]
+schemaV17 =
+    [ "CREATE TABLE IF NOT EXISTS journal ( id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, created_at INTEGER NOT NULL, label TEXT NOT NULL )"
+    , "CREATE TABLE IF NOT EXISTS journal_rows ( change_id INTEGER NOT NULL REFERENCES journal(id) ON DELETE CASCADE, table_name TEXT NOT NULL, row_key TEXT NOT NULL, before_json TEXT NOT NULL, PRIMARY KEY (change_id, table_name, row_key) )"
+    , "CREATE INDEX IF NOT EXISTS idx_journal_rows_change ON journal_rows(change_id)"
+    , "DROP TABLE IF EXISTS undo_capture_rows"
+    , "DROP TABLE IF EXISTS undo_dead_override_rows"
+    , "DROP TABLE IF EXISTS undo_link_rows"
+    , "DROP TABLE IF EXISTS undo_highlight_rows"
+    , "DROP TABLE IF EXISTS undo_tag_rows"
+    , "DROP TABLE IF EXISTS undo_bookmark_tags"
+    , "DROP TABLE IF EXISTS undo_bookmark_rows"
+    , "DROP TABLE IF EXISTS undo_snapshots"
+    ]
 
 schemaV1 :: [Query]
 schemaV1 =
