@@ -44,9 +44,9 @@ Captured 2026-11-14 from `main` at commit `57639c0` before any program change.
 | M2 Client architecture | complete | `web-logic` owns the whole native client state and update: Model/Action, pure `Update` monad + dispatcher over 13 per-group reducers, native `Effect` vocabulary, `Requests`/`Transport` API surface; `web` is a ~25-line adapter + Interpreter + views (`Eza.Web.Api`, the 13 Update modules, `Update.hs-boot`, facade and `-fno-specialise` are gone). 134 logic tests; wasm 7,705,966 raw / 2,218,780 gzip — under hard ceilings (7.8M/2.25M), raw target missed by 5,966 B and gzip by 18.8 KB; recorded as a dedicated size pass in M7 (no further architecture lever) |
 | M3 Build/assets/runtime | complete | M3-A: content-addressed bundle + manifest + server `Eza.Assets`/`Eza.Shell`. M3-B: WASM built inside Nix from pinned FOD tarballs + vendored cabal revisions + a deterministic local Hackage index; `nix build .#eza-web` (7,775,380 raw / 2,201,325 gzip), `.#docker`, module check and docker smoke green; SRI pin/release-asset chain deleted; gates enforced in the Nix path |
 | M4 Server architecture | complete | M4-C read-path auth + `Eza.Library`; M4-A dispatch from `Eza.Routes`; M4-B one `Eza.Problem` error path + catch-all JSON 500/503; M4-D async egress: schema v18 job columns, four 202 job routes (`snapshot`, `check-dead`, `ai/suggestions` tag-bucket, `webhooks/{id}/test`), `GET /api/v1/jobs/{id}` own-library only, per-library `Eza.Egress` worker (claimKind, cancel, bounded retry, restart requeue), handlers enqueue-only; snapshot file READ stays; 370 server examples/JobsSpec. |
-| M5 Data layer/journal/upgrade | in progress | M5-A shared checksummed `Eza.Migrate` engine (`schema_meta`, user v16/control v2, verify-on-open, CLI verify). M5-B one journal: user schema v17 adds `journal`/`journal_rows`, drops the undo side tables/legacy JSON undo (history not migrated), `Eza.Journal` captures before-images for bookmarks/tag links/highlights/links/captures/dead overrides and restores newest-first with URL-conflict refusal + FTS rebuild; `Eza.Undo` API unchanged (1,130→215 lines); 362 server examples incl. `JournalSpec`. M5-C (compatibility cleanup: legacy EZA_DB, unprefixed tokens, flat backup stamps/restore, legacy passkey sign-in, startup library relocation) pending |
-| M6 Feature completion, formal specs, deployment subtraction | in progress | M6-DS removed Kubernetes/rclone/Tailscale; M6-formal adds Jobs/Undo TLA+ models; M4-D completed the async spine: snapshot capture, dead-link sweep, AI suggestions and webhook tests are durable jobs with client polling and typed result handling; favicon/enrichment/webhook workers unchanged. Remaining: the graph label-mode-from-view client TODO, extension/clipper contract pass and any formal parity updates. |
-| M7 Validation/release | in progress | Release notes (`CHANGELOG.md`), the one-way `docs/upgrade.md` guide (0.3 schema v15/control v1 -> 0.4 schema v18/control v2; backup, Docker/NixOS/source steps, verify, rollback, troubleshooting) and the `docs/release.md` checklist (version bump, gates, upgrade drill, tag/publish, post-release) are written and linked from the README. Remaining: M7 size pass to meet <7.7M raw / <2.2M gzip and reverse the recorded M4-D ceilings, version bump/tag, and the drilled upgrade against a released artifact. |
+| M5 Data layer/journal/upgrade | complete | M5-A checksummed `Eza.Migrate` engine (`schema_meta`, user v16/control v2). M5-B journal: user v17 adds `journal`/`journal_rows`, drops the undo tables/legacy JSON undo, captures before-images for bookmarks/tag links/highlights/links/captures/dead overrides, restores newest-first with URL-conflict refusal + FTS rebuild; Undo API unchanged. M5-C removed the 0.3 compatibility branches: no flat `EZA_DB` adoption (diagnosis-only hint), no unprefixed tokens, retired passkey sign-in routes removed (JSON 404; passkeys stay the second factor), flat backup stamps/flat layouts refused. One-way upgrade documented in docs/upgrade.md; 368 server examples. |
+| M6 Feature completion, formal specs, deployment subtraction | complete | M6-DS removed Kubernetes/rclone/Tailscale; M6-formal added Jobs/Undo TLA+ models; M4-D completed the async spine (snapshot/dead-check/AI/webhook-test as durable jobs with client polling); the last feature TODO (graph label mode from the active saved view) is fixed with `ViewSpec` (158 logic tests); the client feature audit confirmed every shipped surface is wired and routed the remaining polish items (webhook-test failure visibility, AI status error, snapshot-404 state, busy guards, dead actions) into task-30. |
+| M7 Validation/release | in progress | Release notes, one-way upgrade guide and release checklist are written. Size investigation shows the <7.7M raw/<2.2M gzip target is unreachable by trimming (baseline 7,706,279 already misses it); the measured lever is the planned Model-partition program (task-29), with the temporary 8,000,000/2,300,000 ceilings in force until it lands. Remaining: task-29 size program, client polish (task-30), version bump/tag 0.4.0.0, and the drilled upgrade against a released artifact. |
 
 ## Gate log
 
@@ -121,6 +121,10 @@ Append one entry per gate run: milestone, date, commands, result, commit.
 2026-11-14 M4-D: bash scripts/build-web.sh      -> 7,937,977 raw / 2,285,814 gzip under the RECORDED TEMPORARY ceilings 8,000,000/2,300,000; bundle 4f032781c43525e3
 2026-11-14 M4-D: bash scripts/e2e.sh            -> ok, 27/27 scripts (async job polling in deeplink/flows/undo)
 2026-11-14 round-6 gate: fourmolu/hlint/check-docs/check-specs/version/notices -> ok
+2026-11-14 M5-C: cabal test all                  -> ok, 158 logic + 35 core + 368 server examples; -Werror 0 warnings
+2026-11-14 M5-C: bash scripts/build-web.sh       -> ok, 7,938,321 raw / 2,285,188 gzip, bundle d6204524293296bc
+2026-11-14 M5-C: check-docs/version/notices/spec/fourmolu/hlint -> ok
+2026-11-14 round-7 e2e: bash scripts/e2e.sh      -> ok, 27/27 scripts (no legacy passkey login; graph label mode unchanged at route level)
 ```
 
 ## Round-4 note
@@ -310,3 +314,20 @@ recorded above.
   <7.7M/<2.2M targets, and lower the ceilings back to 7,800,000/2,250,000.
 - **Snapshot viewer:** `GET /api/v1/bookmarks/{id}/snapshot` remains the
   read-only file route used by the viewer; `POST` is the capture job.
+
+## Round-7 decisions (recorded)
+
+- **WASM size target not reachable by trimming (M7 investigation).** Measured:
+  pre-M4-D baseline 7,706,279 raw / 2,218,780 gzip (already above both targets),
+  M4-D 7,937,977/2,285,814; fixed per-kind poll slots + typed results
+  7,973,858 raw/2,276,041 gzip; no-polling bisect 7,823,461 raw (polling
+  ~115 KB, other M4-D ~117 KB); Model-width probe ~12 KB raw per extra field
+  (261-field flat record, so a +2.3% width already costs ~71 KB). Flags were
+  neutral or worse. The recorded 8,000,000/2,300,000 exception therefore stands
+  until the Model-partition program (task-29) runs; that program is the only
+  measured lever and must land before the ceilings return to 7,800,000/2,250,000.
+- **0.3 compatibility removal (M5-C):** 0.4 opens only the control DB + per-account
+  libraries, accepts only prefixed tokens, serves only the current passkey
+  second-factor routes and accepts only stamp-directory backups. The upgrade
+  path is backup + forward migration (docs/upgrade.md); old flat data/tokens/
+  routes are refused with a diagnosis, not a fallback.
