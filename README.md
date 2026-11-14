@@ -462,7 +462,6 @@ eza stands on a lot of good work:
   [IBM Plex Mono](https://fonts.google.com/specimen/IBM+Plex+Mono), under the SIL
   Open Font License.
 - [Excalidraw](https://excalidraw.com) for the architecture figures.
-- And you, for keeping your own shelf.
 
 ---
 
