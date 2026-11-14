@@ -147,18 +147,20 @@ The in-process TagSoup extractor remains the default for background
 enrichment. When `EZA_DEFUDDLE_CMD` is set, `Eza.Enrich` first sends the page
 through the JSON-lines Node/Defuddle sidecar and falls back to the Haskell
 extractor on any error. The sidecar has no network access and a 5 MiB/15 s
-limit. Schema v7 adds the lossless undo side tables; v8 adds `captures` and
-`clip_templates`; v12 extends the side snapshot to `captures`, so undoing a
-delete, prune, or merge brings the clipped content back too; v14 stores the
-event kind on each webhook delivery row so the delivery history stays readable
-after the 30-day event purge; v15 adds the manual dead-link override table,
-copies that override into side snapshots, removes stale favicon failure
-placeholders, and clears non-local or old-cap favicon URLs. The undo read path
-summarizes the same snapshot tables (`op`, `row_count`, affected titles/tags,
-highlight/capture/link counts) for the Maintenance history and preview; only
-the newest usable snapshot can be restored. The restore path
-re-enables `recursive_triggers` and rebuilds the FTS index, so an undo cannot
-leave stale terms behind.
+limit. Schema v16 adds `schema_meta` (per-migration sha256 checksums, verified
+on open) and schema v17 replaces the lossless undo side tables with one
+append-only journal. v8 added `captures`/`clip_templates`, v10 views, v11 the
+event log and webhooks, v13 the FTS source-domain column, v14 the webhook
+delivery kind and v15 manual dead-link overrides; v17's journal captures the
+before-image of bookmarks, tag links, highlights, wikilinks, captures and dead
+overrides (plus tag rows for tag operations) in the same transaction as the
+write and prunes itself to the newest 100 changes. The undo read path
+summarizes the journal (`op`, per-table counts, affected titles/tags,
+highlight/capture/link counts) for the Maintenance history and preview, and
+only the newest usable change can be restored. Restore updates a bookmark by
+id when its URL is unchanged, inserts when id and URL are free, refuses a URL
+conflict, re-enables `recursive_triggers` and rebuilds the FTS index, so an
+undo cannot leave stale terms behind.
 
 ## Search model
 
@@ -230,11 +232,12 @@ The triggers compare only the six indexed columns — `title`, `description`,
 the FTS index in schema v13). Updating `is_read` or `last_opened_at` does not
 rewrite the index.
 
-Destructive actions write an undo snapshot first. The snapshot stores the full
-`bookmarks` row, the tag names for the affected rows, highlights, wikilinks,
-and (v12) the clipped `captures` rows. `POST /api/v1/undo`
-restores the most recent snapshot and deletes the snapshot row. The UI asks for
-confirmation before merge or prune, and the API applies one snapshot at a time.
+Destructive actions record a journal change first. The before-image stores the
+full `bookmarks` row, the tag names for the affected rows, highlights,
+wikilinks, clipped `captures` rows and manual dead-link overrides; tag
+operations also store the tag rows. `POST /api/v1/undo` restores the newest
+usable change and deletes it from the journal. The UI asks for confirmation
+before merge or prune, and the API applies one change at a time.
 
 ## The client contract
 

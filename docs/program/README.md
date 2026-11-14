@@ -41,11 +41,11 @@ Captured 2026-11-14 from `main` at commit `57639c0` before any program change.
 |---|---|---|
 | M0 Guardrails | complete | `docs/program/README.md` created; `scripts/check-docs.sh` green; `devenv shell -- docs` added; baseline build/test captured |
 | M1 Contract spine | complete | `Eza.Routes` (127 routes) is the single route truth and `Eza.Authz` derives from it; all boundary DTOs are core types; client strict decode (no `Eza.Web.Types`, no lenient helpers); graph layout wire in core and server-only; boot `wire_version`; 35 core golden tests + 316 server examples; full e2e 27/27; fourmolu/hlint/docs/spec gates green |
-| M2 Client architecture | in progress | M2-A native route/request logic; M2-B1 native effects + ledger reducer; M2-B2a Update split (437-line dispatcher over 13 modules), single `Interpreter`, RequestId staleness, all 53 write requests adopted (0 `/api/` literals in web); M2-B2b part 1 moved the whole `Model`+407-constructor `Action` to `web-logic` with `Text` (106 logic tests) while `web` keeps a Miso facade and a documented `-fno-specialise` stopgap; wasm 7,776,200 raw / 2,206,619 gzip. Remaining M2-B2b (task-21): pure per-group reducers, delete projection/bootstrap, view accessor conversion, drop stopgap, hit <7.7M/<2.20M |
+| M2 Client architecture | complete | `web-logic` owns the whole native client state and update: Model/Action, pure `Update` monad + dispatcher over 13 per-group reducers, native `Effect` vocabulary, `Requests`/`Transport` API surface; `web` is a ~25-line adapter + Interpreter + views (`Eza.Web.Api`, the 13 Update modules, `Update.hs-boot`, facade and `-fno-specialise` are gone). 134 logic tests; wasm 7,705,966 raw / 2,218,780 gzip — under hard ceilings (7.8M/2.25M), raw target missed by 5,966 B and gzip by 18.8 KB; recorded as a dedicated size pass in M7 (no further architecture lever) |
 | M3 Build/assets/runtime | complete | M3-A: content-addressed bundle + manifest + server `Eza.Assets`/`Eza.Shell`. M3-B: WASM built inside Nix from pinned FOD tarballs + vendored cabal revisions + a deterministic local Hackage index; `nix build .#eza-web` (7,775,380 raw / 2,201,325 gzip), `.#docker`, module check and docker smoke green; SRI pin/release-asset chain deleted; gates enforced in the Nix path |
 | M4 Server architecture | in progress | M4-C read-path auth + `Eza.Library`; M4-A dispatch from `Eza.Routes` (`Server.hs` 3,595→469 lines, 12 `Eza.Api.*`, 405/404 JSON); M4-B one `Eza.Problem` error path (`jsonError`=0, six `toProblem` converters), catch-all JSON 500/503 middleware, `ProblemSpec`; 351 server examples. M4-D (egress jobs) pending |
-| M5 Data layer/journal/upgrade | in progress | M5-A shared append-only `Eza.Migrate` engine with sha256 checksums (`schema_meta`), user v16 / control v2, legacy backfill, verify-on-open + `verify` schema checks, `MigrationSpec`; 359 server examples. M5-B (journal + one-way upgrade) pending |
-| M6 Feature completion, formal specs, deployment subtraction | in progress | M6-DS removed Kubernetes manifests/docs, rclone offsite backup and Tailscale Serve from code/Nix module/image/docs/figures and kept Docker/Compose/NixOS+Caddy; README/architecture/deployment docs updated (deployment Excalidraw figure removed). Feature completion/formal specs pending |
+| M5 Data layer/journal/upgrade | in progress | M5-A shared checksummed `Eza.Migrate` engine (`schema_meta`, user v16/control v2, verify-on-open, CLI verify). M5-B one journal: user schema v17 adds `journal`/`journal_rows`, drops the undo side tables/legacy JSON undo (history not migrated), `Eza.Journal` captures before-images for bookmarks/tag links/highlights/links/captures/dead overrides and restores newest-first with URL-conflict refusal + FTS rebuild; `Eza.Undo` API unchanged (1,130→215 lines); 362 server examples incl. `JournalSpec`. M5-C (compatibility cleanup: legacy EZA_DB, unprefixed tokens, flat backup stamps/restore, legacy passkey sign-in, startup library relocation) pending |
+| M6 Feature completion, formal specs, deployment subtraction | in progress | M6-DS removed Kubernetes/rclone/Tailscale branches (Docker/Compose/NixOS+Caddy kept). M6-formal adds bounded `spec/Jobs.tla` and `spec/Undo.tla` (four TLC models now, ~215k states for Undo; JSON checks unchanged). Feature completion (AI/captures/dead-links/favicons/views-webhooks/clipper-sidecar on the async/contract spine) pending and depends on M4-D |
 | M7 Validation/release | not started | — |
 
 ## Gate log
@@ -110,6 +110,12 @@ Append one entry per gate run: milestone, date, commands, result, commit.
 2026-11-14 round-4 gate: bash scripts/build-web.sh -> ok, 7,776,200 raw / 2,206,619 gzip, bundle bb04b64055cb29a8
 2026-11-14 round-4 gate: fourmolu/hlint/check-docs/check-specs/version/notices -> ok
 2026-11-14 round-4 gate: nix build .#checks.eza-module + .#docker -> ok (after staging the new Migrate.hs for the git flake)
+2026-11-14 M6-formal: bash scripts/check-specs.sh -> ok (MultiUser 48,290 / Extensions 231,777 / Jobs 2,058 / Undo 215,683 distinct states; JSON fixtures pass)
+2026-11-14 M5-B: cabal test eza-test            -> ok, 362 examples, 0 failures, 1 pending (+ JournalSpec; v16->v17 backup, table-by-table undo identity, prune 100, newer-schema refusal)
+2026-11-14 M5-B: verify CLI                    -> schema ok (v17/v17); no undo_* tables; journal empty on a fresh install
+2026-11-14 M2-B2b-2: cabal test eza-web-logic   -> ok, 134 examples (+28 UpdateSpec across all route groups)
+2026-11-14 M2-B2b-2: bash scripts/build-web.sh  -> ok, 7,705,966 raw / 2,218,780 gzip, bundle bb6a997a424f2fa3; -fno-specialise removed
+2026-11-14 round-5 gate: cabal build all --ghc-options=-Werror -> ok (0 warnings); cabal test all -> 134 logic + 35 core + 362 server examples
 ```
 
 ## Round-4 note
@@ -255,3 +261,25 @@ recorded above.
   (its content was the three old targets); the README/architecture now describe
   Docker/Compose, NixOS+Caddy only. `Fetch.hs` keeps a factual CGNAT comment
   that mentions overlay networks, not the removed deployment branch.
+
+## Round-5 decisions (recorded)
+
+- **Journal engine (M5-B):** one append-only `journal` + `journal_rows` table
+  replaces eight per-feature undo tables and the legacy JSON undo payload.
+  Before-images are JSON per row inside the caller's transaction and the
+  journal is pruned to the newest 100 changes. The public `Eza.Undo` API and
+  wire DTOs are unchanged, so call sites did not move; only legacy-only
+  helpers were deleted. The upgrade is one-way: old undo history is not
+  migrated, older binaries refuse schema v17, rollback is the pre-migration
+  backup. `spec/Undo.tla` models the restore/conflict rule.
+- **Client completion (M2-B2b):** the Miso shell is reduced to adapter +
+  interpreter + views; native reducers own all 407 actions and the model.
+  The raw size target (<7.7M) is missed by 5,966 B and gzip (<2.2M) by
+  18.8 KB with no ceiling changes; a dedicated size pass (view/renderer
+  dedup, wasm flags) is recorded for M7, not more architecture.
+- **Formal scope:** `Jobs.tla`/`Undo.tla` are bounded design checks; worker
+  timing, network failure timing and refinement are explicitly out of scope.
+  TLC deadlock checking is disabled for the two new models because they model
+  batch processes that quiesce; safety invariants still run to exhaustion.
+- **Pending:** M4-D (async egress, schema v18), M5-C compatibility cleanup,
+  M6 feature completion, M7 upgrade drill/release.
