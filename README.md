@@ -118,13 +118,14 @@ server stores data under the checkout's `data/` directory. See
 commands.
 
 > [!IMPORTANT]
-> The Nix and Docker outputs pin the web client as a CI-built release asset; the
-> URL and SRI hash live in `nix/web-assets.json`. The GitHub release's
-> `eza-web-<version>.tar.gz` asset is that web bundle for the deployment flake,
-> not a standalone installer. A `v*` tag runs
-> `.github/workflows/release.yml` to build/upload the bundle, then
+> The Nix and Docker outputs build the web client from the same commit inside
+> the deployment flake: `nix/eza-web.nix` pins the WASM toolchain and an offline
+> Hackage dependency set, compiles the Miso client and bundles the
+> content-addressed assets with `scripts/bundle-web.sh`. There is no separately
+> published web bundle or SRI pin to update. A `v*` tag runs
+> `.github/workflows/release.yml` to create the release, then
 > `.github/workflows/release-image.yml` to publish the container image and its
-> versioned compose file.
+> versioned compose file; the container image is the installable artifact.
 
 One Warp and WAI process serves the client assets, the auth and share pages and
 `/api/v1`. The control database owns identity only; each account has a private
@@ -190,8 +191,9 @@ For a public domain, use Caddy instead:
 }
 ```
 
-Until the release asset exists, build the client from a checkout and serve the
-directory:
+The module's default web assets are built from the same flake input, so no
+separate step is needed. To serve a checkout build instead, build the bundle
+and point `staticDir` at the directory that contains `asset-manifest.json`:
 
 ```bash
 devenv shell -- web
@@ -429,7 +431,7 @@ Node sidecar (`EZA_DEFUDDLE_CMD`) handles extraction for the server. See
 | [docs/clipper.md](docs/clipper.md) | Clipper, clip API, CORS origins, sidecar and templates |
 | [docs/extensions.md](docs/extensions.md) | View and webhook contract, limits, delivery and threat model |
 | [docs/performance.md](docs/performance.md) | Benchmark method, raw output and limits |
-| [docs/deployment-nixos.md](docs/deployment-nixos.md) | Flake input, module options, unit, backup timer and web assets |
+| [docs/deployment-nixos.md](docs/deployment-nixos.md) | Flake input, module options, unit, backup timer and the in-Nix web build |
 | [docs/deployment-docker.md](docs/deployment-docker.md) | Image build, Compose, environment, healthcheck and secrets |
 | [docs/deployment-k8s.md](docs/deployment-k8s.md) | Image publish, kustomize apply, HTTPS, probes, storage and upgrades |
 | [docs/tailscale.md](docs/tailscale.md) | Tailscale Serve for NixOS and Docker |

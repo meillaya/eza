@@ -7,8 +7,9 @@
 #
 # The argument is either the tarball produced by `nix build .#docker` (the
 # `result` symlink is accepted) or an existing image reference. The script uses
-# a fresh named volume, waits for /healthz, checks the shell/WASM/static files
-# and the first-run /setup page, and always removes the container and volume.
+# a fresh named volume, waits for /healthz, checks the generated shell, service
+# worker, and the content-addressed loader/WASM it names, then checks the
+# first-run /setup page; it always removes the container and volume.
 # EZA_DOCKER_BROWSER=1 additionally runs tests/e2e/docker-first-run.mjs
 # (requires `bun install` and Playwright Chromium on the host).
 set -euo pipefail
@@ -120,8 +121,21 @@ if [ "$root_status" != "200" ] && [ "$root_status" != "302" ]; then
   docker logs "$NAME" >&2 || true
   exit 1
 fi
-check_status "/assets/app/index.js" 200
-check_status "/assets/app/app.wasm" 200
+# Asset names are content-addressed and generated, so the worker's embedded
+# cache list is the HTTP-visible source of truth for the current bundle. This
+# also proves the image serves the same bundle the shell/worker were built for.
+SW_TEXT="$(curl -fsS "http://127.0.0.1:${PORT}/sw.js")"
+WASM_PATH="$(printf '%s' "$SW_TEXT" | grep -o '/assets/app/app\.[0-9a-f][0-9a-f]*\.wasm' | head -n 1)"
+LOADER_PATH="$(printf '%s' "$SW_TEXT" | grep -o '/assets/app/index\.[0-9a-f][0-9a-f]*\.js' | head -n 1)"
+CSS_PATH="$(printf '%s' "$SW_TEXT" | grep -o '/assets/eza\.[0-9a-f][0-9a-f]*\.css' | head -n 1)"
+if [ -z "$WASM_PATH" ] || [ -z "$LOADER_PATH" ] || [ -z "$CSS_PATH" ]; then
+  echo "docker-smoke: /sw.js does not name the content-addressed bundle assets" >&2
+  exit 1
+fi
+check_status "/sw.js" 200
+check_status "$LOADER_PATH" 200
+check_status "$WASM_PATH" 200
+check_status "$CSS_PATH" 200
 check_status "/setup" 200
 
 if ! curl -fsS "http://127.0.0.1:${PORT}/setup" | grep -q 'password-setup'; then

@@ -1,8 +1,9 @@
 # Deploying eza on NixOS
 
 eza ships as a deployment-only Nix flake: it builds the `eza-bookmarks`
-binary (Warp server + CLI), the CI-built web client bundle, a Docker image and
-a hardened `services.eza` NixOS module. The development environment is
+binary (Warp server + CLI), the content-addressed web client bundle (Miso
+compiled to WebAssembly from source inside Nix), a Docker image and a hardened
+`services.eza` NixOS module. The development environment is
 separate (`devenv.nix`, run `devenv shell`); this flake has no devShells.
 
 The deployment binary is **eza-bookmarks**:
@@ -25,11 +26,9 @@ The deployment binary is **eza-bookmarks**:
 - A **secure origin** for passkeys: WebAuthn only works over HTTPS (or
   `http://localhost`). Use [Tailscale Serve](tailscale.md) or the module's
   Caddy option. Never expose plain HTTP to the internet.
-- The web client bundle. The flake pins it as a fixed-output release asset in
-  `nix/web-assets.json` (see [Web assets](#web-assets)); until the release
-  workflow has published and pinned an asset for your version, either pin it
-  with `scripts/release-asset.sh` or build the bundle locally and point the
-  module at the local package.
+- The web client bundle. The flake builds it from source with the
+  `ghc-wasm-meta` toolchain input (see [Web assets](#web-assets)); no release
+  asset download or hash pin is involved.
 
 ## Flake input
 
@@ -126,7 +125,7 @@ All options live under `services.eza`:
 |---|---|---|
 | `enable` | `false` | Enable the service. |
 | `package` | flake `eza-bookmarks` | Server package (provides `bin/eza-bookmarks`). |
-| `webAssets` | flake `eza-web` (CI asset) | Bundle served at `share/eza/static`; use `eza-web-local` for local builds. |
+| `webAssets` | flake `eza-web` (built from source) | Bundle served at `share/eza/static`; override for a locally built tree. |
 | `dataDir` | `/var/lib/eza` | `control.db` + `users/<id>/eza.db` + `backups/`. Default is a systemd StateDirectory owned by user `eza`. |
 | `bind` | `127.0.0.1:8080` | Warp listen address (`EZA_BIND`). Keep loopback behind Caddy/Tailscale. |
 | `publicOrigin` | `https://<caddy.hostname>` or `http://localhost:<port>` | Browser-visible origin (`PUBLIC_ORIGIN`). Passkeys are bound to it. |
@@ -288,49 +287,43 @@ journalctl -u eza.service -f
 
 ## Web assets
 
-Nix cannot build the Miso/WASM client (it needs the wasm32-wasi GHC toolchain,
-which is not in nixpkgs). CI builds it with `scripts/build-web.sh` and
-publishes `eza-web-<version>.tar.gz` as a GitHub release asset; the flake pins
-it as a fixed-output derivation (`packages.<system>.eza-web`). The tarball must
-include the `<file>.gz` sidecars the script writes next to the WASM, CSS, shell
-and loader JavaScript; the server serves those with `Content-Encoding: gzip`
-and `Vary: Accept-Encoding`, and without them the WASM crosses the wire at its
-raw 6.7 MB instead of about 1.5 MB.
+The browser client is Miso compiled to WebAssembly. The deployment flake
+builds it from source, so an operator builds the server and the client from the
+same revision with no prebuilt download:
 
-The URL and SRI hash live in one file, `nix/web-assets.json`. Publish the
-asset with the release workflow (a `v*` tag runs
-`.github/workflows/release.yml`, which uploads `eza-web-<version>.tar.gz` and
-commits the resolved hash), or locally:
+- the toolchain comes from the `ghc-wasm-meta` flake input
+  (`wasm32-wasi-ghc`/`wasm32-wasi-cabal`, node for the GHC post-link step, and
+  binaryen for `wasm-opt`);
+- `packages.<system>.eza-web` compiles `cabal.project.wasm` (core,
+  web-logic and the Miso shell) and runs the same `scripts/build-web.sh` +
+  `scripts/bundle-web.sh` the development shell uses. The dependency plan is
+  pinned by `cabal.project.wasm.freeze`; the Hackage tarballs are fixed-output
+  fetchurls listed in `nix/wasm-hackage.nix` with their solver metadata
+  vendored under `nix/wasm-cabal/`, so the build itself is offline and
+  reproducible;
+- the output is `share/eza/static`: the content-addressed hashed assets plus
+  `asset-manifest.json`, the generated shell, and the generated service worker.
+  The server validates that manifest at startup and refuses to serve a bundle
+  without it; hashed files are immutable, the shell is `no-store`, and `/sw.js`
+  carries the build id as its ETag.
+
+Build it directly when you want to inspect the bundle:
 
 ```bash
-bash scripts/build-web.sh
-bash scripts/release-asset.sh            # dist/release/eza-web-<version>.tar.gz
-bash scripts/release-asset.sh --check    # prints the SRI hash to pin
-# copy sha256-... into nix/web-assets.json "hash", then:
 nix build .#eza-web
+ls result/share/eza/static/asset-manifest.json
 ```
 
-`nix flake check` includes `checks.<system>.eza-web-pin`, so a placeholder hash
-fails the check loudly; `packages.<system>.eza-web` (and `.#docker`, and the
-default NixOS module web-assets path) also refuse with the pin instructions
-while the hash is unpinned.
+The Docker image and the default NixOS module path both consume that
+derivation. Set `services.eza.staticDir` to serve a bundle built outside Nix
+(for example with `devenv shell -- scripts/build-web.sh`); when it is set the
+unit reads that directory and does not reference `webAssets`, so the flake
+bundle stays out of the system closure.
 
-For local development before the first release, build the bundle and use the
-local override:
-
-```bash
-devenv shell -- scripts/build-web.sh
-nix build path:.#eza-web-local      # path flake: includes gitignored static/app
-# in configuration.nix:
-# services.eza.webAssets = inputs.eza.packages.${system}.eza-web-local;
-```
-
-Set `services.eza.staticDir` to serve a bundle built outside Nix instead. When
-it is set the unit reads that directory and does not reference `webAssets`, so
-the pinned release artifact stays out of the system closure.
-
-See [deployment-docker.md](deployment-docker.md#web-assets) for the CI
-workflow and asset layout.
+When the wasm dependency set changes (a `cabal.project.wasm` edit), refresh the
+pins together: `cabal.project.wasm.freeze`, `nix/wasm-hackage.nix`, and
+`nix/wasm-cabal/`. `scripts/update-wasm-deps.sh` does that from a development
+shell and explains the steps it runs.
 
 ## Updating
 
@@ -341,9 +334,8 @@ sudo nixos-rebuild switch --flake .#host
 ```
 
 The module is evaluated against your `nixpkgs` because the flake input follows
-it. If the web bundle is pinned by release asset hash, update the hash when the
-flake version changes (or keep `webAssets` overridden to a locally built
-package).
+it. The web bundle is rebuilt from source with the rest of the flake, so a
+version bump needs no separately pinned asset hash.
 
 Server dependencies are pinned in the flake to the generation used by the
 project's development build plan (`cabal.project.freeze` pins the cabal side) (`hpkgsUpgraded` overlay, including a few
@@ -356,13 +348,10 @@ hashes; see the comments in `flake.nix`.
 | Output | Purpose |
 |---|---|
 | `packages.<system>.eza-bookmarks` | Server + CLI (GHC 9.10 package set, local core/server). |
-| `packages.<system>.eza-web` | CI-built web bundle (fixed-output release asset). |
-| `packages.<system>.eza-web-local` | Local bundle from `./static` (development override). |
-| `packages.<system>.docker` | Layered Docker image tarball from the CI web asset (non-root, `/data`, `eza-bookmarks healthcheck`). |
-| `packages.<system>.docker-local` | Same image built with the local `./static` bundle (before the first release asset). |
+| `packages.<system>.eza-web` | Web bundle built from source (content-addressed `share/eza/static`). |
+| `packages.<system>.docker` | Layered Docker image tarball with the source-built web bundle (non-root, `/data`, `eza-bookmarks healthcheck`). |
 | `nixosModules.default` | `services.eza` module (this page). |
 | `checks.<system>.eza-module` | Cheap module evaluation/security-posture check. |
-| `checks.<system>.eza-web-pin` | Fails while `nix/web-assets.json` still holds the placeholder hash. |
 | `checks.<system>.nixos-vm` | Full NixOS VM test (builds a system image; needs KVM for speed). |
 
 Validate a configuration before switching:
@@ -370,7 +359,7 @@ Validate a configuration before switching:
 > Working from the eza repo while the rewrite is still uncommitted? Nix's git
 > flake source only contains tracked files, so paths like `core/` or
 > `deploy/` can be missing. Use an explicit path flake for local builds:
-> `nix build path:.#eza-bookmarks`, `nix build path:.#docker-local`, ...
+> `nix build path:.#eza-bookmarks`, `nix build path:.#eza-web`, ...
 > Once the tree is committed, plain `.#...` references work everywhere.
 
 ```bash

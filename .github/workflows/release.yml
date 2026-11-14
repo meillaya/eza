@@ -1,25 +1,17 @@
-name: Release web assets
+name: Create GitHub release
 
-# Produces the deployment flake's fixed-output web bundle on a v* tag:
-#
-#   1. build the Miso client with scripts/build-web.sh (wasm32-wasi GHC from
-#      devenv.nix; nixpkgs cannot build it),
-#   2. pack deterministically with scripts/release-asset.sh,
-#   3. upload eza-web-<version>.tar.gz to the GitHub release,
-#   4. pin its SRI hash in nix/web-assets.json on the default branch,
-#   5. verify the pin by fetching the uploaded asset through nix.
-#
-# The hash lives in nix/web-assets.json (not flake.nix) so this workflow and a
-# human running scripts/release-asset.sh both have exactly one file to edit.
-# docs/deployment-docker.md ("Web assets") and docs/deployment-nixos.md
-# describe the operator-facing sequence.
+# Creates the GitHub release on a v* tag. The web client and server are built
+# from source by the deployment flake (packages.<system>.eza-web and
+# .eza-bookmarks); there is no prebuilt web-asset upload and no SRI pin any
+# more. The container image is published separately by release-image.yml once
+# this workflow has created the release.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version from flake.nix (e.g. 0.1.0.0); must match scripts/version.sh"
+        description: "Release version from flake.nix (e.g. 0.2.0.0); must match scripts/version.sh"
         required: true
         type: string
 
@@ -27,34 +19,24 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-web-assets-${{ github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
   GH_TOKEN: ${{ github.token }}
-  REPO: ${{ github.repository }}
-  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
 
 jobs:
-  web-asset:
+  release:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: cachix/install-nix-action@v31
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-      - uses: cachix/cachix-action@v16
-        with:
-          name: devenv
-      - name: Install devenv
-        run: nix profile install nixpkgs#devenv
 
-      - name: Resolve release version
+      - name: Resolve and validate the release version
         id: version
+        shell: bash
         run: |
           set -euo pipefail
           version="$(bash scripts/version.sh)"
@@ -65,78 +47,34 @@ jobs:
               echo "::error title=Version mismatch::workflow input '$requested' does not match flake.nix/scripts/version.sh '$version'."
               exit 1
             fi
+            if ! git ls-remote --exit-code --tags "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${tag}" >/dev/null 2>&1; then
+              echo "::error title=Missing release tag::tag ${tag} does not exist; refusing to create a release from an untagged tree."
+              exit 1
+            fi
           elif [ "${{ github.ref_type }}" != "tag" ] || [ "${{ github.ref_name }}" != "$tag" ]; then
             echo "::error title=Tag/version mismatch::tag '${{ github.ref_name }}' does not match scripts/version.sh '$version' (expected '$tag'). Bump flake.nix + the Cabal versions before tagging."
             exit 1
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "asset=eza-web-${version}.tar.gz" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=${version}"
+            echo "tag=${tag}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::release ${tag}"
 
-      - name: Cache the WASM Cabal package index
-        uses: actions/cache@v4
-        with:
-          path: .devenv/cabal-wasm
-          key: cabal-wasm-index-v2-${{ runner.os }}-${{ hashFiles('cabal.project.wasm', 'core/eza-core.cabal', 'web/eza-web.cabal', 'devenv.lock') }}
-          restore-keys: |
-            cabal-wasm-index-v2-${{ runner.os }}-
-
-      # build-web.sh runs wasm32-wasi-cabal with CABAL_DIR in the checkout
-      # (\`.devenv/cabal-wasm\`); a fresh runner has no Hackage index there, so
-      # bootstrap it before building. This is the same failure class the CI
-      # workflow fixed (a cold CABAL_DIR cannot resolve aeson).
-      - name: Bootstrap the WASM Cabal package index
+      - name: Create or update the GitHub release
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
-          index=".devenv/cabal-wasm/packages/hackage.haskell.org/01-index.tar"
-          if [ ! -f "$index" ]; then
-            echo "::notice::WASM Cabal index is not cached; running 'cabal update' for scripts/build-web.sh's CABAL_DIR."
-            devenv shell -- bash -c 'CABAL_DIR="$PWD/.devenv/cabal-wasm" cabal update' || {
-              echo "::error title=WASM Cabal index bootstrap failed::'cabal update' failed for CABAL_DIR=$PWD/.devenv/cabal-wasm, which scripts/build-web.sh uses. Check Hackage reachability and re-run the job."
-              exit 1
-            }
-          fi
-          devenv shell -- bash -c 'CABAL_DIR="$PWD/.devenv/cabal-wasm" wasm32-wasi-cabal build --project-file=cabal.project.wasm eza-web --dry-run' || {
-            echo "::error title=WASM dependency resolution failed::wasm32-wasi-cabal could not resolve cabal.project.wasm."
-            exit 1
-          }
-
-      - name: Build the WASM web bundle
-        run: devenv shell -- bash scripts/build-web.sh
-
-      - name: Pack the deterministic release asset
-        id: asset
-        run: |
-          set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
-          bash scripts/release-asset.sh --no-build --out dist/release
-          asset="dist/release/eza-web-${version}.tar.gz"
-          test -s "$asset" || {
-            echo "::error title=Web asset missing::$asset was not produced."
-            exit 1
-          }
-          # The same hash release-asset.sh prints and the workflow pins.
-          hash="$(bash scripts/release-asset.sh --no-build --out dist/release --print-hash)"
-          echo "hash=$hash" >> "$GITHUB_OUTPUT"
-          echo "::notice::built $asset ($(wc -c < "$asset" | tr -d ' ') bytes), SRI $hash"
-          # Fail now (not after upload) if nix/web-assets.json still names a
-          # different version: the asset URL is versioned.
-          bash scripts/release-asset.sh --no-build --check
-
-      - name: Upload eza-web-<version>.tar.gz to the release
-        run: |
-          set -euo pipefail
-          tag="${{ steps.version.outputs.tag }}"
-          asset="dist/release/${{ steps.version.outputs.asset }}"
-          version="${{ steps.version.outputs.version }}"
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            notes="$(cat <<EOF
+          notes="$(cat <<EOF
           ## Quick start
 
           \`\`\`bash
           docker run -d --name eza --restart unless-stopped \\
             -p 8080:8080 -v eza-data:/data \\
-            ghcr.io/meillaya/eza:${version}
+            ghcr.io/meillaya/eza:${VERSION}
           \`\`\`
 
           Open <http://localhost:8080/setup> and create the first account. The named
@@ -152,85 +90,30 @@ jobs:
 
           \`\`\`bash
           docker exec eza eza-bookmarks backup
-          docker pull ghcr.io/meillaya/eza:${version}
+          docker pull ghcr.io/meillaya/eza:${VERSION}
           docker rm -f eza
           docker run -d --name eza --restart unless-stopped \\
             -p 8080:8080 -v eza-data:/data \\
-            ghcr.io/meillaya/eza:${version}
+            ghcr.io/meillaya/eza:${VERSION}
           \`\`\`
 
-          A version-pinned \`eza-${version}-compose.yml\` is attached to this release for
+          A version-pinned \`eza-${VERSION}-compose.yml\` is attached to this release for
           Compose users. Migrations run automatically on first start; see the upgrade
           notes below.
 
           ## Assets
 
-          The container image is the installable artifact. The attached
-          \`eza-web-${version}.tar.gz\` is the CI-built web client bundle used by the
-          deployment flake (\`nix/web-assets.json\`); it is not a standalone installer.
+          The container image is the installable artifact. The Nix flake builds the
+          server and the content-addressed web client from source
+          (\`packages.<system>.eza-bookmarks\` and \`packages.<system>.eza-web\`); no
+          separate web bundle download is published for this release.
 
           EOF
           )"
-            gh release create "$tag" \
-              --title "eza $tag" \
-              --notes "$notes" || {
-              echo "::error title=Release creation failed::could not create GitHub release $tag."
-              exit 1
-            }
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes "$notes"
+            echo "::notice::updated the notes for existing release $TAG"
+          else
+            gh release create "$TAG" --title "eza $TAG" --notes "$notes"
+            echo "::notice::created release $TAG"
           fi
-          gh release upload "$tag" "$asset" --clobber || {
-            echo "::error title=Asset upload failed::could not upload $asset to release $tag."
-            exit 1
-          }
-          echo "::notice::uploaded $asset to release $tag"
-
-      - name: Pin the uploaded asset's SRI hash in nix/web-assets.json
-        run: |
-          set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
-          hash="${{ steps.asset.outputs.hash }}"
-          # Read the pin from the default branch (not the tag): that is the
-          # file operators' `github:meillaya/eza` input resolves to.
-          sha="$(gh api "repos/${REPO}/contents/nix/web-assets.json" --jq .sha)"
-          content="$(gh api "repos/${REPO}/contents/nix/web-assets.json" --jq .content | base64 -d)"
-          pinned="$(printf '%s' "$content" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hash"])')"
-          if [ "$pinned" = "$hash" ]; then
-            echo "::notice::nix/web-assets.json is already pinned to $hash; nothing to commit."
-            exit 0
-          fi
-          updated="$(printf '%s' "$content" | python3 -c '
-          import json
-          import sys
-
-          pin = json.load(sys.stdin)
-          pin["hash"] = sys.argv[1]
-          pin["url"] = sys.argv[2]
-          json.dump(pin, sys.stdout, indent=2)
-          sys.stdout.write("\n")
-          ' "$hash" "https://github.com/${REPO}/releases/download/v${version}/eza-web-${version}.tar.gz")"
-          encoded="$(printf '%s' "$updated" | base64 -w 0)"
-          if ! gh api --method PUT "repos/${REPO}/contents/nix/web-assets.json" \
-            -f message="release: pin web asset hash for v${version} [skip ci]" \
-            -f content="$encoded" \
-            -f sha="$sha" \
-            -f branch="$DEFAULT_BRANCH" >/dev/null; then
-            echo "::error title=Could not commit web asset hash::The default branch rejected the nix/web-assets.json update (branch protection?). Pin it manually: set \"hash\": \"$hash\" in nix/web-assets.json and commit."
-            exit 1
-          fi
-          echo "::notice::pinned nix/web-assets.json to $hash on $DEFAULT_BRANCH"
-
-      - name: Verify the pin against the uploaded asset
-        run: |
-          set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
-          # Refresh the file from the default branch, because this checkout is
-          # the tag commit (which predates the pin commit).
-          gh api "repos/${REPO}/contents/nix/web-assets.json?ref=${DEFAULT_BRANCH}" \
-            --jq .content | base64 -d > nix/web-assets.json
-          bash scripts/release-asset.sh --no-build --check --require-pinned
-          # Real verification: fetch the uploaded release asset through the
-          # fixed-output derivation and compare its SRI hash, then run the
-          # pin check. This is the same path a Docker/NixOS operator uses.
-          nix build -L --no-link path:.#eza-web
-          nix build -L --no-link path:.#checks.x86_64-linux.eza-web-pin
-          echo "::notice::eza-web-${version}.tar.gz is uploaded and pinned; Docker/NixOS default builds are unblocked."

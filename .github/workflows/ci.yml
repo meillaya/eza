@@ -109,10 +109,10 @@ jobs:
         run: devenv shell -- bash scripts/e2e.sh
 
   # The flake checks need no cabal/Haskell toolchain: they evaluate the NixOS
-  # module and the web-asset pin. `checks.eza-module` is the documented
-  # security-posture check (docs/deployment-nixos.md); before this job it was
-  # never run in CI, which is why its brittle greps (and the placeholder web
-  # hash) stayed invisible.
+  # module. `checks.eza-module` is the documented security-posture check
+  # (docs/deployment-nixos.md). The web bundle is built from source by
+  # packages.<system>.eza-web; docker-smoke below builds it and the image that
+  # serves it.
   nix-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -127,26 +127,15 @@ jobs:
           name: devenv
       - name: NixOS module posture check
         run: nix build -L .#checks.x86_64-linux.eza-module
-      # Advisory until the first release asset exists: the pin is repaired by
-      # .github/workflows/release.yml (which uploads eza-web-<version>.tar.gz
-      # and commits the SRI hash into nix/web-assets.json). After that this
-      # step prints the pinned URL/hash; the release workflow enforces it with
-      # `--require-pinned`.
-      - name: Web asset pin status
-        run: |
-          set -euo pipefail
-          if nix build -L .#checks.x86_64-linux.eza-web-pin; then
-            echo "web asset pin is set: $(cat result/url) $(cat result/hash)"
-          else
-            echo "::warning title=Web asset not pinned::nix/web-assets.json still pins lib.fakeHash. Run .github/workflows/release.yml (or scripts/release-asset.sh and pin the hash) to publish eza-web-<version>.tar.gz; default Docker/NixOS builds fail until then."
-          fi
 
   # The published artifact is a container image, so build and smoke-test it on
   # every CI run. This catches a broken entrypoint, missing static bundle,
-  # unwritable /data, or a healthcheck regression before a release tag.
+  # unwritable /data, or a healthcheck regression before a release tag. The
+  # image build includes the from-source WebAssembly bundle
+  # (packages.<system>.eza-web), which is the slowest part on a cold store.
   docker-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31

@@ -8,8 +8,8 @@ under **/data**, and exposes **/healthz** for health checks.
 
 The image is produced by Nix (`packages.<system>.docker` in the deployment
 flake) using `dockerTools.buildLayeredImage`; there is no Dockerfile because
-the web client is a CI-built WASM release asset and the server is a GHC
-derivation.
+both the server and the WebAssembly client are Nix derivations built from the
+same revision.
 
 ## Quick start
 
@@ -254,62 +254,47 @@ writable by uid 10001 (group-write for group 10001 also works).
 
 ## Web assets
 
-The client is compiled with the wasm32-wasi GHC toolchain (not in nixpkgs),
-built in CI with `scripts/build-web.sh`, and published as a release asset. The
-deployment flake pins it as a fixed-output derivation; the URL and SRI hash live
-in one place, `nix/web-assets.json`:
-
-```json
-{
-  "url": "https://github.com/meillaya/eza/releases/download/v0.2.0.0/eza-web-0.2.0.0.tar.gz",
-  "hash": "sha256-..."
-}
-```
-
-Asset layout: `eza-web-<version>.tar.gz` is a **tarball of the `static/`
-tree with entries at the archive root**:
-
-    index.html
-    eza.css
-    theme.js
-    app/index.js
-    app/app.wasm
-    app/ghc_wasm_jsffi.js
-    vendor/...
-    # plus the <file>.gz sidecars scripts/build-web.sh writes next to the
-    # compressible assets (wasm, css, html shell, loader JavaScript)
-
-The `.gz` sidecars are not optional for a fast cold load: the server serves
-them with `Content-Encoding: gzip` and `Vary: Accept-Encoding`, so the WASM
-bundle crosses the wire at about 1.5 MB instead of 6.7 MB. Including them in the
-tarball is what keeps the compression on; without them the assets are served
-uncompressed.
-
-Publish the asset with the release workflow or locally:
+The web client is Miso compiled to WebAssembly. The deployment flake builds it
+from source with the `ghc-wasm-meta` toolchain input, so the image is
+self-contained and there is no release asset to download or hash to pin:
 
 ```bash
-# Local route: build the deterministic tarball, then upload it to a v<version>
-# release (the release workflow does the same on a v* tag and updates the pin):
-bash scripts/build-web.sh
-bash scripts/release-asset.sh            # writes dist/release/eza-web-0.2.0.0.tar.gz
-bash scripts/release-asset.sh --check    # prints the SRI hash
-# put the printed sha256-... into nix/web-assets.json "hash", then:
-nix build .#eza-web
-nix build .#docker              # rebuild the image with the pinned bundle
+nix build .#eza-web    # content-addressed bundle at share/eza/static
+nix build .#docker    # image with that bundle baked in
 ```
 
-`.github/workflows/release.yml` builds and uploads the asset on a `v*` tag and
-commits the resolved SRI hash to `nix/web-assets.json`. Until the pin is real,
-`.#docker` and the default NixOS web-assets path fail at evaluation with an
-actionable message rather than a hash mismatch; `nix/web-assets.json` is the
-only file to edit.
+`packages.<system>.eza-web` compiles `cabal.project.wasm` and runs the same
+`scripts/build-web.sh` + `scripts/bundle-web.sh` the development shell uses.
+The dependency plan is pinned by `cabal.project.wasm.freeze`; the Hackage
+tarballs are fixed-output fetchurls in `nix/wasm-hackage.nix` with their solver
+metadata vendored under `nix/wasm-cabal/`, so the Nix build itself is offline
+and reproducible.
 
-Use the local bundle while iterating without a release:
+The output layout is the server's static tree: `share/eza/static/` with
+`asset-manifest.json` (build id, logical-to-hashed path map, shell refs, and
+the service-worker precache list), the hashed assets (WASM, loader,
+`ghc_wasm_jsffi`, CSS with rewritten font URLs, scripts, icons, fonts, the WASI
+vendor tree), and the generated `index.html`/`sw.js`/`manifest.webmanifest`.
+Hashed files are served `public, max-age=31536000, immutable` with an ETag;
+the shell is `no-store`; `/sw.js` is the generated worker served `no-cache`
+with the build id as its ETag. The `.gz` sidecars the bundler writes are part
+of the tree and the server serves them with `Content-Encoding: gzip` and
+`Vary: Accept-Encoding`, which is what keeps the WASM cold load at about
+2.1 MB instead of 7.7 MB. The server validates the manifest at startup and
+refuses to start without it.
+
+For a local development bundle outside Nix:
 
 ```bash
 devenv shell -- scripts/build-web.sh
-nix build path:.#eza-web-local   # or: git add -f static/app && nix build .#eza-web-local
+# then either serve it directly...
+EZA_STATIC_DIR=$PWD/static ./bin/eza-bookmarks serve
+# ...or stage it in an image build by overriding services.eza.staticDir
 ```
+
+When the wasm dependency set changes, refresh `cabal.project.wasm.freeze`,
+`nix/wasm-hackage.nix`, and `nix/wasm-cabal/` together;
+`scripts/update-wasm-deps.sh` performs that update from a development shell.
 
 ## Upgrades
 

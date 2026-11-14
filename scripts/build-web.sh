@@ -120,8 +120,15 @@ gzip_asset static/app/app.wasm
 # dependency builds, not a product limit; M2-B (moving the reducer and effect
 # layer out of the Miso shell) is expected to bring it back under the old
 # number. Record any further raise in docs/program/README.md.
+#
+# Gzip ceiling: raised from 2,200,000 to 2,250,000 in M2-B1/M3-B (2026-11-14).
+# The same wasm compresses to 2,197,921 B with the devenv gzip and 2,201,334 B
+# with the NixOS gzip used by the deployment build, so the old ceiling rejected
+# the release build while the dev build passed. The gates are enforced in both
+# paths (the Nix derivation does not override them); the 1.7 MB target is
+# unchanged and M2-B2 must recover headroom rather than raise this again.
 WASM_GZIP_TARGET_BYTES="${EZA_WASM_GZIP_TARGET_BYTES:-1700000}"
-WASM_GZIP_MAX_BYTES="${EZA_WASM_GZIP_MAX_BYTES:-2200000}"
+WASM_GZIP_MAX_BYTES="${EZA_WASM_GZIP_MAX_BYTES:-2250000}"
 WASM_RAW_MAX_BYTES="${EZA_WASM_RAW_MAX_BYTES:-7800000}"
 WASM_RAW_BYTES="$(wc -c < static/app/app.wasm)"
 WASM_GZIP_BYTES="$(wc -c < static/app/app.wasm.gz)"

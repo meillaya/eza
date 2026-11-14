@@ -5,9 +5,13 @@
   # The development environment is devenv.nix (run: devenv shell). This flake
   # is what operators build and import into a NixOS configuration.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # The wasm32-wasi GHC toolchain used to build the Miso client. The revision
+  # is pinned in flake.lock; it must stay in step with devenv.lock so the
+  # development shell and the deployment build use the same compiler.
+  inputs.ghc-wasm-meta.url = "gitlab:haskell-wasm/ghc-wasm-meta?host=gitlab.haskell.org";
 
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs, ghc-wasm-meta }:
     let
       lib = nixpkgs.lib;
 
@@ -20,52 +24,15 @@
       version = "0.2.0.0";
 
       # ---------------------------------------------------------------------
-      # Web assets (the static/ tree: index.html, eza.css, theme.js, and the
-      # app/ directory holding app.wasm + its JS loader).
+      # Web assets (the static/ tree: index.html, the content-addressed app/
+      # files, the generated service worker, and asset-manifest.json).
       #
-      # The Miso client is built with the wasm32-wasi GHC toolchain, which is
-      # not part of nixpkgs; Nix therefore cannot build it. CI runs
-      # scripts/build-web.sh with that toolchain and publishes the resulting
-      # static/ tree as the release asset referenced below. This flake pins
-      # the asset as a fixed-output derivation -- the CI-built asset IS the
-      # fixed output.
-      #
-      # The URL and SRI hash live in nix/web-assets.json: exactly one file to
-      # edit on a release. .github/workflows/release.yml builds and uploads
-      # eza-web-<version>.tar.gz on a v* tag and rewrites that file with the
-      # uploaded asset's hash; scripts/release-asset.sh builds the same
-      # deterministic tarball locally and prints the SRI hash. Until the hash
-      # is pinned, packages.<system>.eza-web (and therefore .#docker and the
-      # default NixOS module path) fails with an actionable message; use
-      # packages.<system>.eza-web-local / .#docker-local in the meantime.
-      # docs/deployment-docker.md and docs/deployment-nixos.md describe the
-      # operator-facing release sequence.
+      # The Miso client is built from source inside Nix by
+      # packages.<system>.eza-web (see nix/eza-web.nix) with the
+      # ghc-wasm-meta toolchain input above. There is no CI-built release
+      # asset and no SRI pin: the same derivation produces the bundle the
+      # Docker image and the NixOS module serve.
       # ---------------------------------------------------------------------
-      webAssets = builtins.fromJSON (builtins.readFile ./nix/web-assets.json);
-
-      expectedWebAssetUrl =
-        "https://github.com/meillaya/eza/releases/download/v${version}/eza-web-${version}.tar.gz";
-
-      webAssetsPinned = webAssets.hash != lib.fakeHash;
-
-      # The failure operators see when a release asset has not been published
-      # yet. Kept next to the pin so there is one place to explain the process.
-      webAssetsUnpinnedMessage = ''
-        eza-web: the pinned web bundle asset is not available yet.
-
-        nix/web-assets.json still carries the lib.fakeHash placeholder for:
-          ${webAssets.url}
-
-        Publish the release asset (or run `bash scripts/release-asset.sh`),
-        then pin its SRI hash in nix/web-assets.json:
-          "hash": "<nix hash file --sri --type sha256 eza-web-${version}.tar.gz>"
-
-        Before the first release asset, build the bundle locally and use the
-        local override instead:
-          bash scripts/build-web.sh
-          nix build path:.#eza-web-local
-          nix build path:.#docker-local
-      '';
 
       # NixOS module: nix/module.nix is a normal module; this wrapper injects
       # the pinned package defaults through _module.args.
@@ -213,58 +180,13 @@
           });
 
           # --- web assets ----------------------------------------------------
-          # CI-built release asset, fetched and unpacked to a stable location
-          # that EZA_STATIC_DIR can point at. While the pin is the
-          # lib.fakeHash placeholder the derivation throws with the release
-          # instructions rather than failing on a hash mismatch after a
-          # network fetch; .#docker and the default module path inherit it.
-          eza-web-asset =
-            if webAssetsPinned then
-              pkgs.fetchurl {
-                name = "eza-web-${version}.tar.gz";
-                inherit (webAssets) url hash;
-              }
-            else
-              throw webAssetsUnpinnedMessage;
-
-          eza-web = pkgs.runCommand "eza-web-${version}" {
-            meta.description = "eza web client bundle (CI-built release asset)";
-          } ''
-            mkdir -p $out/share/eza/static
-            tar -xzf ${eza-web-asset} -C $out/share/eza/static
-            # The bundle must contain the WASM client and its precompressed
-            # sidecars; an empty/incorrect tarball should fail here, not in a
-            # browser.
-            test -f $out/share/eza/static/index.html
-            test -f $out/share/eza/static/app/app.wasm
-            test -f $out/share/eza/static/app/app.wasm.gz
-          '';
-
-          # Local override: package the working tree's static/ directory
-          # instead of the release asset. `static/app` is a build artifact and
-          # is gitignored, so build it first (devenv shell -- scripts/build-web.sh)
-          # and either use `nix build path:.#eza-web-local` (a path flake sees
-          # untracked files) or stage the bundle (git add -f static/app).
-          eza-web-local =
-            let
-              localStatic = ./static;
-              hasBundle = builtins.pathExists (localStatic + "/app");
-            in
-            pkgs.runCommand "eza-web-local-${version}" { } (
-              if hasBundle then
-                ''
-                  mkdir -p $out/share/eza/static
-                  cp -r ${localStatic}/. $out/share/eza/static/
-                ''
-              else
-                ''
-                  echo "eza-web-local: no static/app directory in the flake source." >&2
-                  echo "Build the bundle first: devenv shell -- scripts/build-web.sh" >&2
-                  echo "Then build from a path flake (nix build path:.#eza-web-local)" >&2
-                  echo "or stage the gitignored bundle: git add -f static/app" >&2
-                  exit 1
-                ''
-            );
+          # Built from source inside Nix; the server rejects a static tree
+          # without asset-manifest.json, so this is the only bundle the
+          # deployment paths consume.
+          eza-web = import ./nix/eza-web.nix {
+            inherit lib pkgs ghc-wasm-meta system version;
+            src = self;
+          };
 
           # --- container image ----------------------------------------------
           # The secretspec manifest ships read-only for the optional
@@ -353,14 +275,11 @@
             };
           };
 
-          # Release image: server + the CI-built web asset pinned in webAssets.
+          # Release image: server + the source-built web bundle.
           docker = mkDocker eza-web;
-          # Local image: server + the bundle built from ./static (useful before
-          # the first release asset exists, and for CI smoke tests).
-          docker-local = mkDocker eza-web-local;
         in
         {
-          inherit eza-bookmarks eza-web eza-web-local docker docker-local;
+          inherit eza-bookmarks eza-web docker;
           eza-core = eza-core;
           eza-server = eza-server;
           default = eza-bookmarks;
@@ -390,15 +309,15 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
 
-          # Stand-in for the CI-built release asset so checks never need the
-          # real (network) fixed-output derivation.
+          # Stand-in for the web bundle so the module check never builds the
+          # wasm toolchain and dependency set.
           stubWeb = pkgs.runCommand "eza-web-stub" { } ''
             mkdir -p $out/share/eza/static
             printf '%s\n' '<!doctype html><title>eza</title>' > $out/share/eza/static/index.html
           '';
 
           # Minimal stand-ins so the module check never builds the real server
-          # package or fetches the fixed-output web asset.
+          # package or the web bundle.
           stubPackage = pkgs.writeShellScriptBin "eza-bookmarks" ''
             echo "stub eza-bookmarks package (module evaluation check)"
           '';
@@ -437,10 +356,6 @@
           # `--provider 'systemd-credential'`, which is why this check failed
           # for every system.
           eza-module = pkgs.runCommand "eza-module-check" {
-            inherit expectedWebAssetUrl;
-            pinUrl = webAssets.url;
-            pinHash = webAssets.hash;
-            pinPinned = if webAssetsPinned then "1" else "0";
             staticDirExpected = "${stubWeb}/share/eza/static";
           } ''
             mkdir -p $out
@@ -509,56 +424,8 @@
             # must not run a second find-based retention pass.
             ! grep -Fq -- '-mtime' $out/eza-backup || fail 'backup unit runs its own retention pass'
 
-            # Web-asset pin: the module path serves the flake's fixed-output
-            # CI bundle, so its URL must name this flake version and its hash
-            # must be a syntactically valid SRI sha256. The real value lives in
-            # nix/web-assets.json; checks.eza-web-pin fails while it is the
-            # placeholder (this check still passes so the security posture is
-            # testable before the first release asset).
-            [ "$pinUrl" = "$expectedWebAssetUrl" ] || fail "nix/web-assets.json url is '$pinUrl', expected '$expectedWebAssetUrl'"
-            printf '%s' "$pinHash" | grep -Eq '^sha256-[A-Za-z0-9+/]{43}=$' \
-              || fail "nix/web-assets.json hash is not an SRI sha256: $pinHash"
-            if [ "$pinPinned" != "1" ]; then
-              echo "eza-module: warning: nix/web-assets.json still pins the lib.fakeHash placeholder." >&2
-              echo "  checks.eza-web-pin fails until the release asset hash is set." >&2
-            fi
-
             touch $out/ok
           '';
-
-          # Fails while nix/web-assets.json carries the lib.fakeHash
-          # placeholder. Default builds (.eza-web, .#docker, the default NixOS
-          # module path) cannot produce a real bundle until the release asset
-          # exists; this check makes that state visible instead of a
-          # fixed-output hash mismatch. Run release.yml, then the hash pin
-          # turns this check green.
-          eza-web-pin = pkgs.runCommand "eza-web-pin-check" {
-            inherit expectedWebAssetUrl;
-            pinnedUrl = webAssets.url;
-            pinnedHash = webAssets.hash;
-          } (
-            if webAssetsPinned then
-              ''
-                mkdir -p $out
-                [ "$pinnedUrl" = "$expectedWebAssetUrl" ] || {
-                  echo "eza-web-pin: nix/web-assets.json url is '$pinnedUrl', expected '$expectedWebAssetUrl'" >&2
-                  exit 1
-                }
-                printf '%s\n' "$pinnedUrl" > $out/url
-                printf '%s\n' "$pinnedHash" > $out/hash
-                touch $out/ok
-              ''
-            else
-              ''
-                echo "eza-web-pin check failed: nix/web-assets.json still pins lib.fakeHash." >&2
-                echo "" >&2
-                cat > $out/unpinned-message <<'MSG'
-                ${webAssetsUnpinnedMessage}
-                MSG
-                cat $out/unpinned-message >&2
-                exit 1
-              ''
-          );
 
           # Full NixOS VM test (best effort: builds the server package and a
           # complete system image; needs KVM to run quickly). Covers health

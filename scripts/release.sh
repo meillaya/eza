@@ -4,12 +4,13 @@
 #   bash scripts/release.sh
 #
 # Output (dist/release/):
-#   eza-web-<version>.tar.gz              the deployment flake's web bundle asset
-#                                         (same file .github/workflows/release.yml
-#                                         uploads and nix/web-assets.json pins)
 #   eza-<version>-<arch>-linux.tar.gz     server binary + static bundle +
 #                                         extension + sidecar + licence/notices
-#   SHA256SUMS                            checksums for both
+#   SHA256SUMS                            checksum for the tarball
+#
+# The web bundle is built from source by the deployment flake
+# (packages.<system>.eza-web); the release tarball stages that bundle under
+# share/eza/static. There is no separate prebuilt web-asset upload or SRI pin.
 #
 # Version: derived from flake.nix via scripts/version.sh, which also verifies
 # the Cabal packages agree (0.2.0.0). There is no separate release version.
@@ -66,7 +67,6 @@ VERSION="$(bash scripts/version.sh)"
 PLATFORM="${EZA_RELEASE_PLATFORM:-$(uname -m)-linux}"
 DIST="$ROOT/dist/release"
 OUT="$DIST/eza-${VERSION}"
-ASSET_NAME="eza-web-${VERSION}.tar.gz"
 TARBALL="$DIST/eza-${VERSION}-${PLATFORM}.tar.gz"
 
 log() { printf 'release: %s\n' "$*" >&2; }
@@ -79,17 +79,32 @@ mkdir -p "$DIST"
 WARNINGS=""
 
 # ---------------------------------------------------------------------------
-# Web asset (the file the deployment flake pins; see nix/web-assets.json)
+# Web bundle (built from source by the deployment flake)
 # ---------------------------------------------------------------------------
+WEB_STATIC=""
 if [ "$BUILD_WEB" -eq 1 ]; then
-  log "building the web bundle and dist/$ASSET_NAME"
-  bash scripts/release-asset.sh --out "$DIST" || die "scripts/release-asset.sh failed"
-  [ -s "$DIST/$ASSET_NAME" ] || die "expected $DIST/$ASSET_NAME"
-else
-  log "skipping the web asset (--no-web)"
-  if [ -f "$DIST/$ASSET_NAME" ]; then
-    log "using the existing $DIST/$ASSET_NAME"
+  if [ "$BUILD_MODE" != "cabal" ] && command -v nix >/dev/null 2>&1; then
+    log "building the web bundle: nix build path:.#eza-web"
+    web_out="$(mktemp)"
+    if nix build --no-link --print-out-paths "path:$ROOT#eza-web" >"$web_out" 2>&1; then
+      WEB_STATIC="$(head -n 1 "$web_out")/share/eza/static"
+      log "web bundle: $WEB_STATIC"
+    else
+      cat "$web_out" >&2
+      rm -f "$web_out"
+      die "'nix build .#eza-web' failed; the release tarball needs a web bundle (the server rejects a static tree without asset-manifest.json)"
+    fi
+    rm -f "$web_out"
+  else
+    if [ -f "$ROOT/static/asset-manifest.json" ]; then
+      WEB_STATIC="$ROOT/static"
+      log "web bundle: local static/ (built by scripts/build-web.sh)"
+    else
+      die "no web bundle: run 'bash scripts/build-web.sh' first, or build with Nix (nix build .#eza-web)"
+    fi
   fi
+else
+  log "skipping the web bundle (--no-web)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -170,18 +185,17 @@ rm -rf "$OUT"
 mkdir -p "$OUT/bin" "$OUT/share/eza"
 
 cp "$BIN" "$OUT/bin/eza-bookmarks"
-if [ -d static/app ] && [ -f static/index.html ]; then
-  # A release tarball serves the bundle from share/eza/static. The web asset
-  # tarball is the flake-pinned copy of the same tree.
-  cp -a static "$OUT/share/eza/static"
-  if [ -f "$DIST/$ASSET_NAME" ]; then
-    cp "$DIST/$ASSET_NAME" "$OUT/share/eza/$ASSET_NAME"
-  fi
+if [ -n "$WEB_STATIC" ]; then
+  # A release tarball serves the bundle from share/eza/static. The bundle is
+  # the flake-built content-addressed tree (asset-manifest.json + hashed
+  # assets + generated shell/service worker).
+  cp -a "$WEB_STATIC" "$OUT/share/eza/static"
+  [ -f "$OUT/share/eza/static/asset-manifest.json" ] || die "the web bundle has no asset-manifest.json (the server would refuse to start)"
 else
-  WARNINGS="${WARNINGS}static/app is missing; the tarball has no web bundle and the UI will 404
-until scripts/build-web.sh runs and the release is rebuilt.
+  WARNINGS="${WARNINGS}The tarball has no web bundle (--no-web); the UI will 404 until
+EZA_STATIC_DIR points at a built bundle.
 "
-  log "warning: static/app is missing; archiving the tarball without a web bundle"
+  log "warning: archiving the tarball without a web bundle (--no-web)"
 fi
 cp secretspec.toml "$OUT/share/eza/secretspec.toml"
 cp LICENSE "$OUT/share/eza/LICENSE"
@@ -208,10 +222,10 @@ Run:
   PUBLIC_ORIGIN=https://your-eza-host.example \
   ./bin/eza-bookmarks serve
 
-The web bundle asset for the deployment flake is eza-web-<version>.tar.gz
-(included under share/eza/ when the release was built with the web bundle).
-Pin its SRI hash in nix/web-assets.json before relying on `nix build .#docker`
-or the default NixOS module path.
+The web client is the content-addressed bundle under share/eza/static,
+built from source by `nix build .#eza-web` (it is included in this tarball when
+the release was built with the web bundle). The Docker image and the NixOS
+module consume the same derivation directly.
 EOF
 } >"$OUT/share/eza/README.txt"
 
@@ -245,25 +259,14 @@ tar -C "$DIST" -czf "$TARBALL" "eza-${VERSION}"
 # ---------------------------------------------------------------------------
 (
   cd "$DIST"
-  : >SHA256SUMS
-  for file in "$ASSET_NAME" "$(basename "$TARBALL")"; do
-    if [ -f "$file" ]; then
-      sha256sum "$file" >>SHA256SUMS
-    fi
-  done
+  sha256sum "$(basename "$TARBALL")" >SHA256SUMS
 )
 
 printf '\nrelease artifacts in dist/release:\n'
-ls -l "$DIST/$ASSET_NAME" "$TARBALL" "$DIST/SHA256SUMS" 2>/dev/null || true
+ls -l "$TARBALL" "$DIST/SHA256SUMS" 2>/dev/null || true
 printf '\n'
 cat "$DIST/SHA256SUMS" 2>/dev/null || true
 printf '\nversion: %s (flake.nix via scripts/version.sh)\n' "$VERSION"
-if [ -f "$DIST/$ASSET_NAME" ]; then
-  printf 'web asset: %s\n' "$DIST/$ASSET_NAME"
-  printf '  next: bash scripts/release-asset.sh --check --require-pinned\n'
-  printf '        (after uploading the asset and pinning its SRI hash in nix/web-assets.json;\n'
-  printf '         .github/workflows/release.yml does both on a v* tag)\n'
-fi
 if [ "$HOST_BOUND" -eq 1 ]; then
   printf '\nWARNING: this tarball binary is host-bound to the Nix store; see\n'
   printf '         share/eza/HOST-BOUND-WARNING.txt inside the tarball.\n'

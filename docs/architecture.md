@@ -26,15 +26,18 @@ backups/<stamp>/users/<id>/eza.db   a backup run's library files
 unique case-insensitive username, an `admin`/`member` role, the path to the
 account's library, a per-account WebAuthn user handle, and timestamps for
 creation, disablement, and last login. `users/<id>/eza.db` (`EZA_USERS_DIR`)
-holds everything else. Requests open library databases lazily: a per-account
-slot owns one write connection behind an `MVar`, a small read-only pool for
-GET/HEAD, and a graph layout cache, with the number of open slots capped by
-`EZA_MAX_USERS`.
+holds everything else. Requests open library databases lazily: an
+`Eza.Library` owns one write connection behind an `MVar`, a small read-only
+pool, the graph layout cache and the account's worker handles; the number of
+open slots is capped by `EZA_MAX_USERS`. Authentication runs on the read pool:
+a session or token is validated by a SELECT, and `last_seen_at`/`last_used_at`
+are written as a throttled activity touch (at most once per minute) only when
+the stored timestamp is stale, so a normal GET never touches the writer.
 
-Every API route passes the table in `Eza.Server`. The table is deny-by-default
-and `Eza.Authz` is the single classification and scope matrix, so a new route
-without a guard returns 401 and admin routes accept only admin browser
-sessions. Unsafe methods also require the `X-CSRF-Token` header. Session,
+Every API route is classified by `Eza.Routes` and enforced by `Eza.Authz`, the
+single authorization matrix: a request without a guard returns 401 and admin
+routes accept only admin browser sessions. Unsafe methods also require the
+`X-CSRF-Token` header. Session,
 pending, share, and API tokens carry the owning account id in their prefix
 (`u<id>_...`, `eza_pat_u<id>_...`); the guard resolves that id through the
 control database and then verifies the token hash in that account's library,
@@ -59,9 +62,12 @@ in place, with no copy or move; removing `control.db` rolls the registration
 back. An unclaimed legacy file is left alone. Otherwise the first
 `/setup` claims a fresh account under `users/<id>/`.
 
-Background work is per account. Opening an account database starts its
-enrichment claimers, webhook delivery worker (each database has its own
-outbox and cursor), and one favicon backfill loop. The favicon loop works
+Background work is per account. The slot supervisor starts and owns each
+account's worker set through `Eza.Library`: the enrichment claimers, the
+webhook delivery worker (each database has its own outbox and cursor), and one
+favicon backfill loop. Worker threads open their database connection through a
+bracket, so cancelling a worker or closing the library closes it; a disabled
+account's workers stop on the next supervisor tick. The favicon loop works
 per source domain, not per bookmark: cached domains are applied with one
 `UPDATE bookmarks SET favicon_url = ... WHERE domain = ?`. A domain with no
 cached icon is probed at the conventional `/favicon.ico`, `/favicon.png` and
@@ -295,9 +301,29 @@ pins are intentionally different: the development shell follows
 `nixpkgs-unstable` for tooling, and the deployment flake follows
 `nixos-unstable` with a hand-maintained Hackage overlay so the release artifact
 does not move when the development shell updates. A dependency bump changes the
-freeze file and the flake overlay together; the WASM web bundle is pinned
-separately by URL and SRI hash in `nix/web-assets.json` (see
-[deployment-nixos.md](deployment-nixos.md#web-assets)).
+freeze file and the flake overlay together.
+
+The WebAssembly client is built inside the deployment flake, not fetched as a
+release asset. `packages.<system>.eza-web` takes its compiler from the
+`ghc-wasm-meta` input and its dependency set from three pins that change
+together: `cabal.project.wasm.freeze` (the solver's versions),
+`nix/wasm-hackage.nix` (one fixed-output tarball per dependency, with SRI
+hashes) and `nix/wasm-cabal/` (the latest published Hackage revision of each
+dependency's `.cabal` file). `nix/build-wasm-index.py` assembles those into a
+small local Hackage index whose entries all predate the wasm plan's
+`index-state`, so the derivation builds offline and does not depend on
+Hackage's moving index. `scripts/update-wasm-deps.sh` refreshes the three pins
+from a development shell when the wasm plan changes.
+
+The bundle itself is produced by the same two scripts as the development path:
+`scripts/build-web.sh` compiles and runs the size gates, and
+`scripts/bundle-web.sh` writes the content-addressed files plus
+`asset-manifest.json`, the generated shell and the generated service worker
+(see [Serving and caching](#serving-and-caching)). The Docker image
+(`.#docker`) and the default NixOS module `webAssets` consume that
+derivation directly, so a release builds both halves from one revision with no
+separately published bundle or SRI pin. `nix build .#eza-web` builds just the
+bundle (see [deployment-nixos.md](deployment-nixos.md#web-assets)).
 
 ![Deployment: one binary across NixOS, Docker, and Kubernetes](figures/deployment.png)
 

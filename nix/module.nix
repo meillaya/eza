@@ -175,12 +175,13 @@ in
     webAssets = mkOption {
       type = types.package;
       default = ezaWebAssets;
-      defaultText = lib.literalExpression "the eza-web package from the eza flake (CI-built release asset)";
+      defaultText = lib.literalExpression "the eza-web package from the eza flake (built from source)";
       description = ''
         Package containing the browser bundle at `share/eza/static`
-        (index.html, eza.css, app/app.wasm, ...). The default is the
-        CI-built, fixed-output release asset pinned by the flake. For a local
-        checkout, point this at `packages.<system>.eza-web-local`.
+        (`asset-manifest.json` plus the content-addressed hashed assets and the
+        generated shell and service worker). The default is
+        `packages.<system>.eza-web`, built from source inside Nix; a
+        development build can point this at a locally bundled static tree.
       '';
     };
 
