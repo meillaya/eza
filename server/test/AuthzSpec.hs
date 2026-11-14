@@ -44,8 +44,6 @@ publicRoutes =
     , ("POST", ["api", "auth", "login"])
     , ("POST", ["api", "auth", "passkey", "options"])
     , ("POST", ["api", "auth", "passkey", "verify"])
-    , ("POST", ["api", "auth", "options"])
-    , ("POST", ["api", "auth", "verify"])
     , ("POST", ["api", "setup", "password"])
     , ("POST", ["api", "setup", "options"])
     , ("POST", ["api", "setup", "verify"])

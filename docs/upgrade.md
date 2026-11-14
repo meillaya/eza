@@ -10,6 +10,12 @@ success payloads and the WebAuthn scope, but it is a **one-way** upgrade:
   upgrade, not starting the old binary against the new data.
 - Legacy undo history is ephemeral and is not carried across the journal
   migration; the library rows themselves are untouched.
+- 0.4 does **not** accept pre-0.4 compatibility shapes: a flat `EZA_DB` file
+  is not adopted (back it up and import its HTML export), unprefixed session,
+  API, and share tokens are rejected, the retired `/api/auth/options|verify`
+  passkey sign-in routes are gone, and backup restore accepts only the stamp
+  directory shape (`control.db`, `manifest.json`, `users/<id>/eza.db`) — not
+  the first multi-user flat stamps or single-user `eza-*.db` files.
 - The Kubernetes manifests, the rclone offsite backup option and the Tailscale
   Serve front end were removed. Docker/Compose, the NixOS module and Caddy
   remain supported; move an existing deployment to one of those before
@@ -39,6 +45,14 @@ each account library.
    rollback path.
 4. Keep `PUBLIC_ORIGIN` and `EZA_RP_ID` unchanged. Passkeys are bound to them;
    changing either requires recovery.
+5. **Passkey-only accounts:** 0.4 removes the pre-0.4 passkey **sign-in** page
+   (passkeys remain the second factor). Before upgrading, every account must
+   have a password or a valid recovery code: set one with
+   `eza-bookmarks set-password`/the old UI, or use recovery. Otherwise that
+   account cannot sign in after the upgrade. Legacy browsers, tokens and share
+   links issued by a pre-0.4 instance are refused: users re-login and shares are
+   re-created; pre-0.4 flat backup stamps must be converted with the old binary
+   (backup again with it) before they can be restored by 0.4.
 
 ## Docker / Compose
 

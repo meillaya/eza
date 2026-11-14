@@ -2,8 +2,10 @@
 
 {- | Backup and restore: a stamp mirrors the live layout (@control.db@,
 @manifest.json@, @users/<id>/eza.db@), includes disabled accounts, prunes on
-the configured keep window, and restores new and old flat stamps with the
-control paths rewritten and the current installation backed up first.
+the configured keep window, and restores only new-layout stamp directories
+(control.db + manifest.json + users/<id>/eza.db) with the control paths
+rewritten and the current installation backed up first. A pre-0.4 flat stamp
+is refused.
 -}
 module BackupSpec (spec) where
 
@@ -125,33 +127,21 @@ spec = describe "backup and restore" $ do
                 (user : _) -> cuDbPath user `shouldBe` cfgUsersDir cfg </> show (cuId alice) </> "eza.db"
                 [] -> expectationFailure "the restored installation has no account"
 
-    it "restores an old flat stamp and keeps the current library of accounts the stamp skipped" $
+    it "refuses a pre-0.4 flat stamp directory" $
         withSystemTempDirectory "eza-backup-flat" $ \dir -> do
             let cfg = testConfig dir
-            (alice, bob) <- createAccounts cfg
+            (alice, _bob) <- createAccounts cfg
             addBookmarkTo cfg alice "https://alice.example/flat"
-            addBookmarkTo cfg bob "https://bob.example/flat"
             backup <- expectBackup =<< runBackup cfg Nothing
             flatRoot <- flattenStamp (brRoot backup)
-            layout <- expectRightIO "layout" (detectStampLayout flatRoot)
-            layout `shouldBe` StampLayoutFlat
-            -- The flat stamp only has alice's library (the M1 backup skipped
-            -- disabled/missing accounts); bob must keep the current copy.
-            removeIfExists (flatRoot </> "users" </> show (cuId bob) <> ".db")
-            addBookmarkTo cfg alice "https://alice.example/post-backup"
+            detected <- detectStampLayout flatRoot
+            case detected of
+                Left message -> message `shouldSatisfy` T.isInfixOf "manifest"
+                Right _ -> expectationFailure "a flat stamp must not be accepted"
             result <- runRestore cfg (RestoreOptions flatRoot False False)
-            report <- expectRestore result
-            rrsRestored report `shouldBe` [(cuId alice, "alice")]
-            rrsPreserved report `shouldBe` [(cuId bob, "bob")]
-            bracket (Db.openDb (cuDbPath alice)) Sqlite.close $ \conn ->
-                scalar conn "SELECT COUNT(*) FROM bookmarks" `shouldReturn` 1
-            bracket (Db.openDb (cuDbPath bob)) Sqlite.close $ \conn ->
-                scalar conn "SELECT COUNT(*) FROM bookmarks" `shouldReturn` 1
-            users <- listUsers cfg
-            map cuDbPath users
-                `shouldBe` [ cfgUsersDir cfg </> show (cuId alice) </> "eza.db"
-                           , cfgUsersDir cfg </> show (cuId bob) </> "eza.db"
-                           ]
+            case result of
+                Left message -> message `shouldSatisfy` T.isInfixOf "manifest"
+                Right _ -> expectationFailure "a flat stamp must not restore"
 
     it "does not write anything on a dry run" $
         withSystemTempDirectory "eza-backup-dry" $ \dir -> do

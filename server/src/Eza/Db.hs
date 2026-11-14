@@ -6,7 +6,6 @@ helpers. The schema is forward only. Every step runs in its own transaction
 and a verified online backup is written before an existing database changes.
 -}
 module Eza.Db (
-    initDb,
     openDb,
     closeDb,
     ConnectionStats (..),
@@ -38,7 +37,6 @@ module Eza.Db (
     checkSchema,
     maxStoredTimestamp,
     normaliseTimestamp,
-    databaseClaimed,
     ftsIntegrityCheck,
     DbError (..),
 ) where
@@ -55,7 +53,7 @@ import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
 import qualified Database.SQLite.Simple as Sqlite
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing)
 import System.Environment (lookupEnv)
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO.Unsafe (unsafePerformIO)
@@ -159,9 +157,6 @@ recordClose =
     modifyMVar_ connectionCounter $ \(opened, closed) ->
         pure (opened, closed + 1)
 
-initDb :: FilePath -> IO ()
-initDb path = openDb path >> pure ()
-
 migrate :: FilePath -> Sqlite.Connection -> IO ()
 migrate dbPath conn = do
     start <- Migrate.currentVersion conn
@@ -192,7 +187,7 @@ ensureCompatible conn version = do
     let versionedPython = not hasAppState && version >= 1 && version <= 6
         unstampedPython = version == 0 && hasBookmarks && not hasAddedAt
     when (versionedPython || unstampedPython) $
-        throwIO (DbError "legacy Python eza DB detected; the new app expects a fresh database (data/eza.db). Import the HTML export instead.")
+        throwIO (DbError "legacy Python eza DB detected; 0.4 opens only users/<id>/eza.db. Back this file up and import its HTML export instead (see docs/upgrade.md).")
 
 {- | Copy the database before a migration with @VACUUM INTO@ and verify the
 copy. The name carries the database file name and random bytes: every user
@@ -201,9 +196,9 @@ the version and the second would collide when two accounts migrate within the
 same second.
 
 The copy goes to @EZA_BACKUP_DIR@ when it is set. When it is unset the copy
-lands next to the database in @users/<id>/backups/@ (or @data/backups/@ for
-the legacy bootstrap database); @Eza.Backup.pruneBackups@ prunes the configured
-directory and those sibling directories on the normal keep window.
+lands next to the database in @users/<id>/backups/@; @Eza.Backup.pruneBackups@
+prunes the configured directory and those sibling directories on the normal
+keep window.
 -}
 preMigrationBackup :: FilePath -> Sqlite.Connection -> Int -> IO ()
 preMigrationBackup dbPath conn fromVersion = do
@@ -248,26 +243,6 @@ randomHex = do
 -- | Keep a file name safe for a backup directory entry.
 sanitizeName :: String -> String
 sanitizeName = map (\c -> if isAlphaNum c || c `elem` ("-._" :: String) then c else '_')
-
-{- | True when the database at the path is an eza database whose account was
-claimed (@app_state.setup_claimed = 1@). Missing, malformed, and non-eza files
-return False without creating or migrating anything; the CLI uses this to tell
-an unclaimed legacy file from a real account.
--}
-databaseClaimed :: FilePath -> IO Bool
-databaseClaimed path = do
-    exists <- doesFileExist path
-    if not exists
-        then pure False
-        else do
-            result <-
-                try
-                    ( bracket (Sqlite.open path) Sqlite.close $ \conn -> do
-                        rows <- query_ conn "SELECT setup_claimed FROM app_state WHERE id = 1" :: IO [Only Int]
-                        pure (case rows of [Only n] -> n /= 0; _ -> False)
-                    ) ::
-                    IO (Either SomeException Bool)
-            pure (either (const False) id result)
 
 {- | Check the FTS5 index against the content table. The bare
 @integrity-check@ command validates the index structure; the second form with
@@ -477,10 +452,9 @@ schemaV5 =
     , "CREATE TABLE IF NOT EXISTS rules (     id INTEGER PRIMARY KEY AUTOINCREMENT,     name TEXT NOT NULL,     enabled INTEGER NOT NULL DEFAULT 1,     field TEXT NOT NULL DEFAULT 'url',     pattern TEXT NOT NULL,     add_tags TEXT NOT NULL DEFAULT '[]',     mark_read INTEGER NOT NULL DEFAULT 0,     created_at INTEGER NOT NULL     )"
     ]
 
-{- | v6 turns the passkey-only account into a single username/password account.
-The passkey tables stay for installations that migrate from v5; passkeys are
-legacy credentials once a password exists. The login counters live on the same
-single row so a failed attempt survives a restart.
+{- | v6 adds the username/password account on top of the passkey tables. A
+passkey is now an optional credential, never the primary login. The login
+counters live on the same single row so a failed attempt survives a restart.
 -}
 schemaV6 :: [Query]
 schemaV6 =

@@ -1,7 +1,6 @@
 // Password setup, sign-in, optional passkey two-factor, and recovery for the
-// server-rendered auth pages. The legacy passkey sign-in remains for libraries
-// claimed before passwords. No inline scripts: this file is served from
-// /assets/auth.js.
+// server-rendered auth pages. The pre-0.4 passkey sign-in routes are gone.
+// No inline scripts: this file is served from /assets/auth.js.
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -271,23 +270,6 @@ async function doRecover() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Legacy passkey flows
-// ---------------------------------------------------------------------------
-
-async function doPasskeyLogin() {
-  try {
-    showError("");
-    if (blockIfPasskeysUnavailable()) return;
-    const options = await postJSON("/api/auth/options");
-    const credential = await navigator.credentials.get({ publicKey: parseRequestOptions(options) });
-    const result = await postJSON("/api/auth/verify", credentialJSON(credential));
-    window.location.href = result.redirect || "/";
-  } catch (e) {
-    showError(e.message || String(e));
-  }
-}
-
 async function doAddPasskey() {
   try {
     showError("");
@@ -302,13 +284,12 @@ async function doAddPasskey() {
 }
 
 const page = document.querySelector("[data-page]")?.dataset.page;
-const passkeyPage = page === "passkey-login" || page === "add-passkey";
+const passkeyPage = page === "add-passkey";
 if (passkeyPage) {
   const reason = passkeysUnavailable();
   if (reason) showError(reason);
 }
 if (page === "login") $("#auth-form")?.addEventListener("submit", doPasswordLogin);
 if (page === "setup" || page === "recovery-setup") $("#auth-form")?.addEventListener("submit", doPasswordSetup);
-if (page === "passkey-login") $("#passkey-login")?.addEventListener("click", doPasskeyLogin);
 if (page === "recover") $("#redeem")?.addEventListener("click", doRecover);
 if (page === "add-passkey") $("#passkey-add")?.addEventListener("click", doAddPasskey);

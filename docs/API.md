@@ -64,24 +64,22 @@ case-insensitive), `role` (`admin` or `member`), database path, WebAuthn user
 handle, `disabled_at`, `last_login_at`. A disabled account cannot sign in and
 its live sessions stop resolving.
 
-Startup migration: if the control database has no rows and the legacy
-`EZA_DB` file exists with a claimed account, that file is registered as user 1
-with the admin role, in place, with no copy or move. An unclaimed legacy file
-is left alone. Otherwise the first `POST /api/setup/password` claims a fresh
-account in `$EZA_DATA_DIR/users/<id>/eza.db`.
+The control database is the only identity source: 0.4 opens
+`control.db` and each account's `users/<id>/eza.db`, and the first
+`POST /api/setup/password` claims a fresh account in
+`$EZA_DATA_DIR/users/<id>/eza.db`. A pre-0.4 flat `EZA_DB` file is never opened
+or adopted; if one is present the server prints the upgrade hint and leaves it
+untouched (back it up and import its HTML export).
 
-Passkeys that predate schema v6 are legacy credentials: they sign in only while
-the account's database has no password. Recovery clears both the password and
-the passkeys. Each account gets its own WebAuthn user handle from the control
-row, so two passkeys on one server are never registered under a shared user
-id.
+Passkeys are optional second factors only. They never sign in on their own,
+and recovery clears them together with the password. Each account gets its own
+WebAuthn user handle from the control row, so two passkeys on one server are
+never registered under a shared user id.
 
 ```
 POST   /api/auth/login
 POST   /api/auth/passkey/options
 POST   /api/auth/passkey/verify
-POST   /api/auth/options
-POST   /api/auth/verify
 POST   /api/auth/logout
 POST   /api/setup/password
 POST   /api/recovery/redeem
@@ -125,10 +123,9 @@ database claimed, replaces the recovery codes with ten new ones, returns
 two-factor off. `POST /api/setup/options` and `/api/setup/verify` are retired
 and return 410.
 
-`POST /api/auth/options` and `POST /api/auth/verify` are the legacy passkey
-ceremony. They work only while the database has passkeys and no password, and
-return 403 once a password exists or a recovery session is active. A successful
-assertion sets the session and CSRF cookies.
+The retired 0.2/0.3 passkey sign-in routes `POST /api/auth/options` and
+`POST /api/auth/verify` are removed in 0.4 and answer JSON 404. Passkeys sign
+in only as the second factor above.
 
 `POST /api/auth/logout` clears the session, CSRF, and pending cookies.
 
@@ -142,9 +139,8 @@ completing the setup writes a new password and rotates the remaining codes
 out.
 
 The password pages are `GET /login`, `GET /setup`, and `GET /recover`.
-`GET /login` renders the password form (or the legacy passkey form when that
-account predates passwords), or redirects to `/setup` while
-the control database has no accounts. `GET /setup` renders the claim form, or
+`GET /login` renders the password form, or redirects to `/setup` while the
+control database has no accounts. `GET /setup` renders the claim form, or
 the recovery form pre-filled with the session account's username while a
 recovery session is active.
 `GET /account/add-passkey` is the passkey registration page for a signed-in
@@ -549,8 +545,7 @@ does not change the two-factor flag; recovery does clear it.
 
 `POST /api/v1/account/password` takes
 `{"current_password":Text?,"new_password":Text,"confirm":Text}`. The current
-password is required once one exists; a legacy passkey session may set the
-first password without it. The new password is at least ten characters, other
+password is required once one exists. The new password is at least ten characters, other
 browser sessions are revoked, and the response is `{"ok":true}`.
 
 `POST /api/v1/account/username` takes
@@ -564,8 +559,7 @@ A signed-in session can register a passkey at any time.
 browser session. An existing credential can be renamed or deleted.
 `DELETE /api/v1/account/passkeys/{id}` may remove every passkey while
 two-factor is off. With two-factor on it refuses to remove the last one with
-409 `last_credential`; turn two-factor off first. A legacy passkey-only
-account also refuses to remove its last credential.
+409 `last_credential`; turn two-factor off first.
 
 `POST /api/v1/account/recovery/regenerate` invalidates the unused codes and
 returns ten new codes. `POST /api/v1/tokens` takes

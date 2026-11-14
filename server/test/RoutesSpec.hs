@@ -74,6 +74,10 @@ spec = describe "Eza.Routes" $ do
         matchRoute "GET" ["api", "v1", "admin", "no-such-route"] `shouldBe` Nothing
         Authz.routeClass "GET" ["api", "v1", "no-such-route"] `shouldBe` DeniedClass
         isPublicRoute "GET" ["api", "v1", "no-such-route"] `shouldBe` False
+        -- The retired 0.2/0.3 passkey sign-in routes are not part of 0.4.
+        matchRoute "POST" ["api", "auth", "options"] `shouldBe` Nothing
+        matchRoute "POST" ["api", "auth", "verify"] `shouldBe` Nothing
+        Authz.routeClass "POST" ["api", "auth", "options"] `shouldBe` DeniedClass
 
     it "keeps class and capability consistent" $
         forM_ allRoutes $ \route -> case Routes.routeClass route of

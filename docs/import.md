@@ -9,9 +9,8 @@ Account > About download links).
 
 - Claim the first account at `/setup` (or create one with
   `eza-bookmarks users add`) before importing. An import into an installation
-  that has no accounts lands in the legacy `EZA_DB` file, which the server only
-  adopts when it is an already-claimed single-user database; a fresh unclaimed
-  file would be ignored and the records would look lost.
+  with no accounts fails; 0.4 never falls back to the pre-0.4 flat `EZA_DB`
+  file, so back that file up and import its HTML export instead.
 - `eza-bookmarks init` is optional and only initialises the control schema.
 - The server can stay running: the importer opens the same SQLite file and the
   one writer serialises the transaction with web requests. Stop the server only

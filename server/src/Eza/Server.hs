@@ -76,7 +76,7 @@ import Eza.Tokens (Token (..), validateToken)
 
 import Eza.User (UserRole (..))
 
-import Eza.Api.Auth (clientHostKey, legacyPasskeyOptionsHandler, legacyPasskeyVerifyHandler, loginHandler, passkeySecondFactorOptionsHandler, passkeySecondFactorVerifyHandler, passkeySetupRetired, passwordLoginHandler, passwordSetupHandler, recoveryRedeemHandler, setupHandler)
+import Eza.Api.Auth (clientHostKey, loginHandler, passkeySecondFactorOptionsHandler, passkeySecondFactorVerifyHandler, passkeySetupRetired, passwordLoginHandler, passwordSetupHandler, recoveryRedeemHandler, setupHandler)
 import Eza.Api.Bookmarks (bootPayloadFor)
 import Eza.Api.Common
 import Eza.Api.Context (AppState (..), AuthContext (..), RequestContext (..), UserSlot (..), closeAppState, logStartupWarnings, newAppState, recordSessionActivity, recordTokenActivity, requestSession, resolveApiToken, resolveSession, stopAllUserWorkers, syncUserWorkers, userSlotCount, userSlotFor, userWorkerIds, withDb, withReadDb, workerSupervisor)
@@ -278,8 +278,6 @@ dispatchApp cfg state req respond =
         RoutePasswordLogin -> passwordLoginHandler state req respond
         RoutePasskeyLoginOptions -> passkeySecondFactorOptionsHandler state req respond
         RoutePasskeyLoginVerify -> passkeySecondFactorVerifyHandler state req respond
-        RouteLegacyPasskeyOptions -> legacyPasskeyOptionsHandler state req respond
-        RouteLegacyPasskeyVerify -> legacyPasskeyVerifyHandler state req respond
         RoutePasswordSetup -> passwordSetupHandler state req respond
         RoutePasskeySetupOptionsRetired -> respond passkeySetupRetired
         RoutePasskeySetupVerifyRetired -> respond passkeySetupRetired

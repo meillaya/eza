@@ -8,8 +8,8 @@ argv.
 
 Commands that operate on one library resolve the account first:
 @--user <name|id>@ picks one, a single-account install uses its only enabled
-account, and a control database with no rows falls back to the legacy
-@EZA_DB@ path so pre-M3b workflows keep working.
+account, and otherwise the command fails. 0.4 opens only the control database
+and @users/<id>/eza.db@; the flat @EZA_DB@ file is not adopted.
 -}
 module Eza.Cli (
     CliCommand (..),
@@ -214,7 +214,7 @@ commandParser :: Parser CliCommand
 commandParser =
     subparser
         ( command "serve" (info (pure Serve <**> helper) (progDesc "Run the web server"))
-            <> command "init" (info (pure Init <**> helper) (progDesc "Create or migrate the control database and the legacy database file"))
+            <> command "init" (info (pure Init <**> helper) (progDesc "Create the control database (0.4 opens only control.db and users/<id>/eza.db)"))
             <> command "version" (info (pure Version <**> helper) (progDesc "Print the version"))
             <> command
                 "routes"
@@ -451,9 +451,15 @@ routesPlainText =
 
 runInit :: Config -> IO ()
 runInit cfg = do
-    Db.initDb (cfgDbPath cfg)
     withControl cfg (\_ -> pure ())
-    putStrLn ("database initialized: " <> cfgDbPath cfg)
+    legacyExists <- doesFileExist (cfgDbPath cfg)
+    when legacyExists $
+        hPutStrLn
+            stderr
+            ( "eza: the pre-0.4 database at "
+                <> cfgDbPath cfg
+                <> " was left untouched; 0.4 does not open it (back it up and import its HTML export, see docs/upgrade.md)"
+            )
     putStrLn ("control database initialized: " <> cfgControlDbPath cfg)
 
 runBackupCommand :: Config -> Maybe Text -> IO ()
@@ -490,7 +496,6 @@ runRestoreCommand cfg opts = do
             mapM_ (\(userId, username) -> putStrLn ("  " <> T.unpack verb <> " user " <> show userId <> " (" <> T.unpack username <> ")")) (rrsRestored report)
             mapM_ (\(userId, username) -> putStrLn ("  keep current library for user " <> show userId <> " (" <> T.unpack username <> "): the stamp has no copy")) (rrsPreserved report)
             mapM_ (\(userId, username) -> putStrLn ("  drop account " <> show userId <> " (" <> T.unpack username <> "): no library in the stamp or the current installation")) (rrsDropped report)
-            mapM_ (\path -> putStrLn ("  legacy database target: " <> path)) (rrsLegacyTarget report)
             unless (null (rrsDropped report)) $
                 putStrLn "  note: dropped accounts are removed from the restored control database"
             if rrsDryRun report
@@ -690,9 +695,9 @@ writePassword cfg opts conn _first passwordHash username = do
   where
     _ = cfg
 
-{- | Rename the control row before the library is written. An account that is
-not registered in the control database (the legacy single-user layout) keeps
-its library-only username, as before.
+{- | Rename the control row before the library is written. The set-password
+command always resolves a registered account, so there is no library-only
+username path left.
 -}
 renameControlFirst :: Config -> Maybe Control.ControlUser -> Text -> IO (Either Text ())
 renameControlFirst _ Nothing _ = pure (Right ())

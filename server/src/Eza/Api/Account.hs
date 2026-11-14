@@ -85,10 +85,8 @@ accountTwoFactorHandler cfg conn ctx role req respond = do
                             payload <- accountPayload conn ctx role
                             respond (jsonResponse status200 payload)
 
-{- | Change the account password. A current password is required once one
-exists; the session vouches for the first password on a legacy passkey-only
-account. Other browser sessions are revoked so a stolen session does not keep
-the old access.
+{- | Change the account password. The current password is required. Other
+browser sessions are revoked so a stolen session does not keep the old access.
 -}
 accountPasswordHandler :: Config -> Connection -> AuthContext -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 accountPasswordHandler cfg conn ctx req respond = do
@@ -111,7 +109,7 @@ accountPasswordHandler cfg conn ctx req respond = do
                                 account <- Auth.loadAccount conn
                                 authorized <- case current of
                                     Just currentPassword -> Auth.verifyCurrentPassword conn (authConfig cfg) currentPassword
-                                    Nothing -> pure (not (Auth.accountHasPassword account))
+                                    Nothing -> pure False
                                 if not authorized
                                     then respond (jsonProblem status403 "invalid_password" "the current password is incorrect")
                                     else

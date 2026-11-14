@@ -84,7 +84,7 @@ The same binary provides `healthcheck` (for HEALTHCHECK / probes), `backup`,
 | `EZA_CONTROL_DB` | `$EZA_DATA_DIR/control.db` | Account registry (identity, roles, per-account database paths). |
 | `EZA_USERS_DIR` | `$EZA_DATA_DIR/users` | Per-account library root: `users/<id>/eza.db` and `users/<id>/snapshots/`. |
 | `EZA_MAX_USERS` | `32` | Cap on user databases this process opens at once. |
-| `EZA_DB` | `$EZA_DATA_DIR/eza.db` | Legacy single-user database, read only at startup to register an existing claimed install as user 1. |
+| `EZA_DB` | `$EZA_DATA_DIR/eza.db` | Pre-0.4 single-user database path. 0.4 never opens or adopts it; it is only used to print the upgrade hint. |
 | `EZA_BIND` | `0.0.0.0:8080` | Listen address. |
 | `PUBLIC_ORIGIN` | `http://localhost:8080` | Browser-visible origin; passkeys are bound to it. Set this. |
 | `EZA_RP_ID` | host of `PUBLIC_ORIGIN` | WebAuthn relying-party ID (host only, no scheme/port). The server derives it from `PUBLIC_ORIGIN` when unset; set it only to override, it must be a suffix of the origin host. |
@@ -224,9 +224,10 @@ docker compose run --rm eza /bin/eza-bookmarks restore /data/backups/<stamp> --y
 docker compose start eza
 ```
 
-Add `--dry-run` to inspect the plan without writing. A stamp written by the
-first multi-user layout (`users/<id>.db`, no manifest) is accepted; accounts
-whose library is missing from the stamp keep their current copy. Restoring an
+Add `--dry-run` to inspect the plan without writing. Only the stamp directory
+shape (`control.db`, `manifest.json`, `users/<id>/eza.db`) is accepted; pre-0.4
+flat stamps are refused. Accounts whose library is missing from the stamp keep
+their current copy. Restoring an
 enabled account whose library predates the schema upgrade is safe: the restored
 database migrates on open.
 

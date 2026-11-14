@@ -111,8 +111,8 @@ data HttpResponse = HttpResponse
 withTestServer :: (TestServer -> IO a) -> IO a
 withTestServer = withTestServerCustom id (\_ -> pure ())
 
-{- | Run the server after a preparation step (for the migration test, which
-needs a claimed legacy database before startup).
+{- | Run the server after a preparation step (for the pre-0.4 flat-database
+negative test). The preparation runs before application state exists.
 -}
 withTestServerConfig :: (Config -> IO ()) -> (TestServer -> IO a) -> IO a
 withTestServerConfig = withTestServerCustom id
@@ -155,7 +155,8 @@ testConfig dir =
         , cfgControlDbPath = dir </> "control.db"
         , cfgUsersDir = dir </> "users"
         , cfgMaxUsers = 8
-        , -- The legacy bootstrap path for this test only.
+        , -- The pre-0.4 flat path: never opened or adopted, only used by the
+          -- negative tests that prove it stays untouched.
           cfgDbPath = dir </> "eza.db"
         , cfgBind = "127.0.0.1:0"
         , cfgPublicOrigin = "http://localhost:8080"

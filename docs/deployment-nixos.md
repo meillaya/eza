@@ -164,7 +164,8 @@ so the SQLite file keeps a stable owner) with `StateDirectory=eza` →
     /var/lib/eza/backups/     verified backup stamps from the timer
 
 Environment: `EZA_DATA_DIR`, `EZA_CONTROL_DB`, `EZA_USERS_DIR`,
-`EZA_MAX_USERS`, `EZA_DB` (legacy migration path only), `EZA_BIND`, `PUBLIC_ORIGIN`,
+`EZA_MAX_USERS`, `EZA_DB` (pre-0.4 path, never opened; upgrade hint only),
+`EZA_BIND`, `PUBLIC_ORIGIN`,
 `EZA_RP_ID`, `EZA_RP_NAME`, `EZA_STATIC_DIR`, `EZA_SNAPSHOT_DIR`,
 `EZA_TRUSTED_PROXIES` (set it to the proxy/Caddy addresses so auth rate limits
 stay per client), `EZA_BACKUP_DIR`, `EZA_BACKUP_KEEP_DAYS`, `EZA_LOG_LEVEL`,
@@ -258,9 +259,10 @@ sudo -u eza "$BIN" restore /var/lib/eza/backups/<stamp> --yes
 sudo systemctl start eza
 ```
 
-`--dry-run` prints the plan without writing. A stamp from the first multi-user
-layout (`users/<id>.db`, no `manifest.json`) still restores; accounts whose
-library is missing from the stamp keep their current copy. Page snapshots are
+`--dry-run` prints the plan without writing. Only the stamp directory shape
+(`control.db`, `manifest.json`, `users/<id>/eza.db`) restores; pre-0.4 flat
+stamps are refused. Accounts whose library is missing from the stamp keep their
+current copy. Page snapshots are
 not in a stamp: copy `users/<id>/snapshots/` from a volume backup when the
 snapshot pages matter.
 

@@ -1,8 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {- | Small server-rendered auth pages. The authenticated app is the Miso
-bundle; these pages run the password setup, sign-in, recovery, the legacy
-passkey sign-in, and passkey registration for a logged-in account.
+bundle; these pages run the password setup, sign-in, recovery, and passkey
+registration for a logged-in account.
 
 Every page loads one external script (@/assets/auth.js@); there is no inline
 JavaScript. The recovery-codes block is shared by the fresh setup and the
@@ -10,7 +10,6 @@ recovery setup.
 -}
 module Eza.Pages (
     loginPage,
-    passkeyLoginPage,
     setupPage,
     recoverySetupPage,
     recoverPage,
@@ -130,24 +129,6 @@ loginPage pages =
                 , field "password" "password" "password" "current-password"
                 , "        <button id=\"password-login\" class=\"btn btn--strong auth-action\" type=\"submit\">sign in</button>"
                 , "      </form>"
-                , authError
-                , authLinks [("/recover", "recover with a code")]
-                ]
-            )
-
-{- | Legacy installations claimed with a passkey: sign in with the passkey
-until a password is set from the account page or the CLI.
--}
-passkeyLoginPage :: PageAssets -> Text
-passkeyLoginPage pages =
-    commonHead pages "Sign in"
-        <> authPage
-            "passkey-login"
-            ( T.unlines
-                [ authBrand "/login"
-                , authTitle "Sign in"
-                , authSub "This library was claimed with a passkey. Sign in, then set a password from the account page."
-                , "      <button id=\"passkey-login\" class=\"btn btn--strong auth-action\" type=\"button\">sign in with your passkey</button>"
                 , authError
                 , authLinks [("/recover", "recover with a code")]
                 ]

@@ -6,8 +6,8 @@ Every session cookie, share token, and API token carries the owning account id
 in its prefix: @u<id>_<random>@ for session/share tokens and
 @eza_pat_u<id>_<random>@ for API tokens. The server uses the prefix to pick the
 user database before it hashes and validates the full token. A rewritten
-prefix therefore fails the hash check, and the unprefixed legacy format is
-accepted only through the explicit single-user fallback.
+prefix therefore fails the hash check. 0.4 rejects unprefixed values outright;
+there is no single-user fallback.
 
 The functions here are pure and total so the parser can be shared by the
 server, the CLI, and the tests.

@@ -204,8 +204,6 @@ data Route
       RoutePasswordLogin
     | RoutePasskeyLoginOptions
     | RoutePasskeyLoginVerify
-    | RouteLegacyPasskeyOptions
-    | RouteLegacyPasskeyVerify
     | RoutePasswordSetup
     | RoutePasskeySetupOptionsRetired
     | RoutePasskeySetupVerifyRetired
@@ -349,8 +347,6 @@ routeInfo = \case
     RoutePasswordLogin -> row "POST" "/api/auth/login" PublicClass Nothing
     RoutePasskeyLoginOptions -> row "POST" "/api/auth/passkey/options" PublicClass Nothing
     RoutePasskeyLoginVerify -> row "POST" "/api/auth/passkey/verify" PublicClass Nothing
-    RouteLegacyPasskeyOptions -> row "POST" "/api/auth/options" PublicClass Nothing
-    RouteLegacyPasskeyVerify -> row "POST" "/api/auth/verify" PublicClass Nothing
     RoutePasswordSetup -> row "POST" "/api/setup/password" PublicClass Nothing
     RoutePasskeySetupOptionsRetired -> row "POST" "/api/setup/options" PublicClass Nothing
     RoutePasskeySetupVerifyRetired -> row "POST" "/api/setup/verify" PublicClass Nothing
@@ -506,8 +502,6 @@ allRoutes =
     , RoutePasswordLogin
     , RoutePasskeyLoginOptions
     , RoutePasskeyLoginVerify
-    , RouteLegacyPasskeyOptions
-    , RouteLegacyPasskeyVerify
     , RoutePasswordSetup
     , RoutePasskeySetupOptionsRetired
     , RoutePasskeySetupVerifyRetired
@@ -716,8 +710,6 @@ matchPost path = case path of
     ["api", "auth", "login"] -> Just RoutePasswordLogin
     ["api", "auth", "passkey", "options"] -> Just RoutePasskeyLoginOptions
     ["api", "auth", "passkey", "verify"] -> Just RoutePasskeyLoginVerify
-    ["api", "auth", "options"] -> Just RouteLegacyPasskeyOptions
-    ["api", "auth", "verify"] -> Just RouteLegacyPasskeyVerify
     ["api", "auth", "logout"] -> Just RouteLogout
     ["api", "setup", "password"] -> Just RoutePasswordSetup
     ["api", "setup", "options"] -> Just RoutePasskeySetupOptionsRetired

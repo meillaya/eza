@@ -170,18 +170,18 @@ snapshotCount dir = do
             result <- try (listDirectory dir) :: IO (Either SomeException [FilePath])
             pure (either (const 0) length result)
 
-{- | The message the per-library CLI commands print when there is no account to
-use and the legacy @EZA_DB@ file is not a claimed eza database. Naming both the
-control path and the legacy path makes the next step obvious: create an
-account, or point the command at an account with @--user@.
+{- | The message the per-library CLI commands print when no account exists.
+Naming the control path and the fact that 0.4 no longer opens @EZA_DB@ makes the
+next step obvious: create an account, or point the command at one with
+@--user@.
 -}
 noAccountMessage :: Config -> Text
 noAccountMessage cfg =
     "no accounts are registered in the control database ("
         <> T.pack (cfgControlDbPath cfg)
-        <> ") and the legacy database ("
+        <> "). 0.4 does not open the legacy database ("
         <> T.pack (cfgDbPath cfg)
-        <> ") is missing or has no claimed account. Start the server and finish /setup to create the first account, or pass --user <name|id> for an existing account"
+        <> "); start the server and finish /setup to create the first account, or pass --user <name|id> for an existing account"
 
 {- | Enabled accounts whose library database file is missing. The server can
 warn at startup instead of silently opening (and creating) a fresh empty
@@ -430,10 +430,9 @@ readIntText value = case reads (T.unpack (T.strip value)) of
 {- | The library path a per-library CLI command should use.
 
 With @--user@ the account is looked up in the control table. Without it, an
-install with exactly one enabled account uses that account; a control database
-with no rows falls back to the legacy @EZA_DB@ path so single-user installs and
-pre-control workflows keep working; several accounts is an error that names
-@--user@.
+install with exactly one enabled account uses that account; no accounts or
+several accounts is an error that names @--user@ (0.4 never falls back to the
+flat @EZA_DB@ file).
 -}
 resolveLibraryPath :: Config -> Maybe Text -> IO (Either Text FilePath)
 resolveLibraryPath cfg selector = fmap snd <$> resolveLibraryTarget cfg selector
@@ -468,12 +467,7 @@ resolveLibraryTarget cfg selector = do
             users <- Control.listUsers control
             let enabled = filter (isNothing . cuDisabledAt) users
             case (users, enabled) of
-                ([], _) -> do
-                    claimed <- Db.databaseClaimed (cfgDbPath cfg)
-                    pure $
-                        if claimed
-                            then Right (Nothing, cfgDbPath cfg)
-                            else Left (noAccountMessage cfg)
+                ([], _) -> pure (Left (noAccountMessage cfg))
                 (_, [only]) -> pure (Right (Just only, cuDbPath only))
                 (_, []) -> pure (Left "every account is disabled; choose one with --user <name|id>")
                 _ -> pure (Left "several accounts exist; choose one with --user <name|id>")

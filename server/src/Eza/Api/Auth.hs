@@ -28,7 +28,7 @@ import Eza.Config
 import Eza.Control (ControlUser (..))
 import qualified Eza.Control as Control
 
-import Eza.Pages (loginPage, passkeyLoginPage, recoverySetupPage, setupPage)
+import Eza.Pages (loginPage, recoverySetupPage, setupPage)
 import Eza.Password (validatePassword, validateUsername)
 import qualified Eza.Password as Password
 import Eza.Routes (Route (..))
@@ -49,25 +49,7 @@ loginHandler state req respond = do
             accounts <- withControl state Control.countUsers
             if accounts == 0
                 then respond (redirectTo "/setup")
-                else do
-                    legacy <- legacyPasskeyLogin state
-                    let pages = pageAssets (asAssets state)
-                    respond (htmlResponse (if legacy then passkeyLoginPage pages else loginPage pages))
-
-{- | The legacy passkey page is only for a single-account database that still
-has passkeys and no password. A multi-user install always shows the password
-form.
--}
-legacyPasskeyLogin :: AppState -> IO Bool
-legacyPasskeyLogin state = do
-    muser <- legacyUser state
-    case muser of
-        Nothing -> pure False
-        Just user -> do
-            result <- userSlotFor state user
-            case result of
-                Left _ -> pure False
-                Right slot -> withDb slot (Auth.legacyPasskeyLoginAllowed)
+                else respond (htmlResponse (loginPage (pageAssets (asAssets state))))
 
 {- | A fresh control database and a recovery session both open the password
 setup; anything else goes back to sign in.
@@ -269,77 +251,9 @@ passkeySecondFactorVerifyHandler state req respond =
 pendingRequired :: Response
 pendingRequired = jsonProblem status401 "pending_required" "the password sign-in expired; sign in again"
 
-{- | Legacy passkey sign-in: only while exactly one enabled account exists and
-its database has passkeys but no password, and never during a recovery setup.
--}
-legacyCeremonySlot :: AppState -> IO (Maybe (Control.ControlUser, UserSlot))
-legacyCeremonySlot state = do
-    muser <- legacyUser state
-    case muser of
-        Nothing -> pure Nothing
-        Just user -> do
-            result <- userSlotFor state user
-            pure $ case result of
-                Left _ -> Nothing
-                Right slot -> Just (user, slot)
-
-legacyPasskeyOptionsHandler :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-legacyPasskeyOptionsHandler state req respond =
-    case requireOrigin cfg req of
-        Left err -> respond (authErrResponse err)
-        Right () -> do
-            target <- legacyCeremonySlot state
-            case target of
-                Nothing -> respond passkeysRetired
-                Just (_, slot) -> withDb slot $ \conn -> do
-                    allowed <- Auth.legacyPasskeyLoginAllowed conn
-                    if not allowed
-                        then respond passkeysRetired
-                        else do
-                            result <- Auth.authenticationOptions conn (authConfig cfg)
-                            either (respond . authErrResponse) (respond . jsonResponse status200) result
-  where
-    cfg = asConfig state
-
-legacyPasskeyVerifyHandler :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-legacyPasskeyVerifyHandler state req respond =
-    case requireOrigin cfg req of
-        Left err -> respond (authErrResponse err)
-        Right () -> do
-            target <- legacyCeremonySlot state
-            case target of
-                Nothing -> respond passkeysRetired
-                Just (user, slot) -> do
-                    allowed <- withDb slot (Auth.legacyPasskeyLoginAllowed)
-                    if not allowed
-                        then respond passkeysRetired
-                        else do
-                            body <- readAuthBody cfg req
-                            case body of
-                                Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
-                                Left (AuthBodyInvalid message) -> respond (jsonProblem status400 "bad_request" message)
-                                Right value -> do
-                                    result <- withDb slot $ \conn -> Auth.verifyLogin conn (authConfig cfg) value
-                                    case result of
-                                        Left err -> respond (authErrResponse err)
-                                        Right session ->
-                                            respond
-                                                ( withAuthCookies
-                                                    cfg
-                                                    (wireSessionToken user session)
-                                                    (jsonResponse status200 (object ["redirect" .= ("/" :: Text)]))
-                                                )
-  where
-    cfg = asConfig state
-
-passkeysRetired :: Response
-passkeysRetired =
-    jsonProblem status403 "passkeys_retired" "password sign-in is active; passkeys are legacy credentials"
-
 {- | Finish a password setup. With a recovery session the session's account is
 the target; on an empty control database this claims a new user and creates
-the next free @users/N/eza.db@ (never the legacy @EZA_DB@ file, which is only
-adopted by the startup bootstrap when it already holds an account).
+the next free @users/N/eza.db@. The flat @EZA_DB@ file is never adopted.
 -}
 passwordSetupHandler :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 passwordSetupHandler state req respond =

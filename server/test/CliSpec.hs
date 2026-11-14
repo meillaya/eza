@@ -111,7 +111,7 @@ spec = describe "CLI" $ do
                 fresh <- Auth.verifyPasswordLogin conn ac "alice" "temporary alice password"
                 authStatus fresh `shouldBe` 200
 
-    it "resolves the library from --user, the only account, or the legacy path" $
+    it "resolves the library from --user or the only enabled account" $
         withCliConfig $ \cfg -> do
             addCliUser cfg "alice" RoleAdmin
             alice <- mustLookup cfg "alice"
@@ -179,18 +179,33 @@ spec = describe "CLI" $ do
                 Left ExitSuccess -> expectationFailure "a healthcheck with no server must fail"
                 Right () -> expectationFailure "a healthcheck with no server must fail"
 
-    it "refuses the legacy fallback unless the legacy database is a claimed eza database" $
+    it "init creates only the control database, never a flat EZA_DB file" $
+        withCliConfig $ \cfg -> do
+            runOk cfg Init
+            controlExists <- doesFileExist (cfgControlDbPath cfg)
+            controlExists `shouldBe` True
+            flatExists <- doesFileExist (cfgDbPath cfg)
+            flatExists `shouldBe` False
+
+    it "does not adopt a pre-0.4 flat database as the CLI library" $
         withCliConfig $ \cfg -> do
             expectCliFailure (runCli cfg (textSource "") (Stats Nothing))
-            -- An existing but unclaimed database is not enough.
-            bracket (Db.openDb (cfgDbPath cfg)) Sqlite.close (\_ -> pure ())
-            expectCliFailure (runCli cfg (textSource "") (Stats Nothing))
-            -- A claimed legacy database keeps the single-user workflow working.
+            -- An existing claimed flat database is still not an account.
             bracket (Db.openDb (cfgDbPath cfg)) Sqlite.close $ \conn -> do
                 passwordHash <- Password.hashPassword (cfgArgon2 cfg) "legacy password"
                 _ <- Auth.completeSetup conn "legacy" passwordHash
                 pure ()
-            runOk cfg (Stats Nothing)
+            expectCliFailure (runCli cfg (textSource "") (Stats Nothing))
+            -- A registered account works; the flat file stays unused.
+            addCliUser cfg "alice" RoleAdmin
+            alice <- mustLookup cfg "alice"
+            bracket (Db.openDb (cuDbPath alice)) Sqlite.close $ \conn -> do
+                _ <- Bookmarks.insertBookmark conn "https://alice.example/one" "One" []
+                pure ()
+            ((), output) <- captureOutput (runCli cfg (textSource "") (Stats Nothing))
+            output `shouldSatisfy` T.isInfixOf ("db: " <> T.pack (cuDbPath alice))
+            flat <- doesFileExist (cfgDbPath cfg)
+            flat `shouldBe` True
 
     it "requires --yes before restoring a stamp" $
         withCliConfig $ \cfg -> do

@@ -1,7 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {- | Multi-user isolation tests for the M3a control plane: tokens, sessions,
-shares, the legacy fallback, recovery, and the Authz matrix.
+shares, recovery, and the Authz matrix. Prefixed tokens are the only accepted
+form in 0.4; a pre-0.4 flat database is never adopted.
 -}
 module IsolationSpec (spec) where
 
@@ -159,25 +160,26 @@ spec = describe "M3a multi-user isolation" $ do
             rejected <- httpRequest server "GET" ("/s/" <> T.unpack tampered) [] Nothing
             rejected `shouldHaveStatus` 404
 
-    it "accepts an unprefixed legacy token only while one enabled account exists" $
+    it "rejects an unprefixed session token even when exactly one account exists" $
         withTestServer $ \server -> do
             alice <- createTestUser server "alice" "alice password" Control.RoleAdmin
             legacyConn <- Db.openDb (Control.cuDbPath alice)
             legacySession <- Auth.createSession legacyConn "normal" 3600
             Sqlite.close legacyConn
             let rawToken = Auth.nsToken legacySession
-                getBoot =
+                getBootWith cookie =
                     httpRequest
                         server
                         "GET"
                         "/api/v1/boot"
-                        [("Cookie", TE.encodeUtf8 ("eza_session=" <> rawToken))]
+                        [("Cookie", TE.encodeUtf8 ("eza_session=" <> cookie))]
                         Nothing
-            single <- getBoot
-            single `shouldHaveStatus` 200
-            _ <- createTestUser server "bob" "bob password" Control.RoleMember
-            ambiguous <- getBoot
-            ambiguous `shouldHaveStatus` 401
+            unprefixed <- getBootWith rawToken
+            unprefixed `shouldHaveStatus` 401
+            -- The prefixed form of the same session is accepted, so this is a
+            -- wire-format rule, not a missing session.
+            prefixed <- getBootWith (TokenPrefix.withUserPrefix TokenPrefix.sessionPrefix (Control.cuId alice) rawToken)
+            prefixed `shouldHaveStatus` 200
 
     it "rejects a session for a disabled account" $
         withTestServer $ \server -> do
@@ -261,10 +263,8 @@ spec = describe "M3a multi-user isolation" $ do
             wrong `shouldHaveStatus` 401
             hrespBody unknown `shouldBe` hrespBody wrong
 
-    it "claims users/1/eza.db on a fresh setup and leaves an unclaimed legacy file alone"
-        $ withTestServerConfig
-            (\cfg -> Db.initDb (cfgDbPath cfg))
-        $ \server -> do
+    it "claims users/1/eza.db on a fresh setup and never creates a flat EZA_DB file" $
+        withTestServer $ \server -> do
             unauthenticated <- httpRequest server "GET" "/" [] Nothing
             unauthenticated `shouldHaveStatus` 302
             headerValue unauthenticated "Location" `shouldBe` Just "/login"
@@ -293,14 +293,9 @@ spec = describe "M3a multi-user isolation" $ do
                 [] -> expectationFailure "expected the first account"
             freshExists <- doesFileExist (cfgUsersDir (tsConfig server) </> "1" </> "eza.db")
             freshExists `shouldBe` True
-            -- The legacy file still exists because it was never claimed;
-            -- the fresh account uses the per-user path instead.
-            legacyExists <- doesFileExist (cfgDbPath (tsConfig server))
-            legacyExists `shouldBe` True
-            legacyConn <- Sqlite.open (cfgDbPath (tsConfig server))
-            legacyClaimed <- Auth.setupClaimed legacyConn
-            Sqlite.close legacyConn
-            legacyClaimed `shouldBe` False
+            -- 0.4 never creates (or opens) the flat single-user path.
+            flatExists <- doesFileExist (cfgDbPath (tsConfig server))
+            flatExists `shouldBe` False
             csrf <- expectJust "csrf cookie" (setCookieValue finished Auth.csrfCookieName)
             boot <- httpRequest server "GET" "/api/v1/boot" (cookieHeaders session csrf) Nothing
             boot `shouldHaveStatus` 200
@@ -330,7 +325,7 @@ spec = describe "M3a multi-user isolation" $ do
                     encoded `shouldSatisfy` BS.isInfixOf aliceB64
                     encoded `shouldSatisfy` (not . BS.isInfixOf bobB64)
 
-    it "registers an already-claimed legacy database under its own username"
+    it "does not adopt a pre-0.4 claimed flat database"
         $ withTestServerConfig
             ( \cfg -> do
                 legacy <- Db.openDb (cfgDbPath cfg)
@@ -340,39 +335,24 @@ spec = describe "M3a multi-user isolation" $ do
             )
         $ \server -> do
             users <- Control.listUsers (tsControl server)
-            length users `shouldBe` 1
-            case users of
-                (user : _) -> do
-                    Control.cuUsername user `shouldBe` "legacyuser"
-                    Control.cuRole user `shouldBe` Control.RoleAdmin
-                    Control.cuDbPath user `shouldBe` cfgDbPath (tsConfig server)
-                    Control.cuCredentialHandle user `shouldSatisfy` isJust
-                [] -> expectationFailure "expected one migrated account"
-            exists <- doesFileExist (cfgDbPath (tsConfig server))
-            exists `shouldBe` True
-            freshDbExists <- doesFileExist (cfgUsersDir (tsConfig server) </> "1" </> "eza.db")
-            freshDbExists `shouldBe` False
-            (session, csrf) <- loginAs server "legacyuser" "legacy password"
-            session `shouldSatisfy` T.isPrefixOf "u1_"
-            boot <- httpRequest server "GET" "/api/v1/boot" (cookieHeaders session csrf) Nothing
-            boot `shouldHaveStatus` 200
-
-    it "repairs the placeholder owner name from an earlier migration"
-        $ withTestServerConfig
-            ( \cfg -> do
-                legacy <- Db.openDb (cfgDbPath cfg)
-                stored <- Password.hashPassword (cfgArgon2 cfg) "legacy password"
-                _ <- Auth.completeSetup legacy "meillaya" stored
-                Sqlite.close legacy
-                control <- Control.openControlDb (cfgControlDbPath cfg)
-                _ <- Control.createUser control "owner" (cfgDbPath cfg) Control.RoleAdmin Nothing
-                Sqlite.close control
-            )
-        $ \server -> do
-            users <- Control.listUsers (tsControl server)
-            map Control.cuUsername users `shouldBe` ["meillaya"]
-            (session, _csrf) <- loginAs server "meillaya" "legacy password"
-            session `shouldSatisfy` T.isPrefixOf "u1_"
+            length users `shouldBe` 0
+            legacyExists <- doesFileExist (cfgDbPath (tsConfig server))
+            legacyExists `shouldBe` True
+            -- The first setup claims a per-user library; the flat file stays
+            -- untouched and is never registered as an account.
+            finished <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/setup/password"
+                    jsonHeaders
+                    (Just (encode (object ["username" .= ("fresh" :: Text), "password" .= ("fresh owner password" :: Text), "confirm" .= ("fresh owner password" :: Text)])))
+            finished `shouldHaveStatus` 200
+            usersAfter <- Control.listUsers (tsControl server)
+            map Control.cuDbPath usersAfter
+                `shouldBe` [cfgUsersDir (tsConfig server) </> "1" </> "eza.db"]
+            stillFlat <- doesFileExist (cfgDbPath (tsConfig server))
+            stillFlat `shouldBe` True
 
     it "opens one slot per account and reuses it across reads and writes" $
         withTwoUsers $ \server _ _ -> do

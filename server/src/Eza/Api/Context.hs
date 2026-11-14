@@ -47,8 +47,6 @@ import qualified Eza.Library as Library
 import qualified Eza.TokenPrefix as TokenPrefix
 import Eza.Tokens (Token (..), tokenActivityDue, touchToken)
 
-import Eza.User (UserRole (..))
-
 import Eza.Api.Common
 
 {- | One server process, one control database, and a lazily opened slot per
@@ -154,7 +152,7 @@ newAppState cfg = do
     -- half-running process.
     assets <- loadAssetsForStartup (cfgStaticDir cfg)
     control <- Control.openControlDb (cfgControlDbPath cfg)
-    bootstrapControl cfg control
+    warnLegacyInstallation cfg control
     manager <- newTlsManager
     proxies <- loadTrustedProxies
     recoveryLimiter <- Auth.newRateLimiter 5 900
@@ -198,118 +196,45 @@ newAppState cfg = do
             , asWorkerLimitWarned = limitWarnedVar
             }
 
-{- | Bootstrap and migration. The two existing shapes are:
-
-  * @EZA_DB@ (default @data/eza.db@) is claimed, meaning it already has an
-    account, and the control database is empty: register that exact file as
-    user 1 with the admin role. The file is never copied or moved, so an
-    operator can roll back by removing the control database.
-
-  * Everything else: leave the legacy file alone. The first @/setup@ creates
-    @users/1/eza.db@ and registers it.
-
-A control database with any user row ignores @EZA_DB@ entirely.
+{- | Startup diagnosis for pre-0.4 installations. 0.4 opens only the control
+database and @users/<id>/eza.db@; a flat @EZA_DB@ file is never adopted or
+migrated automatically. When no account is registered yet and the legacy file
+still exists, print the upgrade hint (this is diagnosis only, not a fallback).
 -}
-bootstrapControl :: Config -> Connection -> IO ()
-bootstrapControl cfg control = do
+warnLegacyInstallation :: Config -> Connection -> IO ()
+warnLegacyInstallation cfg control = do
     accounts <- Control.countUsers control
     when (accounts == 0) $ do
-        claimed <- legacyDatabaseClaimed cfg
-        when claimed $ do
-            -- The legacy account's own username is authoritative. Using a
-            -- placeholder here made the migrated account impossible to log
-            -- into, because login resolves the control row by username.
-            legacyName <- legacyUsername cfg
-            let username = case fmap T.strip legacyName of
-                    Just name | not (T.null name) -> name
-                    _ -> "owner"
-            created <- Control.createUser control username (cfgDbPath cfg) RoleAdmin Nothing
-            case created of
-                Left err ->
-                    ioError (userError ("could not register the existing database at " <> cfgDbPath cfg <> ": " <> show err))
-                Right user ->
-                    hPutStrLn
-                        stderr
-                        ( "eza: registered the existing database "
+        exists <- doesFileExist (cfgDbPath cfg)
+        when exists $ do
+            pythonLayout <- looksLikePythonDatabase (cfgDbPath cfg)
+            hPutStrLn
+                stderr
+                ( if pythonLayout
+                    then
+                        "eza: the old Python eza database at "
                             <> cfgDbPath cfg
-                            <> " as user "
-                            <> show (cuId user)
-                            <> " ("
-                            <> T.unpack (cuUsername user)
-                            <> ", admin); the file was left in place"
-                        )
-    -- Repair the placeholder name written by the first migration build, so an
-    -- installation that already ran it can log in again without hand-editing
-    -- the control database.
-    repairLegacyAccountName cfg control
+                            <> " is not opened by 0.4; back it up and import its HTML export instead"
+                    else
+                        "eza: the pre-0.4 single-user database at "
+                            <> cfgDbPath cfg
+                            <> " is not opened or adopted by 0.4; back it up and import its HTML export, or finish /setup to create a fresh account (see docs/upgrade.md)"
+                )
 
-{- | The username stored in an existing user database, if it has the old or
-new app_state row. Missing files, the Python layout, and unclaimed databases
-return Nothing.
+{- | The Python application shipped no @app_state@ table and no @added_at@
+column. A malformed or non-SQLite file is treated as unknown, not as Python.
 -}
-legacyUsername :: Config -> IO (Maybe Text)
-legacyUsername cfg = usernameInDatabase (cfgDbPath cfg)
-
-usernameInDatabase :: FilePath -> IO (Maybe Text)
-usernameInDatabase path = do
-    exists <- doesFileExist path
-    if not exists
-        then pure Nothing
-        else do
-            result <-
-                try
-                    ( bracket (Sqlite.open path) Sqlite.close $ \conn -> do
-                        rows <- Sqlite.query_ conn "SELECT username FROM app_state WHERE id = 1" :: IO [Only Text]
-                        pure (case rows of [Only name] -> Just name; _ -> Nothing)
-                    ) ::
-                    IO (Either SomeException (Maybe Text))
-            pure (either (const Nothing) id result)
-
-{- | If a migration from before the username fix registered the legacy library
-as the placeholder @owner@, restore the name the database actually has. Runs
-on every start and is a no-op once the names agree.
--}
-repairLegacyAccountName :: Config -> Connection -> IO ()
-repairLegacyAccountName _cfg control = do
-    users <- Control.listUsers control
-    forM_ users $ \user ->
-        when (T.strip (cuUsername user) == "owner") $ do
-            stored <- usernameInDatabase (cuDbPath user)
-            case fmap T.strip stored of
-                Just name
-                    | not (T.null name)
-                    , name /= cuUsername user -> do
-                        repaired <- Control.setUsername control (cuId user) name
-                        case repaired of
-                            Right () ->
-                                hPutStrLn
-                                    stderr
-                                    ( "eza: repaired the migrated account username from "
-                                        <> T.unpack name
-                                        <> " in the library database"
-                                    )
-                            Left err ->
-                                hPutStrLn
-                                    stderr
-                                    ( "eza: could not repair the migrated account username: "
-                                        <> show err
-                                    )
-                _ -> pure ()
-
-{- | True when the legacy single-user database exists and its @app_state@ says
-an account was claimed. A missing table (the old Python layout) or an
-unclaimed database is not migrated.
--}
-legacyDatabaseClaimed :: Config -> IO Bool
-legacyDatabaseClaimed cfg = do
-    exists <- doesFileExist (cfgDbPath cfg)
-    if not exists
-        then pure False
-        else do
-            result <-
-                try (bracket (Sqlite.open (cfgDbPath cfg)) Sqlite.close Auth.setupClaimed) ::
-                    IO (Either SomeException Bool)
-            pure (either (const False) id result)
+looksLikePythonDatabase :: FilePath -> IO Bool
+looksLikePythonDatabase path = do
+    result <-
+        try
+            ( bracket (Sqlite.open path) Sqlite.close $ \conn -> do
+                appState <- Sqlite.query_ conn "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_state'" :: IO [Only Int]
+                addedAt <- Sqlite.query_ conn "SELECT 1 FROM pragma_table_info('bookmarks') WHERE name = 'added_at'" :: IO [Only Int]
+                pure (null appState && null addedAt)
+            ) ::
+            IO (Either SomeException Bool)
+    pure (either (const False) id result)
 
 {- | Close every open user database and the control database. Warp has already
 stopped routing requests when this runs.
@@ -394,21 +319,6 @@ enabledOnly found = case found of
     Just user | isNothing (cuDisabledAt user) -> Just user
     _ -> Nothing
 
-{- | The legacy fallback: an unprefixed token may only resolve while exactly one
-enabled account exists, so there is never a question of whose database it
-belongs to.
--}
-legacyUser :: AppState -> IO (Maybe Control.ControlUser)
-legacyUser state = withControl state $ \control -> do
-    enabled <- Control.countEnabledUsers control
-    if enabled /= 1
-        then pure Nothing
-        else do
-            users <- Control.listUsers control
-            pure $ case filter (isNothing . cuDisabledAt) users of
-                [user] -> Just user
-                _ -> Nothing
-
 -- ---------------------------------------------------------------------------
 -- Token prefixes
 -- ---------------------------------------------------------------------------
@@ -419,7 +329,8 @@ lands on the wrong database and fails the hash check. Unprefixed values use
 the explicit single-account fallback.
 
 Wire forms: @u<id>_<raw>@ for sessions, pending sessions, and share links,
-and @eza_pat_u<id>_<raw>@ for API bearer tokens.
+and @eza_pat_u<id>_<raw>@ for API bearer tokens. Unprefixed values are not
+tokens in 0.4.
 -}
 stripSessionPrefix :: Text -> Maybe (Int, Text)
 stripSessionPrefix = TokenPrefix.splitUserPrefix
@@ -449,28 +360,24 @@ wireApiToken user raw = case T.stripPrefix "eza_pat_" raw of
 wireShareToken :: Control.ControlUser -> Text -> Text
 wireShareToken user raw = TokenPrefix.withUserPrefix TokenPrefix.sharePrefix (cuId user) raw
 
-{- | Resolve a prefixed (or legacy unprefixed) token to the account and slot
-that own it, plus the bare value its database stores. Left carries a limit
-message the guard reports as 503; Right Nothing means the token names no
-usable account.
+{- | Resolve a prefixed token to the account and slot that own it, plus the
+bare value its database stores. Every token must carry its account prefix; an
+unprefixed value resolves to nothing (401). Left carries a limit message the
+guard reports as 503; Right Nothing means the token names no usable account.
 -}
 resolveOwner ::
     AppState ->
     Maybe (Int, Text) ->
     Text ->
     IO (Either Text (Maybe (Control.ControlUser, UserSlot, Text)))
-resolveOwner state parsed raw =
+resolveOwner state parsed _raw =
     case parsed of
         Just (userId, bare) -> do
             muser <- enabledUserById state userId
             case muser of
                 Nothing -> pure (Right Nothing)
                 Just user -> slotThen user bare
-        Nothing -> do
-            muser <- legacyUser state
-            case muser of
-                Nothing -> pure (Right Nothing)
-                Just user -> slotThen user raw
+        Nothing -> pure (Right Nothing)
   where
     slotThen user bare = do
         result <- userSlotFor state user

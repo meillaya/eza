@@ -17,8 +17,8 @@ await page.goto(BASE + "/account/add-passkey", { waitUntil: "networkidle" });
 const addButton = await page.locator("#passkey-add").count();
 console.log("add page title:", await page.title(), "button:", addButton, "url:", page.url());
 if (addButton === 0) {
-  // Password accounts retire passkey-first setup. Legacy passkey enrollment is
-  // covered by the auth unit tests, not this browser path.
+  // Password accounts are the primary login; the add-passkey page retires
+  // passkey-first setup, which 0.4 no longer offers.
   console.log("passkey enrollment retired for password accounts");
   await browser.close();
   process.exit(0);

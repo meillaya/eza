@@ -5,7 +5,6 @@
 module Eza.Enrich (
     enrichBookmark,
     enqueueEnrichment,
-    runEnrichWorker,
     runEnrichWorkerFor,
     runFaviconWorkerFor,
     backfillCachedFavicons,
@@ -14,7 +13,7 @@ module Eza.Enrich (
 ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
+import Control.Concurrent.QSem (QSem, signalQSem, waitQSem)
 import Control.Exception (SomeException, bracket, bracket_, try)
 import Control.Monad (forM_, forever)
 import Data.ByteString (ByteString)
@@ -208,14 +207,6 @@ markFailed conn bookmarkId message attempts = do
             "UPDATE bookmarks SET enrich_state = 'failed', enrich_error = ?, enrich_attempts = ?, updated_at = strftime('%s','now') WHERE id = ? AND enrich_state <> 'manual'"
             (message, attempts + 1, bookmarkId)
 
-{- | The single database worker kept for the CLI and old call sites: it opens
-the configured database and gives one loop its own semaphore.
--}
-runEnrichWorker :: Manager -> Config -> IO ()
-runEnrichWorker manager cfg = do
-    sem <- newQSemFor cfg
-    runEnrichWorkerFor manager cfg (cfgDbPath cfg) sem
-
 {- | One enrichment loop for one user database. The semaphore is process-wide,
 so @EZA_ENRICH_WORKERS@ bounds the network work across every account while
 each database still gets its own claimer.
@@ -244,9 +235,6 @@ runEnrichWorkerFor manager cfg databasePath sem =
                                     Left err -> failJob conn (jobId job) (T.pack (show err)) (jobAttempts job)
                                     Right (Left err) -> failJob conn (jobId job) err (jobAttempts job)
                                     Right (Right ()) -> completeJob conn (jobId job)
-
-newQSemFor :: Config -> IO QSem
-newQSemFor cfg = newQSem (max 1 (cfgEnrichWorkers cfg))
 
 -- ---------------------------------------------------------------------------
 -- Favicon backfill

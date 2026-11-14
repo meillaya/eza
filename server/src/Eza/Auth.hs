@@ -5,13 +5,12 @@
 
 {- | Authentication for one account database: the username/password account
 row, sessions, login rate limiting, recovery codes, passkey management,
-optional passkey two-factor, and the WebAuthn relying-party operations kept
-for accounts that still sign in with a legacy passkey. Multi-user identity
-lives in the control database ("Eza.Control"); this module is unaware of it
-except for the per-user WebAuthn handle that registration callers pass in.
+optional passkey two-factor, and the WebAuthn relying-party operations.
+Multi-user identity lives in the control database ("Eza.Control"); this module
+is unaware of it except for the per-user WebAuthn handle that registration
+callers pass in.
 
-A password is the primary factor. Passkeys registered before schema v6 are
-legacy credentials: they keep working only while no password exists. On a
+A password is the primary factor; passkeys never sign in on their own. On a
 password account a passkey is an optional second factor: when @require_passkey@
 is on and at least one credential exists, a correct password opens a
 short-lived pending session instead of a normal one, and a passkey assertion
@@ -40,7 +39,6 @@ module Eza.Auth (
     setupAllowed,
     accountHasPassword,
     accountConfigured,
-    legacyPasskeyLoginAllowed,
     twoFactorRequired,
     loadAccount,
     setAccountPassword,
@@ -51,11 +49,9 @@ module Eza.Auth (
     verifyPasswordLogin,
     verifyCurrentPassword,
     registrationOptions,
-    authenticationOptions,
     addPasskeyOptions,
     secondFactorOptions,
     verifyRegistration,
-    verifyLogin,
     verifySecondFactor,
     verifyAddPasskey,
     completePendingLogin,
@@ -292,17 +288,6 @@ accountConfigured conn = do
     account <- loadAccount conn
     pure (accountHasPassword account && not (T.null (acctUsername account)))
 
-{- | Passkey sign-in survives only on a database that has passkeys and no
-password. Once a password or a recovery session exists, password setup and
-recovery own the ceremony.
--}
-legacyPasskeyLoginAllowed :: Connection -> IO Bool
-legacyPasskeyLoginAllowed conn = do
-    n <- countCredentials conn
-    configured <- accountConfigured conn
-    rec <- hasRecoverySession conn
-    pure (n > 0 && not configured && not rec)
-
 {- | True when a correct password must be followed by a passkey assertion. The
 flag alone is not enough: a credential has to exist, otherwise the account
 would ask for a second factor it cannot satisfy. Deleting the last credential
@@ -440,15 +425,15 @@ clearLoginFailures conn =
     withImmediateTransaction conn $
         execute_ conn "UPDATE app_state SET failed_login_count = 0, failed_login_at = NULL, login_blocked_until = NULL WHERE id = 1"
 
-{- | Check the current password for a password change. A legacy passkey-only
-account has no password to check, so the session itself vouches for the first
-password.
+{- | Check the current password for a password change. 0.4 has no
+passkey-only session that could set a first password here; the recovery setup
+owns that ceremony.
 -}
 verifyCurrentPassword :: Connection -> AuthConfig -> Text -> IO Bool
 verifyCurrentPassword conn ac password = do
     account <- loadAccount conn
     if not (accountHasPassword account)
-        then pure True
+        then pure False
         else Password.verifyPassword (acPasswordParams ac) (acctPasswordHash account) password
 
 {- | Authenticate a username and password. A wrong username, a wrong password,
@@ -702,9 +687,8 @@ credentialDescriptors conn = do
         | Only raw <- rows
         ]
 
-{- | Assertion options for one ceremony. The challenge purpose separates the
-legacy passkey sign-in from the two-factor check so one ceremony cannot consume
-the other's challenge.
+{- | Assertion options for one ceremony. The challenge purpose keeps ceremonies
+from consuming each other's challenge.
 -}
 authenticationOptionsWith :: Connection -> AuthConfig -> Text -> IO (Either AuthError Value)
 authenticationOptionsWith conn ac purpose = do
@@ -717,9 +701,6 @@ authenticationOptionsWith conn ac purpose = do
             let opts = (authenticationOptionsFor ac challenge){WA.coaAllowCredentials = descriptors}
             pure (Right (toJSON (WA.wjEncodeCredentialOptionsAuthentication opts)))
 
-authenticationOptions :: Connection -> AuthConfig -> IO (Either AuthError Value)
-authenticationOptions conn ac = authenticationOptionsWith conn ac "authentication"
-
 {- | The second-factor challenge. Only meaningful while the account asks for a
 passkey at sign-in; the caller has already proved the password with a pending
 session.
@@ -731,9 +712,8 @@ secondFactorOptions conn ac = do
         then authenticationOptionsWith conn ac "second_factor"
         else pure (Left (authError 403 "2fa_not_required" "this account does not ask for a passkey at sign-in"))
 
-{- | A logged-in session can register a passkey at any time. On a password
-account the credential is an optional second factor and an extra way in; on a
-legacy passkey-only account it is the credential the sign-in uses.
+{- | A logged-in session can register a passkey at any time. The credential is
+an optional second factor and an extra way in after the password sign-in.
 -}
 addPasskeyOptions :: Connection -> AuthConfig -> BS.ByteString -> IO (Either AuthError Value)
 addPasskeyOptions conn ac handle = registrationOptions conn ac handle False
@@ -802,8 +782,7 @@ setSetupClaimed conn =
 
 {- | Verify one WebAuthn assertion against the challenge of the given purpose.
 Records the credential use on success. The caller decides what the assertion
-earns: a legacy passkey sign-in creates a normal session directly, while a
-two-factor assertion must complete the pending session.
+earns: the two-factor assertion must complete the pending session.
 -}
 verifyAssertion :: Connection -> AuthConfig -> Text -> Value -> IO (Either AuthError ())
 verifyAssertion conn ac purpose body =
@@ -828,13 +807,6 @@ verifyAssertion conn ac purpose body =
                                         V.Success (WA.AuthenticationResult counter) -> do
                                             recordCredentialUse conn (WA.unCredentialId (WA.ceCredentialId entry)) counter
                                             pure (Right ())
-
-verifyLogin :: Connection -> AuthConfig -> Value -> IO (Either AuthError NewSession)
-verifyLogin conn ac body = do
-    result <- verifyAssertion conn ac "authentication" body
-    case result of
-        Left err -> pure (Left err)
-        Right () -> Right <$> createSession conn "normal" (acSessionTtlSeconds ac)
 
 {- | The passkey half of a two-factor sign-in. The pending session is proof that
 the password was already correct.
@@ -1089,27 +1061,22 @@ renameCredential conn cid nick = do
         changes conn
     pure (n > 0)
 
-{- | A legacy passkey-only account must keep one credential so it can still
-sign in. A password account may drop every passkey, except while optional
-passkey two-factor is on: then a credential is the second factor and removing
-the last one would make the next sign-in impossible.
+{- | A password account may drop every passkey, except while optional passkey
+two-factor is on: then a credential is the second factor and removing the last
+one would make the next sign-in impossible.
 -}
 deleteCredential :: Connection -> BS.ByteString -> IO (Either AuthError ())
 deleteCredential conn cid = do
     n <- countCredentials conn
     account <- loadAccount conn
-    let configured = accountHasPassword account && not (T.null (acctUsername account))
-        lastOne = n <= 1
-    if lastOne && not configured
-        then pure (Left (authError 409 "last_credential" "cannot revoke the last passkey while no password is set; set a password or use a recovery code"))
-        else
-            if lastOne && acctRequirePasskey account
-                then pure (Left (authError 409 "last_credential" "cannot revoke the last passkey while passkey two-factor is on; turn two-factor off first"))
-                else do
-                    changed <- withImmediateTransaction conn $ do
-                        execute conn "DELETE FROM passkey_credentials WHERE credential_id = ?" (Only cid)
-                        changes conn
-                    pure (if changed > 0 then Right () else Left (authError 404 "not_found" "unknown passkey"))
+    let lastOne = n <= 1
+    if lastOne && acctRequirePasskey account
+        then pure (Left (authError 409 "last_credential" "cannot revoke the last passkey while passkey two-factor is on; turn two-factor off first"))
+        else do
+            changed <- withImmediateTransaction conn $ do
+                execute conn "DELETE FROM passkey_credentials WHERE credential_id = ?" (Only cid)
+                changes conn
+            pure (if changed > 0 then Right () else Left (authError 404 "not_found" "unknown passkey"))
 
 -- ---------------------------------------------------------------------------
 -- Housekeeping

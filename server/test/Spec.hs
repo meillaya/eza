@@ -768,19 +768,6 @@ main = hspec $ do
                 codes <- Auth.recoveryCodesRemaining migrated
                 codes `shouldBe` 1
                 close migrated
-        it "keeps a legacy passkey database in legacy passkey mode" $
-            withSystemTempDirectory "eza-legacy" $ \dir -> do
-                conn <- openDb (dir </> "test.db")
-                Sqlite.execute_ conn "UPDATE app_state SET setup_claimed = 1 WHERE id = 1"
-                Sqlite.execute_ conn "INSERT INTO passkey_credentials (credential_id,user_handle,public_key,created_at) VALUES (x'01',x'02',x'03',1)"
-                allowed <- Auth.setupAllowed conn
-                allowed `shouldBe` False
-                configured <- Auth.accountConfigured conn
-                configured `shouldBe` False
-                legacy <- Auth.legacyPasskeyLoginAllowed conn
-                legacy `shouldBe` True
-                close conn
-
     describe "password login" $ do
         it "opens a session with the configured TTL and expires it" $
             withSystemTempDirectory "eza-login" $ \dir -> do
@@ -866,25 +853,6 @@ main = hspec $ do
                         stale <- Auth.redeemRecoveryCode conn secondCode
                         authStatus stale `shouldBe` 400
                     _ -> expectationFailure "expected at least two recovery codes"
-                close conn
-
-    describe "legacy passkey retirement" $ do
-        it "stops passkey login and setup once a password exists" $
-            withSystemTempDirectory "eza-retire" $ \dir -> do
-                conn <- openDb (dir </> "test.db")
-                let params = Password.PasswordParams 1024 1 1
-                Sqlite.execute_ conn "UPDATE app_state SET setup_claimed = 1 WHERE id = 1"
-                Sqlite.execute_ conn "INSERT INTO passkey_credentials (credential_id,user_handle,public_key,created_at) VALUES (x'01',x'02',x'03',1)"
-                legacyBefore <- Auth.legacyPasskeyLoginAllowed conn
-                legacyBefore `shouldBe` True
-                stored <- Password.hashPassword params "correct horse battery"
-                Auth.setAccountPassword conn "owner" stored
-                legacyAfter <- Auth.legacyPasskeyLoginAllowed conn
-                legacyAfter `shouldBe` False
-                stillAllowed <- Auth.setupAllowed conn
-                stillAllowed `shouldBe` False
-                removed <- Auth.deleteCredential conn (BS.pack [0x01])
-                removed `shouldBe` Right ()
                 close conn
 
     describe "passkey two-factor" $ do

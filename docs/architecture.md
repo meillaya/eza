@@ -56,11 +56,10 @@ returns a short-lived pending session and requires a WebAuthn assertion before
 a normal session is created. Pending scopes cannot reach `/api/v1`. Recovery
 requires a username and clears that account's password, passkeys, and flag.
 
-Startup migration: when the control database has no rows and `EZA_DB` exists
-with a claimed account, that file is registered as user 1 with the admin role
-in place, with no copy or move; removing `control.db` rolls the registration
-back. An unclaimed legacy file is left alone. Otherwise the first
-`/setup` claims a fresh account under `users/<id>/`.
+Startup: the control database is the only identity source. The first `/setup`
+claims a fresh account under `users/<id>/eza.db`. A pre-0.4 flat `EZA_DB` file
+is never opened or adopted; when one exists and no account is registered the
+server prints the upgrade hint and leaves it untouched.
 
 Background work is per account. The slot supervisor starts and owns each
 account's worker set through `Eza.Library`: the enrichment claimers, the
@@ -105,16 +104,17 @@ normal `GET /api/v1/bookmarks/{id}/snapshot`; only capture is a job.
 
 The CLI commands (`import`, `export`, `enrich`, `verify`, `backup`,
 `check-dead`, `set-password`) accept `--user <name|id>`; without it they use
-the only enabled account (a control database with no rows falls back to the
-legacy `EZA_DB` path). `eza-bookmarks users list|add|enable|disable|reset-password|delete`
+the only enabled account, and otherwise fail (there is no flat-file fallback in
+0.4). `eza-bookmarks users list|add|enable|disable|reset-password|delete`
 manages accounts, `init` creates the control schema, and `set-password`
 prompts twice with the terminal echo off, so the password never reaches argv.
 `backup` copies the control database and every account library (disabled
 accounts included; page snapshots are not part of a stamp) into one verified
 stamp directory. `restore STAMP --yes`, run with the server stopped, validates
 the stamp, backs up the current installation, copies each library to its
-control row's path, and rewrites those paths when the data root moved; old
-flat stamps (`users/<id>.db`) are accepted. SQLite serializes the writers per
+control row's path, and rewrites those paths when the data root moved. Only
+the stamp directory shape is accepted; pre-0.4 flat stamps and
+single-user `eza-*.db` files are refused. SQLite serializes the writers per
 file, so a running server and a one-off CLI command do not corrupt a library
 database.
 
@@ -346,7 +346,7 @@ separately published bundle or SRI pin. `nix build .#eza-web` builds just the
 bundle (see [deployment-nixos.md](deployment-nixos.md#web-assets)).
 
 Caddy terminates HTTPS in front of the process. Set
-`PUBLIC_ORIGIN` to the public hostname before claiming the library. A legacy
+`PUBLIC_ORIGIN` to the public hostname before claiming the library. Every
 passkey is bound to `PUBLIC_ORIGIN` and `EZA_RP_ID` at registration time, so
 keep both stable while a passkey is still in use.
 

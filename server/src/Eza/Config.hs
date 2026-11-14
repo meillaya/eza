@@ -39,7 +39,10 @@ data Config = Config
     , cfgUsersDir :: FilePath
     -- ^ Per-user library directories (@users/<id>/eza.db@).
     , cfgMaxUsers :: Int
-    -- ^ Upper bound on user database paths this process will open.
+    {- ^ Upper bound on user database paths this process will open.
+    | The pre-0.4 flat database path (EZA_DB). 0.4 never opens or adopts it;
+    it is read only to print the upgrade hint.
+    -}
     , cfgDbPath :: FilePath
     {- ^ Legacy bootstrap database. Only read at startup to register an existing
     single-user install; request paths never come from here.
