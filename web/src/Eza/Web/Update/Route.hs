@@ -15,7 +15,8 @@ import Miso
 
 import Eza.Web.Api
 import Eza.Web.Interpreter
-import Eza.Web.Model
+import Eza.Web.Logic.Model
+import Eza.Web.Logic.Route (Route (..))
 import Eza.Web.Update.Common (dedupFirstPage, firstUrlIn, isDetailRoute, isHttpUrlText, isListRoute, isSaveRoute, loadIndexList, putModel, refreshTags, reloadList)
 import Eza.Web.Update.Graph (enterGraphRoute)
 import Eza.Web.Update.Views (openSavedView)
@@ -195,20 +196,18 @@ loadRoute route = do
             fetchRules RulesLoaded RulesFailed
         History -> pure ()
         Save sharedTitle sharedText sharedUrl -> do
-            let urlFromShare = case fmap (T.strip) sharedUrl of
-                    Just url | isHttpUrlText (ms (T.unpack url)) -> ms (T.unpack url)
+            let urlFromShare = case fmap T.strip sharedUrl of
+                    Just url | isHttpUrlText url -> url
                     _ -> firstUrlIn sharedText
-                titleFromShare = ms (fromMaybe "" sharedTitle)
+                titleFromShare = fromMaybe "" sharedTitle
                 noteFromShare =
-                    ms
-                        ( fromMaybe "" $
-                            case fmap T.strip sharedText of
-                                Just shared
-                                    | T.null shared -> Nothing
-                                    | "http://" `T.isPrefixOf` shared || "https://" `T.isPrefixOf` shared -> Nothing
-                                    | otherwise -> Just shared
-                                Nothing -> Nothing
-                        )
+                    fromMaybe "" $
+                        case fmap T.strip sharedText of
+                            Just shared
+                                | T.null shared -> Nothing
+                                | "http://" `T.isPrefixOf` shared || "https://" `T.isPrefixOf` shared -> Nothing
+                                | otherwise -> Just shared
+                            Nothing -> Nothing
             putModel
                 ( \x ->
                     x

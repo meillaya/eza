@@ -43,6 +43,7 @@ import qualified Data.Text as T
 
 import Miso
 
+import Eza.Ledger (LedgerEntry (..))
 import Eza.Types
 import Eza.Web.Api
 import Eza.Web.Error
@@ -50,8 +51,9 @@ import Eza.Web.Interpreter
 import Eza.Web.Logic.Effect (TimerId, nextRequestId)
 import qualified Eza.Web.Logic.Input as LogicInput
 import qualified Eza.Web.Logic.Ledger as Ledger
+import Eza.Web.Logic.Model
+import Eza.Web.Logic.Route (Route (..))
 import qualified Eza.Web.Logic.Route as ClientRoute
-import Eza.Web.Model
 
 putModel :: (Model -> Model) -> Effect () () Model Action
 putModel f = get >>= put . f
@@ -69,18 +71,18 @@ cover the whole library.
 dedupFirstPage :: (DedupReport -> Action) -> (ApiError -> Action) -> Effect () () Model Action
 dedupFirstPage = fetchDedupReport 0 60 0 40
 
-isHttpUrlText :: MisoString -> Bool
+isHttpUrlText :: Text -> Bool
 isHttpUrlText value =
-    let lowered = T.toLower (T.strip (fromMisoString value))
+    let lowered = T.toLower (T.strip value)
      in "http://" `T.isPrefixOf` lowered || "https://" `T.isPrefixOf` lowered
 
 -- | The native tag-input parser, wrapped for the shell's MisoString field.
-splitTags :: MisoString -> [Text]
-splitTags = LogicInput.splitTags . fromMisoString
+splitTags :: Text -> [Text]
+splitTags = LogicInput.splitTags
 
 -- | The native one-tag parser, wrapped for the shell's MisoString field.
-parseTagInput :: MisoString -> Maybe Text
-parseTagInput = LogicInput.parseTagInput . fromMisoString
+parseTagInput :: Text -> Maybe Text
+parseTagInput = LogicInput.parseTagInput
 
 toggleMember :: (Eq a) => a -> [a] -> [a]
 toggleMember x xs
@@ -116,7 +118,7 @@ or a searched ledger needs its own request.
 bootPageMatchesLedger :: Model -> Bool
 bootPageMatchesLedger m =
     mRoute m == Index
-        && T.null (T.strip (fromMisoString (mQ m)))
+        && T.null (T.strip (mQ m))
         && null (mTagsFilter m)
         && mSort m == "created"
         && not (mUnreadOnly m)
@@ -227,8 +229,8 @@ completeWikilink :: Text -> Int -> Text -> (Text, Int)
 completeWikilink = LogicInput.completeWikilink
 
 -- | Pick the first http(s) URL out of share_target "text".
-firstUrlIn :: Maybe Text -> MisoString
-firstUrlIn value = maybe "" ms (value >>= LogicInput.firstUrlIn)
+firstUrlIn :: Maybe Text -> Text
+firstUrlIn value = fromMaybe "" (value >>= LogicInput.firstUrlIn)
 
 {- | A few characters before/after a highlight selection, used by the server
 as drift anchors.
@@ -258,7 +260,7 @@ setCursor idx = do
         Just b -> do
             putModel (\x -> x{mLedgerCursor = Just idx, mDrawer = Just (bsId b)})
             if mWidth m < 768
-                then scrollRowIntoView (ms ("ledger-row-" <> show (bsId b)))
+                then scrollRowIntoView ("ledger-row-" <> T.pack (show (bsId b)))
                 else do
                     let target = max 0 (ledgerScrollTarget m idx)
                     when (target /= mScrollY m) $ scrollLedger target

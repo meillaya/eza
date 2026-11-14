@@ -30,13 +30,15 @@ import Eza.Web.Logic.Effect (nextRequestId, requestIsCurrent)
 
 import Miso
 
+import Data.Text (Text)
 import Eza.Types
 import qualified Eza.View as EV
 import Eza.Web.Api
 import Eza.Web.Error
 import Eza.Web.Graph
 import Eza.Web.Interpreter
-import Eza.Web.Model
+import Eza.Web.Logic.Model
+import Eza.Web.Logic.Route (Route (..), isGraphRoute)
 import {-# SOURCE #-} Eza.Web.Update (updateModel)
 import Eza.Web.Update.Common (putModel)
 import Eza.Web.Update.ViewDefs (activeGraphDefinition, recomputeGraphColors)
@@ -89,7 +91,7 @@ frames instead, like 'measureGraphCanvas'.
 focusGraphPlate :: Model -> Effect () () Model Action
 focusGraphPlate m =
     when
-        (isGraphRoute (mRoute m) && T.null (T.strip (fromMisoString (mGraphFilter m))))
+        (isGraphRoute (mRoute m) && T.null (T.strip ((mGraphFilter m))))
         focusGraphCanvas
 
 visibleHit :: Model -> Maybe Int -> Maybe Int
@@ -101,7 +103,7 @@ visibleHit m (Just key)
 {- | Shown when the graph payload has no matching server layout. The client
 never computes a layout itself: the server is the only layout producer.
 -}
-layoutMissingMessage :: MisoString
+layoutMissingMessage :: Text
 layoutMissingMessage =
     "The server sent no layout for this library. Reload the page to ask for one."
 
@@ -235,7 +237,7 @@ applyGraphScope m =
                             Nothing -> emptyScope m
                     Nothing -> emptyScope m
   where
-    matchOn layout = matchGraph (T.strip (fromMisoString (mGraphFilter m))) layout
+    matchOn layout = matchGraph (T.strip ((mGraphFilter m))) layout
     emptyScope model =
         model
             { mGraphLocalLayout = Nothing
@@ -280,7 +282,7 @@ the detail plate. One timer per gesture event is cheap.
 -}
 graphEscape :: Model -> Effect () () Model Action
 graphEscape m
-    | not (T.null (T.strip (fromMisoString (mGraphFilter m)))) = do
+    | not (T.null (T.strip ((mGraphFilter m)))) = do
         updateModel (GraphFilterChanged "")
         updateModel GraphFilterSettled
     | otherwise = updateModel GraphClearSelection
@@ -369,7 +371,7 @@ handle = \case
                                         { mGraph = Just graph
                                         , mGraphLayout = Nothing
                                         , mGraphLoading = False
-                                        , mGraphError = Just (ms layoutMissingMessage)
+                                        , mGraphError = Just layoutMissingMessage
                                         }
                                 )
                         Just hydratedLayout -> do
@@ -426,7 +428,7 @@ handle = \case
                             unless (mGraphViewReady m) (measureGraphCanvas GraphMeasured)
                             focusGraphPlate m
     GraphFailed err -> do
-        putModel (\x -> x{mGraphLoading = False, mGraphError = Just (ms (aeMessage err))})
+        putModel (\x -> x{mGraphLoading = False, mGraphError = Just ((aeMessage err))})
         -- The error panel is only rendered while the plate has no layout to
         -- fall back on; without this toast a failed refresh of an already
         -- painted graph looked like a successful one.
@@ -589,7 +591,7 @@ handle = \case
                 putModel
                     ( \x ->
                         x
-                            { mGraphMatches = matchGraph (T.strip (fromMisoString (mGraphFilter x))) layout
+                            { mGraphMatches = matchGraph (T.strip ((mGraphFilter x))) layout
                             , mGraphFilterTimer = Nothing
                             }
                     )
@@ -705,7 +707,7 @@ handle = \case
                                 { mGraphLayout = Nothing
                                 , mGraphLayoutSource = ""
                                 , mGraphLoading = False
-                                , mGraphError = Just (ms layoutMissingMessage)
+                                , mGraphError = Just layoutMissingMessage
                                 }
                         )
     GraphLayoutFailed err -> do
@@ -722,7 +724,7 @@ handle = \case
                     , mGraphError =
                         case mGraphLayout x of
                             Just _ -> mGraphError x
-                            Nothing -> Just (ms (aeMessage err))
+                            Nothing -> Just ((aeMessage err))
                     }
             )
         when (isNothing (mGraph m)) (fetchGraph GraphLoaded GraphFailed)

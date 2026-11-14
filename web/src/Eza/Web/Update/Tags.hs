@@ -13,7 +13,8 @@ import Miso
 import Eza.Web.Api
 import Eza.Web.Error
 import Eza.Web.Interpreter
-import Eza.Web.Model
+import Eza.Web.Logic.Model
+import Eza.Web.Logic.Route (Route (..))
 import {-# SOURCE #-} Eza.Web.Update (updateModel)
 import Eza.Web.Update.Common (putModel, refreshStats, refreshTags, reloadList)
 
@@ -24,14 +25,14 @@ handle = \case
     ConsolLoaded groups ->
         putModel (\m -> m{mConsol = groups, mConsolLoading = False, mConsolError = Nothing})
     ConsolFailed err -> do
-        putModel (\m -> m{mConsolLoading = False, mConsolError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mConsolLoading = False, mConsolError = Just ((aeMessage err))})
         handleApiError err
     TagMerge from into -> mergeTags from into TagMerged TagOpFailed
-    TagRenamed old newName -> renameTag old (fromMisoString newName) TagMerged TagOpFailed
+    TagRenamed old newName -> renameTag old newName TagMerged TagOpFailed
     TagDeleted tag -> deleteTag tag TagMerged TagOpFailed
     TagDialogOpen dialog -> do
         let draft = case dialog of
-                TagRenameDialog tag -> ms tag
+                TagRenameDialog tag -> tag
                 _ -> ""
         putModel
             ( \m ->
@@ -58,7 +59,7 @@ handle = \case
         case mTagDialog m of
             Nothing -> pure ()
             Just (TagRenameDialog old) -> do
-                let wanted = T.strip (fromMisoString (mTagDialogInput m))
+                let wanted = T.strip ((mTagDialogInput m))
                 if T.null wanted
                     then putModel (\x -> x{mTagDialogError = Just "Enter a name for the tag."})
                     else
@@ -66,7 +67,7 @@ handle = \case
                             then putModel (\x -> x{mTagDialogError = Just "That is already this tag's name."})
                             else do
                                 putModel (\x -> x{mTagDialogBusy = True, mTagDialogError = Nothing})
-                                updateModel (TagRenamed old (ms wanted))
+                                updateModel (TagRenamed old wanted)
             Just (TagDeleteDialog tag) -> do
                 putModel (\x -> x{mTagDialogBusy = True, mTagDialogError = Nothing})
                 updateModel (TagDeleted tag)
@@ -94,7 +95,7 @@ handle = \case
         putModel
             ( \x ->
                 x
-                    { mQ = ms (T.unpack query)
+                    { mQ = query
                     , mTagsFilter = []
                     , mUnreadOnly = False
                     , mSort = "created"
@@ -119,7 +120,7 @@ handle = \case
         refreshStats
         reloadList
     TagOpFailed err -> do
-        putModel (\m -> m{mTagDialogBusy = False, mTagDialogError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mTagDialogBusy = False, mTagDialogError = Just ((aeMessage err))})
         when (aeStatus err == Just 401) (handleApiError err)
     -- ai tags ---------------------------------------------------------------
     AiTagSelected tag -> do
@@ -143,11 +144,11 @@ handle = \case
                     { mSuggestions = suggestions
                     , mSuggestionsLoading = False
                     , mSuggestionError = Nothing
-                    , mSuggestionNotice = fmap ms notice
+                    , mSuggestionNotice = notice
                     }
             )
     SuggestionsFailed err -> do
-        putModel (\m -> m{mSuggestionsLoading = False, mSuggestionError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mSuggestionsLoading = False, mSuggestionError = Just ((aeMessage err))})
         when (aeStatus err == Just 401) (handleApiError err)
     AiStatusReload -> fetchAiStatus AiStatusLoaded AiStatusFailed
     AiSuggestRetry -> do

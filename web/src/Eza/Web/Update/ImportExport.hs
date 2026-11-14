@@ -6,9 +6,10 @@ module Eza.Web.Update.ImportExport (handle) where
 
 import Miso
 
+import qualified Data.Text as T
 import Eza.Web.Api
 import Eza.Web.Interpreter
-import Eza.Web.Model
+import Eza.Web.Logic.Model
 import Eza.Web.Update.Common (putModel, refreshStats, refreshTags, reloadList)
 
 handle :: Action -> Effect () () Model Action
@@ -23,7 +24,7 @@ handle = \case
             existing = imrExisting response
             found = imrFound response
         notify
-            ( ms
+            ( T.pack
                 ( "Imported "
                     <> show inserted
                     <> " of "

@@ -23,7 +23,8 @@ import Eza.Types
 import Eza.Web.Api
 import Eza.Web.Error
 import Eza.Web.Interpreter
-import Eza.Web.Model
+import Eza.Web.Logic.Model
+import Eza.Web.Logic.Route (Route (..), isGraphRoute)
 import {-# SOURCE #-} Eza.Web.Update (updateModel)
 import Eza.Web.Update.Common (bootPageMatchesLedger, cancelSelectAllPaging, hasUnsaved, indexOfBookmark, isDetailRoute, isListRoute, itemAt, loadMore, moveCursor, putModel, refreshStats, refreshTags, reloadList, setCursor)
 import Eza.Web.Update.Graph (graphEscape, graphOpenSelected, graphPan)
@@ -118,30 +119,27 @@ handle = \case
         putModel (\m -> m{mBooted = True})
         fetchBoot BootLoaded BootFailed
         bootstrapEnvironment
-    RouteChanged fragmentText routeResult -> do
+    -- The share-target landing page is a real page now: it renders the
+    -- prefilled save form instead of quietly writing a bookmark.
+    RouteChanged fragmentText route -> do
         m <- get
-        case routeResult of
-            Left _ -> loadRoute NotFound
-            -- The share-target landing page is a real page now: it renders the
-            -- prefilled save form instead of quietly writing a bookmark.
-            Right route -> do
-                -- The fragment is applied in the same update as the route, so
-                -- it cannot land after a tab click and undo it.
-                when (route == Account) $
-                    putModel (\x -> x{mAccountTab = accountTabFromSlug fragmentText})
-                if hasUnsaved m && route /= mRoute m && isDetailRoute (mRoute m)
-                    then
-                        -- The browser already changed the address before the
-                        -- subscription delivered this route. Remember that so
-                        -- cancelling can put the address back and discarding
-                        -- can avoid a duplicate history entry.
-                        put m{mGuardOpen = True, mPendingRoute = Just route, mGuardFromHistory = True}
-                    else do
-                        -- A history navigation that lands on the rendered
-                        -- route (e.g. Forward while the guard is open) closes
-                        -- the guard instead of re-deriving it.
-                        putModel (\x -> x{mGuardOpen = False, mPendingRoute = Nothing, mGuardFromHistory = False})
-                        loadRoute route
+        -- The fragment is applied in the same update as the route, so it
+        -- cannot land after a tab click and undo it.
+        when (route == Account) $
+            putModel (\x -> x{mAccountTab = accountTabFromSlug fragmentText})
+        if hasUnsaved m && route /= mRoute m && isDetailRoute (mRoute m)
+            then
+                -- The browser already changed the address before the
+                -- subscription delivered this route. Remember that so
+                -- cancelling can put the address back and discarding
+                -- can avoid a duplicate history entry.
+                put m{mGuardOpen = True, mPendingRoute = Just route, mGuardFromHistory = True}
+            else do
+                -- A history navigation that lands on the rendered route
+                -- (e.g. Forward while the guard is open) closes the guard
+                -- instead of re-deriving it.
+                putModel (\x -> x{mGuardOpen = False, mPendingRoute = Nothing, mGuardFromHistory = False})
+                loadRoute route
     Navigate route -> do
         m <- get
         if route == mRoute m
@@ -157,7 +155,7 @@ handle = \case
     QuickSaved bookmarkId existing -> do
         notify
             ( if existing
-                then ms ("Already in your library (#" <> show bookmarkId <> ")")
+                then T.pack ("Already in your library (#" <> show bookmarkId <> ")")
                 else "Saved to eza"
             )
             ToastOk
@@ -166,7 +164,7 @@ handle = \case
         refreshStats
     QuickSaveFailed err -> handleApiError err
     CopyBookmarklet bookmarklet
-        | T.null (T.strip (fromMisoString bookmarklet)) ->
+        | T.null (T.strip bookmarklet) ->
             notify "Bookmarklet unavailable." ToastInfo
         | otherwise -> copyText bookmarklet "Bookmarklet copied" "Copy failed. Drag the link instead"
     LayoutChanged width height -> do
@@ -271,8 +269,8 @@ handle = \case
         putModel
             ( \m ->
                 m
-                    { mVersion = ms (bpVersion payload)
-                    , mOrigin = ms (bpOrigin payload)
+                    { mVersion = (bpVersion payload)
+                    , mOrigin = (bpOrigin payload)
                     , mTags = bpTags payload
                     , mStats = Just (bpStats payload)
                     , mSaved = bpSavedSearches payload

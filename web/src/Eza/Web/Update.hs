@@ -14,7 +14,7 @@ module Eza.Web.Update (
 import Miso (Effect ())
 
 import Eza.Web.Interpreter (subscriptions)
-import Eza.Web.Model (Action (..), Model)
+import Eza.Web.Logic.Model (Action (..), Model)
 
 import qualified Eza.Web.Update.Account as Account
 import qualified Eza.Web.Update.Dedup as Dedup
@@ -101,6 +101,7 @@ updateModel action = case action of
     TitleInput{} -> Detail.handle action
     NoteChanged{} -> Detail.handle action
     NoteMeta{} -> Detail.handle action
+    NoteCursorRead{} -> Detail.handle action
     NoteModeChanged{} -> Detail.handle action
     TagDraftInput{} -> Detail.handle action
     TagAdd{} -> Detail.handle action

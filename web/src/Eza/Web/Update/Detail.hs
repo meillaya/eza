@@ -28,7 +28,8 @@ import Eza.Types
 import Eza.Web.Api
 import Eza.Web.Error
 import Eza.Web.Interpreter
-import Eza.Web.Model
+import Eza.Web.Logic.Model
+import Eza.Web.Logic.Route (Route (..))
 import {-# SOURCE #-} Eza.Web.Update (updateModel)
 import Eza.Web.Update.Common (completeWikilink, hasUnsaved, isHttpUrlText, isSaveRoute, parseTagInput, putModel, refreshStats, refreshTags, reloadList, splitTags, wikilinkQueryAt)
 import Eza.Web.Update.Route (loadRoute)
@@ -69,12 +70,12 @@ insertHighlight highlight highlights =
 the extracted-text editor. Keep the two flags separate so saving one does not
 claim the other was saved.
 -}
-textEditedDetail :: BookmarkDetail -> MisoString -> BookmarkDetail
+textEditedDetail :: BookmarkDetail -> Text -> BookmarkDetail
 textEditedDetail detail draft =
     detail
-        { bdExtractedText = fromMisoString draft
+        { bdExtractedText = draft
         , bdReadingTimeMinutes =
-            let words' = length (T.words (fromMisoString draft))
+            let words' = length (T.words draft)
              in if words' == 0 then 0 else (words' + 219) `div` 220
         , bdEnrichState = "manual"
         , bdEnrichError = ""
@@ -104,7 +105,7 @@ finalizeAdd bookmarkId = do
                 , mAddError = Nothing
                 }
         )
-    notify (ms ("Saved bookmark #" <> show bookmarkId)) ToastOk
+    notify (T.pack ("Saved bookmark #" <> show bookmarkId)) ToastOk
     refreshTags
     refreshStats
     if isSaveRoute (mRoute m)
@@ -192,7 +193,7 @@ handle = \case
                             AddFailed
     AddSucceeded bookmarkId -> do
         m <- get
-        if T.null (T.strip (fromMisoString (mAddNote m)))
+        if T.null (T.strip ((mAddNote m)))
             then finalizeAdd bookmarkId
             else
                 -- The create endpoint has no note field, so a note is attached
@@ -209,7 +210,7 @@ handle = \case
             ToastError
         finalizeAdd bookmarkId
     AddFailed err -> do
-        putModel (\m -> m{mAddBusy = False, mAddError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mAddBusy = False, mAddError = Just ((aeMessage err))})
         handleApiError err
     -- command palette -------------------------------------------------------
     DetailLoaded epoch detail -> sameEpoch epoch $ do
@@ -223,12 +224,12 @@ handle = \case
                             { mDetail = Just detail
                             , mDetailLoading = False
                             , mDetailError = Nothing
-                            , mEditTitle = ms (bdTitle detail)
-                            , mEditNote = ms (bdNoteBody detail)
+                            , mEditTitle = (bdTitle detail)
+                            , mEditNote = (bdNoteBody detail)
                             , mEditTags = bdTags detail
                             , mDirty = False
                             , mExtractEditing = False
-                            , mExtractDraft = ms (bdExtractedText detail)
+                            , mExtractDraft = (bdExtractedText detail)
                             , mExtractDirty = False
                             , mExtractSaving = False
                             , mNoteMode = NoteWrite
@@ -238,21 +239,24 @@ handle = \case
                     )
             _ -> pure ()
     DetailFailed epoch err -> sameEpoch epoch $ do
-        putModel (\m -> m{mDetailLoading = False, mDetail = Nothing, mDetailError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mDetailLoading = False, mDetail = Nothing, mDetailError = Just ((aeMessage err))})
         handleApiError err
     TitleInput title -> putModel (\m -> m{mEditTitle = title, mDirty = True})
-    NoteChanged noteText domRef -> do
+    NoteChanged noteText -> do
         putModel (\m -> m{mEditNote = noteText, mDirty = True})
-        readSelectionStart domRef (\cursor -> NoteMeta cursor (wikilinkQueryAt (fromMisoString noteText) cursor))
+        readNoteCursor
+    NoteCursorRead cursor -> do
+        m <- get
+        updateModel (NoteMeta cursor (wikilinkQueryAt (mEditNote m) cursor))
     NoteMeta cursor query -> do
         m <- get
-        putModel (\x -> x{mNoteCursor = cursor, mLinkQuery = fmap ms query})
+        putModel (\x -> x{mNoteCursor = cursor, mLinkQuery = query})
         case query of
             Nothing -> putModel (\x -> x{mLinkResults = []})
             Just rawQuery ->
                 if T.null rawQuery
                     then putModel (\x -> x{mLinkResults = take 6 (mItems m)})
-                    else fetchAutocomplete (ms rawQuery) LinkSuggestions (\_ -> Noop)
+                    else fetchAutocomplete rawQuery LinkSuggestions (\_ -> Noop)
     NoteModeChanged mode -> putModel (\m -> m{mNoteMode = mode})
     TagDraftInput draft -> putModel (\m -> m{mNewTag = draft})
     TagAdd -> do
@@ -319,7 +323,7 @@ handle = \case
             _ -> pure ()
         notify
             ( if highlightsRemoved > 0
-                then ms ("Saved; " <> show highlightsRemoved <> " unmatched highlight(s) removed")
+                then T.pack ("Saved; " <> show highlightsRemoved <> " unmatched highlight(s) removed")
                 else "Saved"
             )
             (if highlightsRemoved > 0 then ToastInfo else ToastOk)
@@ -340,7 +344,7 @@ handle = \case
                     ( \x ->
                         x
                             { mExtractEditing = True
-                            , mExtractDraft = ms (bdExtractedText detail)
+                            , mExtractDraft = (bdExtractedText detail)
                             , mExtractDirty = False
                             }
                     )
@@ -356,7 +360,7 @@ handle = \case
                     ( \x ->
                         x
                             { mExtractEditing = False
-                            , mExtractDraft = ms (bdExtractedText detail)
+                            , mExtractDraft = (bdExtractedText detail)
                             , mExtractDirty = False
                             }
                     )
@@ -453,11 +457,11 @@ handle = \case
         case drop index (mLinkResults m) of
             [] -> pure ()
             (bookmark : _) -> do
-                let (newNote, newCursor) = completeWikilink (fromMisoString (mEditNote m)) (mNoteCursor m) (bsTitle bookmark)
+                let (newNote, newCursor) = completeWikilink ((mEditNote m)) (mNoteCursor m) (bsTitle bookmark)
                 putModel
                     ( \x ->
                         x
-                            { mEditNote = ms newNote
+                            { mEditNote = newNote
                             , mNoteCursor = newCursor
                             , mLinkQuery = Nothing
                             , mLinkResults = []
@@ -466,7 +470,7 @@ handle = \case
                     )
                 setNoteCursor newCursor
     LinkSuggestions suggestions -> putModel (\m -> m{mLinkResults = suggestions, mLinkSel = 0})
-    RunBookmarkAction bookmarkId verb -> bookmarkAction bookmarkId verb (ToastAdd (ms (T.toTitle verb <> " queued")) ToastOk) (\err -> ApiErrorRaised err)
+    RunBookmarkAction bookmarkId verb -> bookmarkAction bookmarkId verb (ToastAdd ((T.toTitle verb <> " queued")) ToastOk) (\err -> ApiErrorRaised err)
     DeleteBookmarkRequest bookmarkId -> do
         m <- get
         case currentDetail m of
@@ -560,7 +564,7 @@ handle = \case
                     (readerSuffix detail selection)
                     (rsStart selection)
                     (rsEnd selection)
-                    (fromMisoString (mHighlightNote m))
+                    ((mHighlightNote m))
                     "yellow"
                     HighlightAdded
                     HighlightFailed
@@ -585,7 +589,7 @@ handle = \case
                     ( \x ->
                         x
                             { mHighlightEdit = Just highlightId
-                            , mHighlightEditNote = ms (hNote highlight)
+                            , mHighlightEditNote = (hNote highlight)
                             , mHighlightEditColor = hColor highlight
                             }
                     )
@@ -601,7 +605,7 @@ handle = \case
                 patchHighlight
                     (bdId detail)
                     highlightId
-                    (Just (fromMisoString (mHighlightEditNote m)))
+                    (Just ((mHighlightEditNote m)))
                     (Just (mHighlightEditColor m))
                     HighlightPatched
                     HighlightFailed
@@ -630,7 +634,7 @@ handle = \case
                     }
             )
     SharesFailed epoch err -> sameEpoch epoch $ do
-        putModel (\m -> m{mSharesLoading = False, mSharesError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mSharesLoading = False, mSharesError = Just ((aeMessage err))})
         handleApiError err
     ShareDialogOpen -> do
         m <- get
@@ -669,13 +673,13 @@ handle = \case
             Nothing -> pure ()
     ShareCreated shareId url -> do
         putModel (\m -> m{mShareBusy = False, mShareUrl = Just url})
-        notify (ms ("Share link created (#" <> show shareId <> ")")) ToastOk
+        notify (T.pack ("Share link created (#" <> show shareId <> ")")) ToastOk
         refreshShares
         refreshStats
     ShareCreateFailed err -> do
         putModel (\m -> m{mShareBusy = False})
         handleApiError err
-    ShareCopy url -> copyText (ms (url :: Text)) "Share link copied" "Copy failed. Select the text instead"
+    ShareCopy url -> copyText ((url :: Text)) "Share link copied" "Copy failed. Select the text instead"
     ShareRevoke shareId -> revokeShareLink shareId ShareRevoked ShareCreateFailed
     ShareRevoked -> do
         notify "Share link revoked" ToastOk

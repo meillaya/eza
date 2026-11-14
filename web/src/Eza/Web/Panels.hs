@@ -63,12 +63,12 @@ import Eza.Web.Graph (
     labelCount,
  )
 import Eza.Web.Model
+import qualified Eza.Web.Render.Event as HE
 import Eza.Webhook (DeliveryView (..), Webhook (..), allEventTypes, eventTypeText, maxWebhooks)
 import Miso
 import qualified Miso.CSS as C
 import qualified Miso.Canvas as Canvas
 import qualified Miso.Html as H
-import qualified Miso.Html.Event as HE
 import qualified Miso.Html.Property as HP
 import Miso.JSON (withObject, (.!=), (.:), (.:?))
 
@@ -926,7 +926,7 @@ graphGroupEditor m =
                     [text "First enabled group wins. Queries use the ledger search syntax; #rrggbb colors."]
                , H.div_ [HP.class_ "g-group-rows"] (map groupRow (zip [0 :: Int ..] drafts))
                , case vuError (mViewUi m) of
-                    Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]
+                    Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text (ms message)]
                     Nothing -> H.span_ [] []
                ]
         )
@@ -1007,7 +1007,7 @@ viewsBody m =
             [text "refresh"]
         ]
     , case mViewsError m of
-        Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]
+        Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text (ms message)]
         Nothing -> H.span_ [] []
     ]
         ++ ( if null (mViews m)
@@ -1039,7 +1039,7 @@ viewRow m view =
                             [ H.input_
                                 [ HP.class_ "input"
                                 , HP.type_ "text"
-                                , HP.value_ name
+                                , HP.value_ (ms name)
                                 , HE.onInput ViewRenameInput
                                 ]
                             , H.button_ [HP.class_ "btn btn--sm", HP.type_ "button", HE.onClick ViewRenameSubmit] [text "rename"]
@@ -1122,12 +1122,12 @@ viewSaveDialog m =
             [ HP.class_ "input"
             , HP.type_ "text"
             , HP.placeholder_ "view name"
-            , HP.value_ (vuSaveName ui)
+            , HP.value_ (ms (vuSaveName ui))
             , testId "view-name-input"
             , HE.onInput ViewSaveNameInput
             ]
         , case vuError ui of
-            Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]
+            Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text (ms message)]
             Nothing -> H.span_ [] []
         , H.div_
             [HP.class_ "dialog__actions"]
@@ -1159,12 +1159,12 @@ viewImportDialog m =
             [ HP.class_ "input view-import-text"
             , HP.rows_ "8"
             , HP.placeholder_ "{ \"name\": ... }"
-            , HP.value_ (vuImportText ui)
+            , HP.value_ (ms (vuImportText ui))
             , testId "view-import-text"
             , HE.onInput ViewImportTextInput
             ]
         , case vuError ui of
-            Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]
+            Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text (ms message)]
             Nothing -> H.span_ [] []
         , H.div_
             [HP.class_ "dialog__actions"]
@@ -2890,7 +2890,7 @@ securityPanel m =
         MisoString ->
         MisoString ->
         MisoString ->
-        (MisoString -> Action) ->
+        (Text -> Action) ->
         View () () Model Action
     field labelText domId inputType autocomplete value onInput =
         H.div_
@@ -3368,7 +3368,7 @@ webhookForm m =
             , H.span_ [] [text "enabled"]
             ]
         , case mWebhookFormError m of
-            Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]
+            Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text (ms message)]
             Nothing -> H.span_ [] []
         , H.button_
             [ HP.class_ "btn btn--sm btn--strong"
@@ -3576,7 +3576,7 @@ deleteAccountForm m user =
             , text " also delete the library and snapshots"
             ]
         , case mUserActionError m of
-            Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text message]
+            Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text (ms message)]
             Nothing -> H.span_ [] []
         , H.div_
             [HP.class_ "account-created-row"]
@@ -3636,7 +3636,7 @@ userCreateForm m =
                 [ HP.id_ "user-role"
                 , HP.class_ "input"
                 , testId "user-role"
-                , HE.onChange (\raw -> UserRoleSelected (if fromMisoString raw == ("admin" :: Text) then RoleAdmin else RoleMember))
+                , HE.onChange (\raw -> UserRoleSelected (if raw == "admin" then RoleAdmin else RoleMember))
                 ]
                 [ H.option_ [HP.value_ "member", HP.selected_ (mUserRole m == RoleMember)] [text "member"]
                 , H.option_ [HP.value_ "admin", HP.selected_ (mUserRole m == RoleAdmin)] [text "admin"]
@@ -4034,7 +4034,7 @@ ruleForm m =
                 , H.select_
                     [ HP.id_ "rule-field"
                     , HP.class_ "select"
-                    , HE.onChange (\raw -> RuleFieldSelected (fromMisoString raw))
+                    , HE.onChange (\raw -> RuleFieldSelected raw)
                     ]
                     [ fieldOption "url" "address"
                     , fieldOption "domain" "source"
@@ -4128,10 +4128,10 @@ importPanel m =
             , H.div_
                 [HP.class_ "account-actions"]
                 [ H.a_
-                    [HP.class_ "btn btn--strong", HP.href_ exportUrl]
+                    [HP.class_ "btn btn--strong", HP.href_ (ms exportUrl)]
                     [text "export bookmarks.html"]
                 , H.a_
-                    [HP.class_ "btn btn--ghost", HP.href_ exportJsonUrl]
+                    [HP.class_ "btn btn--ghost", HP.href_ (ms exportJsonUrl)]
                     [text "export eza.json"]
                 ]
             ]
@@ -4223,7 +4223,7 @@ capturePanel m =
                 [HP.class_ "account-snippet"]
                 [ H.code_ [HP.class_ "mono"] [text (captureBookmarklet m)]
                 , H.button_
-                    ( [HP.class_ "btn", HP.type_ "button", HE.onClick (CopyBookmarklet (captureBookmarklet m))]
+                    ( [HP.class_ "btn", HP.type_ "button", HE.onClick (CopyBookmarklet (fromMisoString (captureBookmarklet m)))]
                         ++ attrDisabled (not (hasBookmarklet m))
                     )
                     [text "copy"]

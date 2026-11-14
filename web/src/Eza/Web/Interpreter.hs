@@ -48,7 +48,7 @@ module Eza.Web.Interpreter (
     measureLedgerScroll,
     focusElement,
     focusElementDelayed,
-    readSelectionStart,
+    readNoteCursor,
     setNoteCursor,
     readReaderSelection,
     triggerFileInput,
@@ -76,6 +76,7 @@ module Eza.Web.Interpreter (
 import Control.Monad (unless, void, when)
 import Data.Aeson (Value (Null))
 import Data.Maybe (fromMaybe)
+import Data.Text (Text)
 import qualified Data.Text as T
 
 import Miso
@@ -83,6 +84,8 @@ import qualified Miso.JSON as MJ
 import Miso.Router (toURI)
 
 import Eza.Web.Api (fetchBookmarksQuery, fetchStats)
+
+-- the orphan Router Route instance for history FFI
 import Eza.Web.Error (ApiError (..))
 import Eza.Web.Logic.Api (ClientRequest (..))
 import Eza.Web.Logic.Effect (RequestId (..), TimerId)
@@ -96,7 +99,10 @@ import Eza.Web.Logic.Ledger (
     initialLedgerState,
     updateLedger,
  )
-import Eza.Web.Model
+import Eza.Web.Logic.Model
+import Eza.Web.Logic.Route (Route (..), routeTitle)
+import qualified Eza.Web.Logic.Route as ClientRoute
+import Eza.Web.Model ()
 
 -- ----------------------------------------------------------- subscriptions ---
 
@@ -105,7 +111,7 @@ the virtualized grid, and window resize for the column count.
 -}
 subscriptions :: [Sub Model Action]
 subscriptions =
-    [ uriSub (\uri -> RouteChanged (uriFragment uri) (Right (routeOfUri uri)))
+    [ uriSub (\uri -> RouteChanged (fromMisoString (uriFragment uri)) (routeOfUriUri uri))
     , windowSub "scroll" emptyDecoder (\() -> Scrolled)
     , windowSub "resize" emptyDecoder (\() -> Resized)
     , -- The keyboard bridge in pwa.js normalises @event.key@ and the modifier
@@ -144,7 +150,7 @@ the projection never goes stale.
 extractLedger :: Model -> LedgerState
 extractLedger model =
     initialLedgerState
-        { ldQuery = fromMisoString (mQ model)
+        { ldQuery = mQ model
         , ldTagFilters = mTagsFilter model
         , ldSort = mSort model
         , ldUnreadOnly = mUnreadOnly model
@@ -157,12 +163,12 @@ extractLedger model =
         , ldHasMore = mHasMore model
         , ldLoading = mLoading model
         , ldLoadingMore = mLoadingMore model
-        , ldError = fmap fromMisoString (mError model)
+        , ldError = mError model
         , ldListRequest = mListEpoch model
         , ldDebounceTimer = mDebounceTimer model
         , ldTimerSeq = mTimerSeq model
         , ldStats = mStats model
-        , ldStatsError = fmap fromMisoString (mStatsError model)
+        , ldStatsError = mStatsError model
         , ldStatsRequest = mStatsEpoch model
         }
 
@@ -170,7 +176,7 @@ extractLedger model =
 embedLedger :: LedgerState -> Model -> Model
 embedLedger ledger model =
     model
-        { mQ = ms (ldQuery ledger)
+        { mQ = ldQuery ledger
         , mTagsFilter = ldTagFilters ledger
         , mSort = ldSort ledger
         , mUnreadOnly = ldUnreadOnly ledger
@@ -181,12 +187,12 @@ embedLedger ledger model =
         , mHasMore = ldHasMore ledger
         , mLoading = ldLoading ledger
         , mLoadingMore = ldLoadingMore ledger
-        , mError = fmap ms (ldError ledger)
+        , mError = ldError ledger
         , mListEpoch = ldListRequest ledger
         , mDebounceTimer = ldDebounceTimer ledger
         , mTimerSeq = ldTimerSeq ledger
         , mStats = ldStats ledger
-        , mStatsError = fmap ms (ldStatsError ledger)
+        , mStatsError = ldStatsError ledger
         , mStatsEpoch = ldStatsRequest ledger
         }
 
@@ -211,8 +217,8 @@ interpretEffect = \case
     Logic.CancelTimer _ -> cancelTimer
     Logic.Navigate route -> withSink $ \sink -> sink (Navigate route)
     Logic.ReplaceUrl route -> replaceRoute route
-    Logic.SetDocumentTitle title -> setDocumentTitle (ms title)
-    Logic.Focus domId -> focusElement (ms domId)
+    Logic.SetDocumentTitle title -> setDocumentTitle title
+    Logic.Focus domId -> focusElement domId
 
 {- | Start the reader for a fetched request and route its answer back. A fetch
 for the list is an append when the reducer has an append in flight; that is
@@ -260,7 +266,7 @@ putModel f = get >>= put . f
 {- | Show a toast. The dismissal timer lives here because it is a browser
 timer; the update modules only say what to show.
 -}
-notify :: MisoString -> ToastKind -> Effect () () Model Action
+notify :: Text -> ToastKind -> Effect () () Model Action
 notify message kind = do
     m <- get
     let tid = mToastNext m
@@ -277,7 +283,7 @@ notice; anything else is a toast.
 -}
 handleApiError :: ApiError -> Effect () () Model Action
 handleApiError err = do
-    let message = ms (aeMessage err)
+    let message = aeMessage err
     case aeStatus err of
         Just 401 -> do
             putModel (\m -> m{mSignedOut = True})
@@ -291,25 +297,29 @@ handleApiError err = do
 this never come back, which is why the update action that triggers it is
 usually the last step.
 -}
-redirect :: MisoString -> Effect () () Model Action
+redirect :: Text -> Effect () () Model Action
 redirect url = withSink $ \_ -> do
     location <- jsg "window" ! "location"
-    _ <- location # "assign" $ (url :: MisoString)
+    _ <- location # "assign" $ (ms url :: MisoString)
     pure ()
 
 -- | The browser tab title for a route.
-documentTitle :: Route -> MisoString
+documentTitle :: Route -> Text
 documentTitle route = case route of
     Index -> "eza"
     _ -> routeTitle route <> " · eza"
 
 -- | Set the browser tab title.
-setDocumentTitle :: MisoString -> Effect () () Model Action
+setDocumentTitle :: Text -> Effect () () Model Action
 setDocumentTitle title = withSink $ \_ -> do
     document <- jsg ("document" :: MisoString)
-    setField document ("title" :: MisoString) title
+    setField document ("title" :: MisoString) (ms title)
 
 -- ----------------------------------------------------- lifecycle/viewport ---
+
+-- | Classify the current URL; the native parser takes the path text.
+routeOfUriUri :: URI -> Route
+routeOfUriUri uri = ClientRoute.routeOfUri (fromMisoString (prettyURI uri))
 
 {- | Read the browser environment once at mount: URI (for the first route),
 viewport, theme, connectivity and origin. Every probe answers with an action
@@ -326,9 +336,9 @@ bootstrapEnvironment = withSink $ \sink -> do
     origin <- readOrigin
     sink (ThemeLoaded theme)
     sink (ConnectivityChanged online)
-    sink (WindowOriginKnown origin)
+    sink (WindowOriginKnown (fromMisoString origin))
     sink (LayoutChanged width height)
-    sink (RouteChanged (uriFragment uri) (Right (routeOfUri uri)))
+    sink (RouteChanged (fromMisoString (uriFragment uri)) (routeOfUriUri uri))
 
 -- | Flip light/dark through the theme holder the shell bootstrapped.
 toggleTheme :: Effect () () Model Action
@@ -336,7 +346,7 @@ toggleTheme = withSink $ \sink -> do
     holder <- jsg "EzaTheme"
     value <- holder # "toggle" $ ()
     themeM <- fromJSVal value
-    sink (ThemeLoaded (maybe ThemeLight (themeOfMiso . fromMisoString) (themeM :: Maybe MisoString)))
+    sink (ThemeLoaded (maybe ThemeLight (themeOfText . fromMisoString) (themeM :: Maybe MisoString)))
 
 {- | Re-read the viewport and the ledger's scroll metrics after a resize: the
 column count and the virtualized window both depend on it.
@@ -356,26 +366,30 @@ measureLedgerScroll = withSink $ \sink -> do
     sink (ScrollMetrics measured)
 
 -- | Focus one element by DOM id after the next render.
-focusElement :: MisoString -> Effect () () Model Action
-focusElement domId = withSink $ \_ -> focus domId
+focusElement :: Text -> Effect () () Model Action
+focusElement domId = withSink $ \_ -> focus (ms domId)
 
 {- | Focus an input after the VDOM patch that creates the dialog has run.
 Focusing in the same update runs before the element exists, which left focus
 on the body behind the palette and the add dialog.
 -}
-focusElementDelayed :: MisoString -> Effect () () Model Action
+focusElementDelayed :: Text -> Effect () () Model Action
 focusElementDelayed domId = withSink $ \_ -> do
-    _ <- jsgf "setTimeout" (asyncCallback (focus domId), 60 :: Int)
+    _ <- jsgf "setTimeout" (asyncCallback (focus (ms domId)), 60 :: Int)
     pure ()
 
-{- | The caret offset of a textarea/input after an input event, reported as an
-action. Reading the DOM is the only way to know where the caret is; the caller
-computes whatever it needs from the offset.
+{- | Read the note editor's caret after the input event that changed the text.
+Reading the DOM is the only way to know where the caret is; the reducer then
+computes the wikilink completion query from the new text and offset.
 -}
-readSelectionStart :: DOMRef -> (Int -> Action) -> Effect () () Model Action
-readSelectionStart domRef onCursor = withSink $ \sink -> do
-    selection <- fromMaybe 0 <$> (fromJSVal =<< getProperty domRef "selectionStart")
-    sink (onCursor (round (selection :: Double)))
+readNoteCursor :: Effect () () Model Action
+readNoteCursor = withSink $ \sink -> do
+    document <- jsg ("document" :: MisoString)
+    element <- (document # ("getElementById" :: MisoString)) ("note-editor" :: MisoString)
+    missing <- isNull element
+    unless missing $ do
+        selection <- fromMaybe 0 <$> (fromJSVal =<< getProperty element "selectionStart")
+        sink (NoteCursorRead (round (selection :: Double)))
 
 -- | Put the caret back after the update rewrote the note text.
 setNoteCursor :: Int -> Effect () () Model Action
@@ -398,21 +412,21 @@ readReaderSelection = withSink $ \sink -> do
     sink (ReaderSelectionFound selection)
 
 -- | Open the native file picker of the import panel.
-triggerFileInput :: MisoString -> Effect () () Model Action
+triggerFileInput :: Text -> Effect () () Model Action
 triggerFileInput domId = withSink $ \_ -> do
-    element <- getElementById domId
+    element <- getElementById (ms domId)
     click () element
 
 {- | Copy text through the promise-based bridge. The toast reports the real
 result, so a one-time secret is never announced as copied when the clipboard
 write was denied.
 -}
-copyText :: MisoString -> MisoString -> MisoString -> Effect () () Model Action
+copyText :: Text -> Text -> Text -> Effect () () Model Action
 copyText value successMessage failureMessage = withSink $ \sink -> do
     _ <-
         jsgf
             "ezaCopy"
-            ( value
+            ( ms value
             , asyncCallback1
                 ( \jsValue -> do
                     copied <- fromMaybe False <$> (fromJSVal jsValue :: IO (Maybe Bool))
@@ -440,7 +454,7 @@ replaceRoute route = withSink $ \_ -> replaceURI (toURI route)
 {- | Record the selected account tab in the URL fragment without a history
 entry, so the back button still leaves the page rather than walking the tabs.
 -}
-selectAccountTab :: MisoString -> Effect () () Model Action
+selectAccountTab :: Text -> Effect () () Model Action
 selectAccountTab slug = withSink $ \_ -> do
     window <- jsg ("window" :: MisoString)
     history <- window ! "history"
@@ -454,7 +468,7 @@ selectAccountTab slug = withSink $ \_ -> do
             _ -> "/account"
     stateValue <- toJSVal (Null :: Value)
     titleValue <- toJSVal ("" :: MisoString)
-    urlValue <- toJSVal (ms (pathname <> "#" <> (fromMisoString slug :: String)))
+    urlValue <- toJSVal (ms (pathname <> "#" <> (T.unpack slug)))
     _ <- history # ("replaceState" :: MisoString) $ (stateValue, titleValue, urlValue)
     pure ()
 
@@ -470,10 +484,10 @@ scrollLedger :: Int -> Effect () () Model Action
 scrollLedger pixels = withSink $ \_ -> void $ jsgf "ezaScrollLedger" (pixels :: Int)
 
 -- | Narrow sheets render every row, so the browser can find the row by id.
-scrollRowIntoView :: MisoString -> Effect () () Model Action
+scrollRowIntoView :: Text -> Effect () () Model Action
 scrollRowIntoView domId = withSink $ \_ -> do
     document <- jsg ("document" :: MisoString)
-    el <- (document # ("getElementById" :: MisoString)) domId
+    el <- (document # ("getElementById" :: MisoString)) (ms domId)
     _ <- (el # ("scrollIntoView" :: MisoString)) ()
     pure ()
 
@@ -608,4 +622,4 @@ readTheme = do
     holder <- jsg "EzaTheme"
     value <- holder # "get" $ ()
     themeM <- fromJSVal value
-    pure $ maybe ThemeLight (themeOfMiso . fromMisoString) (themeM :: Maybe MisoString)
+    pure $ maybe ThemeLight (themeOfText . fromMisoString) (themeM :: Maybe MisoString)

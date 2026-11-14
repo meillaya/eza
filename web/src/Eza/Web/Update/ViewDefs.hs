@@ -20,17 +20,15 @@ module Eza.Web.Update.ViewDefs (
 
 import Data.Maybe
 import Data.Text (Text)
-import qualified Data.Text as T
 import qualified Eza.Web.Logic.Route as ClientRoute
-
-import Miso
 
 import qualified Eza.GraphMatch as GM
 import Eza.SearchQuery
 import Eza.Types
 import Eza.User
 import qualified Eza.View as EV
-import Eza.Web.Model
+import Eza.Web.Logic.Model
+import Eza.Web.Logic.Route (Route (..))
 import Eza.Webhook
 
 findViewBySlug :: Text -> [EV.View] -> Maybe EV.View
@@ -56,7 +54,7 @@ applyGraphView view m = case EV.vDefinition view of
         m
             { mGraphViewId = Just (EV.vId view)
             , mGraphViewRev = EV.vUpdatedAt view
-            , mGraphFilter = ms (T.unpack (EV.gvdQuery definition))
+            , mGraphFilter = EV.gvdQuery definition
             , mGraphTagsShown = EV.gvdTagsShown definition
             , mGraphLabelMode = EV.gvdLabelMode definition
             , mGraphPreset = EV.gvdLayoutPreset definition
@@ -75,7 +73,7 @@ currentGraphDefinition :: Model -> EV.ViewDefinition
 currentGraphDefinition m =
     EV.GraphDefinition
         EV.GraphViewDefinition
-            { EV.gvdQuery = fromMisoString (mGraphFilter m)
+            { EV.gvdQuery = mGraphFilter m
             , EV.gvdTagsShown = mGraphTagsShown m
             , EV.gvdLabelMode = mGraphLabelMode m
             , EV.gvdLayoutPreset = mGraphPreset m
@@ -87,7 +85,7 @@ currentLedgerDefinition :: Model -> EV.ViewDefinition
 currentLedgerDefinition m =
     EV.LedgerDefinition
         EV.LedgerViewDefinition
-            { EV.lvdQuery = fromMisoString (mQ m)
+            { EV.lvdQuery = mQ m
             , EV.lvdSort = case mSort m of
                 "added" -> EV.SortAdded
                 "opened" -> EV.SortOpened

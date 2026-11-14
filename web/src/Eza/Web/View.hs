@@ -14,10 +14,10 @@ import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Eza.View (ViewKind (..))
+import qualified Eza.Web.Render.Event as HE
 import Miso
 import qualified Miso.CSS as C
 import qualified Miso.Html as H
-import qualified Miso.Html.Event as HE
 import qualified Miso.Html.Property as HP
 import qualified Miso.JSON as MJ
 import Text.Read (readMaybe)
@@ -1464,7 +1464,7 @@ duplicateNote m = case duplicateId m of
                 ]
             ]
 
-saveField :: MisoString -> MisoString -> MisoString -> MisoString -> (MisoString -> Action) -> Bool -> View () () Model Action
+saveField :: MisoString -> MisoString -> MisoString -> MisoString -> (Text -> Action) -> Bool -> View () () Model Action
 saveField label domId inputType value onInput wide =
     H.div_
         [HP.class_ "save-field"]
@@ -1554,7 +1554,7 @@ toastView toast =
         , HP.role_ "status"
         , HP.data_ "testid" "toast"
         ]
-        [ H.span_ [] [text (toastMessage toast)]
+        [ H.span_ [] [text (ms (toastMessage toast))]
         , H.button_
             [ HP.class_ "toast__close"
             , HP.type_ "button"
@@ -1676,7 +1676,7 @@ savedSearchShareFields m =
                 , HE.onChange
                     ( \raw ->
                         ShareExpirySelected
-                            (fromMaybe 30 (readMaybe (fromMisoString raw :: String)))
+                            (fromMaybe 30 (readMaybe (T.unpack raw)))
                     )
                 ]
                 (map (savedShareExpiryOption (mShareExpiryDays m)) savedShareExpiryChoices)
@@ -1801,7 +1801,7 @@ addDialog m =
         | isJust (duplicateId model) = "duplicate"
         | otherwise = "idle"
 
-addField :: MisoString -> MisoString -> MisoString -> MisoString -> (MisoString -> Action) -> MisoString -> View () () Model Action
+addField :: MisoString -> MisoString -> MisoString -> MisoString -> (Text -> Action) -> MisoString -> View () () Model Action
 addField label domId inputType value onInput extraClass =
     H.div_
         [HP.class_ ("field" <> extraClass)]
@@ -2029,15 +2029,15 @@ hasTerm :: Model -> Text -> Bool
 hasTerm m term = T.toLower term `elem` map T.toLower (T.words (qText m))
 
 -- | Append a term, or remove it when it is already there.
-toggleTerm :: Model -> Text -> MisoString
+toggleTerm :: Model -> Text -> Text
 toggleTerm m term =
     let query = qText m
         words' = T.words query
         needle = T.toLower term
         remaining = dropFirst (\word -> T.toLower word == needle) words'
      in if hasTerm m term
-            then ms (T.unpack (T.unwords remaining))
-            else ms (T.unpack (T.strip (query <> " " <> term)))
+            then T.unwords remaining
+            else T.strip (query <> " " <> term)
 
 dropFirst :: (a -> Bool) -> [a] -> [a]
 dropFirst _ [] = []
@@ -2064,7 +2064,7 @@ queryChips m = map tagFilterChip (mTagsFilter m) ++ map tokenChip (tokensOf m)
             [ HP.class_ (chipClass token)
             , HP.type_ "button"
             , HP.title_ "Remove this token"
-            , HE.onClick (SearchInput (ms (T.unpack (removeToken token (qText m)))))
+            , HE.onClick (SearchInput (removeToken token (qText m)))
             ]
             (chipBody token)
 

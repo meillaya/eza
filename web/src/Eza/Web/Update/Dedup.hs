@@ -20,16 +20,17 @@ import Data.Text (Text)
 
 import Miso
 
+import qualified Data.Text as T
 import Eza.Types
 import Eza.Web.Api
 import Eza.Web.Error
 import Eza.Web.Interpreter
-import Eza.Web.Model
+import Eza.Web.Logic.Model
 import Eza.Web.Update.Common (dedupFirstPage, putModel, refreshStats)
 
-accessionLabel :: Int -> MisoString
+accessionLabel :: Int -> Text
 accessionLabel bookmarkId =
-    ms ("EA-" <> replicate (max 0 (5 - length raw)) '0' <> raw)
+    "EA-" <> T.pack (replicate (max 0 (5 - length raw)) '0' <> raw)
   where
     raw = show bookmarkId
 
@@ -121,7 +122,7 @@ handle = \case
                     { mDedupLoading = False
                     , mDedupMoreBusy = False
                     , mDedupBusy = False
-                    , mDedupError = Just (ms (aeMessage err))
+                    , mDedupError = Just ((aeMessage err))
                     }
             )
         handleApiError err
@@ -211,12 +212,10 @@ handle = \case
                     }
             )
         notify
-            ( ms
-                ( "Merged "
-                    <> show merged
-                    <> (if merged == 1 then " duplicate record into " else " duplicate records into ")
-                    <> fromMisoString (accessionLabel keeper)
-                )
+            ( "Merged "
+                <> T.pack (show merged)
+                <> (if merged == 1 then " duplicate record into " else " duplicate records into ")
+                <> accessionLabel keeper
             )
             ToastOk
         refreshStats
@@ -241,7 +240,7 @@ handle = \case
                     }
             )
         notify
-            ( ms
+            ( T.pack
                 ( "Merged "
                     <> show (dmGroups report)
                     <> " URL duplicate group"

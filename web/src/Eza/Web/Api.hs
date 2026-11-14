@@ -110,7 +110,7 @@ module Eza.Web.Api (
     bookmarkSnapshotUrl,
 ) where
 
-import Data.Aeson (FromJSON (..), Result (..), ToJSON, Value (..), fromJSON, object, toJSON, withObject, (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), ToJSON, Value (..), object, toJSON, withObject, (.:), (.:?), (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
@@ -140,7 +140,6 @@ import Eza.Types (
     DedupReport,
     GraphData (..),
     Highlight,
-    ImportReport,
     LibraryStats (..),
     SavedSearch,
     SearchPage,
@@ -160,6 +159,7 @@ import Eza.Web.Logic.Api (
     requestPath,
  )
 import qualified Eza.Web.Logic.Route as ClientRoute
+import Eza.Web.Logic.Wire (ImportResponse (..), ListParams (..), WebhookTest (..), defaultListParams)
 import Eza.Webhook (DeliveryView, Webhook, WebhookInput (..))
 
 -- | Convenience alias: the API module is polymorphic in the app model/action.
@@ -426,27 +426,6 @@ apiDeleteRequest request onOk onErr =
 
 -- ------------------------------------------------------------- list query --
 
-data ListParams = ListParams
-    { lpQ :: MisoString
-    , lpTags :: [Text]
-    , lpSort :: Text
-    , lpUnreadOnly :: Bool
-    , lpOffset :: Int
-    , lpLimit :: Int
-    }
-    deriving (Eq, Show)
-
-defaultListParams :: ListParams
-defaultListParams =
-    ListParams
-        { lpQ = ""
-        , lpTags = []
-        , lpSort = "created"
-        , lpUnreadOnly = False
-        , lpOffset = 0
-        , lpLimit = 60
-        }
-
 {- | Read a client request through the native request model. Both the HTTP
 method and the URL come from the shared route truth, so a read fetcher cannot
 drift from the endpoint it names.
@@ -481,7 +460,7 @@ requestMethodText = fromText . requestMethod
 listQuery :: ListParams -> BookmarkListQuery
 listQuery lp =
     BookmarkListQuery
-        { blqQ = toText (lpQ lp)
+        { blqQ = lpQ lp
         , blqTags = lpTags lp
         , blqSort = lpSort lp
         , blqUnreadOnly = lpUnreadOnly lp
@@ -674,27 +653,6 @@ decodeStatsAt endpoint value =
 answer with the summary counts @inserted@, @found@ and @existing@; the full
 'Eza.Types.ImportReport' is only present for the Netscape file flow.
 -}
-data ImportResponse = ImportResponse
-    { imrInserted :: Int
-    , imrFound :: Int
-    , imrExisting :: Int
-    , imrReport :: Maybe ImportReport
-    }
-    deriving (Eq, Show)
-
-instance FromJSON ImportResponse where
-    parseJSON value = do
-        (inserted, found, existing) <-
-            withObject "import response" (\o -> (,,) <$> o .: "inserted" <*> o .: "found" <*> o .: "existing") value
-        pure
-            ImportResponse
-                { imrInserted = inserted
-                , imrFound = found
-                , imrExisting = existing
-                , imrReport = case fromJSON value :: Result ImportReport of
-                    Success report -> Just report
-                    Error _ -> Nothing
-                }
 
 -- ------------------------------------------------------------------ reads --
 
@@ -740,12 +698,12 @@ fetchBacklinks bid onOk onErr =
     flatten bks = bksLinked bks ++ bksUnlinked bks
 
 fetchAutocomplete ::
-    MisoString ->
+    Text ->
     ([BookmarkSummary] -> action) ->
     (ApiError -> action) ->
     Eff model action
 fetchAutocomplete q onOk onErr =
-    requestGet (ApiAutocomplete (toText q)) (\url value -> decodeListFieldAt url "items" value) onOk onErr
+    requestGet (ApiAutocomplete q) (\url value -> decodeListFieldAt url "items" value) onOk onErr
 
 fetchGraph ::
     (GraphData -> action) ->
@@ -809,20 +767,6 @@ deleteView slug = apiDeleteRequest (ApiDeleteView slug)
 token gets 403 @session_required@. The create response is the only place the
 64-hex secret ever appears.
 -}
-data WebhookTest = WebhookTest
-    { wtOk :: Bool
-    , wtStatus :: Maybe Int
-    , wtError :: Text
-    }
-    deriving (Eq, Show)
-
-instance FromJSON WebhookTest where
-    parseJSON = withObject "webhook test" $ \o ->
-        WebhookTest
-            <$> o .: "ok"
-            <*> o .:? "status"
-            <*> o .: "error"
-
 fetchWebhooks :: ([Webhook] -> action) -> (ApiError -> action) -> Eff model action
 fetchWebhooks onOk onErr =
     requestGet ApiWebhooks (\url value -> decodeListFieldAt url "webhooks" value) onOk onErr
@@ -1004,8 +948,8 @@ fetchStats onOk onErr =
 -- ----------------------------------------------------------------- writes --
 
 createBookmark ::
-    MisoString ->
-    MisoString ->
+    Text ->
+    Text ->
     [Text] ->
     (Int -> action) ->
     (ApiError -> action) ->
@@ -1025,8 +969,8 @@ createBookmark url title tags onOk onErr =
         onOk
         onErr
 quickSave ::
-    MisoString ->
-    MisoString ->
+    Text ->
+    Text ->
     (Int -> Bool -> action) ->
     (ApiError -> action) ->
     Eff model action
@@ -1091,8 +1035,8 @@ bookmarkAction bid verb =
     apiWriteRequest (ApiBookmarkAction bid verb) (Nothing :: Maybe Value)
 
 saveSavedSearch ::
-    MisoString ->
-    MisoString ->
+    Text ->
+    Text ->
     [Text] ->
     (Int -> action) ->
     (ApiError -> action) ->
@@ -1541,16 +1485,16 @@ testRule field patternText onOk onErr =
         (\response -> onOk (rtrMatches response) (rtrBookmarkIds response))
         onErr
 
-exportUrl :: MisoString
-exportUrl = requestUrl ApiExport
+exportUrl :: Text
+exportUrl = toText (requestUrl ApiExport)
 
 -- | The JSON export download the views page links to.
-exportJsonUrl :: MisoString
-exportJsonUrl = requestUrl ApiExport <> "?format=json"
+exportJsonUrl :: Text
+exportJsonUrl = toText (requestUrl ApiExport) <> "?format=json"
 
-notesExportUrl :: MisoString
-notesExportUrl = requestUrl ApiExportNotes
+notesExportUrl :: Text
+notesExportUrl = toText (requestUrl ApiExportNotes)
 
 -- | The reading-copy download link for one record (a GET navigation).
-bookmarkSnapshotUrl :: Int -> MisoString
-bookmarkSnapshotUrl bookmarkId = requestUrl (ApiBookmarkAction bookmarkId "snapshot")
+bookmarkSnapshotUrl :: Int -> Text
+bookmarkSnapshotUrl bookmarkId = toText (requestUrl (ApiBookmarkAction bookmarkId "snapshot"))

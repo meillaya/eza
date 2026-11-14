@@ -7,7 +7,8 @@ module Main (main) where
 import qualified Data.Map.Strict as M
 import Miso
 
-import Eza.Web.Model (Action (..), Model, initialModel)
+import Eza.Web.Logic.Model (Action (..), Model, initialModel)
+import Eza.Web.Model ()
 import Eza.Web.Update (subscriptions, updateModel)
 import Eza.Web.View (viewModel)
 

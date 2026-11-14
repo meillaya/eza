@@ -25,7 +25,8 @@ import qualified Eza.View as EV
 import Eza.Web.Api
 import Eza.Web.Error
 import Eza.Web.Interpreter
-import Eza.Web.Model
+import Eza.Web.Logic.Model
+import Eza.Web.Logic.Route (Route (..))
 import {-# SOURCE #-} Eza.Web.Update (updateModel)
 import Eza.Web.Update.Common (putModel)
 import Eza.Web.Update.Graph (applyGraphScope, fitActiveView)
@@ -51,7 +52,7 @@ openSavedViewNow view = case EV.vDefinition view of
         putModel
             ( \x ->
                 x
-                    { mQ = ms (T.unpack (EV.lvdQuery definition))
+                    { mQ = EV.lvdQuery definition
                     , mSort = EV.ledgerSortText (EV.lvdSort definition)
                     , mTagsFilter = []
                     , mUnreadOnly = False
@@ -94,7 +95,7 @@ handle = \case
                 Nothing -> pure ()
         putModel recomputeGraphColors
     ViewsFailed err ->
-        putModel (\x -> x{mViewsLoading = False, mViewsError = Just (ms (aeMessage err))})
+        putModel (\x -> x{mViewsLoading = False, mViewsError = Just ((aeMessage err))})
     ViewSaved view -> do
         notify "View saved" ToastOk
         putModel
@@ -134,7 +135,7 @@ handle = \case
         putModel
             ( \x ->
                 let ui = mViewUi x
-                 in x{mViewUi = ui{vuBusy = False, vuError = Just (ms (aeMessage err))}}
+                 in x{mViewUi = ui{vuBusy = False, vuError = Just ((aeMessage err))}}
             )
     ViewDeleted slug -> do
         notify "View deleted" ToastOk
@@ -157,11 +158,11 @@ handle = \case
             )
         fetchViews ViewsLoaded ViewsFailed
     ViewDeleteFailed err ->
-        putModel (\x -> x{mViewsError = Just (ms (aeMessage err))})
+        putModel (\x -> x{mViewsError = Just ((aeMessage err))})
     ViewOpenView slug -> openSavedView slug
     ViewFetched view -> openSavedViewNow view
     ViewFetchFailed err ->
-        putModel (\x -> x{mViewsError = Just (ms (aeMessage err))})
+        putModel (\x -> x{mViewsError = Just ((aeMessage err))})
     ViewDefaultView slug -> do
         putModel (\x -> x{mViewUi = (mViewUi x){vuBusy = True, vuError = Nothing}})
         patchView slug (ViewPatch Nothing Nothing Nothing (Just True)) ViewSaved ViewSaveFailed
@@ -185,7 +186,7 @@ handle = \case
                 putModel
                     ( \x ->
                         let ui = mViewUi x
-                         in x{mViewUi = ui{vuRename = Just (EV.vSlug view, ms (T.unpack (EV.vName view)))}}
+                         in x{mViewUi = ui{vuRename = Just (EV.vSlug view, EV.vName view)}}
                     )
             Nothing -> pure ()
     ViewRenameInput name ->
@@ -198,9 +199,9 @@ handle = \case
         m <- get
         case vuRename (mViewUi m) of
             Just (slug, name)
-                | not (T.null (T.strip (fromMisoString name))) -> do
+                | not (T.null (T.strip name)) -> do
                     putModel (\x -> x{mViewUi = (mViewUi x){vuBusy = True, vuError = Nothing}})
-                    patchView slug (ViewPatch (Just (T.strip (fromMisoString name))) Nothing Nothing Nothing) ViewSaved ViewSaveFailed
+                    patchView slug (ViewPatch (Just (T.strip name)) Nothing Nothing Nothing) ViewSaved ViewSaveFailed
             _ -> pure ()
     ViewDuplicateView slug -> do
         m <- get
@@ -232,7 +233,7 @@ handle = \case
     ViewSaveSubmit -> do
         m <- get
         let ui = mViewUi m
-            name = T.strip (fromMisoString (vuSaveName ui))
+            name = T.strip ((vuSaveName ui))
             definition = case vuSaveKind ui of
                 EV.GraphKind -> currentGraphDefinition m
                 EV.LedgerKind -> currentLedgerDefinition m
@@ -250,10 +251,10 @@ handle = \case
     ViewImportSubmit -> do
         m <- get
         let ui = mViewUi m
-            raw = TE.encodeUtf8 (T.pack (fromMisoString (vuImportText ui)))
+            raw = TE.encodeUtf8 (vuImportText ui)
         case Aeson.eitherDecodeStrict' raw :: Either String EV.ViewInput of
             Left message ->
-                putModel (\x -> x{mViewUi = (mViewUi x){vuError = Just (ms message)}})
+                putModel (\x -> x{mViewUi = (mViewUi x){vuError = Just (T.pack message)}})
             Right input -> do
                 putModel (\x -> x{mViewUi = (mViewUi x){vuBusy = True, vuError = Nothing}})
                 createView input ViewSaved ViewSaveFailed
@@ -277,7 +278,7 @@ handle = \case
         putModel (\x -> x{mGraphGroupDrafts = removeAt index (mGraphGroupDrafts x), mGraphGroupDirty = True, mGraphGroupEditor = True})
         putModel recomputeGraphColors
     ViewGroupField index field value -> do
-        let valueText = fromMisoString value
+        let valueText = value
             update group = case field of
                 GroupName -> group{EV.cgName = valueText}
                 GroupQuery -> group{EV.cgQuery = valueText}

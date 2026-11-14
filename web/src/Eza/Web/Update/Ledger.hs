@@ -16,7 +16,7 @@ import Eza.Web.Api
 import Eza.Web.Error
 import Eza.Web.Interpreter
 import qualified Eza.Web.Logic.Ledger as Ledger
-import Eza.Web.Model
+import Eza.Web.Logic.Model
 import Eza.Web.Update.Common (cancelSelectAllPaging, continueScrollRestore, fireTimer, listParams, putModel, refreshStats, refreshTags, reloadList, resetShellForReload, resetShellForSearch, settleLedgerSelection, splitTags)
 import Eza.Web.Update.Detail (reloadDetail)
 
@@ -26,7 +26,7 @@ handle = \case
     StatsFailed requestId err -> runLedgerAction (Ledger.StatsFailed requestId (aeMessage err))
     SearchInput query -> do
         putModel resetShellForSearch
-        runLedgerAction (Ledger.SearchInput (fromMisoString query))
+        runLedgerAction (Ledger.SearchInput query)
     SearchCommit -> reloadList
     TimerRegistered timer -> putModel (\m -> m{mDebounce = Just timer})
     TimerFired timerId -> fireTimer timerId
@@ -68,7 +68,7 @@ handle = \case
                 | not (mConfirmMarkAll m) -> do
                     putModel (\x -> x{mConfirmMarkAll = True})
                     notify
-                        ( ms
+                        ( T.pack
                             ( "Mark "
                                 <> show (length ids)
                                 <> " loaded unread record"
@@ -83,7 +83,7 @@ handle = \case
     MarkAllDone updated -> do
         putModel (\m -> m{mBulkBusy = False, mConfirmMarkAll = False})
         notify
-            ( ms
+            ( T.pack
                 ( "Marked "
                     <> show updated
                     <> " record"
@@ -102,7 +102,7 @@ handle = \case
         putModel
             ( \m ->
                 m
-                    { mQ = ms (ssQ saved)
+                    { mQ = (ssQ saved)
                     , mTagsFilter = if null (ssTags saved) then mTagsFilter m else ssTags saved
                     }
             )
@@ -111,8 +111,8 @@ handle = \case
     -- add modal -------------------------------------------------------------
     SavedSearchSave -> do
         m <- get
-        let queryText = T.strip (fromMisoString (mQ m))
-            explicitName = T.strip (fromMisoString (mSavedName m))
+        let queryText = T.strip ((mQ m))
+            explicitName = T.strip ((mSavedName m))
         if T.null queryText && null (mTagsFilter m)
             then notify "Type a search or choose a tag before saving it" ToastInfo
             else do
@@ -225,7 +225,7 @@ handle = \case
                     putModel (\x -> (cancelSelectAllPaging x){mSelection = capped})
                     if IS.size capped >= 10000
                         then notify "Selected the first 10,000 bookmarks" ToastInfo
-                        else notify (ms ("Selected " <> show (IS.size capped) <> " bookmarks")) ToastOk
+                        else notify (T.pack ("Selected " <> show (IS.size capped) <> " bookmarks")) ToastOk
     SelectPageFailed selectEpoch err -> do
         m <- get
         when (requestIsCurrent (mSelectEpoch m) selectEpoch) $ do
@@ -284,7 +284,7 @@ handle = \case
                     , mConfirmBulkDelete = False
                     }
             )
-        notify (ms ("Updated " <> show updated <> " bookmarks")) ToastOk
+        notify (T.pack ("Updated " <> show updated <> " bookmarks")) ToastOk
         reloadList
         refreshTags
         refreshStats

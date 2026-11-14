@@ -8,10 +8,10 @@ import Data.List (find, sortOn)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Eza.Web.Render.Event as HE
 import Miso
 import qualified Miso.CSS as C
 import qualified Miso.Html as H
-import qualified Miso.Html.Event as HE
 import qualified Miso.Html.Property as HP
 import Text.Read (readMaybe)
 
@@ -608,7 +608,7 @@ noteEditor m detail =
                     , HP.placeholder_ "Write in markdown. Type [[ to link another record."
                     , HP.spellcheck_ False
                     , HP.value_ (mEditNote m)
-                    , HE.onInputWith NoteChanged
+                    , HE.onInput NoteChanged
                     ]
                 ]
     previewViews model
@@ -1023,7 +1023,7 @@ shareFields m =
                 , HE.onChange
                     ( \raw ->
                         ShareExpirySelected
-                            (fromMaybe 30 (readMaybe (fromMisoString raw :: String)))
+                            (fromMaybe 30 (readMaybe (T.unpack raw)))
                     )
                 ]
                 (map (expiryOption (mShareExpiryDays m)) expiryDayChoices)
@@ -1358,7 +1358,7 @@ snapshotDialog m detail
             ]
 
 snapshotUrl :: BookmarkDetail -> MisoString
-snapshotUrl detail = bookmarkSnapshotUrl (bdId detail)
+snapshotUrl detail = ms (bookmarkSnapshotUrl (bdId detail))
 
 -- --------------------------------------------------------------- helpers --
 

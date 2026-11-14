@@ -25,11 +25,17 @@ library
   hs-source-dirs:   src
   exposed-modules:  Eza.Web.Logic.Api
                     Eza.Web.Logic.Effect
+                    Eza.Web.Logic.Error
+                    Eza.Web.Logic.Graph
                     Eza.Web.Logic.Input
                     Eza.Web.Logic.Ledger
+                    Eza.Web.Logic.Model
                     Eza.Web.Logic.Route
+                    Eza.Web.Logic.Wire
   build-depends:    base >=4.18 && <5
+                  , aeson
                   , bytestring
+                  , containers
                   , eza-core
                   , text
 
@@ -41,9 +47,11 @@ test-suite eza-web-logic-test
   other-modules:    ApiSpec
                     HelperSpec
                     LedgerSpec
+                    ModelSpec
                     PuritySpec
                     RouteSpec
   build-depends:    base >=4.18 && <5
+                  , aeson
                   , directory
                   , eza-core
                   , eza-web-logic

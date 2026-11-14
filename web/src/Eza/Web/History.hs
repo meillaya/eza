@@ -10,10 +10,10 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 
+import qualified Eza.Web.Render.Event as HE
 import Miso
 import qualified Miso.CSS as C
 import qualified Miso.Html as H
-import qualified Miso.Html.Event as HE
 import qualified Miso.Html.Property as HP
 
 import Eza.Types (LibraryStats (..))

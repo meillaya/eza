@@ -12,7 +12,7 @@ import Eza.Types
 import Eza.Web.Api
 import Eza.Web.Error
 import Eza.Web.Interpreter
-import Eza.Web.Model
+import Eza.Web.Logic.Model
 import Eza.Web.Update.Common (dedupFirstPage, putModel, refreshStats, refreshTags, reloadList, toggleMember)
 
 handle :: Action -> Effect () () Model Action
@@ -28,7 +28,7 @@ handle = \case
                     }
             )
     PruneFailed err -> do
-        putModel (\m -> m{mPruneError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mPruneError = Just ((aeMessage err))})
         handleApiError err
     PruneToggle bookmarkId -> putModel (\m -> m{mPruneSel = toggleMember bookmarkId (mPruneSel m)})
     PruneAll -> do
@@ -50,7 +50,7 @@ handle = \case
     PruneCancel -> putModel (\m -> m{mConfirmPrune = False})
     PruneDone pruned -> do
         putModel (\m -> m{mMaintBusy = False})
-        notify (ms ("Pruned " <> show pruned <> " record(s). Undo is available")) ToastOk
+        notify (T.pack ("Pruned " <> show pruned <> " record(s). Undo is available")) ToastOk
         fetchPruneCandidates PruneLoaded PruneFailed
         refreshTags
         refreshStats
@@ -62,7 +62,7 @@ handle = \case
     DeadCheckDone checked newlyDead totalDead -> do
         putModel (\m -> m{mMaintBusy = False, mCheckedCount = Just checked, mDeadCount = Just totalDead})
         notify
-            (ms ("Checked " <> show checked <> " links, " <> show newlyDead <> " newly dead, " <> show totalDead <> " marked dead"))
+            (T.pack ("Checked " <> show checked <> " links, " <> show newlyDead <> " newly dead, " <> show totalDead <> " marked dead"))
             ToastOk
         reloadList
         refreshStats
@@ -72,14 +72,14 @@ handle = \case
     UndoEntriesLoaded entries ->
         putModel (\m -> m{mUndoEntries = entries, mUndoLoading = False, mUndoError = Nothing})
     UndoEntriesFailed err ->
-        putModel (\m -> m{mUndoLoading = False, mUndoError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mUndoLoading = False, mUndoError = Just ((aeMessage err))})
     UndoPreviewRequest snapshotId -> do
         putModel (\m -> m{mUndoPreview = Nothing, mUndoPreviewLoading = True, mUndoPreviewError = Nothing})
         fetchUndoPreview snapshotId UndoPreviewLoaded UndoPreviewFailed
     UndoPreviewLoaded preview ->
         putModel (\m -> m{mUndoPreview = Just preview, mUndoPreviewLoading = False, mUndoPreviewError = Nothing})
     UndoPreviewFailed err ->
-        putModel (\m -> m{mUndoPreviewLoading = False, mUndoPreviewError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mUndoPreviewLoading = False, mUndoPreviewError = Just ((aeMessage err))})
     UndoPreviewClose ->
         putModel (\m -> m{mUndoPreview = Nothing, mUndoPreviewLoading = False, mUndoPreviewError = Nothing})
     UndoConfirm snapshotId -> do
@@ -97,7 +97,7 @@ handle = \case
                     }
             )
         notify
-            (ms ("Undid " <> T.unpack (urOp result) <> "; restored " <> show (urRestored result) <> " row(s)"))
+            ("Undid " <> urOp result <> "; restored " <> T.pack (show (urRestored result)) <> " row(s)")
             ToastOk
         fetchUndoEntries UndoEntriesLoaded UndoEntriesFailed
         fetchPruneCandidates PruneLoaded PruneFailed
@@ -105,7 +105,7 @@ handle = \case
         reloadList
         refreshStats
     UndoFailed err -> do
-        putModel (\m -> m{mUndoBusy = False, mUndoPreviewError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mUndoBusy = False, mUndoPreviewError = Just ((aeMessage err))})
     MaintFailed err -> do
         putModel (\m -> m{mMaintBusy = False})
         handleApiError err

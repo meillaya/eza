@@ -23,8 +23,7 @@ module Eza.Web.Graph (
     module Eza.GraphLayout,
 
     -- * Viewport
-    GraphView (..),
-    initialGraphView,
+    module Eza.Web.Logic.Graph,
     fitView,
     focusView,
     resizeView,
@@ -47,12 +46,7 @@ module Eza.Web.Graph (
     labelCount,
 
     -- * Matching
-    GraphMatches (..),
-    emptyMatches,
     matchGraph,
-
-    -- * Dragging
-    GraphDrag (..),
 
     -- * Painting
     GraphDraw (..),
@@ -79,8 +73,10 @@ import Miso.Canvas (Canvas)
 import qualified Miso.Canvas as Canvas
 
 import Eza.GraphLayout
+
 import Eza.Types (GraphRecord (..))
 import Eza.View (LabelMode (..))
+import Eza.Web.Logic.Graph (GraphDrag (..), GraphMatches (..), GraphView (..), emptyMatches)
 
 -- --------------------------------------------------------------- viewport ---
 
@@ -88,18 +84,6 @@ import Eza.View (LabelMode (..))
 'gvFit' is the scale at which the whole graph fits the plate; the zoom
 readout and the vector threshold are relative to it.
 -}
-data GraphView = GraphView
-    { gvWidth :: Double
-    , gvHeight :: Double
-    , gvDpr :: Double
-    , gvScale :: Double
-    , gvPan :: (Double, Double)
-    , gvFit :: Double
-    }
-    deriving (Eq, Show)
-
-initialGraphView :: GraphView
-initialGraphView = GraphView 920 480 1 1 (0, 0) 1
 
 -- | The starting view for a layout inside a measured plate.
 fitView :: GraphLayout -> Double -> Double -> Double -> GraphView
@@ -212,17 +196,6 @@ neighbourhood layout key = IM.fromList [(neighbour, ()) | neighbour <- neighbour
 {- | The filter result. The record set, tag set and top ids are filled by one
 scan over the records; nothing is sorted per frame.
 -}
-data GraphMatches = GraphMatches
-    { gmActive :: Bool
-    , gmIds :: IS.IntSet
-    , gmTop :: [Int]
-    , gmCount :: Int
-    , gmTags :: IS.IntSet
-    }
-    deriving (Eq, Show)
-
-emptyMatches :: GraphMatches
-emptyMatches = GraphMatches False IS.empty [] 0 IS.empty
 
 {- | Match records by title, domain, or tag name. Tokens are ANDed and lowered
 once. The top list keeps the eight best records for the results panel.
@@ -276,12 +249,6 @@ matchGraph rawQuery layout
 {- | One line of drag state. 'gdStart' is where the pointer went down, 'gdLast'
 the last move; the flag tells a click from a pan.
 -}
-data GraphDrag = GraphDrag
-    { gdStart :: (Double, Double)
-    , gdLast :: (Double, Double)
-    , gdMoved :: Bool
-    }
-    deriving (Eq, Show)
 
 -- | Everything the painter needs for one frame.
 data GraphDraw = GraphDraw

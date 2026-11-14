@@ -12,19 +12,20 @@ import qualified Data.Text as T
 
 import Miso
 
+import Data.Text (Text)
 import Eza.Account
 import Eza.Rule
 import Eza.User
 import Eza.Web.Api
 import Eza.Web.Error
 import Eza.Web.Interpreter
-import Eza.Web.Model
+import Eza.Web.Logic.Model
 import {-# SOURCE #-} Eza.Web.Update (updateModel)
 import Eza.Web.Update.Common (hasUnsaved, putModel, splitTags)
 import Eza.Web.Update.ViewDefs (isUserEnabled, upsertUser, upsertWebhook)
 import Eza.Webhook
 
-setSecurityError :: MisoString -> Effect () () Model Action
+setSecurityError :: Text -> Effect () () Model Action
 setSecurityError message =
     putModel (\m -> m{mSecurityBusy = False, mSecurityError = Just message})
 
@@ -55,8 +56,8 @@ handle = \case
                     , mAccountError = Nothing
                     , mSessions = aiSessions info
                     , mSecurityUsername =
-                        if T.null (T.strip (fromMisoString (mSecurityUsername m)))
-                            then ms (aiUsername info)
+                        if T.null (T.strip ((mSecurityUsername m)))
+                            then (aiUsername info)
                             else mSecurityUsername m
                     , mSecurity2faWanted = aiRequirePasskey info
                     , mAdminUsersLoading = null (mAdminUsers m)
@@ -65,14 +66,14 @@ handle = \case
         m0 <- get
         when (mAdminUsersLoading m0) (fetchAdminUsers AdminUsersLoaded AdminUsersFailed)
     AccountFailed err -> do
-        putModel (\m -> m{mAccountLoading = False, mAccountError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mAccountLoading = False, mAccountError = Just ((aeMessage err))})
         handleApiError err
     RecoveryRegenerate -> regenerateRecovery RecoveryLoaded AccountFailed
     RecoveryLoaded codes -> do
         putModel (\m -> m{mRecoveryCodes = codes})
         notify "New recovery codes. Store them now." ToastOk
     CredentialRenamed credentialId nickname -> do
-        renameCredential credentialId (fromMisoString nickname) (ToastAdd "Passkey renamed" ToastOk) CredentialOpFailed
+        renameCredential credentialId nickname (ToastAdd "Passkey renamed" ToastOk) CredentialOpFailed
     CredentialDeleted credentialId -> deleteCredential credentialId (CredentialRemoved credentialId) CredentialOpFailed
     CredentialRemoved _ -> do
         notify "Passkey deleted" ToastOk
@@ -86,7 +87,7 @@ handle = \case
             Nothing -> pure ()
             Just (credentialId, nickname) -> do
                 putModel (\x -> x{mCredEdit = Nothing})
-                renameCredential credentialId (fromMisoString nickname) AccountReload CredentialOpFailed
+                renameCredential credentialId nickname AccountReload CredentialOpFailed
     CredentialEditCancel -> putModel (\m -> m{mCredEdit = Nothing})
     SecurityUsernameInput value -> putModel (\m -> m{mSecurityUsername = value, mSecurityError = Nothing})
     SecurityCurrentPasswordInput value -> putModel (\m -> m{mSecurityCurrent = value, mSecurityError = Nothing})
@@ -99,8 +100,8 @@ handle = \case
         case mAccount m of
             Nothing -> setSecurityError "The account has not loaded yet."
             Just account ->
-                let wanted = T.strip (fromMisoString (mSecurityUsername m))
-                    current = fromMisoString (mSecurityCurrent m)
+                let wanted = T.strip ((mSecurityUsername m))
+                    current = (mSecurityCurrent m)
                  in if T.null wanted
                         then setSecurityError "Enter the username."
                         else
@@ -118,9 +119,9 @@ handle = \case
         case mAccount m of
             Nothing -> setSecurityError "The account has not loaded yet."
             Just account ->
-                let current = fromMisoString (mSecurityCurrent m)
-                    wanted = fromMisoString (mSecurityNew m)
-                    repeated = fromMisoString (mSecurityConfirm m)
+                let current = (mSecurityCurrent m)
+                    wanted = (mSecurityNew m)
+                    repeated = (mSecurityConfirm m)
                  in if T.length wanted < 10
                         then setSecurityError "The new password must be at least ten characters."
                         else
@@ -147,14 +148,14 @@ handle = \case
                 | mSecurity2faWanted m && null (aiCredentials account) ->
                     setSecurityError "Add a passkey before requiring one for sign-in."
                 | aiHasPassword account
-                , T.null (T.strip (fromMisoString (mSecurityCurrent m))) ->
+                , T.null (T.strip ((mSecurityCurrent m))) ->
                     setSecurityError "Enter the current password."
                 | otherwise -> do
                     putModel (\x -> x{mSecurityBusy = True, mSecurityError = Nothing})
                     setPasskeyRequirement
                         (mSecurity2faWanted m)
                         ( if aiHasPassword account
-                            then Just (fromMisoString (mSecurityCurrent m))
+                            then Just ((mSecurityCurrent m))
                             else Nothing
                         )
                         (SecuritySaved "Sign-in requirement saved")
@@ -174,7 +175,7 @@ handle = \case
         notify message ToastOk
         fetchAccount AccountLoaded AccountFailed
     SecurityFailed err -> do
-        putModel (\m -> m{mSecurityBusy = False, mSecurityError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mSecurityBusy = False, mSecurityError = Just ((aeMessage err))})
         when (aeStatus err == Just 401) (handleApiError err)
     SessionsRevokeOthers -> do
         putModel (\m -> m{mAccountLoading = True})
@@ -182,7 +183,7 @@ handle = \case
     SessionsRevoked revoked -> do
         putModel (\m -> m{mAccountLoading = False})
         notify
-            ( ms
+            ( T.pack
                 ( "Revoked "
                     <> show revoked
                     <> (if revoked == 1 then " other session" else " other sessions")
@@ -208,7 +209,7 @@ handle = \case
     TokensLoaded tokens ->
         putModel (\m -> m{mTokens = tokens, mTokensLoading = False, mTokensError = Nothing})
     TokensFailed err -> do
-        putModel (\m -> m{mTokensLoading = False, mTokensError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mTokensLoading = False, mTokensError = Just ((aeMessage err))})
         handleApiError err
     TokenNameInput value -> putModel (\m -> m{mTokenName = value})
     TokenScopeToggled scope ->
@@ -223,7 +224,7 @@ handle = \case
             )
     TokenCreate -> do
         m <- get
-        let name = T.strip (fromMisoString (mTokenName m))
+        let name = T.strip ((mTokenName m))
         if T.null name
             then notify "Give the token a name" ToastInfo
             else
@@ -251,7 +252,7 @@ handle = \case
         notify "Token revoked" ToastOk
         fetchTokens TokensLoaded TokensFailed
     TokenRevealDismiss -> putModel (\m -> m{mTokenSecret = Nothing})
-    TokenCopied raw -> copyText (ms raw) "Token copied" "Copy failed. Select the text instead"
+    TokenCopied raw -> copyText raw "Token copied" "Copy failed. Select the text instead"
     -- admin users ----------------------------------------------------------
     AdminUsersLoaded users ->
         putModel
@@ -269,7 +270,7 @@ handle = \case
                 m
                     { mAdminUsersLoading = False
                     , mAdminUsersAllowed = False
-                    , mAdminUsersError = if mAccountTab m == AccountUsers then Just (ms (aeMessage err)) else Nothing
+                    , mAdminUsersError = if mAccountTab m == AccountUsers then Just ((aeMessage err)) else Nothing
                     }
             )
         when (aeStatus err == Just 401) (handleApiError err)
@@ -280,8 +281,8 @@ handle = \case
         m <- get
         let input =
                 UserCreateInput
-                    { uciUsername = T.strip (fromMisoString (mUserName m))
-                    , uciPassword = fromMisoString (mUserPassword m)
+                    { uciUsername = T.strip ((mUserName m))
+                    , uciPassword = (mUserPassword m)
                     , uciRole = mUserRole m
                     }
         putModel (\x -> x{mUserBusy = True, mUserFormError = Nothing})
@@ -303,7 +304,7 @@ handle = \case
                     }
             )
     UserCreateFailed err -> do
-        putModel (\m -> m{mUserBusy = False, mUserFormError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mUserBusy = False, mUserFormError = Just ((aeMessage err))})
         when (aeStatus err == Just 401) (handleApiError err)
     UserToggleEnabled user ->
         patchAdminUser
@@ -329,7 +330,7 @@ handle = \case
                     }
             )
     UserUpdateFailed err ->
-        putModel (\m -> m{mUserActionError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mUserActionError = Just ((aeMessage err))})
     UserResetOpen userId ->
         putModel (\m -> m{mUserReset = Just userId, mUserResetPassword = "", mUserActionError = Nothing})
     UserResetPasswordInput value -> putModel (\m -> m{mUserResetPassword = value})
@@ -338,7 +339,7 @@ handle = \case
         case mUserReset m of
             Nothing -> pure ()
             Just userId ->
-                let password = fromMisoString (mUserResetPassword m)
+                let password = (mUserResetPassword m)
                  in if T.null (T.strip password)
                         then putModel (\x -> x{mUserActionError = Just "a temporary password is required"})
                         else resetAdminPassword userId password (UserResetDone userId password) UserResetFailed
@@ -358,8 +359,8 @@ handle = \case
             )
     UserResetCancel -> putModel (\m -> m{mUserReset = Nothing, mUserResetPassword = "", mUserActionError = Nothing})
     UserResetFailed err ->
-        putModel (\m -> m{mUserActionError = Just (ms (aeMessage err))})
-    UserRecoveryCopied raw -> copyText (ms raw) "Recovery codes copied" "Copy failed. Select the text instead"
+        putModel (\m -> m{mUserActionError = Just ((aeMessage err))})
+    UserRecoveryCopied raw -> copyText raw "Recovery codes copied" "Copy failed. Select the text instead"
     UserRecoveryDismiss -> putModel (\m -> m{mUserRecovery = Nothing})
     UserResetShownDismiss -> putModel (\m -> m{mUserResetShown = Nothing})
     UserDeleteOpen user ->
@@ -389,7 +390,7 @@ handle = \case
         m <- get
         case mUserDelete m of
             Just user
-                | T.strip (fromMisoString (mUserDeleteName m)) == uvUsername user -> do
+                | T.strip ((mUserDeleteName m)) == uvUsername user -> do
                     putModel (\x -> x{mUserDeleteBusy = True, mUserActionError = Nothing})
                     deleteAdminUser (uvId user) (mUserDeleteLibrary m) (UserDeleted (uvId user)) UserDeleteFailed
                 | otherwise ->
@@ -410,12 +411,12 @@ handle = \case
             )
         fetchAdminUsers AdminUsersLoaded AdminUsersFailed
     UserDeleteFailed err ->
-        putModel (\m -> m{mUserDeleteBusy = False, mUserActionError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mUserDeleteBusy = False, mUserActionError = Just ((aeMessage err))})
     -- webhooks -------------------------------------------------------------
     WebhooksLoaded webhooks ->
         putModel (\m -> m{mWebhooks = webhooks, mWebhooksLoading = False, mWebhooksError = Nothing})
     WebhooksFailed err -> do
-        putModel (\m -> m{mWebhooksLoading = False, mWebhooksError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mWebhooksLoading = False, mWebhooksError = Just ((aeMessage err))})
         handleApiError err
     WebhookNameInput value -> putModel (\m -> m{mWebhookName = value})
     WebhookUrlInput value -> putModel (\m -> m{mWebhookUrl = value})
@@ -435,8 +436,8 @@ handle = \case
         m <- get
         let input =
                 WebhookInput
-                    { wiName = T.strip (fromMisoString (mWebhookName m))
-                    , wiUrl = T.strip (fromMisoString (mWebhookUrl m))
+                    { wiName = T.strip ((mWebhookName m))
+                    , wiUrl = T.strip ((mWebhookUrl m))
                     , wiEvents = mWebhookEvents m
                     , wiEnabled = mWebhookEnabled m
                     }
@@ -464,7 +465,7 @@ handle = \case
             ( \m ->
                 m
                     { mWebhookBusy = False
-                    , mWebhookFormError = Just (ms (aeMessage err))
+                    , mWebhookFormError = Just ((aeMessage err))
                     }
             )
         when (aeStatus err == Just 401) (handleApiError err)
@@ -489,7 +490,7 @@ handle = \case
     WebhookTested webhookId result ->
         putModel (\m -> m{mWebhookTest = Just (webhookId, result), mWebhookTestError = Nothing})
     WebhookTestFailed err -> do
-        putModel (\m -> m{mWebhookTest = Nothing, mWebhookTestError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mWebhookTest = Nothing, mWebhookTestError = Just ((aeMessage err))})
         when (aeStatus err == Just 401) (handleApiError err)
     WebhookDelete webhookId ->
         deleteWebhook webhookId (WebhookDeleted webhookId) WebhookDeleteFailed
@@ -509,19 +510,19 @@ handle = \case
             )
     WebhookDeleteFailed err -> handleApiError err
     WebhookSecretDismiss -> putModel (\m -> m{mWebhookSecret = Nothing})
-    WebhookSecretCopied raw -> copyText (ms raw) "Webhook secret copied" "Copy failed. Select the text instead"
+    WebhookSecretCopied raw -> copyText raw "Webhook secret copied" "Copy failed. Select the text instead"
     WebhookDeliveriesOpen webhookId -> do
         putModel (\m -> m{mWebhookDeliveriesError = Nothing})
         fetchWebhookDeliveries webhookId (WebhookDeliveriesLoaded webhookId) (WebhookDeliveriesFailed webhookId)
     WebhookDeliveriesLoaded webhookId deliveries ->
         putModel (\m -> m{mWebhookDeliveries = Just (webhookId, deliveries), mWebhookDeliveriesError = Nothing})
     WebhookDeliveriesFailed _webhookId err ->
-        putModel (\m -> m{mWebhookDeliveries = Nothing, mWebhookDeliveriesError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mWebhookDeliveries = Nothing, mWebhookDeliveriesError = Just ((aeMessage err))})
     -- highlights -----------------------------------------------------------
     RulesLoaded rules ->
         putModel (\m -> m{mRules = rules, mRulesLoading = False, mRulesError = Nothing})
     RulesFailed err -> do
-        putModel (\m -> m{mRulesLoading = False, mRulesError = Just (ms (aeMessage err))})
+        putModel (\m -> m{mRulesLoading = False, mRulesError = Just ((aeMessage err))})
         handleApiError err
     RuleNameInput value -> putModel (\m -> m{mRuleName = value})
     RuleFieldSelected field -> putModel (\m -> m{mRuleField = field})
@@ -530,8 +531,8 @@ handle = \case
     RuleMarkReadToggled -> putModel (\m -> m{mRuleMarkRead = not (mRuleMarkRead m)})
     RuleCreate -> do
         m <- get
-        let name = T.strip (fromMisoString (mRuleName m))
-            patternText = T.strip (fromMisoString (mRulePattern m))
+        let name = T.strip ((mRuleName m))
+            patternText = T.strip ((mRulePattern m))
         if T.null name || T.null patternText
             then notify "Rule name and pattern are required" ToastInfo
             else do
@@ -558,7 +559,7 @@ handle = \case
                     , mRuleDryRun = Nothing
                     }
             )
-        notify (ms ("Rule “" <> ruleName rule <> "” created")) ToastOk
+        notify (("Rule “" <> ruleName rule <> "” created")) ToastOk
     RuleCreateFailed err -> do
         putModel (\m -> m{mRuleBusy = False})
         handleApiError err
@@ -577,7 +578,7 @@ handle = \case
     RuleFailed err -> handleApiError err
     RuleDryRun -> do
         m <- get
-        let patternText = T.strip (fromMisoString (mRulePattern m))
+        let patternText = T.strip ((mRulePattern m))
         if T.null patternText
             then notify "Enter a pattern to dry-run" ToastInfo
             else do
@@ -585,7 +586,7 @@ handle = \case
                 testRule (mRuleField m) patternText RuleDryRunResult RuleDryRunFailed
     RuleDryRunResult matches ids -> do
         putModel (\m -> m{mRuleBusy = False, mRuleDryRun = Just (matches, ids)})
-        notify (ms (show matches <> " bookmark(s) would match")) ToastOk
+        notify (T.pack (show matches <> " bookmark(s) would match")) ToastOk
     RuleDryRunFailed err -> do
         putModel (\m -> m{mRuleBusy = False})
         handleApiError err
