@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Part of the client update function; see "Eza.Web.Update".
-module Eza.Web.Update.Dedup (
+module Eza.Web.Logic.Update.Dedup (
     accessionLabel,
     addDedupChoices,
     dedupGroup,
@@ -18,15 +18,14 @@ import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.Text (Text)
 
-import Miso
-
 import qualified Data.Text as T
 import Eza.Types
-import Eza.Web.Api
-import Eza.Web.Error
-import Eza.Web.Interpreter
+import Eza.Web.Logic.Browser
+import Eza.Web.Logic.Error
 import Eza.Web.Logic.Model
-import Eza.Web.Update.Common (dedupFirstPage, putModel, refreshStats)
+import Eza.Web.Logic.Requests
+import Eza.Web.Logic.Update.Common
+import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
 
 accessionLabel :: Int -> Text
 accessionLabel bookmarkId =
@@ -100,7 +99,7 @@ dropDedupGroup key m =
                         }
             | otherwise -> Just counts
 
-handle :: Action -> Effect () () Model Action
+handle :: Action -> Update ()
 handle = \case
     DedupLoaded report -> do
         putModel

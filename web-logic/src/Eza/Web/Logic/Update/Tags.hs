@@ -2,23 +2,21 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Part of the client update function; see "Eza.Web.Update".
-module Eza.Web.Update.Tags (handle) where
+module Eza.Web.Logic.Update.Tags (handle) where
 
 import Control.Monad
 import Data.Maybe
 import qualified Data.Text as T
 
-import Miso
-
-import Eza.Web.Api
-import Eza.Web.Error
-import Eza.Web.Interpreter
+import Eza.Web.Logic.Browser
+import Eza.Web.Logic.Error
 import Eza.Web.Logic.Model
+import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Route (Route (..))
-import {-# SOURCE #-} Eza.Web.Update (updateModel)
-import Eza.Web.Update.Common (putModel, refreshStats, refreshTags, reloadList)
+import Eza.Web.Logic.Update.Common
+import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
 
-handle :: Action -> Effect () () Model Action
+handle :: Action -> Update ()
 handle = \case
     TagsRefreshed stats -> putModel (\m -> m{mTags = stats})
     TagStatsLoaded stats -> putModel (\m -> m{mTags = stats})
@@ -67,13 +65,13 @@ handle = \case
                             then putModel (\x -> x{mTagDialogError = Just "That is already this tag's name."})
                             else do
                                 putModel (\x -> x{mTagDialogBusy = True, mTagDialogError = Nothing})
-                                updateModel (TagRenamed old wanted)
+                                dispatch (TagRenamed old wanted)
             Just (TagDeleteDialog tag) -> do
                 putModel (\x -> x{mTagDialogBusy = True, mTagDialogError = Nothing})
-                updateModel (TagDeleted tag)
+                dispatch (TagDeleted tag)
             Just (TagMergeDialog from into) -> do
                 putModel (\x -> x{mTagDialogBusy = True, mTagDialogError = Nothing})
-                updateModel (TagMerge from into)
+                dispatch (TagMerge from into)
     TagDialogClose ->
         putModel
             ( \m ->
@@ -86,7 +84,7 @@ handle = \case
             )
     FilterByTag tag -> do
         putModel (\m -> m{mTagsFilter = [tag]})
-        updateModel (Navigate Index)
+        dispatch (Navigate Index)
     -- Open the ledger on an explicit query (a history year, day or
     -- source, or a tag from the graph). The query replaces the old one so
     -- the total matches the figure the reader clicked.
@@ -103,7 +101,7 @@ handle = \case
             )
         if mRoute m == Index
             then reloadList
-            else updateModel (Navigate Index)
+            else dispatch (Navigate Index)
     TagMerged -> do
         putModel
             ( \m ->

@@ -18,10 +18,7 @@ common web-common
     RecordWildCards
     ScopedTypeVariables
     TypeApplications
-  -- -fno-specialise keeps the WASM bundle inside the size ceiling while the
-  -- M2-B2b migration still carries the transitional MisoString facade; drop it
-  -- when the reducer migration removes that duplication.
-  ghc-options:      -Wall -fno-specialise
+  ghc-options:      -Wall
   if arch(wasm32)
     ghc-options:
       -no-hs-main
@@ -34,30 +31,17 @@ executable eza-web
   hs-source-dirs:   src
   main-is:          Main.hs
   other-modules:    Eza.Web.History
-                    Eza.Web.Api
                     Eza.Web.Detail
                     Eza.Web.Error
                     Eza.Web.Graph
                     Eza.Web.Interpreter
+                    Eza.Web.Transport
                     Eza.Web.Markdown
                     Eza.Web.Model
                     Eza.Web.Panels
                     Eza.Web.Render
                     Eza.Web.Render.Event
                     Eza.Web.Update
-                    Eza.Web.Update.Account
-                    Eza.Web.Update.Common
-                    Eza.Web.Update.Dedup
-                    Eza.Web.Update.Detail
-                    Eza.Web.Update.Graph
-                    Eza.Web.Update.ImportExport
-                    Eza.Web.Update.Ledger
-                    Eza.Web.Update.Maintenance
-                    Eza.Web.Update.Route
-                    Eza.Web.Update.Shell
-                    Eza.Web.Update.Tags
-                    Eza.Web.Update.ViewDefs
-                    Eza.Web.Update.Views
                     Eza.Web.View
                     Eza.Web.Widgets
   build-depends:    base >=4.18 && <5

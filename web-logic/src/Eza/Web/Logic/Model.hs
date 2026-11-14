@@ -58,7 +58,6 @@ import Eza.View (
  )
 import Eza.Webhook (DeliveryView, EventType, Webhook (..))
 
-import Eza.Web.Logic.Effect (RequestId (..), TimerId)
 import Eza.Web.Logic.Error (ApiError (..))
 import Eza.Web.Logic.Graph (
     GraphDrag,
@@ -67,6 +66,7 @@ import Eza.Web.Logic.Graph (
     emptyMatches,
     initialGraphView,
  )
+import Eza.Web.Logic.Ids (RequestId (..), TimerId)
 import Eza.Web.Logic.Route (Route (..))
 import Eza.Web.Logic.Wire (ImportResponse (..), ListParams, WebhookTest (..))
 

@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Part of the client update function; see "Eza.Web.Update".
-module Eza.Web.Update.Views (
+module Eza.Web.Logic.Update.Views (
     handle,
     openSavedView,
     openSavedViewNow,
@@ -19,35 +19,33 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Eza.Web.Logic.Effect (nextRequestId)
 
-import Miso
-
 import qualified Eza.View as EV
-import Eza.Web.Api
-import Eza.Web.Error
-import Eza.Web.Interpreter
+import Eza.Web.Logic.Browser
+import Eza.Web.Logic.Error
 import Eza.Web.Logic.Model
+import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Route (Route (..))
-import {-# SOURCE #-} Eza.Web.Update (updateModel)
-import Eza.Web.Update.Common (putModel)
-import Eza.Web.Update.Graph (applyGraphScope, fitActiveView)
-import Eza.Web.Update.ViewDefs (applyGraphView, currentGraphDefinition, currentLedgerDefinition, defaultGraphView, findViewBySlug, recomputeGraphColors, removeAt, setAt, upsertView)
+import Eza.Web.Logic.Update.Common
+import Eza.Web.Logic.Update.Graph (applyGraphScope, fitActiveView)
+import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
+import Eza.Web.Logic.Update.ViewDefs (applyGraphView, currentGraphDefinition, currentLedgerDefinition, defaultGraphView, findViewBySlug, recomputeGraphColors, removeAt, setAt, upsertView)
 
-openSavedView :: Text -> Effect () () Model Action
+openSavedView :: Text -> Update ()
 openSavedView slug = do
     m <- get
     case findViewBySlug slug (mViews m) of
         Just view -> openSavedViewNow view
         Nothing -> fetchView slug ViewFetched ViewFetchFailed
 
-openSavedViewNow :: EV.View -> Effect () () Model Action
+openSavedViewNow :: EV.View -> Update ()
 openSavedViewNow view = case EV.vDefinition view of
     EV.GraphDefinition definition -> do
         putModel (applyGraphView view)
         m <- get
         when (isJust (mGraphLayout m)) $
-            updateModel (GraphPresetSelected (EV.gvdLayoutPreset definition))
+            dispatch (GraphPresetSelected (EV.gvdLayoutPreset definition))
         putModel recomputeGraphColors
-        updateModel (Navigate Graph)
+        dispatch (Navigate Graph)
     EV.LedgerDefinition definition -> do
         putModel
             ( \x ->
@@ -58,13 +56,13 @@ openSavedViewNow view = case EV.vDefinition view of
                     , mUnreadOnly = False
                     }
             )
-        updateModel (Navigate Index)
+        dispatch (Navigate Index)
 
 -- | PATCH the active (or default) graph view with the current state.
-saveCurrentGraphView :: Model -> Effect () () Model Action
+saveCurrentGraphView :: Model -> Update ()
 saveCurrentGraphView m =
     case graphTarget of
-        Nothing -> updateModel (ViewSaveOpen EV.GraphKind)
+        Nothing -> dispatch (ViewSaveOpen EV.GraphKind)
         Just view -> do
             putModel (\x -> x{mViewUi = (mViewUi x){vuBusy = True, vuError = Nothing}})
             patchView
@@ -84,7 +82,7 @@ saveCurrentGraphView m =
             [] -> defaultGraphView (mViews m)
         Nothing -> defaultGraphView (mViews m)
 
-handle :: Action -> Effect () () Model Action
+handle :: Action -> Update ()
 handle = \case
     ViewsLoaded views -> do
         putModel (\x -> x{mViews = views, mViewsLoading = False, mViewsError = Nothing})
@@ -351,7 +349,7 @@ handle = \case
                     }
             )
         putModel (\x -> fitActiveView (applyGraphScope x))
-        measureGraphCanvas GraphMeasured
+        measureGraphCanvas
     GraphSelect key ->
         putModel (\m -> m{mGraphSelected = Just key, mGraphFocus = Nothing})
     GraphClearSelection ->

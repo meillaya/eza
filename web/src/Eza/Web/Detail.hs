@@ -22,7 +22,7 @@ import Eza.Types (
     BookmarkSummary (..),
     Highlight (..),
  )
-import Eza.Web.Api (bookmarkSnapshotUrl)
+import Eza.Web.Logic.Requests (bookmarkSnapshotUrl)
 import Eza.Web.Markdown (renderMarkdown)
 import Eza.Web.Model
 import Eza.Web.Widgets (disabledAttr)

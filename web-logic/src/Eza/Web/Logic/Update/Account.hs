@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Part of the client update function; see "Eza.Web.Update".
-module Eza.Web.Update.Account (
+module Eza.Web.Logic.Update.Account (
     handle,
     setSecurityError,
 ) where
@@ -10,28 +10,26 @@ module Eza.Web.Update.Account (
 import Control.Monad
 import qualified Data.Text as T
 
-import Miso
-
 import Data.Text (Text)
 import Eza.Account
 import Eza.Rule
 import Eza.User
-import Eza.Web.Api
-import Eza.Web.Error
-import Eza.Web.Interpreter
+import Eza.Web.Logic.Browser
+import Eza.Web.Logic.Error
 import Eza.Web.Logic.Model
-import {-# SOURCE #-} Eza.Web.Update (updateModel)
-import Eza.Web.Update.Common (hasUnsaved, putModel, splitTags)
-import Eza.Web.Update.ViewDefs (isUserEnabled, upsertUser, upsertWebhook)
+import Eza.Web.Logic.Requests
+import Eza.Web.Logic.Update.Common
+import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
+import Eza.Web.Logic.Update.ViewDefs (isUserEnabled, upsertUser, upsertWebhook)
 import Eza.Webhook
 
-setSecurityError :: Text -> Effect () () Model Action
+setSecurityError :: Text -> Update ()
 setSecurityError message =
     putModel (\m -> m{mSecurityBusy = False, mSecurityError = Just message})
 
 -- \| EA-00417: the accession form used by the dedup toast and dialog.
 
-handle :: Action -> Effect () () Model Action
+handle :: Action -> Update ()
 handle = \case
     AccountTabSelected tab -> do
         putModel (\m -> m{mAccountTab = tab})
@@ -201,7 +199,7 @@ handle = \case
         m <- get
         if hasUnsaved m
             then putModel (\x -> x{mConfirmLogout = True})
-            else updateModel Logout
+            else dispatch Logout
     LogoutCancel -> putModel (\m -> m{mConfirmLogout = False})
     Logout -> logout LoggedOut (\err -> ApiErrorRaised err)
     LoggedOut -> redirect "/login"

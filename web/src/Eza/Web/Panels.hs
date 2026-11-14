@@ -47,7 +47,6 @@ import Eza.Types (
  )
 import Eza.User (UserRole (..), UserView (..), userRoleText)
 import qualified Eza.View as EV
-import Eza.Web.Api (WebhookTest (..), exportJsonUrl, exportUrl)
 import Eza.Web.Graph (
     GraphDraw (..),
     GraphLayout (..),
@@ -62,6 +61,8 @@ import Eza.Web.Graph (
     isTagKey,
     labelCount,
  )
+import Eza.Web.Logic.Requests (exportJsonUrl, exportUrl)
+import Eza.Web.Logic.Wire (WebhookTest (..))
 import Eza.Web.Model
 import qualified Eza.Web.Render.Event as HE
 import Eza.Webhook (DeliveryView (..), Webhook (..), allEventTypes, eventTypeText, maxWebhooks)

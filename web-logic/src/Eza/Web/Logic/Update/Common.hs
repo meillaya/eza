@@ -1,7 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Part of the client update function; see "Eza.Web.Update".
-module Eza.Web.Update.Common (
+{- | Shared pure update helpers: route predicates, tag input, ledger
+selection/cursor state and the small request chains several groups share.
+
+The ledger state machine itself is "Eza.Web.Logic.Ledger"; this module projects
+the whole 'Model' into that slice and writes the slice back when a ledger
+action runs, so the shell model keeps one store.
+-}
+module Eza.Web.Logic.Update.Common (
     bootPageMatchesLedger,
     cancelSelectAllPaging,
     completeWikilink,
@@ -22,12 +28,14 @@ module Eza.Web.Update.Common (
     loadMore,
     moveCursor,
     parseTagInput,
+    projectLedger,
     putModel,
     refreshStats,
     refreshTags,
     reloadList,
     resetShellForReload,
     resetShellForSearch,
+    runLedger,
     setCursor,
     settleLedgerSelection,
     splitTags,
@@ -41,34 +49,89 @@ import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
 
-import Miso
-
 import Eza.Ledger (LedgerEntry (..))
 import Eza.Types
-import Eza.Web.Api
-import Eza.Web.Error
-import Eza.Web.Interpreter
+
+import Eza.Web.Logic.Browser (scrollLedger, scrollRowIntoView)
 import Eza.Web.Logic.Effect (TimerId, nextRequestId)
+import Eza.Web.Logic.Error (ApiError)
 import qualified Eza.Web.Logic.Input as LogicInput
 import qualified Eza.Web.Logic.Ledger as Ledger
 import Eza.Web.Logic.Model
+import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Route (Route (..))
 import qualified Eza.Web.Logic.Route as ClientRoute
+import Eza.Web.Logic.Update.Monad (Update, emit, get, put, putModel)
 
-putModel :: (Model -> Model) -> Effect () () Model Action
-putModel f = get >>= put . f
+{- | Run one ledger action: project the model into the native ledger slice,
+let the slice reduce, write the slice back, and emit the effects it asks for.
+-}
+runLedger :: Ledger.LedgerAction -> Update ()
+runLedger action = do
+    model <- get
+    let (ledger, effects) = Ledger.updateLedger (projectLedger model) action
+    put (embedLedger ledger model)
+    mapM_ emit effects
+
+projectLedger :: Model -> Ledger.LedgerState
+projectLedger model =
+    Ledger.initialLedgerState
+        { Ledger.ldQuery = mQ model
+        , Ledger.ldTagFilters = mTagsFilter model
+        , Ledger.ldSort = mSort model
+        , Ledger.ldUnreadOnly = mUnreadOnly model
+        , Ledger.ldRouteUnread = mRoute model == Inbox
+        , Ledger.ldLimit = Ledger.defaultLedgerLimit
+        , Ledger.ldOffset = mOffset model
+        , Ledger.ldItems = mItems model
+        , Ledger.ldTotal = mTotal model
+        , Ledger.ldYearCounts = mYearHere model
+        , Ledger.ldHasMore = mHasMore model
+        , Ledger.ldLoading = mLoading model
+        , Ledger.ldLoadingMore = mLoadingMore model
+        , Ledger.ldError = mError model
+        , Ledger.ldListRequest = mListEpoch model
+        , Ledger.ldDebounceTimer = mDebounceTimer model
+        , Ledger.ldTimerSeq = mTimerSeq model
+        , Ledger.ldStats = mStats model
+        , Ledger.ldStatsError = mStatsError model
+        , Ledger.ldStatsRequest = mStatsEpoch model
+        }
+
+embedLedger :: Ledger.LedgerState -> Model -> Model
+embedLedger ledger model =
+    model
+        { mQ = Ledger.ldQuery ledger
+        , mTagsFilter = Ledger.ldTagFilters ledger
+        , mSort = Ledger.ldSort ledger
+        , mUnreadOnly = Ledger.ldUnreadOnly ledger
+        , mOffset = Ledger.ldOffset ledger
+        , mItems = Ledger.ldItems ledger
+        , mTotal = Ledger.ldTotal ledger
+        , mYearHere = Ledger.ldYearCounts ledger
+        , mHasMore = Ledger.ldHasMore ledger
+        , mLoading = Ledger.ldLoading ledger
+        , mLoadingMore = Ledger.ldLoadingMore ledger
+        , mError = Ledger.ldError ledger
+        , mListEpoch = Ledger.ldListRequest ledger
+        , mDebounceTimer = Ledger.ldDebounceTimer ledger
+        , mTimerSeq = Ledger.ldTimerSeq ledger
+        , mStats = Ledger.ldStats ledger
+        , mStatsError = Ledger.ldStatsError ledger
+        , mStatsEpoch = Ledger.ldStatsRequest ledger
+        }
 
 {- | Read the whole library count again after a write, so the masthead and
 the panels stop showing a pre-write number.
 -}
-refreshStats :: Effect () () Model Action
-refreshStats = runLedgerAction Ledger.StatsRequested
+refreshStats :: Update ()
+refreshStats = runLedger Ledger.StatsRequested
 
 {- | The first page of both duplicate sections. The server's defaults are 60
 same-URL groups and 40 review-only title groups; the counts in the report always
 cover the whole library.
 -}
-dedupFirstPage :: (DedupReport -> Action) -> (ApiError -> Action) -> Effect () () Model Action
+dedupFirstPage :: (DedupReport -> Action) -> (ApiError -> Action) -> Update ()
 dedupFirstPage = fetchDedupReport 0 60 0 40
 
 isHttpUrlText :: Text -> Bool
@@ -179,17 +242,17 @@ settleLedgerSelection append m =
         }
 
 -- | Reload the first page of the current ledger query.
-reloadList :: Effect () () Model Action
+reloadList :: Update ()
 reloadList = do
     putModel resetShellForReload
-    runLedgerAction Ledger.Reload
+    runLedger Ledger.Reload
 
 {- | Load the ledger for @/@. On the first paint the boot payload already
 carries the same default page, so the fetch is deferred until @/boot@ answers
 and only issued when the route is filtered or the boot page was consumed
 elsewhere.
 -}
-loadIndexList :: Effect () () Model Action
+loadIndexList :: Update ()
 loadIndexList = do
     m <- get
     if mBootSeeded m
@@ -202,22 +265,22 @@ loadIndexList = do
 {- | Ask the native reducer for the next page. It owns the guards, so the
 scroll callback cannot double-fetch.
 -}
-loadMore :: Effect () () Model Action
-loadMore = runLedgerAction Ledger.LoadMore
+loadMore :: Update ()
+loadMore = runLedger Ledger.LoadMore
 
 {- | A native debounce timer fired. The reducer accepts the id only while it is
 still current, so a late fire changes nothing; the shell reset around it
 matches the old @DebouncedSearch@ handler.
 -}
-fireTimer :: TimerId -> Effect () () Model Action
+fireTimer :: TimerId -> Update ()
 fireTimer timerId = do
     m <- get
-    when (Ledger.debounceTimerIsCurrent (extractLedger m) timerId) $ do
+    when (Ledger.debounceTimerIsCurrent (projectLedger m) timerId) $ do
         putModel (\x -> x{mDebounce = Nothing})
         putModel resetShellForReload
-        runLedgerAction (Ledger.SearchDebounceElapsed timerId)
+        runLedger (Ledger.SearchDebounceElapsed timerId)
 
-refreshTags :: Effect () () Model Action
+refreshTags :: Update ()
 refreshTags = fetchTags TagsRefreshed (\_ -> Noop)
 
 -- | Detect an open @[[query@ immediately before the cursor.
@@ -242,7 +305,7 @@ hasUnsaved m = mDirty m || mExtractDirty m
 the whole detail (which would discard a pending note edit). The server remains
 the authority; this only keeps the editor and reading header consistent.
 -}
-moveCursor :: Int -> Effect () () Model Action
+moveCursor :: Int -> Update ()
 moveCursor delta = do
     m <- get
     let n = length (mItems m)
@@ -252,7 +315,7 @@ moveCursor delta = do
         setCursor idx
         when (idx + 8 >= n && mHasMore m) loadMore
 
-setCursor :: Int -> Effect () () Model Action
+setCursor :: Int -> Update ()
 setCursor idx = do
     m <- get
     case itemAt (mItems m) idx of
@@ -316,7 +379,7 @@ cancelSelectAllPaging x =
 -- can (or until the list has no more rows), then set the model offset and
 -- the container together.
 
-continueScrollRestore :: Effect () () Model Action
+continueScrollRestore :: Update ()
 continueScrollRestore = do
     m <- get
     case mScrollRestore m of

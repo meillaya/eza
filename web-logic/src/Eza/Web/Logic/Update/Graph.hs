@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Part of the client update function; see "Eza.Web.Update".
-module Eza.Web.Update.Graph (
+module Eza.Web.Logic.Update.Graph (
     applyGraphScope,
     enterGraphRoute,
     fitActiveView,
@@ -26,24 +26,24 @@ import Control.Monad
 import qualified Data.IntMap.Strict as IM
 import Data.Maybe
 import qualified Data.Text as T
-import Eza.Web.Logic.Effect (nextRequestId, requestIsCurrent)
-
-import Miso
+import Eza.Web.Logic.Effect (RequestId (..), nextRequestId, requestIsCurrent)
 
 import Data.Text (Text)
+import Eza.GraphLayout
 import Eza.Types
 import qualified Eza.View as EV
-import Eza.Web.Api
-import Eza.Web.Error
-import Eza.Web.Graph
-import Eza.Web.Interpreter
+import Eza.Web.Logic.Browser
+import Eza.Web.Logic.Error
+import Eza.Web.Logic.Graph (GraphDrag (..), GraphMatches (..), GraphView (..), emptyMatches)
+import Eza.Web.Logic.Graph.Geometry
 import Eza.Web.Logic.Model
+import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Route (Route (..), isGraphRoute)
-import {-# SOURCE #-} Eza.Web.Update (updateModel)
-import Eza.Web.Update.Common (putModel)
-import Eza.Web.Update.ViewDefs (activeGraphDefinition, recomputeGraphColors)
+import Eza.Web.Logic.Update.Common
+import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
+import Eza.Web.Logic.Update.ViewDefs (activeGraphDefinition, recomputeGraphColors)
 
-graphZoom :: Double -> Effect () () Model Action
+graphZoom :: Double -> Update ()
 graphZoom factor = do
     m <- get
     case activeGraphLayout m of
@@ -64,7 +64,7 @@ graphZoom factor = do
 {- | A pointer that went down and up without moving is a click: a record
 selects, a tag opens the ledger filtered by @tag:@, and empty plate clears.
 -}
-graphClick :: Model -> Double -> Double -> Effect () () Model Action
+graphClick :: Model -> Double -> Double -> Update ()
 graphClick m x y =
     case activeGraphLayout m of
         Nothing -> pure ()
@@ -73,10 +73,10 @@ graphClick m x y =
                 putModel (\model -> model{mGraphSelected = Nothing, mGraphFocus = Nothing})
             Just key
                 | isTagKey key -> case IM.lookup key (glTags layout) of
-                    Just (name, _) -> updateModel (FilterByQuery ("tag:" <> name))
+                    Just (name, _) -> dispatch (FilterByQuery ("tag:" <> name))
                     Nothing -> pure ()
                 | otherwise ->
-                    updateModel (Navigate (Bookmark key))
+                    dispatch (Navigate (Bookmark key))
 
 {- | Focus the plate once it has painted, so the keyboard shortcuts work
 immediately after a visit. @preventScroll@ keeps the panel from jumping to
@@ -88,7 +88,7 @@ that can arrive several animation frames after the graph payload. A single
 timer used to give up when the element was not mounted yet; retry over a few
 frames instead, like 'measureGraphCanvas'.
 -}
-focusGraphPlate :: Model -> Effect () () Model Action
+focusGraphPlate :: Model -> Update ()
 focusGraphPlate m =
     when
         (isGraphRoute (mRoute m) && T.null (T.strip ((mGraphFilter m))))
@@ -157,7 +157,7 @@ rebuilds the neighbourhood and fits it before the first paint. A warm route
 keeps its layout wire and only refreshes the records; a cold route asks for
 the layout first so the first plate is hydrated instead of painted twice.
 -}
-enterGraphRoute :: Bool -> Maybe Int -> Int -> Effect () () Model Action
+enterGraphRoute :: Bool -> Maybe Int -> Int -> Update ()
 enterGraphRoute localMode root depth = do
     m <- get
     let viewLocalDepth = EV.gvdLocalDepth <$> activeGraphDefinition m
@@ -190,7 +190,7 @@ enterGraphRoute localMode root depth = do
     if cachedWire
         then fetchGraph GraphLoaded GraphFailed
         else fetchGraphLayout preset (GraphLayoutLoaded preset) GraphLayoutFailed
-    measureGraphCanvas GraphMeasured
+    measureGraphCanvas
 
 {- | Resolve the row that roots local mode: the explicit root when it still
 exists, else the selected record, else the focused record, else the
@@ -265,7 +265,7 @@ fitActiveView m =
 {- | The view is moving: the plate keeps blitting the world bitmap, and the
 screen-resolution detail plate is stale until the gesture stops.
 -}
-markGraphMoving :: Effect () () Model Action
+markGraphMoving :: Update ()
 markGraphMoving =
     putModel
         ( \m ->
@@ -280,18 +280,18 @@ markGraphMoving =
 a stale epoch is ignored, so only the timer armed for the last view can build
 the detail plate. One timer per gesture event is cheap.
 -}
-graphEscape :: Model -> Effect () () Model Action
+graphEscape :: Model -> Update ()
 graphEscape m
     | not (T.null (T.strip ((mGraphFilter m)))) = do
-        updateModel (GraphFilterChanged "")
-        updateModel GraphFilterSettled
-    | otherwise = updateModel GraphClearSelection
+        dispatch (GraphFilterChanged "")
+        dispatch GraphFilterSettled
+    | otherwise = dispatch GraphClearSelection
 
 {- | Pan the graph from the global keyboard bridge. The canvas is a tab stop,
 but the shortcuts run from any non-editable focus on the graph route, so the
 panel does not need to keep DOM focus on the canvas to be keyboard driven.
 -}
-graphPan :: Double -> Double -> Bool -> Effect () () Model Action
+graphPan :: Double -> Double -> Bool -> Update ()
 graphPan deltaX deltaY accelerated = do
     m <- get
     case mGraphLayout m of
@@ -310,16 +310,16 @@ graphPan deltaX deltaY accelerated = do
             scheduleGraphSettle
 
 -- | Enter on the graph opens the selected record, matching a click.
-graphOpenSelected :: Model -> Effect () () Model Action
+graphOpenSelected :: Model -> Update ()
 graphOpenSelected m =
     case mGraphSelected m of
-        Just key | not (isTagKey key) -> updateModel (Navigate (Bookmark key))
+        Just key | not (isTagKey key) -> dispatch (Navigate (Bookmark key))
         _ -> pure ()
 
 {- | Read the canvas box after a render. The element only exists once the graph
 layout has painted, so a few short retries cover the first frame.
 -}
-handle :: Action -> Effect () () Model Action
+handle :: Action -> Update ()
 handle = \case
     GraphLoaded graph -> do
         m <- get
@@ -346,7 +346,7 @@ handle = \case
                                 }
                     )
                 when (view /= old) (markGraphMoving >> scheduleGraphSettle)
-                unless (mGraphViewReady m) (measureGraphCanvas GraphMeasured)
+                unless (mGraphViewReady m) (measureGraphCanvas)
                 focusGraphPlate m
             _ ->
                 let generation = mGraphGen m + 1
@@ -425,7 +425,7 @@ handle = \case
                             scheduleGraphSettle
                             when (wireMismatch || wirePresetDiffers m preset) $
                                 fetchGraphLayout preset (GraphLayoutLoaded preset) GraphLayoutFailed
-                            unless (mGraphViewReady m) (measureGraphCanvas GraphMeasured)
+                            unless (mGraphViewReady m) (measureGraphCanvas)
                             focusGraphPlate m
     GraphFailed err -> do
         putModel (\x -> x{mGraphLoading = False, mGraphError = Just ((aeMessage err))})
@@ -459,10 +459,10 @@ handle = \case
                             }
                     )
                 scheduleGraphSettle
-                when (not (isGraphRoute (mRoute m))) (updateModel (Navigate Graph))
+                when (not (isGraphRoute (mRoute m))) (dispatch (Navigate Graph))
             _ -> do
                 putModel (\x -> x{mGraphLoading = True})
-                when (not (isGraphRoute (mRoute m))) (updateModel (Navigate Graph))
+                when (not (isGraphRoute (mRoute m))) (dispatch (Navigate Graph))
     GraphMeasured width height dpr -> do
         m <- get
         case activeGraphLayout m of

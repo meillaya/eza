@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Part of the client update function; see "Eza.Web.Update".
-module Eza.Web.Update.Route (
+module Eza.Web.Logic.Update.Route (
     loadRoute,
     reloadRoute,
 ) where
@@ -11,18 +11,17 @@ import Data.Maybe
 import qualified Data.Text as T
 import Eza.Web.Logic.Effect (nextRequestId)
 
-import Miso
-
-import Eza.Web.Api
-import Eza.Web.Interpreter
+import Eza.Web.Logic.Browser
 import Eza.Web.Logic.Model
+import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Route (Route (..))
-import Eza.Web.Update.Common (dedupFirstPage, firstUrlIn, isDetailRoute, isHttpUrlText, isListRoute, isSaveRoute, loadIndexList, putModel, refreshTags, reloadList)
-import Eza.Web.Update.Graph (enterGraphRoute)
-import Eza.Web.Update.Views (openSavedView)
+import Eza.Web.Logic.Update.Common
+import Eza.Web.Logic.Update.Graph (enterGraphRoute)
+import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
+import Eza.Web.Logic.Update.Views (openSavedView)
 
 -- | Reload the current route: the retry path for panel read errors.
-reloadRoute :: Effect () () Model Action
+reloadRoute :: Update ()
 reloadRoute = do
     m <- get
     loadRoute (mRoute m)
@@ -31,7 +30,7 @@ reloadRoute = do
 current.  Every route change starts a new epoch, so a slow response for
 the record the reader left behind is dropped rather than painted.
 -}
-loadRoute :: Route -> Effect () () Model Action
+loadRoute :: Route -> Update ()
 loadRoute route = do
     m <- get
     let previousRoute = mRoute m

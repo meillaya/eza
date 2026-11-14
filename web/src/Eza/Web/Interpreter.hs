@@ -3,74 +3,17 @@
 
 {- | The single place where the client executes something outside the pure
 update function: JSON requests, browser history, DOM focus and geometry,
-timers, the clipboard, the theme and the event subscriptions.
+timers, the clipboard, the theme, uploads and the event subscriptions.
 
-The update modules in "Eza.Web.Update" are declarative: they read and write the
-'Model' and describe side effects as `Effect` values, calling the wrappers in
-this module. Nothing else under @src/Eza/Web@ calls a JSFFI function or
-@withSink@ directly. (The transport in "Eza.Web.Api" is the one exception: it
-is the HTTP implementation these wrappers hand requests to.)
-
-The module also keeps the ledger bridge from M2-B1: 'extractLedger' and
-'embedLedger' project the shell model to and from the native
-'Eza.Web.Logic.Ledger.LedgerState', and 'runLedgerAction' interprets the
-`Eza.Web.Logic.Effect.Effect` values a native reducer returns:
-
-- @Fetch@ becomes the matching "Eza.Web.Api" reader, and its answer is fed back
-  as a shell 'Action' carrying the request id.
-- @Schedule@ / @CancelTimer@ become @setTimeout@ / @clearTimeout@. The timeout
-  callback dispatches 'TimerFired' with the native 'TimerId'; the reducer drops
-  the id when it is no longer current.
-- @Navigate@ is dispatched as the shell's own 'Navigate' action so the
-  unsaved-edit guard keeps working. @ReplaceUrl@, @SetDocumentTitle@ and
-  @Focus@ perform their browser operation directly.
-
-M2-B2 phase 2 moves the Model type into @eza-web-logic@; the browser-side
-wrappers here stay in the shell because they are the only WASM/FFI boundary.
+The reducers in "Eza.Web.Logic.Update" are pure: they return a new
+'Eza.Web.Logic.Model.Model' and a list of "Eza.Web.Logic.Effect.Effect" values.
+This module interprets those values; nothing else under @src/Eza/Web@ calls a
+JSFFI function or @withSink@ directly. "Eza.Web.Transport" owns the HTTP
+exchange, and the pure helper bodies that remain here are browser primitives.
 -}
 module Eza.Web.Interpreter (
-    -- * Native ledger bridge
-    extractLedger,
-    embedLedger,
-    runLedgerAction,
-
-    -- * Shared update helpers
-    notify,
-    handleApiError,
-    redirect,
-    documentTitle,
-    setDocumentTitle,
-
-    -- * Lifecycle and viewport
-    bootstrapEnvironment,
-    toggleTheme,
-    refreshLayout,
-    measureLedgerScroll,
-    focusElement,
-    focusElementDelayed,
-    readNoteCursor,
-    setNoteCursor,
-    readReaderSelection,
-    triggerFileInput,
-    copyText,
-
-    -- * History and ledger navigation
-    navigateTo,
-    replaceRoute,
-    replaceBrowserRoute,
-    selectAccountTab,
-    scrollLedger,
-    scrollRowIntoView,
-
-    -- * Graph browser work
-    measureGraphCanvas,
-    focusGraphCanvas,
-    scheduleGraphSettle,
-    scheduleGraphDetailStep,
-    graphFilterSettle,
-
-    -- * Subscriptions
     subscriptions,
+    interpretEffects,
 ) where
 
 import Control.Monad (unless, void, when)
@@ -79,36 +22,96 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 
-import Miso
+import Miso hiding (CancelTimer, Effect, Schedule)
+import qualified Miso
 import qualified Miso.JSON as MJ
 import Miso.Router (toURI)
 
-import Eza.Web.Api (fetchBookmarksQuery, fetchStats)
-
--- the orphan Router Route instance for history FFI
-import Eza.Web.Error (ApiError (..))
-import Eza.Web.Logic.Api (ClientRequest (..))
-import Eza.Web.Logic.Effect (RequestId (..), TimerId)
-import qualified Eza.Web.Logic.Effect as Logic (
-    Effect (..),
- )
-import Eza.Web.Logic.Ledger (
-    LedgerAction,
-    LedgerState (..),
-    defaultLedgerLimit,
-    initialLedgerState,
-    updateLedger,
- )
+import Eza.Web.Logic.Api (ClientRequest (..), requestPath)
+import Eza.Web.Logic.Effect (Effect (..), RequestId (..), TimerId (..))
+import Eza.Web.Logic.Error (ApiError (..))
 import Eza.Web.Logic.Model
+import Eza.Web.Logic.Requests (decodeResponseAt, decodeStatsAt)
 import Eza.Web.Logic.Route (Route (..), routeTitle)
 import qualified Eza.Web.Logic.Route as ClientRoute
 import Eza.Web.Model ()
+import Eza.Web.Transport (performRequest, uploadImport)
 
--- ----------------------------------------------------------- subscriptions ---
+-- -------------------------------------------------------- effect driver ---
 
-{- | Component subscriptions: URL changes (back/forward), window scroll for
-the virtualized grid, and window resize for the column count.
+-- | Interpret the effects one pure update returned, in order.
+interpretEffects :: [Effect] -> Miso.Effect () () Model Action
+interpretEffects = mapM_ interpretEffect
+
+-- | Interpret one effect in the browser.
+interpretEffect :: Effect -> Miso.Effect () () Model Action
+interpretEffect = \case
+    Fetch request requestId -> fetchRequest request requestId
+    Schedule delayMs timerId -> scheduleTimer delayMs timerId
+    CancelTimer _ -> cancelTimer
+    ApiRequest request requestBody onResult -> performRequest request requestBody onResult
+    OpSubmitImport onOk onErr -> uploadImport onOk onErr
+    OpNavigate route -> navigateTo route
+    OpReplaceUrl route -> replaceRoute route
+    OpReplaceBrowserRoute route -> replaceBrowserRoute route
+    OpSetDocumentTitle title -> setDocumentTitle title
+    OpFocusElement domId -> focusElement domId
+    OpFocusElementDelayed domId -> focusElementDelayed domId
+    OpReadNoteCursor -> readNoteCursor
+    OpSetNoteCursor cursor -> setNoteCursor cursor
+    OpReadReaderSelection -> readReaderSelection
+    OpCopyText value successMessage failureMessage ->
+        copyText value successMessage failureMessage
+    OpRedirect url -> redirect url
+    OpBootstrapEnvironment -> bootstrapEnvironment
+    OpToggleTheme -> toggleTheme
+    OpRefreshLayout -> refreshLayout
+    OpMeasureLedgerScroll -> measureLedgerScroll
+    OpTriggerFileInput domId -> triggerFileInput domId
+    OpSelectAccountTab slug -> selectAccountTab slug
+    OpScrollLedger pixels -> scrollLedger pixels
+    OpScrollRowIntoView domId -> scrollRowIntoView domId
+    OpMeasureGraphCanvas -> measureGraphCanvas GraphMeasured
+    OpFocusGraphCanvas -> focusGraphCanvas
+    OpScheduleGraphSettle -> scheduleGraphSettle
+    OpScheduleGraphDetailStep epoch phase -> scheduleGraphDetailStep epoch phase
+    OpGraphFilterSettle -> graphFilterSettle
+    OpScheduleAction delayMs action -> scheduleAction delayMs action
+
+{- | Start the reader a ledger effect asked for and route its answer back. The
+list fetch is an append when that append is in flight; that is the flag the
+response action needs to append instead of replace.
 -}
+fetchRequest :: ClientRequest -> RequestId -> Miso.Effect () () Model Action
+fetchRequest request requestId = case request of
+    ApiBookmarks _ -> do
+        model <- get
+        let append = mLoadingMore model
+            onResult result = case result of
+                Left err -> ListFailed append requestId err
+                Right value -> case decodeResponseAt (requestPath request) value of
+                    Left err -> ListFailed append requestId err
+                    Right page -> ListLoaded append requestId page
+        performRequest request Nothing onResult
+    ApiStats ->
+        performRequest
+            request
+            Nothing
+            ( \result -> case result of
+                Left err -> StatsFailed requestId err
+                Right value -> case decodeStatsAt (requestPath request) value of
+                    Left err -> StatsFailed requestId err
+                    Right stats -> StatsLoaded requestId stats
+            )
+    _ -> pure ()
+
+-- | Run one action after a delay (milliseconds).
+scheduleAction :: Int -> Action -> Miso.Effect () () Model Action
+scheduleAction delayMs action =
+    withSink $ \sink -> do
+        _ <- jsgf "setTimeout" (asyncCallback1 (\_ -> sink action), delayMs :: Int)
+        pure ()
+
 subscriptions :: [Sub Model Action]
 subscriptions =
     [ uriSub (\uri -> RouteChanged (fromMisoString (uriFragment uri)) (routeOfUriUri uri))
@@ -141,106 +144,10 @@ ezaKeyDecoder =
                 <*> (o MJ..:? "editable" MJ..!= False)
                 <*> (o MJ..:? "row")
 
--- --------------------------------------------------------------- ledger ---
-
-{- | Read the ledger-owned subset of the shell model. Fields the shell still
-mutates directly (boot seeding, the route loader) are read here each time, so
-the projection never goes stale.
--}
-extractLedger :: Model -> LedgerState
-extractLedger model =
-    initialLedgerState
-        { ldQuery = mQ model
-        , ldTagFilters = mTagsFilter model
-        , ldSort = mSort model
-        , ldUnreadOnly = mUnreadOnly model
-        , ldRouteUnread = mRoute model == Inbox
-        , ldLimit = defaultLedgerLimit
-        , ldOffset = mOffset model
-        , ldItems = mItems model
-        , ldTotal = mTotal model
-        , ldYearCounts = mYearHere model
-        , ldHasMore = mHasMore model
-        , ldLoading = mLoading model
-        , ldLoadingMore = mLoadingMore model
-        , ldError = mError model
-        , ldListRequest = mListEpoch model
-        , ldDebounceTimer = mDebounceTimer model
-        , ldTimerSeq = mTimerSeq model
-        , ldStats = mStats model
-        , ldStatsError = mStatsError model
-        , ldStatsRequest = mStatsEpoch model
-        }
-
--- | Write the ledger-owned fields back into the shell model.
-embedLedger :: LedgerState -> Model -> Model
-embedLedger ledger model =
-    model
-        { mQ = ldQuery ledger
-        , mTagsFilter = ldTagFilters ledger
-        , mSort = ldSort ledger
-        , mUnreadOnly = ldUnreadOnly ledger
-        , mOffset = ldOffset ledger
-        , mItems = ldItems ledger
-        , mTotal = ldTotal ledger
-        , mYearHere = ldYearCounts ledger
-        , mHasMore = ldHasMore ledger
-        , mLoading = ldLoading ledger
-        , mLoadingMore = ldLoadingMore ledger
-        , mError = ldError ledger
-        , mListEpoch = ldListRequest ledger
-        , mDebounceTimer = ldDebounceTimer ledger
-        , mTimerSeq = ldTimerSeq ledger
-        , mStats = ldStats ledger
-        , mStatsError = ldStatsError ledger
-        , mStatsEpoch = ldStatsRequest ledger
-        }
-
-{- | Run one ledger action: project, reduce, write back, interpret. The shell
-actions that wrap a ledger event also do their own selection/scroll bookkeeping
-around this call; the interpreter itself touches only ledger-owned fields.
--}
-runLedgerAction :: LedgerAction -> Effect () () Model Action
-runLedgerAction action = do
-    model <- get
-    let (ledger, effects) = updateLedger (extractLedger model) action
-    put (embedLedger ledger model)
-    mapM_ interpretEffect effects
-
--- | Interpret one effect in the browser.
-interpretEffect :: Logic.Effect -> Effect () () Model Action
-interpretEffect = \case
-    Logic.Fetch request requestId -> fetchRequest request requestId
-    Logic.Schedule delayMs timerId -> scheduleTimer delayMs timerId
-    -- The browser handle is tracked under the model's debounce field; the
-    -- timer id itself is checked by the reducer when the callback arrives.
-    Logic.CancelTimer _ -> cancelTimer
-    Logic.Navigate route -> withSink $ \sink -> sink (Navigate route)
-    Logic.ReplaceUrl route -> replaceRoute route
-    Logic.SetDocumentTitle title -> setDocumentTitle title
-    Logic.Focus domId -> focusElement domId
-
-{- | Start the reader for a fetched request and route its answer back. A fetch
-for the list is an append when the reducer has an append in flight; that is
-the flag the shell action needs to append instead of replace.
--}
-fetchRequest :: ClientRequest -> RequestId -> Effect () () Model Action
-fetchRequest request requestId = case request of
-    ApiBookmarks query -> do
-        model <- get
-        let append = mLoadingMore model
-        fetchBookmarksQuery
-            query
-            (ListLoaded append requestId)
-            (ListFailed append requestId)
-    ApiStats -> fetchStats (StatsLoaded requestId) (StatsFailed requestId)
-    -- The ledger slice issues no other read; a later slice extends the table.
-    _ -> pure ()
-
 {- | Schedule one native timer. The callback carries the native id, so the
 reducer decides whether the fire is still current.
 -}
-scheduleTimer :: Int -> TimerId -> Effect () () Model Action
+scheduleTimer :: Int -> TimerId -> Miso.Effect () () Model Action
 scheduleTimer delayMs timerId =
     withSink $ \sink -> do
         timer <- fromJSValUnchecked =<< jsgf "setTimeout" (asyncCallback1 (\_ -> sink (TimerFired timerId)), delayMs :: Int)
@@ -249,7 +156,7 @@ scheduleTimer delayMs timerId =
 {- | Clear the pending browser timeout. The reducer has already dropped the
 native id; a browser that fires anyway delivers a stale id that is ignored.
 -}
-cancelTimer :: Effect () () Model Action
+cancelTimer :: Miso.Effect () () Model Action
 cancelTimer = do
     model <- get
     case mDebounce model of
@@ -260,57 +167,18 @@ cancelTimer = do
 
 -- --------------------------------------------------------------- helpers ---
 
-putModel :: (Model -> Model) -> Effect () () Model Action
-putModel f = get >>= put . f
-
-{- | Show a toast. The dismissal timer lives here because it is a browser
-timer; the update modules only say what to show.
--}
-notify :: Text -> ToastKind -> Effect () () Model Action
-notify message kind = do
-    m <- get
-    let tid = mToastNext m
-        toast = Toast tid message kind
-        keep = drop (max 0 (length (mToasts m) - 3)) (mToasts m ++ [toast])
-    put m{mToasts = keep, mToastNext = tid + 1}
-    withSink $ \sink -> do
-        _ <- jsgf "setTimeout" (asyncCallback1 (\_ -> sink (ToastDismiss tid)), 4800 :: Int)
-        pure ()
-
-{- | The one error-to-interface policy: an expired session blocks the page and
-sends the reader to sign in; a planned-but-missing endpoint is an inline
-notice; anything else is a toast.
--}
-handleApiError :: ApiError -> Effect () () Model Action
-handleApiError err = do
-    let message = aeMessage err
-    case aeStatus err of
-        Just 401 -> do
-            putModel (\m -> m{mSignedOut = True})
-            notify "Session expired. Sign in again." ToastError
-        Just 404 -> do
-            putModel (\m -> m{mNotice = Just message})
-            notify message ToastInfo
-        _ -> notify message ToastError
-
 {- | Send the whole page to another URL (sign-in, a download). Components using
 this never come back, which is why the update action that triggers it is
 usually the last step.
 -}
-redirect :: Text -> Effect () () Model Action
+redirect :: Text -> Miso.Effect () () Model Action
 redirect url = withSink $ \_ -> do
     location <- jsg "window" ! "location"
     _ <- location # "assign" $ (ms url :: MisoString)
     pure ()
 
--- | The browser tab title for a route.
-documentTitle :: Route -> Text
-documentTitle route = case route of
-    Index -> "eza"
-    _ -> routeTitle route <> " · eza"
-
 -- | Set the browser tab title.
-setDocumentTitle :: Text -> Effect () () Model Action
+setDocumentTitle :: Text -> Miso.Effect () () Model Action
 setDocumentTitle title = withSink $ \_ -> do
     document <- jsg ("document" :: MisoString)
     setField document ("title" :: MisoString) (ms title)
@@ -326,7 +194,7 @@ viewport, theme, connectivity and origin. Every probe answers with an action
 so the update function stays pure. The order matters: the reader sees the
 route only after the theme and layout are known.
 -}
-bootstrapEnvironment :: Effect () () Model Action
+bootstrapEnvironment :: Miso.Effect () () Model Action
 bootstrapEnvironment = withSink $ \sink -> do
     uri <- getURI
     width <- windowInnerWidth
@@ -341,7 +209,7 @@ bootstrapEnvironment = withSink $ \sink -> do
     sink (RouteChanged (fromMisoString (uriFragment uri)) (routeOfUriUri uri))
 
 -- | Flip light/dark through the theme holder the shell bootstrapped.
-toggleTheme :: Effect () () Model Action
+toggleTheme :: Miso.Effect () () Model Action
 toggleTheme = withSink $ \sink -> do
     holder <- jsg "EzaTheme"
     value <- holder # "toggle" $ ()
@@ -351,7 +219,7 @@ toggleTheme = withSink $ \sink -> do
 {- | Re-read the viewport and the ledger's scroll metrics after a resize: the
 column count and the virtualized window both depend on it.
 -}
-refreshLayout :: Effect () () Model Action
+refreshLayout :: Miso.Effect () () Model Action
 refreshLayout = withSink $ \sink -> do
     width <- windowInnerWidth
     height <- windowInnerHeight
@@ -360,20 +228,20 @@ refreshLayout = withSink $ \sink -> do
     sink (ScrollMetrics measured)
 
 -- | Re-read only the ledger scroll metrics (a scroll, or a layout pass).
-measureLedgerScroll :: Effect () () Model Action
+measureLedgerScroll :: Miso.Effect () () Model Action
 measureLedgerScroll = withSink $ \sink -> do
     measured <- measureGrid
     sink (ScrollMetrics measured)
 
 -- | Focus one element by DOM id after the next render.
-focusElement :: Text -> Effect () () Model Action
+focusElement :: Text -> Miso.Effect () () Model Action
 focusElement domId = withSink $ \_ -> focus (ms domId)
 
 {- | Focus an input after the VDOM patch that creates the dialog has run.
 Focusing in the same update runs before the element exists, which left focus
 on the body behind the palette and the add dialog.
 -}
-focusElementDelayed :: Text -> Effect () () Model Action
+focusElementDelayed :: Text -> Miso.Effect () () Model Action
 focusElementDelayed domId = withSink $ \_ -> do
     _ <- jsgf "setTimeout" (asyncCallback (focus (ms domId)), 60 :: Int)
     pure ()
@@ -382,7 +250,7 @@ focusElementDelayed domId = withSink $ \_ -> do
 Reading the DOM is the only way to know where the caret is; the reducer then
 computes the wikilink completion query from the new text and offset.
 -}
-readNoteCursor :: Effect () () Model Action
+readNoteCursor :: Miso.Effect () () Model Action
 readNoteCursor = withSink $ \sink -> do
     document <- jsg ("document" :: MisoString)
     element <- (document # ("getElementById" :: MisoString)) ("note-editor" :: MisoString)
@@ -392,7 +260,7 @@ readNoteCursor = withSink $ \sink -> do
         sink (NoteCursorRead (round (selection :: Double)))
 
 -- | Put the caret back after the update rewrote the note text.
-setNoteCursor :: Int -> Effect () () Model Action
+setNoteCursor :: Int -> Miso.Effect () () Model Action
 setNoteCursor cursor =
     withSink $ \_ -> setSelectionRange "note-editor" cursor cursor
 
@@ -400,7 +268,7 @@ setNoteCursor cursor =
 up in the reading pane. The offsets come from the pwa.js bridge; a decode
 failure means "no selection" rather than a broken page.
 -}
-readReaderSelection :: Effect () () Model Action
+readReaderSelection :: Miso.Effect () () Model Action
 readReaderSelection = withSink $ \sink -> do
     raw <- jsgf "ezaSelectionOffsets" ("reader-text" :: MisoString)
     selectionJson <- fromJSVal raw
@@ -412,7 +280,7 @@ readReaderSelection = withSink $ \sink -> do
     sink (ReaderSelectionFound selection)
 
 -- | Open the native file picker of the import panel.
-triggerFileInput :: Text -> Effect () () Model Action
+triggerFileInput :: Text -> Miso.Effect () () Model Action
 triggerFileInput domId = withSink $ \_ -> do
     element <- getElementById (ms domId)
     click () element
@@ -421,7 +289,7 @@ triggerFileInput domId = withSink $ \_ -> do
 result, so a one-time secret is never announced as copied when the clipboard
 write was denied.
 -}
-copyText :: Text -> Text -> Text -> Effect () () Model Action
+copyText :: Text -> Text -> Text -> Miso.Effect () () Model Action
 copyText value successMessage failureMessage = withSink $ \sink -> do
     _ <-
         jsgf
@@ -444,17 +312,17 @@ copyText value successMessage failureMessage = withSink $ \sink -> do
 {- | Push a route onto the history stack (and let the URI subscription deliver
 it, so route loading has one entry point).
 -}
-navigateTo :: Route -> Effect () () Model Action
+navigateTo :: Route -> Miso.Effect () () Model Action
 navigateTo route = withSink $ \_ -> pushRoute route
 
 -- | Rewrite the current history entry instead of pushing a new one.
-replaceRoute :: Route -> Effect () () Model Action
+replaceRoute :: Route -> Miso.Effect () () Model Action
 replaceRoute route = withSink $ \_ -> replaceURI (toURI route)
 
 {- | Record the selected account tab in the URL fragment without a history
 entry, so the back button still leaves the page rather than walking the tabs.
 -}
-selectAccountTab :: Text -> Effect () () Model Action
+selectAccountTab :: Text -> Miso.Effect () () Model Action
 selectAccountTab slug = withSink $ \_ -> do
     window <- jsg ("window" :: MisoString)
     history <- window ! "history"
@@ -473,18 +341,18 @@ selectAccountTab slug = withSink $ \_ -> do
     pure ()
 
 -- | Put the address back after cancelling a history-driven dirty guard.
-replaceBrowserRoute :: Route -> Effect () () Model Action
+replaceBrowserRoute :: Route -> Miso.Effect () () Model Action
 replaceBrowserRoute route =
     withSink $ \_ -> void (jsgf "ezaReplaceUrl" (prettyURI (toURI route) :: MisoString))
 
 -- --------------------------------------------------------------- ledger ---
 
 -- | Scroll the ledger container to an absolute pixel offset.
-scrollLedger :: Int -> Effect () () Model Action
+scrollLedger :: Int -> Miso.Effect () () Model Action
 scrollLedger pixels = withSink $ \_ -> void $ jsgf "ezaScrollLedger" (pixels :: Int)
 
 -- | Narrow sheets render every row, so the browser can find the row by id.
-scrollRowIntoView :: Text -> Effect () () Model Action
+scrollRowIntoView :: Text -> Miso.Effect () () Model Action
 scrollRowIntoView domId = withSink $ \_ -> do
     document <- jsg ("document" :: MisoString)
     el <- (document # ("getElementById" :: MisoString)) (ms domId)
@@ -496,7 +364,7 @@ scrollRowIntoView domId = withSink $ \_ -> do
 {- | Read the canvas box after a render. The element only exists once the graph
 layout has painted, so a few short retries cover the first frame.
 -}
-measureGraphCanvas :: (Double -> Double -> Double -> Action) -> Effect () () Model Action
+measureGraphCanvas :: (Double -> Double -> Double -> Action) -> Miso.Effect () () Model Action
 measureGraphCanvas onMeasured = withSink $ \sink -> measureWith sink 0
   where
     measureWith :: Sink Action -> Int -> IO ()
@@ -525,7 +393,7 @@ canvas on a phone. The canvas only exists after the first layout paints, and on
 a large library that can arrive several animation frames later, so retry over a
 few frames.
 -}
-focusGraphCanvas :: Effect () () Model Action
+focusGraphCanvas :: Miso.Effect () () Model Action
 focusGraphCanvas = withSink $ \_ -> attempt (0 :: Int)
   where
     attempt tries = do
@@ -554,7 +422,7 @@ focusWithoutScroll domId = do
 a stale epoch is ignored, so only the timer armed for the last view can build
 the detail plate. One timer per gesture event is cheap.
 -}
-scheduleGraphSettle :: Effect () () Model Action
+scheduleGraphSettle :: Miso.Effect () () Model Action
 scheduleGraphSettle = do
     m <- get
     let epoch = mGraphSettleEpoch m
@@ -566,7 +434,7 @@ scheduleGraphSettle = do
 each frame short: the plate sharpens over a handful of frames instead of
 blocking one long task after the gesture stops.
 -}
-scheduleGraphDetailStep :: RequestId -> Int -> Effect () () Model Action
+scheduleGraphDetailStep :: RequestId -> Int -> Miso.Effect () () Model Action
 scheduleGraphDetailStep epoch phase =
     withSink $ \sink -> do
         callback <- asyncCallback1 (\_ -> sink (GraphDetailStep epoch phase))
@@ -576,7 +444,7 @@ scheduleGraphDetailStep epoch phase =
 {- | Debounce the graph filter input: cancel the previous browser timeout and
 arm a new one; the settled action does the matching work.
 -}
-graphFilterSettle :: Effect () () Model Action
+graphFilterSettle :: Miso.Effect () () Model Action
 graphFilterSettle = do
     m <- get
     case mGraphFilterTimer m of

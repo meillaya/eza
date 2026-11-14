@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Part of the client update function; see "Eza.Web.Update".
-module Eza.Web.Update.Detail (
+module Eza.Web.Logic.Update.Detail (
     currentDetail,
     finalizeAdd,
     handle,
@@ -22,19 +22,17 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Eza.Web.Logic.Effect (RequestId, nextRequestId, requestIsCurrent)
 
-import Miso
-
 import Eza.Types
-import Eza.Web.Api
-import Eza.Web.Error
-import Eza.Web.Interpreter
+import Eza.Web.Logic.Browser
+import Eza.Web.Logic.Error
 import Eza.Web.Logic.Model
+import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Route (Route (..))
-import {-# SOURCE #-} Eza.Web.Update (updateModel)
-import Eza.Web.Update.Common (completeWikilink, hasUnsaved, isHttpUrlText, isSaveRoute, parseTagInput, putModel, refreshStats, refreshTags, reloadList, splitTags, wikilinkQueryAt)
-import Eza.Web.Update.Route (loadRoute)
+import Eza.Web.Logic.Update.Common
+import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
+import Eza.Web.Logic.Update.Route (loadRoute)
 
-sameEpoch :: RequestId -> Effect () () Model Action -> Effect () () Model Action
+sameEpoch :: RequestId -> Update () -> Update ()
 sameEpoch epoch action = do
     m <- get
     when (requestIsCurrent (mDetailEpoch m) epoch) action
@@ -81,7 +79,7 @@ textEditedDetail detail draft =
         , bdEnrichError = ""
         }
 
-reloadHighlights :: Effect () () Model Action
+reloadHighlights :: Update ()
 reloadHighlights = do
     m <- get
     case currentDetail m of
@@ -90,7 +88,7 @@ reloadHighlights = do
             fetchHighlights (bdId detail) (HighlightsLoaded epoch) (HighlightsFailed epoch)
         Nothing -> pure ()
 
-finalizeAdd :: Int -> Effect () () Model Action
+finalizeAdd :: Int -> Update ()
 finalizeAdd bookmarkId = do
     m <- get
     putModel
@@ -115,7 +113,7 @@ finalizeAdd bookmarkId = do
 -- \| Reload one record after an enrichment or a cancelled edit: new epoch,
 -- empty editor, loading view rather than the previous record.
 
-reloadDetail :: Int -> Effect () () Model Action
+reloadDetail :: Int -> Update ()
 reloadDetail bookmarkId = do
     m <- get
     let epoch = nextRequestId (mDetailEpoch m)
@@ -157,7 +155,7 @@ reloadDetail bookmarkId = do
 
 -- \| Refresh the share list without starting a new route epoch.
 
-refreshShares :: Effect () () Model Action
+refreshShares :: Update ()
 refreshShares = do
     m <- get
     let epoch = mDetailEpoch m
@@ -166,7 +164,7 @@ refreshShares = do
 -- \| Put a validation or server message in the security panel instead of
 -- a toast: the field it belongs to is on the same screen.
 
-handle :: Action -> Effect () () Model Action
+handle :: Action -> Update ()
 handle = \case
     AddOpen -> do
         putModel (\m -> m{mAddOpen = True, mAddError = Nothing})
@@ -247,7 +245,7 @@ handle = \case
         readNoteCursor
     NoteCursorRead cursor -> do
         m <- get
-        updateModel (NoteMeta cursor (wikilinkQueryAt (mEditNote m) cursor))
+        dispatch (NoteMeta cursor (wikilinkQueryAt (mEditNote m) cursor))
     NoteMeta cursor query -> do
         m <- get
         putModel (\x -> x{mNoteCursor = cursor, mLinkQuery = query})
@@ -437,7 +435,7 @@ handle = \case
                 Just detail
                     | hasUnsaved m ->
                         putModel (\x -> x{mDetail = Just detail{bdIsRead = not readFlag}})
-                    | otherwise -> updateModel (DetailReload (bdId detail))
+                    | otherwise -> dispatch (DetailReload (bdId detail))
                 Nothing -> pure ()
             handleApiError err
     OpenToggled -> pure ()

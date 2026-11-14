@@ -26,9 +26,28 @@ library
   exposed-modules:  Eza.Web.Logic.Api
                     Eza.Web.Logic.Effect
                     Eza.Web.Logic.Error
+                    Eza.Web.Logic.Ids
+                    Eza.Web.Logic.Graph.Geometry
                     Eza.Web.Logic.Graph
                     Eza.Web.Logic.Input
                     Eza.Web.Logic.Ledger
+                    Eza.Web.Logic.Browser
+                    Eza.Web.Logic.Update.Common
+                    Eza.Web.Logic.Update.Views
+                    Eza.Web.Logic.Update.ViewDefs
+                    Eza.Web.Logic.Update.Route
+                    Eza.Web.Logic.Update.Shell
+                    Eza.Web.Logic.Update.Ledger
+                    Eza.Web.Logic.Update.Detail
+                    Eza.Web.Logic.Update.Account
+                    Eza.Web.Logic.Update.Graph
+                    Eza.Web.Logic.Update.Maintenance
+                    Eza.Web.Logic.Update.Tags
+                    Eza.Web.Logic.Update
+                    Eza.Web.Logic.Update.Dedup
+                    Eza.Web.Logic.Update.ImportExport
+                    Eza.Web.Logic.Update.Monad
+                    Eza.Web.Logic.Requests
                     Eza.Web.Logic.Model
                     Eza.Web.Logic.Route
                     Eza.Web.Logic.Wire

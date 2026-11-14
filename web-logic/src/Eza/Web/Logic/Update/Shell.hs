@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Part of the client update function; see "Eza.Web.Update".
-module Eza.Web.Update.Shell (
+module Eza.Web.Logic.Update.Shell (
     activateRow,
     choosePalette,
     closeTopLayer,
@@ -16,20 +16,18 @@ import qualified Data.IntSet as IS
 import Data.Maybe
 import qualified Data.Text as T
 
-import Miso
-
 import Eza.Boot
 import Eza.Types
-import Eza.Web.Api
-import Eza.Web.Error
-import Eza.Web.Interpreter
+import Eza.Web.Logic.Browser
+import Eza.Web.Logic.Error
 import Eza.Web.Logic.Model
+import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Route (Route (..), isGraphRoute)
-import {-# SOURCE #-} Eza.Web.Update (updateModel)
-import Eza.Web.Update.Common (bootPageMatchesLedger, cancelSelectAllPaging, hasUnsaved, indexOfBookmark, isDetailRoute, isListRoute, itemAt, loadMore, moveCursor, putModel, refreshStats, refreshTags, reloadList, setCursor)
-import Eza.Web.Update.Graph (graphEscape, graphOpenSelected, graphPan)
-import Eza.Web.Update.Route (loadRoute, reloadRoute)
-import Eza.Web.Update.ViewDefs (applyGraphView, defaultGraphView, isLocalGraphRoute)
+import Eza.Web.Logic.Update.Common
+import Eza.Web.Logic.Update.Graph (graphEscape, graphOpenSelected, graphPan)
+import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
+import Eza.Web.Logic.Update.Route (loadRoute, reloadRoute)
+import Eza.Web.Logic.Update.ViewDefs (applyGraphView, defaultGraphView, isLocalGraphRoute)
 
 hasModalLayer :: Model -> Bool
 hasModalLayer m =
@@ -55,9 +53,9 @@ hasModalLayer m =
         || isJust (mUndoPreview m)
         || isJust (mUndoPreviewError m)
 
-closeTopLayer :: Model -> Effect () () Model Action
+closeTopLayer :: Model -> Update ()
 closeTopLayer m
-    | mUndoPreviewLoading m || isJust (mUndoPreview m) || isJust (mUndoPreviewError m) = updateModel UndoPreviewClose
+    | mUndoPreviewLoading m || isJust (mUndoPreview m) || isJust (mUndoPreviewError m) = dispatch UndoPreviewClose
     | vuSaveOpen (mViewUi m) = putModel (\x -> x{mViewUi = (mViewUi x){vuSaveOpen = False, vuError = Nothing}})
     | vuImportOpen (mViewUi m) = putModel (\x -> x{mViewUi = (mViewUi x){vuImportOpen = False, vuError = Nothing}})
     | isJust (vuExport (mViewUi m)) = putModel (\x -> x{mViewUi = (mViewUi x){vuExport = Nothing}})
@@ -73,7 +71,7 @@ closeTopLayer m
     | isJust (mReaderSel m) = putModel (\x -> x{mReaderSel = Nothing})
     | mPaletteOpen m = putModel (\x -> x{mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})
     | mAddOpen m = putModel (\x -> x{mAddOpen = False})
-    | mGuardOpen m = updateModel DirtyGuardClose
+    | mGuardOpen m = dispatch DirtyGuardClose
     | isJust (mTagPrompt m) = putModel (\x -> x{mTagPrompt = Nothing, mTagPromptValue = ""})
     | mConfirmBulkDelete m = putModel (\x -> x{mConfirmBulkDelete = False})
     | isJust (mLinkQuery m) = putModel (\x -> x{mLinkQuery = Nothing, mLinkResults = []})
@@ -83,7 +81,7 @@ closeTopLayer m
     | mSelectingAll m = putModel cancelSelectAllPaging
     | otherwise = pure ()
 
-choosePalette :: Int -> Effect () () Model Action
+choosePalette :: Int -> Update ()
 choosePalette offsetFromSelection = do
     m <- get
     let entries = paletteEntries m
@@ -91,29 +89,29 @@ choosePalette offsetFromSelection = do
     case drop selection entries of
         ((_, _, nextAction) : _) -> do
             putModel (\x -> x{mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})
-            updateModel nextAction
+            dispatch nextAction
         [] -> pure ()
 
-openCursorRecord :: Model -> Effect () () Model Action
+openCursorRecord :: Model -> Update ()
 openCursorRecord m =
     case itemAt (mItems m) (fromMaybe 0 (mLedgerCursor m)) of
         Nothing -> pure ()
-        Just b -> updateModel (Navigate (Bookmark (bsId b)))
+        Just b -> dispatch (Navigate (Bookmark (bsId b)))
 
 -- \| Open the row the keyboard is on: it becomes the cursor row first, so
 -- returning from the record lands on what the reader activated.
 
-activateRow :: Int -> Effect () () Model Action
+activateRow :: Int -> Update ()
 activateRow bookmarkId = do
     m <- get
     case indexOfBookmark (mItems m) bookmarkId of
         Just idx -> putModel (\x -> x{mLedgerCursor = Just idx})
         Nothing -> pure ()
-    updateModel (Navigate (Bookmark bookmarkId))
+    dispatch (Navigate (Bookmark bookmarkId))
 
 -- \| The index of a bookmark in the loaded ledger.
 
-handle :: Action -> Effect () () Model Action
+handle :: Action -> Update ()
 handle = \case
     Mounted -> do
         putModel (\m -> m{mBooted = True})
@@ -173,7 +171,7 @@ handle = \case
     Resized -> do
         refreshLayout
         m <- get
-        when (isGraphRoute (mRoute m)) (measureGraphCanvas GraphMeasured)
+        when (isGraphRoute (mRoute m)) (measureGraphCanvas)
     Scrolled -> measureLedgerScroll
     ScrollMetrics Nothing -> pure ()
     ScrollMetrics (Just (scrollY, height, gridTop)) -> do
@@ -208,7 +206,7 @@ handle = \case
             -- open the record behind it.
             modal = hasModalLayer m
             graphKeys = isGraphRoute (mRoute m) && not editable && plain && not modal
-            runAction action = updateModel action
+            runAction action = dispatch action
         -- event.key is upper case for a shifted letter; the shortcut names
         -- below are the unshifted ones.
         case T.toLower (keKey key) of
@@ -264,7 +262,7 @@ handle = \case
     -- whole interface instead and ask for a reload.
     BootLoaded payload
         | not (bootWireVersionSupported payload) ->
-            updateModel (WireVersionMismatch (bpWireVersion payload))
+            dispatch (WireVersionMismatch (bpWireVersion payload))
     BootLoaded payload -> do
         putModel
             ( \m ->

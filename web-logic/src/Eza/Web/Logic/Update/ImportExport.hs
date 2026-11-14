@@ -2,17 +2,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Part of the client update function; see "Eza.Web.Update".
-module Eza.Web.Update.ImportExport (handle) where
-
-import Miso
+module Eza.Web.Logic.Update.ImportExport (handle) where
 
 import qualified Data.Text as T
-import Eza.Web.Api
-import Eza.Web.Interpreter
+import Eza.Web.Logic.Browser
 import Eza.Web.Logic.Model
-import Eza.Web.Update.Common (putModel, refreshStats, refreshTags, reloadList)
+import Eza.Web.Logic.Requests
+import Eza.Web.Logic.Update.Common
+import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
 
-handle :: Action -> Effect () () Model Action
+handle :: Action -> Update ()
 handle = \case
     ImportStart -> triggerFileInput "import-file"
     ImportFileChosen -> do

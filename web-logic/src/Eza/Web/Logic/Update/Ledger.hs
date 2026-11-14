@@ -2,58 +2,57 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Part of the client update function; see "Eza.Web.Update".
-module Eza.Web.Update.Ledger (handle) where
+module Eza.Web.Logic.Update.Ledger (handle) where
 
 import Control.Monad
 import qualified Data.IntSet as IS
 import qualified Data.Text as T
-import Eza.Web.Logic.Effect (nextRequestId, requestIsCurrent)
-
-import Miso
+import Eza.Web.Logic.Effect (RequestId (..), nextRequestId, requestIsCurrent)
 
 import Eza.Types
-import Eza.Web.Api
-import Eza.Web.Error
-import Eza.Web.Interpreter
+import Eza.Web.Logic.Browser
+import Eza.Web.Logic.Error
 import qualified Eza.Web.Logic.Ledger as Ledger
 import Eza.Web.Logic.Model
-import Eza.Web.Update.Common (cancelSelectAllPaging, continueScrollRestore, fireTimer, listParams, putModel, refreshStats, refreshTags, reloadList, resetShellForReload, resetShellForSearch, settleLedgerSelection, splitTags)
-import Eza.Web.Update.Detail (reloadDetail)
+import Eza.Web.Logic.Requests
+import Eza.Web.Logic.Update.Common
+import Eza.Web.Logic.Update.Detail (reloadDetail)
+import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
 
-handle :: Action -> Effect () () Model Action
+handle :: Action -> Update ()
 handle = \case
-    StatsLoaded requestId stats -> runLedgerAction (Ledger.StatsLoaded requestId stats)
-    StatsFailed requestId err -> runLedgerAction (Ledger.StatsFailed requestId (aeMessage err))
+    StatsLoaded requestId stats -> runLedger (Ledger.StatsLoaded requestId stats)
+    StatsFailed requestId err -> runLedger (Ledger.StatsFailed requestId (aeMessage err))
     SearchInput query -> do
         putModel resetShellForSearch
-        runLedgerAction (Ledger.SearchInput query)
+        runLedger (Ledger.SearchInput query)
     SearchCommit -> reloadList
     TimerRegistered timer -> putModel (\m -> m{mDebounce = Just timer})
     TimerFired timerId -> fireTimer timerId
     TagToggled tag -> do
         putModel resetShellForReload
-        runLedgerAction (Ledger.TagToggled tag)
+        runLedger (Ledger.TagToggled tag)
     ClearFilters -> do
         putModel resetShellForReload
-        runLedgerAction Ledger.ClearFilters
+        runLedger Ledger.ClearFilters
     SortSelected sort -> do
         putModel resetShellForReload
-        runLedgerAction (Ledger.SortSelected sort)
+        runLedger (Ledger.SortSelected sort)
     UnreadToggled -> do
         putModel resetShellForReload
-        runLedgerAction Ledger.UnreadToggled
+        runLedger Ledger.UnreadToggled
     ListLoaded append requestId page -> do
         m <- get
         -- A response for an older query no longer paints: the user may have
         -- typed again, changed the sort, or left the list route entirely.
-        when (Ledger.listRequestIsCurrent (extractLedger m) requestId) $ do
-            runLedgerAction (Ledger.ListLoaded append requestId page)
+        when (Ledger.listRequestIsCurrent (projectLedger m) requestId) $ do
+            runLedger (Ledger.ListLoaded append requestId page)
             putModel (settleLedgerSelection append)
             continueScrollRestore
     ListFailed _append requestId err -> do
         m <- get
-        when (Ledger.listRequestIsCurrent (extractLedger m) requestId) $ do
-            runLedgerAction (Ledger.ListFailed requestId (aeMessage err))
+        when (Ledger.listRequestIsCurrent (projectLedger m) requestId) $ do
+            runLedger (Ledger.ListFailed requestId (aeMessage err))
             putModel (\x -> x{mScrollRestore = Nothing, mConfirmMarkAll = False})
             handleApiError err
     -- The old call sent the first row's id to an id-cutoff endpoint and marked
