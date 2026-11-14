@@ -255,17 +255,25 @@ and caches it per library revision; the client hydrates the shared
 
 ## Serving and caching
 
-Static files are served from `EZA_STATIC_DIR`: pages at `/`, a fixed entry at
-`/assets/app/index.js`, the WASM bundle, the stylesheet, and the fonts. Every
-static response carries an ETag and `Cache-Control: no-cache`, so a browser
-revalidates after a rebuild and gets a 304 when the file did not change. The
-client shell is sent with `no-store`: the HTML always comes from the server.
+The web client is built in two steps. `scripts/build-web.sh` compiles the
+Miso client and runs the WASM size gates; `scripts/bundle-web.sh` consumes the
+compiled tree and emits the publishable bundle. Every asset gets a
+content-hashed name, and one generated `asset-manifest.json` records the
+logical-to-hashed map, the shell references, the service-worker precache list
+and the build id. That manifest is the single asset list: the server shell, the
+auth pages and `/sw.js` are generated from it, and the generated
+`static/index.html`, `static/sw.js` and `static/manifest.webmanifest` are build
+outputs, not sources.
 
-`/sw.js` is generated per request with the build id that
-`scripts/build-web.sh` writes to `static/app/build-id`. A rebuild therefore
-installs a new service worker; the worker claims the open pages, and each tab
-reloads once into the new build. A port that is already taken reports the
-origin that is probably answering instead of a raw socket error.
+At startup the server loads and validates the manifest once; a missing or
+corrupt bundle stops startup with an actionable message instead of serving a
+broken shell. Hashed assets are served `public, max-age=31536000, immutable`
+with an ETag, the shell is `no-store` and carries the build id, fixed paths
+(`/manifest.webmanifest`, unhashed fallbacks) are `no-cache`, and `/sw.js` is
+the generated worker served `no-cache` with the build id as its ETag. A rebuild
+therefore installs a new service worker and each tab reloads once into the new
+build. A port that is already taken reports the origin that is probably
+answering instead of a raw socket error.
 
 ## Deployment shape
 

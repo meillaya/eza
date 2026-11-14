@@ -17,6 +17,7 @@ import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 import qualified AdminSpec
+import qualified AssetsSpec
 import qualified AuthzSpec
 import qualified BackupSpec
 import qualified CliSpec
@@ -1123,6 +1124,7 @@ main = hspec $ do
             classifyHttp 500 `shouldBe` LinkUnknown
             classifyHttp 200 `shouldBe` LinkAlive
 
+    AssetsSpec.spec
     DataIntegritySpec.spec
     DedupSpec.spec
     LedgerSpec.spec

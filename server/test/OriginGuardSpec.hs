@@ -22,7 +22,6 @@ import Control.Exception (bracket)
 import Control.Monad (void)
 import Data.Aeson (Value (..), encode, object, (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -30,7 +29,6 @@ import qualified Data.Text.Encoding as TE
 import Data.Word (Word32, Word8)
 import Network.Socket (SockAddr (..), tupleToHostAddress)
 import Network.Wai (defaultRequest, remoteHost, requestHeaders)
-import System.Directory (createDirectoryIfMissing)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
@@ -214,8 +212,9 @@ withStaticServer :: (TestServer -> IO a) -> IO a
 withStaticServer action =
     withSystemTempDirectory "eza-origin-static" $ \dir -> do
         let root = dir </> "static"
-        createDirectoryIfMissing True root
-        BS.writeFile (root </> "eza.css") "/* public asset */"
+        -- The server validates a content-addressed bundle at startup; the
+        -- fixture writes the same shape scripts/bundle-web.sh emits.
+        writeTestStaticBundle root
         withTestServerCustom (\cfg -> cfg{cfgStaticDir = Just root}) (\_ -> pure ()) action
 
 publicMethodSpec :: Spec
@@ -229,10 +228,10 @@ publicMethodSpec = describe "#42 HEAD and OPTIONS on public routes" $ do
             hrespBody headHealth `shouldBe` ""
             headerValue headHealth "Content-Type" `shouldBe` headerValue getHealth "Content-Type"
 
-            getAsset <- httpRequest server "GET" "/assets/eza.css" [] Nothing
+            getAsset <- httpRequest server "GET" (T.unpack testBundleCssPath) [] Nothing
             getAsset `shouldHaveStatus` 200
-            hrespBody getAsset `shouldSatisfy` containsText "/* public asset */"
-            headAsset <- httpRequest server "HEAD" "/assets/eza.css" [] Nothing
+            hrespBody getAsset `shouldSatisfy` containsText "/* eza test asset */"
+            headAsset <- httpRequest server "HEAD" (T.unpack testBundleCssPath) [] Nothing
             headAsset `shouldHaveStatus` 200
             hrespBody headAsset `shouldBe` ""
             headerValue headAsset "Content-Type" `shouldBe` headerValue getAsset "Content-Type"

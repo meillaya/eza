@@ -1,4 +1,9 @@
--- | Client model, route type, and the action vocabulary.
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+{- | Client model and the action vocabulary. The route type itself lives in
+the native @eza-web-logic@ package; the module holds the Miso boundary
+(URL classification, history tokens, view labels) for it.
+-}
 module Eza.Web.Model (
     Route (..),
     Theme (..),
@@ -42,15 +47,11 @@ module Eza.Web.Model (
 ) where
 
 import Data.Aeson (FromJSON (..), withObject, (.:))
-import qualified Data.ByteString as BS
-import Data.Char (isDigit)
 import qualified Data.IntSet as IS
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Text.Encoding (decodeUtf8')
-import Text.Read (readMaybe)
 
 import Eza.Account (AccountInfo, SessionInfo, TokenView)
 import Eza.Ai (AiStatus, TagSuggestion)
@@ -99,10 +100,12 @@ import Eza.Web.Graph (
     emptyMatches,
     initialGraphView,
  )
+import Eza.Web.Logic.Route (Route (..), isGraphRoute)
+import qualified Eza.Web.Logic.Route as ClientRoute
 import Eza.Webhook (DeliveryView, EventType, Webhook (..))
 
 import Miso hiding (View)
-import Miso.Router (Router (..), RoutingError (..), Token (..), parseURI, routes, toCapture, toPath, toQueryParam)
+import Miso.Router (Router (..), RoutingError, Token (..), routes, toPath, toQueryParam)
 
 {- | A text selection inside the reader, with character offsets relative to
 the extracted text (used for highlight creation). This is client-local UI
@@ -140,149 +143,26 @@ data ViewUi = ViewUi
     }
     deriving (Eq, Show)
 
--- | Application routes.  @Bookmark@ carries the numeric bookmark id.
-data Route
-    = Index
-    | Bookmark Int
-    | Inbox
-    | Graph
-    | GraphLocal Int Int
-    | Views
-    | ViewOpen Text
-    | Dedup
-    | Tags
-    | AiTags
-    | Maintenance
-    | Account
-    | History
-    | Save (Maybe Text) (Maybe Text) (Maybe Text)
-    | NotFound
-    deriving (Eq, Show)
-
 {- | The route parser is not used: the client classifies URLs directly (and
 falls back to 'NotFound' instead of failing), so the default is overridden.
+The URL grammar itself lives in "Eza.Web.Logic.Route"; this instance only
+bridges Miso's token type, which is why it stays on the client side.
 -}
 instance Router Route where
-    fromRoute = \case
-        Index -> [IndexToken]
-        Bookmark bid -> [toPath "bookmark", toCapture bid]
-        Inbox -> [toPath "inbox"]
-        Graph -> [toPath "graph"]
-        GraphLocal rootKey depth ->
-            [ toPath "graph"
-            , toQueryParam "focus" (T.pack (show rootKey))
-            , toQueryParam "depth" (T.pack (show depth))
-            , toQueryParam "local" ("1" :: Text)
-            ]
-        Views -> [toPath "views"]
-        ViewOpen slug -> [toPath "views", toPath (ms (T.unpack slug))]
-        Dedup -> [toPath "dedup"]
-        Tags -> [toPath "tags"]
-        AiTags -> [toPath "tags", toPath "ai"]
-        Maintenance -> [toPath "maintenance"]
-        Account -> [toPath "account"]
-        History -> [toPath "history"]
-        Save title body url ->
-            [toPath "save"]
-                ++ concat
-                    [ [toQueryParam "title" value]
-                    | Just value <- [title]
-                    ]
-                ++ concat
-                    [ [toQueryParam "text" value]
-                    | Just value <- [body]
-                    ]
-                ++ concat
-                    [ [toQueryParam "url" value]
-                    | Just value <- [url]
-                    ]
-        NotFound -> [toPath "not-found"]
-    toRoute input = case parseURI input of
-        Left err -> Left (LexError input err)
-        Right uri -> Right (classifyRoute uri)
+    fromRoute target =
+        case ClientRoute.routeUriParts target of
+            ([], query) -> IndexToken : queryTokens query
+            (segments, query) -> map (toPath . ms) segments <> queryTokens query
+      where
+        queryTokens = map (\(key, value) -> toQueryParam (ms key) (ms value))
+    toRoute input = Right (ClientRoute.routeOfUri (fromMisoString input))
     routeParser = routes []
 
-splitPath :: String -> [String]
-splitPath = filter (not . null) . step
-  where
-    step s = case break (== '/') s of
-        (a, []) -> [a]
-        (a, _ : rest) -> a : step rest
-
-{- | Decode a URL query value (@%XX@ escapes and @+@ as space, UTF-8 aware).
-miso's URI lexer keeps query values percent-encoded, and the PWA
-share_target passes title/url through the query string.
+{- | Classify a Miso URI. The browser boundary converts the URI back to the
+path text the native parser takes.
 -}
-percentDecode :: Text -> Text
-percentDecode raw =
-    case decodeUtf8' (BS.pack (map fromIntegral (decode (T.unpack raw)))) of
-        Right decoded -> decoded
-        Left _ -> raw
-  where
-    decode [] = []
-    decode ('%' : a : b : rest)
-        | Just hi <- hexValue a
-        , Just lo <- hexValue b =
-            hi * 16 + lo : decode rest
-    decode ('+' : rest) = 32 : decode rest
-    decode (c : rest) = utf8 (fromEnum c) ++ decode rest
-
-    hexValue c
-        | isDigit c = Just (fromEnum c - fromEnum '0')
-        | c >= 'a' && c <= 'f' = Just (fromEnum c - fromEnum 'a' + 10)
-        | c >= 'A' && c <= 'F' = Just (fromEnum c - fromEnum 'A' + 10)
-        | otherwise = Nothing
-
-    utf8 n
-        | n <= 0x7f = [n]
-        | n <= 0x7ff = [0xc0 + n `div` 64, 0x80 + n `mod` 64]
-        | n <= 0xffff =
-            [ 0xe0 + n `div` 4096
-            , 0x80 + (n `div` 64) `mod` 64
-            , 0x80 + n `mod` 64
-            ]
-        | otherwise =
-            [ 0xf0 + n `div` 262144
-            , 0x80 + (n `div` 4096) `mod` 64
-            , 0x80 + (n `div` 64) `mod` 64
-            , 0x80 + n `mod` 64
-            ]
-
-classifyRoute :: URI -> Route
-classifyRoute uri = case splitPath (fromMisoString (uriPath uri)) of
-    [] -> Index
-    ["bookmark", n] -> maybe NotFound Bookmark (readMaybe n)
-    ["inbox"] -> Inbox
-    ["graph"]
-        | queryText "local" == Just "1"
-        , Just focusKey <- query "focus" >>= readMaybe . T.unpack ->
-            GraphLocal focusKey (clampDepth (query "depth" >>= readMaybe . T.unpack))
-        | otherwise -> Graph
-    ["views"] -> Views
-    ["views", slug] -> ViewOpen (fromMisoString (ms slug :: MisoString))
-    ["dedup"] -> Dedup
-    ["tags"] -> Tags
-    ["tags", "ai"] -> AiTags
-    ["maintenance"] -> Maintenance
-    ["account"] -> Account
-    ["history"] -> History
-    ["accessions"] -> History
-    -- PWA share_target landing page: /save?title=..&text=..&url=..
-    ["save"] -> Save (query "title") (query "text") (query "url")
-    _ -> NotFound
-  where
-    query key =
-        fmap (percentDecode . (fromMisoString :: MisoString -> Text))
-            =<< M.lookup key (uriQueryString uri)
-    queryText key = query key
-    clampDepth (Just depth) = max 1 (min 3 depth)
-    clampDepth Nothing = 1
-
 routeOfUri :: URI -> Route
-routeOfUri uri =
-    case toRoute (prettyURI uri) of
-        Right r -> r
-        Left _ -> NotFound
+routeOfUri uri = ClientRoute.routeOfUri (fromMisoString (prettyURI uri))
 
 {- | The layout the plate is showing: the local neighbourhood when local mode
 is on, otherwise the whole-library layout.
@@ -291,12 +171,6 @@ activeGraphLayout :: Model -> Maybe GraphLayout
 activeGraphLayout m
     | mGraphLocal m = mGraphLocalLayout m
     | otherwise = mGraphLayout m
-
--- | Both graph routes share the plate and the graph keyboard handling.
-isGraphRoute :: Route -> Bool
-isGraphRoute Graph = True
-isGraphRoute GraphLocal{} = True
-isGraphRoute _ = False
 
 {- | Does the boot document belong to this client's wire contract? A client
 built against another version could misread the payload, so the update path
@@ -316,41 +190,15 @@ wireVersionMismatchMessage serverVersion =
             <> ". Reload the page to load a matching build."
         )
 
+{- | The document title, wrapped for the Miso view layer. The text and the
+wording live in "Eza.Web.Logic.Route" so they are covered by native tests.
+-}
 routeTitle :: Route -> MisoString
-routeTitle = \case
-    Index -> "Library"
-    Bookmark _ -> "Bookmark"
-    Inbox -> "Inbox"
-    Graph -> "Graph"
-    GraphLocal _ _ -> "Graph"
-    Views -> "Views"
-    ViewOpen _ -> "View"
-    Dedup -> "Duplicates"
-    Tags -> "Tags"
-    AiTags -> "AI tags"
-    Maintenance -> "Maintenance"
-    Account -> "Account"
-    History -> "History by year"
-    Save _ _ _ -> "Save bookmark"
-    NotFound -> "Not found"
+routeTitle r = ms (ClientRoute.routeTitle r)
 
+-- | The one-line subtitle, wrapped the same way as 'routeTitle'.
 routeSubtitle :: Route -> MisoString
-routeSubtitle = \case
-    Index -> "All records, newest first."
-    Bookmark _ -> "One record."
-    Inbox -> "Unread records."
-    Graph -> "Records and tags, as a graph."
-    GraphLocal _ depth -> "A local graph, " <> ms (show depth) <> " hop" <> (if depth == 1 then "" else "s") <> " deep."
-    Views -> "Saved views."
-    ViewOpen _ -> "A saved view."
-    Dedup -> "Same address, same title."
-    Tags -> "The tag vocabulary."
-    AiTags -> "Tag suggestions."
-    Maintenance -> "Dead links, prune, undo."
-    Account -> "Account settings."
-    History -> "Filing by year and source."
-    Save _ _ _ -> "File a record."
-    NotFound -> "Not found."
+routeSubtitle r = ms (ClientRoute.routeSubtitle r)
 
 data Theme = ThemeLight | ThemeDark
     deriving (Eq, Show)

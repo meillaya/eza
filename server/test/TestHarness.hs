@@ -36,11 +36,30 @@ module TestHarness (
     listTotal,
     addTestBookmark,
     containsText,
+    testBundleAuthJsPath,
+    testBundleBuildId,
+    testBundleCssPath,
+    testBundleFaviconFallbackPath,
+    testBundleFaviconPath,
+    testBundleFontPath,
+    testBundleIcon192Path,
+    testBundleIcon512Path,
+    testBundleIndexJsPath,
+    testBundleJsffiPath,
+    testBundleManifest,
+    testBundlePwaJsPath,
+    testBundleServiceWorker,
+    testBundleShellHtml,
+    testBundleThemeJsPath,
+    testBundleVendorPath,
+    testBundleWasmPath,
+    writeTestStaticBundle,
 ) where
 
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (finally)
+import Control.Monad (forM_)
 import Data.Aeson (FromJSON, Value (..), decode, eitherDecode, encode, object, (.=))
 import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -56,7 +75,8 @@ import Network.HTTP.Client
 import Network.HTTP.Types (HeaderName, statusCode)
 import qualified Network.Socket as Socket
 import Network.Wai.Handler.Warp (defaultSettings, openFreePort, runSettingsSocket, setBeforeMainLoop)
-import System.FilePath ((</>))
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath (takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
@@ -180,6 +200,179 @@ testAuthConfig cfg =
         , Auth.acLoginMaxAttempts = cfgLoginMaxAttempts cfg
         , Auth.acLoginLockoutSeconds = cfgLoginLockoutSeconds cfg
         }
+
+-- ---------------------------------------------------------------------------
+-- A valid content-addressed static bundle for asset-serving tests
+-- ---------------------------------------------------------------------------
+
+{- | The build id every fixture manifest carries. Sixteen lowercase hex
+characters is the shape 'Eza.Assets' validates.
+-}
+testBundleBuildId :: Text
+testBundleBuildId = "0123456789abcdef"
+
+{- | The hashed fixture URLs. They mirror the names scripts/bundle-web.sh
+emits (an eight-hex content address before the extension), without requiring
+a WASM build in the native test suite.
+-}
+testBundleCssPath :: Text
+testBundleCssPath = "/assets/eza.deadbeef.css"
+
+testBundleThemeJsPath :: Text
+testBundleThemeJsPath = "/assets/theme.cafebabe.js"
+
+testBundlePwaJsPath :: Text
+testBundlePwaJsPath = "/assets/pwa.0badf00d.js"
+
+testBundleAuthJsPath :: Text
+testBundleAuthJsPath = "/assets/auth.8badf00d.js"
+
+testBundleFaviconPath :: Text
+testBundleFaviconPath = "/assets/favicon.2badf00d.svg"
+
+testBundleFaviconFallbackPath :: Text
+testBundleFaviconFallbackPath = "/assets/favicon-fallback.3badf00d.svg"
+
+testBundleIcon192Path :: Text
+testBundleIcon192Path = "/assets/icons/icon-192.4badf00d.png"
+
+testBundleIcon512Path :: Text
+testBundleIcon512Path = "/assets/icons/icon-512.5badf00d.png"
+
+testBundleFontPath :: Text
+testBundleFontPath = "/assets/fonts/newsreader-300-800.6badf00d.woff2"
+
+testBundleWasmPath :: Text
+testBundleWasmPath = "/assets/app/app.7badf00d.wasm"
+
+testBundleJsffiPath :: Text
+testBundleJsffiPath = "/assets/app/ghc_wasm_jsffi.9badf00d.js"
+
+testBundleIndexJsPath :: Text
+testBundleIndexJsPath = "/assets/app/index.abadf00d.js"
+
+testBundleVendorPath :: Text
+testBundleVendorPath = "/assets/vendor/browser_wasi_shim.cbadf00d"
+
+{- | The precache list of the fixture worker: the shell route, the web
+manifest, and every hashed asset the shell loads.
+-}
+testBundlePrecache :: [Text]
+testBundlePrecache =
+    [ "/"
+    , "/manifest.webmanifest"
+    , testBundleCssPath
+    , testBundleThemeJsPath
+    , testBundlePwaJsPath
+    , testBundleIndexJsPath
+    , testBundleWasmPath
+    , testBundleJsffiPath
+    , testBundleFaviconPath
+    , testBundleFaviconFallbackPath
+    , testBundleIcon192Path
+    , testBundleIcon512Path
+    , testBundleVendorPath <> "/index.js"
+    , testBundleFontPath
+    ]
+
+-- | The generated-shell shape: every shell ref the manifest names is present.
+testBundleShellHtml :: Text
+testBundleShellHtml =
+    T.unlines
+        [ "<!doctype html>"
+        , "<html lang=\"en\" data-theme=\"light\"><head>"
+        , "<link rel=\"manifest\" href=\"/manifest.webmanifest\" />"
+        , "<link rel=\"icon\" href=\"" <> testBundleFaviconPath <> "\" type=\"image/svg+xml\" />"
+        , "<link rel=\"alternate icon\" href=\"" <> testBundleFaviconFallbackPath <> "\" type=\"image/svg+xml\" />"
+        , "<link rel=\"apple-touch-icon\" href=\"" <> testBundleIcon192Path <> "\" />"
+        , "<link rel=\"preload\" href=\"" <> testBundleFontPath <> "\" as=\"font\" type=\"font/woff2\" crossorigin />"
+        , "<link rel=\"stylesheet\" href=\"" <> testBundleCssPath <> "\" />"
+        , "<script src=\"" <> testBundleThemeJsPath <> "\"></script>"
+        , "<script src=\"" <> testBundlePwaJsPath <> "\" defer></script>"
+        , "<script type=\"module\" src=\"" <> testBundleIndexJsPath <> "\"></script>"
+        , "</head><body><div id=\"app\"></div></body></html>"
+        ]
+
+-- | The generated-worker shape: versioned cache name plus the precache list.
+testBundleServiceWorker :: Text
+testBundleServiceWorker =
+    T.unlines
+        [ "\"use strict\";"
+        , "const VERSION = \"eza-app-shell-" <> testBundleBuildId <> "\";"
+        , "const SHELL_ASSETS = [" <> T.intercalate ", " (map (\path -> "\"" <> path <> "\"") testBundlePrecache) <> "];"
+        ]
+
+{- | The asset manifest 'Eza.Assets' validates, as a JSON value so tests can
+corrupt one field without hand-writing JSON.
+-}
+testBundleManifest :: Value
+testBundleManifest =
+    object
+        [ "schema_version" .= (1 :: Int)
+        , "build_id" .= testBundleBuildId
+        , "assets"
+            .= object
+                [ "app.ghc_wasm_jsffi.js" .= testBundleJsffiPath
+                , "app.index.js" .= testBundleIndexJsPath
+                , "app.wasm" .= testBundleWasmPath
+                , "auth.js" .= testBundleAuthJsPath
+                , "eza.css" .= testBundleCssPath
+                , "favicon-fallback.svg" .= testBundleFaviconFallbackPath
+                , "favicon.svg" .= testBundleFaviconPath
+                , "fonts/newsreader-300-800.woff2" .= testBundleFontPath
+                , "icons/icon-192.png" .= testBundleIcon192Path
+                , "icons/icon-512.png" .= testBundleIcon512Path
+                , "manifest.webmanifest" .= ("/manifest.webmanifest" :: Text)
+                , "pwa.js" .= testBundlePwaJsPath
+                , "theme.js" .= testBundleThemeJsPath
+                , "vendor/browser_wasi_shim" .= testBundleVendorPath
+                ]
+        , "shell"
+            .= object
+                [ "apple_touch_icon" .= testBundleIcon192Path
+                , "auth_js" .= testBundleAuthJsPath
+                , "css" .= testBundleCssPath
+                , "favicon" .= testBundleFaviconPath
+                , "favicon_fallback" .= testBundleFaviconFallbackPath
+                , "manifest" .= ("/manifest.webmanifest" :: Text)
+                , "module_js" .= testBundleIndexJsPath
+                , "preload_font" .= testBundleFontPath
+                , "pwa_js" .= testBundlePwaJsPath
+                , "theme_js" .= testBundleThemeJsPath
+                ]
+        , "precache" .= testBundlePrecache
+        ]
+
+{- | Write a minimal but valid content-addressed bundle under @root@. The
+static-serving tests use it instead of a WASM build, so the native suite does
+not depend on scripts/build-web.sh having run.
+-}
+writeTestStaticBundle :: FilePath -> IO ()
+writeTestStaticBundle root = do
+    forM_ files $ \(relative, bytes) -> do
+        let path = root </> relative
+        createDirectoryIfMissing True (takeDirectory path)
+        BS.writeFile path bytes
+    BS.writeFile (root </> "index.html") (TE.encodeUtf8 testBundleShellHtml)
+    BS.writeFile (root </> "sw.js") (TE.encodeUtf8 testBundleServiceWorker)
+    BS.writeFile (root </> "manifest.webmanifest") "{\"name\":\"eza\",\"icons\":[]}"
+    BS.writeFile (root </> "asset-manifest.json") (LBS.toStrict (encode testBundleManifest))
+  where
+    files =
+        [ ("eza.deadbeef.css", "/* eza test asset */")
+        , ("theme.cafebabe.js", "// eza theme test asset")
+        , ("pwa.0badf00d.js", "// eza pwa test asset")
+        , ("auth.8badf00d.js", "// eza auth test asset")
+        , ("favicon.2badf00d.svg", "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"1\" height=\"1\"/></svg>")
+        , ("favicon-fallback.3badf00d.svg", "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"2\" height=\"2\"/></svg>")
+        , ("icons/icon-192.4badf00d.png", "\137PNG\r\n\SUB\n")
+        , ("icons/icon-512.5badf00d.png", "\137PNG\r\n\SUB\n")
+        , ("fonts/newsreader-300-800.6badf00d.woff2", "\0wOF2")
+        , ("app/app.7badf00d.wasm", "\0asm")
+        , ("app/ghc_wasm_jsffi.9badf00d.js", "export default 1;")
+        , ("app/index.abadf00d.js", "// eza loader test asset")
+        , ("vendor/browser_wasi_shim.cbadf00d/index.js", "export const WASI = 1;")
+        ]
 
 -- ---------------------------------------------------------------------------
 -- Accounts

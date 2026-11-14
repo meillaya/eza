@@ -41,8 +41,8 @@ Captured 2026-11-14 from `main` at commit `57639c0` before any program change.
 |---|---|---|
 | M0 Guardrails | complete | `docs/program/README.md` created; `scripts/check-docs.sh` green; `devenv shell -- docs` added; baseline build/test captured |
 | M1 Contract spine | complete | `Eza.Routes` (127 routes) is the single route truth and `Eza.Authz` derives from it; all boundary DTOs are core types; client strict decode (no `Eza.Web.Types`, no lenient helpers); graph layout wire in core and server-only; boot `wire_version`; 35 core golden tests + 316 server examples; full e2e 27/27; fourmolu/hlint/docs/spec gates green |
-| M2 Client architecture | not started | — |
-| M3 Build/assets/runtime | not started | — |
+| M2 Client architecture | in progress | M2-A complete: native `eza-web-logic` package (Route algebra, ClientRequest/requestPath over `Eza.Routes`, 27 native tests); M2-B (TEA reducer + ClientEffect split) pending |
+| M3 Build/assets/runtime | in progress | M3-A complete: content-addressed bundle + `asset-manifest.json` + generated shell/sw/manifest templates, server `Eza.Assets`/`Eza.Shell` validation and immutable caching, 16 AssetsSpec cases; M3-B (Nix WASM build, delete SRI pin) pending and required before any release |
 | M4 Server architecture | not started | — |
 | M5 Data layer/journal/upgrade | not started | — |
 | M6 Feature completion, formal specs, deployment subtraction | not started | — |
@@ -67,7 +67,33 @@ Append one entry per gate run: milestone, date, commands, result, commit.
 2026-11-14 M1:   fourmolu --mode check         -> ok; hlint -> No hints
 2026-11-14 M1:   bash scripts/check-docs.sh    -> ok (generated routes.md matches `routes --markdown`)
 2026-11-14 M1:   bash scripts/check-specs.sh   -> ok (TLC Extensions clean, schema checks pass)
+2026-11-14 M2-A: cabal test eza-web-logic       -> ok, 27 examples (route round-trip, request paths, purity)
+2026-11-14 M2-A: wasm32-wasi-cabal build        -> ok (Miso shell compiles against eza-web-logic)
+2026-11-14 M3-A: bundle-web.sh --no-build       -> ok, build 44b7ced795fb753e, 18 assets, 25 precache entries, deterministic
+2026-11-14 M3-A: cabal test eza-test            -> ok, 332 examples, 0 failures, 1 pending (16 AssetsSpec cases)
+2026-11-14 M3-A: focused e2e (3 scripts)        -> ok, 3 passed, 0 failed (SW build id, 25-entry cache, offline reload)
+2026-11-14 M2-A+M3-A: bash scripts/build-web.sh -> ok, 7,746,296 raw / 2,172,708 gzip, bundle build 81e489210770b130
+2026-11-14 M2-A+M3-A: cabal test all            -> ok, 27 logic + 35 core + 332 server examples, 0 failures, 1 pending
+2026-11-14 M2-A+M3-A: bash scripts/e2e.sh       -> ok, 27 scripts passed, 0 failed
+2026-11-14 M2-A+M3-A: fourmolu/hlint             -> ok, No hints; check-docs and check-specs ok
 ```
+
+## M2-A / M3-A decisions (recorded)
+
+- The native client-logic package is a separate Cabal package because `miso`
+  cannot build natively; the module namespace stays `Eza.Web.Logic.*` so the
+  client's domain language is unchanged.
+- `ClientRequest` models reads and writes, but only read paths are adopted in
+  `web/src/Eza/Web/Api.hs` this round; write paths follow in M2-B.
+- `instance Router Route` is necessarily an orphan (the type lives in
+  `web-logic`); `Eza.Web.Model` documents it and enables `-Wno-orphans`.
+- The content-addressed bundle is the single asset source: `static/index.html`,
+  `static/sw.js` and `static/manifest.webmanifest` are generated (gitignored)
+  from `static/template/*` through `scripts/bundle-web.sh`.
+- WASM raw ceiling raised from 7,700,000 to 7,800,000 bytes in M2-A for the
+  contract/request-table code. This is an anti-regression guard, not a product
+  limit; M2-B is expected to bring it back under 7,700,000. Further raises must
+  be recorded here.
 
 ## M1 deviations (recorded, no open decisions)
 
@@ -77,12 +103,16 @@ Append one entry per gate run: milestone, date, commands, result, commit.
   `RouteSpaPage`, tag rename/delete), matching the server fallbacks.
 - `Problem` is defined in core and client decoding uses the existing
   `{"error":{"code","message"}}` envelope; the server-wide switch to it is M4.
-- Size headroom is tight: the raw wasm ceiling has ~8 KB left. M3 must either
-  shrink the bundle or raise the ceiling with a recorded decision before adding
-  client code.
+- Size headroom is tight: the raw wasm ceiling had ~8 KB left after M1. M2-A
+  raised it to 7,800,000 with the decision recorded below; M2-B should recover
+  the old headroom by moving the reducer and effect layer out of the shell.
 
 ## Notes
 
+- **M3-B is a release blocker.** The deployment flake still packages the old
+  static tree (no `asset-manifest.json`), which the new server rejects at
+  startup. M3-B (Nix WASM + bundler derivation, delete `nix/web-assets.json`
+  and the SRI/release-pin chain) must land before any release or image build.
 - Remaining target removals (M6): Kubernetes manifests/docs, rclone offsite
   backup (server + NixOS module + image), Tailscale Serve (module + docs).
   Kept: Docker, Compose, NixOS module, Caddy.

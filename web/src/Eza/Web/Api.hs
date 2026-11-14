@@ -11,7 +11,6 @@ module Eza.Web.Api (
     Eff,
     ListParams (..),
     defaultListParams,
-    searchUrl,
     percentEncode,
     toText,
     fromText,
@@ -112,7 +111,6 @@ import Data.Aeson (FromJSON (..), Result (..), ToJSON, Value (..), fromJSON, obj
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
-import Data.Char (chr, isAlphaNum, ord)
 import Data.List (stripPrefix)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe)
@@ -127,7 +125,7 @@ import Eza.Account (AccountInfo, TokenView)
 import Eza.Ai (AiStatus, TagSuggestion)
 import Eza.Boot (BootPayload)
 import Eza.Consolidation (ConsolidationGroup)
-import Eza.GraphLayout (GraphLayoutWire, LayoutPreset (..), layoutPresetText)
+import Eza.GraphLayout (GraphLayoutWire, LayoutPreset (..))
 import Eza.Rule (Rule (..))
 import Eza.Share (ShareView)
 import Eza.Types (
@@ -151,6 +149,14 @@ import Eza.Types (
 import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..), UserView (..))
 import qualified Eza.View as EV
 import Eza.Web.Error (ApiError (..), mkApiError)
+import Eza.Web.Logic.Api (
+    BookmarkListQuery (..),
+    ClientRequest (..),
+    DedupCandidateQuery (..),
+    requestMethod,
+    requestPath,
+ )
+import qualified Eza.Web.Logic.Route as ClientRoute
 import Eza.Webhook (DeliveryView, Webhook, WebhookInput (..))
 
 -- | Convenience alias: the API module is polymorphic in the app model/action.
@@ -252,10 +258,10 @@ bodyError endpoint detail =
 -- | How an endpoint is named in a client-side decode error.
 describeEndpoint :: MisoString -> Text
 describeEndpoint endpoint
-    | T.null text = "the server"
-    | otherwise = text
+    | T.null label = "the server"
+    | otherwise = label
   where
-    text = T.strip (toText endpoint)
+    label = T.strip (toText endpoint)
 
 {- | The server answers failures with @{"error":{"code":...,"message":...}}@.
 The message is worth showing verbatim: it explains duplicates, expired
@@ -335,23 +341,6 @@ decodeResponseAt endpoint value =
         MJ.Success a -> Right a
         MJ.Error e -> Left (bodyError endpoint (toText e))
 
-apiGet ::
-    (FromJSON a) =>
-    MisoString ->
-    (a -> action) ->
-    (ApiError -> action) ->
-    Eff model action
-apiGet url onOk onErr =
-    getValue url [] (\v -> either onErr onOk (decodeResponseAt url v)) onErr
-
-getValue ::
-    MisoString ->
-    [(MisoString, MisoString)] ->
-    (Value -> action) ->
-    (ApiError -> action) ->
-    Eff model action
-getValue url headers = sendValue "GET" url Nothing headers JSON
-
 -- | A write whose response body we do not care about.
 apiWrite ::
     (ToJSON b) =>
@@ -396,57 +385,54 @@ defaultListParams =
         , lpLimit = 60
         }
 
--- | @GET /api/v1/bookmarks@ with the full filter set from the API contract.
-searchUrl :: ListParams -> MisoString
-searchUrl lp =
-    "/api/v1/bookmarks?limit="
-        <> ms (show (lpLimit lp))
-        <> "&offset="
-        <> ms (show (lpOffset lp))
-        <> qPart
-        <> tagsPart
-        <> readPart
-        <> sortPart
+{- | Read a client request through the native request model. Both the HTTP
+method and the URL come from the shared route truth, so a read fetcher cannot
+drift from the endpoint it names.
+-}
+requestGet ::
+    ClientRequest ->
+    (MisoString -> Value -> Either ApiError a) ->
+    (a -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+requestGet request decodeResponse onOk onErr =
+    sendValue (requestMethodText request) url Nothing [] JSON (\value -> either onErr onOk (decodeResponse url value)) onErr
   where
-    qPart
-        | T.null (T.strip (toText (lpQ lp))) = ""
-        | otherwise = "&q=" <> percentEncode (lpQ lp)
-    tagsPart = case lpTags lp of
-        [] -> ""
-        ts -> "&tags=" <> ms (intercalateText "," (map (percentEncode . (ms :: Text -> MisoString)) ts))
-    readPart = if lpUnreadOnly lp then "&is_read=0" else ""
-    sortPart = "&sort=" <> percentEncode (ms (lpSort lp))
-    intercalateText sep = T.intercalate sep . map toText
+    url = requestUrl request
 
--- | Percent-encode a string for a URL query (UTF-8 bytes, RFC 3986).
+-- | A read request whose body decodes directly as a shared core wire type.
+requestGetJson ::
+    (FromJSON a) =>
+    ClientRequest ->
+    (a -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+requestGetJson request = requestGet request (\url value -> decodeResponseAt url value)
+
+requestUrl :: ClientRequest -> MisoString
+requestUrl request = fromText (requestPath request)
+
+requestMethodText :: ClientRequest -> MisoString
+requestMethodText = fromText . requestMethod
+
+-- | The list filter record the native request model renders.
+listQuery :: ListParams -> BookmarkListQuery
+listQuery lp =
+    BookmarkListQuery
+        { blqQ = toText (lpQ lp)
+        , blqTags = lpTags lp
+        , blqSort = lpSort lp
+        , blqUnreadOnly = lpUnreadOnly lp
+        , blqOffset = lpOffset lp
+        , blqLimit = lpLimit lp
+        }
+
+{- | Percent-encode a string for a URL component. The implementation lives in
+the native client logic; this wrapper keeps the MisoString surface for the
+write requests that still build their URLs here.
+-}
 percentEncode :: MisoString -> MisoString
-percentEncode value = ms (concatMap encodeChar (fromMisoString value :: String))
-
-encodeChar :: Char -> String
-encodeChar c
-    | isAlphaNum c || c `elem` ("-._~" :: String) = [c]
-    | otherwise = concatMap hexByte (utf8 (ord c))
-  where
-    hexByte b = ['%', hexDigit (b `div` 16), hexDigit (b `mod` 16)]
-    hexDigit n
-        | n < 10 = chr (ord '0' + n)
-        | otherwise = chr (ord 'A' + n - 10)
-
-utf8 :: Int -> [Int]
-utf8 n
-    | n <= 0x7F = [n]
-    | n <= 0x7FF = [0xC0 + n `div` 64, 0x80 + n `mod` 64]
-    | n <= 0xFFFF =
-        [ 0xE0 + n `div` 4096
-        , 0x80 + (n `div` 64) `mod` 64
-        , 0x80 + n `mod` 64
-        ]
-    | otherwise =
-        [ 0xF0 + n `div` 262144
-        , 0x80 + (n `div` 4096) `mod` 64
-        , 0x80 + (n `div` 64) `mod` 64
-        , 0x80 + n `mod` 64
-        ]
+percentEncode = fromText . ClientRoute.percentEncode . toText
 
 -- ------------------------------------------------- response envelopes ------
 
@@ -651,21 +637,21 @@ instance FromJSON ImportResponse where
 -- ------------------------------------------------------------------ reads --
 
 fetchBoot :: (BootPayload -> action) -> (ApiError -> action) -> Eff model action
-fetchBoot = apiGet "/api/v1/boot"
+fetchBoot = requestGetJson ApiBoot
 
 fetchBookmarks ::
     ListParams ->
     (SearchPage -> action) ->
     (ApiError -> action) ->
     Eff model action
-fetchBookmarks lp = apiGet (searchUrl lp)
+fetchBookmarks lp = requestGetJson (ApiBookmarks (listQuery lp))
 
 fetchDetail ::
     Int ->
     (BookmarkDetail -> action) ->
     (ApiError -> action) ->
     Eff model action
-fetchDetail bid = apiGet ("/api/v1/bookmarks/" <> ms (show bid))
+fetchDetail bid = requestGetJson (ApiBookmark bid)
 
 -- | Linked + unlinked backlinks as one flat list.
 fetchBacklinks ::
@@ -674,9 +660,9 @@ fetchBacklinks ::
     (ApiError -> action) ->
     Eff model action
 fetchBacklinks bid onOk onErr =
-    getValue url [] (either onErr (onOk . flatten) . decodeResponseAt url) onErr
+    requestGet (ApiBookmarkBacklinks bid) decode onOk onErr
   where
-    url = "/api/v1/bookmarks/" <> ms (show bid) <> "/backlinks"
+    decode url value = fmap flatten (decodeResponseAt url value)
     flatten bks = bksLinked bks ++ bksUnlinked bks
 
 fetchAutocomplete ::
@@ -685,15 +671,13 @@ fetchAutocomplete ::
     (ApiError -> action) ->
     Eff model action
 fetchAutocomplete q onOk onErr =
-    getValue url [] (either onErr onOk . decodeListFieldAt url "items") onErr
-  where
-    url = "/api/v1/autocomplete?q=" <> percentEncode q
+    requestGet (ApiAutocomplete (toText q)) (\url value -> decodeListFieldAt url "items" value) onOk onErr
 
 fetchGraph ::
     (GraphData -> action) ->
     (ApiError -> action) ->
     Eff model action
-fetchGraph = apiGet "/api/v1/graph"
+fetchGraph = requestGetJson ApiGraph
 
 {- | The server-built layout for one preset. The payload is the shared
 'GraphLayoutWire': @{schema, revision, preset, tags, records, bounds}@ with
@@ -706,12 +690,7 @@ fetchGraphLayout ::
     (ApiError -> action) ->
     Eff model action
 fetchGraphLayout preset onOk onErr =
-    getValue url [] (either onErr onOk . decodeResponseAt url) onErr
-  where
-    url = "/api/v1/graph/layout?preset=" <> presetSlug preset
-
-presetSlug :: LayoutPreset -> MisoString
-presetSlug = ms . T.unpack . layoutPresetText
+    requestGet (ApiGraphLayout preset) (\url value -> decodeResponseAt url value) onOk onErr
 
 {- | The user's declarative views. @GET /api/v1/views@ answers
 @{"views":[...]}@; create and patch answer the stored view object.
@@ -735,11 +714,11 @@ instance ToJSON ViewPatch where
 
 fetchViews :: ([EV.View] -> action) -> (ApiError -> action) -> Eff model action
 fetchViews onOk onErr =
-    getValue "/api/v1/views" [] (either onErr onOk . decodeListFieldAt "/api/v1/views" "views") onErr
+    requestGet ApiViews (\url value -> decodeListFieldAt url "views" value) onOk onErr
 
 fetchView :: Text -> (EV.View -> action) -> (ApiError -> action) -> Eff model action
 fetchView slug onOk onErr =
-    apiGet ("/api/v1/views/" <> percentEncode (ms (T.unpack slug))) onOk onErr
+    requestGetJson (ApiView slug) onOk onErr
 
 createView :: EV.ViewInput -> (EV.View -> action) -> (ApiError -> action) -> Eff model action
 createView input onOk onErr =
@@ -789,12 +768,10 @@ instance FromJSON WebhookTest where
 
 fetchWebhooks :: ([Webhook] -> action) -> (ApiError -> action) -> Eff model action
 fetchWebhooks onOk onErr =
-    getValue url [] (either onErr onOk . decodeListFieldAt url "webhooks") onErr
-  where
-    url = "/api/v1/webhooks"
+    requestGet ApiWebhooks (\url value -> decodeListFieldAt url "webhooks" value) onOk onErr
 
 fetchWebhook :: Int -> (Webhook -> action) -> (ApiError -> action) -> Eff model action
-fetchWebhook webhookId = apiGet (webhookUrl webhookId)
+fetchWebhook webhookId = requestGetJson (ApiWebhook webhookId)
 
 createWebhook ::
     WebhookInput ->
@@ -847,9 +824,7 @@ testWebhook webhookId onOk onErr =
 
 fetchWebhookDeliveries :: Int -> ([DeliveryView] -> action) -> (ApiError -> action) -> Eff model action
 fetchWebhookDeliveries webhookId onOk onErr =
-    getValue url [] (either onErr onOk . decodeListFieldAt url "deliveries") onErr
-  where
-    url = webhookUrl webhookId <> "/deliveries?limit=20"
+    requestGet (ApiWebhookDeliveries webhookId) (\url value -> decodeListFieldAt url "deliveries" value) onOk onErr
 
 webhookUrl :: Int -> MisoString
 webhookUrl webhookId = "/api/v1/webhooks/" <> ms (show webhookId)
@@ -860,9 +835,7 @@ webhookUrl webhookId = "/api/v1/webhooks/" <> ms (show webhookId)
 -}
 fetchAdminUsers :: ([UserView] -> action) -> (ApiError -> action) -> Eff model action
 fetchAdminUsers onOk onErr =
-    getValue url [] (either onErr onOk . decodeListFieldAt url "users") onErr
-  where
-    url = "/api/v1/admin/users"
+    requestGet ApiAdminUsers (\url value -> decodeListFieldAt url "users" value) onOk onErr
 
 createAdminUser ::
     UserCreateInput ->
@@ -938,9 +911,7 @@ fetchSavedSearches ::
     (ApiError -> action) ->
     Eff model action
 fetchSavedSearches onOk onErr =
-    getValue url [] (either onErr onOk . decodeListFieldAt url "saved_searches") onErr
-  where
-    url = "/api/v1/saved-searches"
+    requestGet ApiSavedSearches (\url value -> decodeListFieldAt url "saved_searches" value) onOk onErr
 
 {- | One page of duplicate candidates. The two sections carry independent
 offsets and limits, and the report repeats the exact whole-library counts on
@@ -955,22 +926,10 @@ fetchDedupReport ::
     (ApiError -> action) ->
     Eff model action
 fetchDedupReport urlOffset urlLimit titleOffset titleLimit onOk onErr =
-    getValue
-        (dedupCandidatesUrl urlOffset urlLimit titleOffset titleLimit)
-        []
-        (\v -> either onErr onOk (decodeResponseAt (dedupCandidatesUrl urlOffset urlLimit titleOffset titleLimit) v))
-        onErr
-
-dedupCandidatesUrl :: Int -> Int -> Int -> Int -> MisoString
-dedupCandidatesUrl urlOffset urlLimit titleOffset titleLimit =
-    "/api/v1/dedup/candidates?url_offset="
-        <> ms (show (max 0 urlOffset))
-        <> "&url_limit="
-        <> ms (show urlLimit)
-        <> "&title_offset="
-        <> ms (show (max 0 titleOffset))
-        <> "&title_limit="
-        <> ms (show titleLimit)
+    requestGet request (\url value -> decodeResponseAt url value) onOk onErr
+  where
+    request =
+        ApiDedupCandidates (DedupCandidateQuery urlOffset urlLimit titleOffset titleLimit)
 
 {- | The confirmed one-shot merge of every same-URL group. The server writes
 one undo snapshot and answers the report the interface shows.
@@ -991,9 +950,7 @@ fetchConsolidation ::
     (ApiError -> action) ->
     Eff model action
 fetchConsolidation onOk onErr =
-    getValue url [] (either onErr onOk . decodeListFieldAt url "groups") onErr
-  where
-    url = "/api/v1/tags/consolidation-candidates"
+    requestGet ApiTagConsolidationCandidates (\url value -> decodeListFieldAt url "groups" value) onOk onErr
 
 {- | @GET /api/v1/tags/{tag}/suggestions@. The server answers an unconfigured
 provider with 200, an empty list and a notice; hand the suggestions and the
@@ -1006,33 +963,31 @@ fetchSuggestions ::
     (ApiError -> action) ->
     Eff model action
 fetchSuggestions tag onOk onErr =
-    getValue url [] (either onErr (\response -> onOk (sgrSuggestions response) (sgrNotice response)) . decodeResponseAt url) onErr
+    requestGet (ApiTagSuggestions tag) decode onOk' onErr
   where
-    url = "/api/v1/tags/" <> percentEncode (ms tag) <> "/suggestions"
+    decode url value =
+        fmap (\response -> (sgrSuggestions response, sgrNotice response)) (decodeResponseAt url value)
+    onOk' (suggestions, notice) = onOk suggestions notice
 
 fetchPruneCandidates ::
     ([BookmarkSummary] -> action) ->
     (ApiError -> action) ->
     Eff model action
 fetchPruneCandidates onOk onErr =
-    getValue url [] (either onErr onOk . decodeListFieldAt url "items") onErr
-  where
-    url = "/api/v1/maintenance/prune-candidates"
+    requestGet ApiMaintenancePruneCandidates (\url value -> decodeListFieldAt url "items" value) onOk onErr
 
 fetchAccount ::
     (AccountInfo -> action) ->
     (ApiError -> action) ->
     Eff model action
-fetchAccount = apiGet "/api/v1/account"
+fetchAccount = requestGetJson ApiAccount
 
 fetchTags ::
     ([TagStat] -> action) ->
     (ApiError -> action) ->
     Eff model action
 fetchTags onOk onErr =
-    getValue url [] (either onErr onOk . decodeListFieldAt url "tags") onErr
-  where
-    url = "/api/v1/tags"
+    requestGet ApiTags (\url value -> decodeListFieldAt url "tags" value) onOk onErr
 
 {- | @GET /api/v1/stats@ — the whole library count read again after a write.
 The API renames three fields of the shared 'LibraryStats' and adds @links@, so
@@ -1043,9 +998,7 @@ fetchStats ::
     (ApiError -> action) ->
     Eff model action
 fetchStats onOk onErr =
-    getValue url [] (either onErr onOk . decodeStatsAt url) onErr
-  where
-    url = "/api/v1/stats"
+    requestGet ApiStats (\url value -> decodeStatsAt url value) onOk onErr
 
 -- ----------------------------------------------------------------- writes --
 
@@ -1258,13 +1211,11 @@ checkDead onOk onErr =
 
 fetchUndoEntries :: ([UndoEntry] -> action) -> (ApiError -> action) -> Eff model action
 fetchUndoEntries onOk onErr =
-    getValue url [] (either onErr onOk . decodeListFieldAt url "entries") onErr
-  where
-    url = "/api/v1/undo?limit=5"
+    requestGet ApiUndoEntries (\url value -> decodeListFieldAt url "entries" value) onOk onErr
 
 fetchUndoPreview :: Int -> (UndoPreview -> action) -> (ApiError -> action) -> Eff model action
 fetchUndoPreview snapshotId onOk onErr =
-    apiGet ("/api/v1/undo/" <> ms (show snapshotId)) onOk onErr
+    requestGetJson (ApiUndoPreview snapshotId) onOk onErr
 
 runUndo :: Int -> (UndoResult -> action) -> (ApiError -> action) -> Eff model action
 runUndo snapshotId onOk onErr =
@@ -1454,9 +1405,7 @@ fetchTokens ::
     (ApiError -> action) ->
     Eff model action
 fetchTokens onOk onErr =
-    getValue url [] (either onErr onOk . decodeListFieldAt url "tokens") onErr
-  where
-    url = "/api/v1/tokens"
+    requestGet ApiTokens (\url value -> decodeListFieldAt url "tokens" value) onOk onErr
 
 -- | @POST /api/v1/tokens@ — returns the raw token once plus its metadata.
 createApiToken ::
@@ -1488,9 +1437,7 @@ fetchHighlights ::
     (ApiError -> action) ->
     Eff model action
 fetchHighlights bookmarkId onOk onErr =
-    getValue url [] (either onErr onOk . decodeListFieldAt url "highlights") onErr
-  where
-    url = "/api/v1/bookmarks/" <> ms (show bookmarkId) <> "/highlights"
+    requestGet (ApiHighlights bookmarkId) (\url value -> decodeListFieldAt url "highlights" value) onOk onErr
 
 {- | @POST /api/v1/bookmarks/{id}/highlights@ — offsets are character offsets
 into the extracted text; prefix/suffix are the server's drift anchors.
@@ -1576,9 +1523,7 @@ fetchShares ::
     (ApiError -> action) ->
     Eff model action
 fetchShares onOk onErr =
-    getValue url [] (either onErr onOk . decodeListFieldAt url "shares") onErr
-  where
-    url = "/api/v1/share-links"
+    requestGet ApiShares (\url value -> decodeListFieldAt url "shares" value) onOk onErr
 
 {- | @POST /api/v1/share-links@ — returns the share id and the public URL
 (the raw token is only ever shown here).
@@ -1624,7 +1569,7 @@ fetchAiStatus ::
     (AiStatus -> action) ->
     (ApiError -> action) ->
     Eff model action
-fetchAiStatus = apiGet "/api/v1/ai/status"
+fetchAiStatus = requestGetJson ApiAiStatus
 
 -- ----------------------------------------------------------------- rules ---
 
@@ -1634,9 +1579,7 @@ fetchRules ::
     (ApiError -> action) ->
     Eff model action
 fetchRules onOk onErr =
-    getValue url [] (either onErr onOk . decodeListFieldAt url "rules") onErr
-  where
-    url = "/api/v1/rules"
+    requestGet ApiRules (\url value -> decodeListFieldAt url "rules" value) onOk onErr
 
 ruleBody :: Text -> Bool -> Text -> Text -> [Text] -> Bool -> Value
 ruleBody name enabled field patternText addTags markRead =
@@ -1716,7 +1659,7 @@ testRule field patternText onOk onErr =
 -- ------------------------------------------------------------------ links --
 
 exportUrl :: MisoString
-exportUrl = "/api/v1/export"
+exportUrl = requestUrl ApiExport
 
 notesExportUrl :: MisoString
-notesExportUrl = "/api/v1/export/notes"
+notesExportUrl = requestUrl ApiExportNotes

@@ -1,8 +1,12 @@
 // WASI shim loader for the eza Miso/WebAssembly client.
-// External module only (CSP friendly). The wasm binary is produced by
-// scripts/build-web.sh (static/app/app.wasm + static/app/ghc_wasm_jsffi.js).
-import { WASI, File, OpenFile, ConsoleStdout } from "../vendor/browser_wasi_shim/index.js";
-import ghc_wasm_jsffi from "./ghc_wasm_jsffi.js";
+// External module only (CSP friendly).
+//
+// This file is a template: scripts/bundle-web.sh rewrites the asset placeholder tokens
+// to the content-addressed names from static/asset-manifest.json and emits
+// static/app/index.<hash>.js. The compile step (scripts/build-web.sh) produces
+// static/app/app.wasm and static/app/ghc_wasm_jsffi.js.
+import { WASI, File, OpenFile, ConsoleStdout } from "../vendor/__EZA_VENDOR_DIR__/index.js";
+import ghc_wasm_jsffi from "./__EZA_JSFFI_FILE__";
 
 const splash = document.getElementById("boot-splash");
 const errorBox = document.getElementById("boot-error");
@@ -53,9 +57,11 @@ async function boot() {
   };
   // Resolve relative to this module (/assets/app/index.js), not the document
   // URL — SPA deep links such as /bookmark/42 would otherwise break the fetch.
-  const wasmUrl = new URL("./app.wasm", import.meta.url);
+  const wasmUrl = new URL("./__EZA_WASM_FILE__", import.meta.url);
   mark("wasm-fetch-start");
-  const response = await fetch(wasmUrl, { cache: "no-cache" });
+  // The wasm name carries its content hash and is served immutable, so the
+  // browser HTTP cache can answer a repeat load without revalidation.
+  const response = await fetch(wasmUrl, { cache: "default" });
   mark("wasm-fetch-end");
   if (!response.ok) {
     throw new Error("Could not load app.wasm (HTTP " + response.status + ")");

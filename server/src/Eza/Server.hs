@@ -74,6 +74,7 @@ import Eza.Account (AccountInfo (..))
 import qualified Eza.Admin as Admin
 import Eza.Ai (AiStatus (..))
 import Eza.AiTag (aiSuggestions, resolveAiModel)
+import Eza.Assets (Assets, assetPath, assetRelativePath, assetsAvailable, assetsBuildId, assetsServiceWorker, isImmutableAsset, loadAssetsForStartup)
 import qualified Eza.Auth as Auth
 import qualified Eza.Authz as Authz
 import Eza.Bookmarks
@@ -99,6 +100,7 @@ import qualified Eza.Password as Password
 import Eza.Rules (Rule (..), createRule, deleteRule, listRules, matchingBookmarks, updateRule)
 import Eza.SavedSearches (createSavedSearch, deleteSavedSearch, listSavedSearches)
 import Eza.Shares (ShareRecord (..), ShareState (..), ShareUnavailable (..), createShare, listShares, resolveShareState, revokeShare, shareBookmarkPage, shareSearchFeed, shareSearchPage, shareUnavailablePage)
+import Eza.Shell (pageAssets, shellPage)
 import Eza.Snapshot (captureSnapshot)
 import Eza.Tags (consolidationCandidates, deleteTag, deleteTagWithLinks, mergeTags, renameTag)
 import qualified Eza.TokenPrefix as TokenPrefix
@@ -187,6 +189,7 @@ stall another user's browsing.
 -}
 data AppState = AppState
     { asConfig :: Config
+    , asAssets :: Assets
     , asControl :: MVar Connection
     , asUsers :: MVar (Map.Map Int UserSlot)
     , asManager :: Manager
@@ -292,6 +295,10 @@ ever opens the database its authenticated account names.
 -}
 newAppState :: Config -> IO AppState
 newAppState cfg = do
+    -- Fail before opening databases: a server that cannot serve its client is
+    -- a startup error with the bundler/release fix in the message, never a
+    -- half-running process.
+    assets <- loadAssetsForStartup (cfgStaticDir cfg)
     control <- Control.openControlDb (cfgControlDbPath cfg)
     bootstrapControl cfg control
     manager <- newTlsManager
@@ -323,6 +330,7 @@ newAppState cfg = do
     pure
         AppState
             { asConfig = cfg
+            , asAssets = assets
             , asControl = controlVar
             , asUsers = usersVar
             , asManager = manager
@@ -913,18 +921,20 @@ dispatchApp cfg state req respond =
         ["healthz"] -> Just (health state respond)
         ["login"] -> Just (loginHandler state req respond)
         ["setup"] -> Just (setupHandler state req respond)
-        ["recover"] -> Just (respond (htmlResponse recoverPage))
+        ["recover"] -> Just (respond (htmlResponse (recoverPage (pageAssets (asAssets state)))))
         ["s", token] -> Just (publicShareHandler state token respond)
-        ("assets" : rest) -> Just (serveAsset cfg rest req respond)
-        ["favicon.svg"] -> Just (serveAsset cfg ["favicon.svg"] req respond)
-        ["theme.js"] -> Just (serveAsset cfg ["theme.js"] req respond)
+        ("assets" : rest) -> Just (serveAsset cfg (asAssets state) rest req respond)
+        -- The stable favicon/theme URLs map to the manifest's hashed copies,
+        -- so an old bookmark still resolves and the response is immutable.
+        ["favicon.svg"] -> Just (serveNamedAsset cfg (asAssets state) "favicon.svg" req respond)
+        ["theme.js"] -> Just (serveNamedAsset cfg (asAssets state) "theme.js" req respond)
         ["manifest.webmanifest"] ->
             Just (serveStaticFile cfg "manifest.webmanifest" [("Content-Type", "application/manifest+json")] req respond)
-        ["sw.js"] -> Just (serveServiceWorker cfg req respond)
+        ["sw.js"] -> Just (serveServiceWorker (asAssets state) req respond)
         [] -> Just $ do
             msess <- requestSession state req
             case msess of
-                Just (_, _, sess) | Auth.sessScope sess == "normal" -> indexResponse cfg req respond
+                Just (_, _, sess) | Auth.sessScope sess == "normal" -> indexResponse state req respond
                 _ -> respond (redirectTo "/login")
         _ -> Nothing
 
@@ -975,7 +985,8 @@ loginHandler state req respond = do
                 then respond (redirectTo "/setup")
                 else do
                     legacy <- legacyPasskeyLogin state
-                    respond (htmlResponse (if legacy then passkeyLoginPage else loginPage))
+                    let pages = pageAssets (asAssets state)
+                    respond (htmlResponse (if legacy then passkeyLoginPage pages else loginPage pages))
 
 {- | The legacy passkey page is only for a single-account database that still
 has passkeys and no password. A multi-user install always shows the password
@@ -998,15 +1009,16 @@ setup; anything else goes back to sign in.
 setupHandler :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 setupHandler state req respond = do
     msess <- requestSession state req
+    let pages = pageAssets (asAssets state)
     case msess of
         Just (user, _, sess)
             | Auth.sessScope sess == "recovery" ->
-                respond (htmlResponse (recoverySetupPage (cuUsername user)))
+                respond (htmlResponse (recoverySetupPage pages (cuUsername user)))
         Just _ -> respond (redirectTo "/")
         Nothing -> do
             accounts <- withControl state Control.countUsers
             if accounts == 0
-                then respond (htmlResponse setupPage)
+                then respond (htmlResponse (setupPage pages))
                 else respond (redirectTo "/login")
 
 passkeySetupRetired :: Response
@@ -1505,7 +1517,7 @@ authedRoute rctx req respond conn =
         ("DELETE", ["api", "v1", "clip-templates", idTxt]) -> case readInt idTxt of
             Nothing -> respond (jsonError status400 "bad_request" "invalid template id")
             Just tid -> templateWriteSession respond ctx (templateDeleteHandler conn tid respond)
-        ("GET", ["save"]) -> indexResponse cfg req respond
+        ("GET", ["save"]) -> indexResponse state req respond
         ("GET", ["api", "v1", "boot"]) -> do
             payload <- bootPayloadFor (cfgPublicOrigin cfg) conn
             respond (jsonResponse status200 payload)
@@ -1527,7 +1539,7 @@ authedRoute rctx req respond conn =
                 ok <- deleteBookmark conn bid
                 if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "bookmark not found")
         ("GET", ["api", "v1", "favicons", domain]) ->
-            faviconHandler conn req domain respond
+            faviconHandler (assetPath (asAssets state) "favicon-fallback.svg") conn req domain respond
         ("POST", ["api", "v1", "quick-save"]) ->
             quickSaveHandler cfg conn req respond
         ("GET", ["api", "v1", "bookmarks", idTxt, "highlights"]) -> case readInt idTxt of
@@ -1846,7 +1858,7 @@ authedRoute rctx req respond conn =
                         )
         ("GET", ["api", "v1", "export", "notes"]) ->
             respond (jsonError status501 "not_implemented" "Markdown note export is coming in a later milestone")
-        ("GET", ["account", "add-passkey"]) -> respond (htmlResponse addPasskeyPage)
+        ("GET", ["account", "add-passkey"]) -> respond (htmlResponse (addPasskeyPage (pageAssets (asAssets state))))
         ("GET", ["api", "v1", "stats"]) -> do
             stats <- libraryStats conn
             links <- Db.queryScalar conn "SELECT COUNT(*) FROM links"
@@ -2012,7 +2024,7 @@ authedRoute rctx req respond conn =
         ("GET", path)
             | not ("api" `elem` path)
             , not ("assets" `elem` path) ->
-                indexResponse cfg req respond
+                indexResponse state req respond
         _ -> respond (jsonError status404 "not_found" "No such route")
   where
     cfg = rcConfig rctx
@@ -2607,11 +2619,11 @@ health state respond = do
         Right True -> respond (jsonResponse status200 (object ["status" .= ("ok" :: Text), "version" .= ("0.1.0" :: Text)]))
         _ -> respond (jsonError status503 "unavailable" "database is unavailable")
 
-faviconHandler :: Connection -> Request -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-faviconHandler conn req domain respond = do
+faviconHandler :: Text -> Connection -> Request -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+faviconHandler fallbackUrl conn req domain respond = do
     cached <- getFavicon conn domain
     case cached of
-        Nothing -> respond (redirectTo "/assets/favicon-fallback.svg")
+        Nothing -> respond (redirectTo fallbackUrl)
         Just favicon -> do
             let etag = TE.encodeUtf8 (fvEtag favicon)
             case lookup hIfNoneMatch (requestHeaders req) of
@@ -3362,9 +3374,10 @@ isHttpUrl t =
 -- Static
 -- ---------------------------------------------------------------------------
 
-{- | A static file with an ETag and a cache policy. Asset URLs do not carry
-build hashes, so the browser must revalidate instead of replaying a stale
-copy after a rebuild. @no-store@ is reserved for the client shell.
+{- | A static file with an ETag and a cache policy. Hashed asset URLs are
+served immutable because the name is the content address; unhashed files and
+the web manifest keep the revalidating no-cache policy. @no-store@ is reserved
+for the client shell.
 -}
 sendFile :: Request -> BS.ByteString -> [(HeaderName, BS.ByteString)] -> FilePath -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 sendFile req cachePolicy headers path respond = do
@@ -3396,6 +3409,12 @@ sendFile req cachePolicy headers path respond = do
     if fresh
         then respond (responseLBS status304 allHeaders "")
         else respond (responseFile status200 allHeaders servedPath Nothing)
+
+{- | The one-year immutable policy for content-addressed asset names. Safe
+because any change to the bytes changes the name the bundler emits.
+-}
+immutableCache :: BS.ByteString
+immutableCache = "public, max-age=31536000, immutable"
 
 {- | Whether the request's @Accept-Encoding@ allows gzip. Header values are
 tokens; browsers send lowercase, so a lowercase-insensitive containment
@@ -3476,8 +3495,13 @@ invalidStaticSegments = any unsafeStaticSegment
             || T.any (== '\\') segment
             || T.any (== '\NUL') segment
 
-serveAsset :: Config -> [Text] -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-serveAsset cfg rest req respond = case cfgStaticDir cfg of
+{- | Serve one @/assets/*@ file. The path is resolved with the same
+traversal-safe resolver as before; a path the manifest lists as a hashed asset
+is served immutable (the filename is its content address), anything else keeps
+the revalidating no-cache policy.
+-}
+serveAsset :: Config -> Assets -> [Text] -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+serveAsset cfg assets rest req respond = case cfgStaticDir cfg of
     Nothing -> respond (jsonError status404 "not_found" "static assets are not configured")
     Just root -> do
         if invalidStaticSegments rest
@@ -3488,32 +3512,52 @@ serveAsset cfg rest req respond = case cfgStaticDir cfg of
                     Nothing -> respond (jsonError status404 "not_found" "asset not found")
                     Just path -> do
                         let rel = foldr ((</>) . T.unpack) "" rest
-                        sendFile req "no-cache" [(hContentType, mimeFor rel)] path respond
+                            urlPath = "/assets/" <> T.intercalate "/" rest
+                            cachePolicy = if isImmutableAsset assets urlPath then immutableCache else "no-cache"
+                        sendFile req cachePolicy [(hContentType, mimeFor rel)] path respond
 
--- | The shell HTML is never stored: a rebuild must reach the next navigation.
-indexResponse :: Config -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-indexResponse cfg req respond = case cfgStaticDir cfg of
-    Just root -> do
-        buildId <- readBuildId cfg
-        let buildHeader = [("X-Eza-Build", TE.encodeUtf8 buildId) | not (T.null buildId)]
-        sendFile req "no-store" ([(hContentType, "text/html; charset=utf-8")] <> buildHeader) (root </> "index.html") respond
-    Nothing -> respond (htmlResponse (placeholderPage cfg))
-
-{- | The service worker version follows the web build id, so every rebuild is a
-new worker and clients update on the next load without a manual unregister.
+{- | Serve one of the two stable asset URLs (/favicon.svg, /theme.js) from the
+manifest's hashed copy. Keeping the stable routes means an old link or an
+already-installed PWA icon still resolves while the payload is addressed.
 -}
-serveServiceWorker :: Config -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-serveServiceWorker cfg req respond = case cfgStaticDir cfg of
+serveNamedAsset :: Config -> Assets -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+serveNamedAsset cfg assets name req respond = case cfgStaticDir cfg of
     Nothing -> respond (jsonError status404 "not_found" "static assets are not configured")
-    Just root -> do
-        template <- BS.readFile (root </> "sw.js")
-        buildId <- readBuildId cfg
-        let generated =
-                if T.null buildId
-                    then template
-                    else TE.encodeUtf8 (T.replace "eza-app-shell-v4-dev" ("eza-app-shell-" <> buildId) (TE.decodeUtf8 template))
-            tag = BSC.pack ("\"" <> (if T.null buildId then BSC.unpack (BSC.pack (show (BS.length generated))) else T.unpack buildId) <> "\"")
-            fresh = lookup hIfNoneMatch (requestHeaders req) == Just tag
+    Just root -> case assetRelativePath assets name of
+        Nothing -> respond (jsonError status404 "not_found" "asset not found")
+        Just relative -> do
+            let segments = T.splitOn "/" relative
+            if invalidStaticSegments segments
+                then respond (jsonError status400 "bad_request" "invalid asset path")
+                else do
+                    resolved <- resolveStaticPath root segments
+                    case resolved of
+                        Nothing -> respond (jsonError status404 "not_found" "asset not found")
+                        Just path -> sendFile req immutableCache [(hContentType, mimeFor (T.unpack relative))] path respond
+
+{- | The shell HTML is generated by the bundler from its tracked template and
+cached in 'Assets' at startup. It is never stored: a rebuild must reach the
+next navigation. A server without a bundle keeps the placeholder page.
+-}
+indexResponse :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+indexResponse state _req respond
+    | assetsAvailable assets = respond (shellPage assets)
+    | otherwise = respond (htmlResponse (placeholderPage (asConfig state)))
+  where
+    assets = asAssets state
+
+{- | The service worker is generated by the bundler with the build id embedded
+and is served from the validated copy, not re-generated per request. The ETag
+is the build id, so a rebuild replaces the worker even though the URL is a
+fixed /sw.js, and no-cache makes every navigation revalidate it.
+-}
+serveServiceWorker :: Assets -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+serveServiceWorker assets req respond
+    | not (assetsAvailable assets) =
+        respond (jsonError status404 "not_found" "static assets are not configured")
+    | otherwise =
+        let buildId = assetsBuildId assets
+            tag = BSC.pack ("\"" <> T.unpack buildId <> "\"")
             headers =
                 [ (hContentType, "text/javascript; charset=utf-8")
                 , ("Service-Worker-Allowed", "/")
@@ -3521,31 +3565,10 @@ serveServiceWorker cfg req respond = case cfgStaticDir cfg of
                 , (hETag, tag)
                 ]
                     <> [("X-Eza-Build", TE.encodeUtf8 buildId) | not (T.null buildId)]
-        if fresh
-            then respond (responseLBS status304 headers "")
-            else respond (responseLBS status200 headers (LBS.fromStrict generated))
-
-{- | The build id written by scripts/build-web.sh. Deployments that copy the
-built static tree without that script fall back to the WASM file's size and
-modification time, which still changes when the client is rebuilt.
--}
-readBuildId :: Config -> IO Text
-readBuildId cfg = case cfgStaticDir cfg of
-    Nothing -> pure ""
-    Just root -> do
-        let path = root </> "app" </> "build-id"
-        exists <- doesFileExist path
-        if exists
-            then T.strip . TE.decodeUtf8 <$> BS.readFile path
-            else do
-                let wasm = root </> "app" </> "app.wasm"
-                wasmExists <- doesFileExist wasm
-                if wasmExists
-                    then do
-                        size <- getFileSize wasm
-                        modified <- getModificationTime wasm
-                        pure ("wasm" <> T.pack (show size) <> "-" <> T.pack (show (round (utcTimeToPOSIXSeconds modified) :: Integer)))
-                    else pure ""
+            body = LBS.fromStrict (assetsServiceWorker assets)
+         in if lookup hIfNoneMatch (requestHeaders req) == Just tag
+                then respond (responseLBS status304 headers "")
+                else respond (responseLBS status200 headers body)
 
 mimeFor :: FilePath -> BS.ByteString
 mimeFor p

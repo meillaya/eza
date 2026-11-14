@@ -70,15 +70,16 @@ in
   scripts = {
     dev.exec = "cabal run eza-bookmarks -- serve";
     web.exec = "scripts/build-web.sh";
+    bundle.exec = "scripts/bundle-web.sh --no-build";
     build.exec = "cabal build all && scripts/build-web.sh";
     test.exec = "cabal test all";
-    lint.exec = "fourmolu --mode check core server web && hlint core server web";
+    lint.exec = "fourmolu --mode check core server web web-logic && hlint core server web web-logic";
     docs.exec = "bash scripts/check-docs.sh";
     spec.exec = "bash scripts/check-specs.sh";
     # THIRD-PARTY-NOTICES.md vs the flake's pinned dependency set (and, when a
     # cabal build plan exists, the resolved versions).
     notices.exec = "bash scripts/check-notices.sh --plan";
-    fmt.exec = "fourmolu --mode inplace core server web";
+    fmt.exec = "fourmolu --mode inplace core server web web-logic";
     e2e.exec = "bash scripts/e2e.sh";
     bench.exec = "cabal run eza-bookmarks -- bench --iterations 100";
     db-init.exec = "cabal run eza-bookmarks -- init";

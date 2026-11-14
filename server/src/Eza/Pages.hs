@@ -20,12 +20,16 @@ module Eza.Pages (
 import Data.Text (Text)
 import qualified Data.Text as T
 
-{- | Shared head for the standalone auth and recovery pages. The frame rules
-centre the printed card without the app shell; they move into the shell
-stylesheet when it owns standalone pages.
+import Eza.Shell (PageAssets (..))
+
+{- | Shared head for the standalone auth and recovery pages. The stylesheet,
+theme bootstrap, auth script, and favicon URLs come from the asset manifest
+('paCss', 'paThemeJs', 'paAuthJs', 'paFavicon'), so a content-addressed rebuild
+updates every page. The frame rules centre the printed card without the app
+shell; they move into the shell stylesheet when it owns standalone pages.
 -}
-commonHead :: Text -> Text
-commonHead title =
+commonHead :: PageAssets -> Text -> Text
+commonHead pages title =
     T.unlines
         [ "<!doctype html>"
         , "<html lang=\"en\" data-theme=\"light\">"
@@ -35,10 +39,10 @@ commonHead title =
         , "<meta name=\"theme-color\" content=\"#F2EDE3\">"
         , "<meta name=\"theme-color\" media=\"(prefers-color-scheme: dark)\" content=\"#10141F\">"
         , "<title>" <> title <> " | eza</title>"
-        , "<link rel=\"stylesheet\" href=\"/assets/eza.css\">"
-        , "<link rel=\"icon\" href=\"/favicon.svg\">"
-        , "<script src=\"/assets/theme.js\"></script>"
-        , "<script src=\"/assets/auth.js\" defer></script>"
+        , "<link rel=\"stylesheet\" href=\"" <> paCss pages <> "\">"
+        , "<link rel=\"icon\" href=\"" <> paFavicon pages <> "\">"
+        , "<script src=\"" <> paThemeJs pages <> "\"></script>"
+        , "<script src=\"" <> paAuthJs pages <> "\" defer></script>"
         , "</head>"
         ]
 
@@ -113,9 +117,9 @@ recoveryCodesSection =
         , "      </div>"
         ]
 
-loginPage :: Text
-loginPage =
-    commonHead "Sign in"
+loginPage :: PageAssets -> Text
+loginPage pages =
+    commonHead pages "Sign in"
         <> authPage
             "login"
             ( T.unlines
@@ -134,9 +138,9 @@ loginPage =
 {- | Legacy installations claimed with a passkey: sign in with the passkey
 until a password is set from the account page or the CLI.
 -}
-passkeyLoginPage :: Text
-passkeyLoginPage =
-    commonHead "Sign in"
+passkeyLoginPage :: PageAssets -> Text
+passkeyLoginPage pages =
+    commonHead pages "Sign in"
         <> authPage
             "passkey-login"
             ( T.unlines
@@ -149,9 +153,9 @@ passkeyLoginPage =
                 ]
             )
 
-setupPage :: Text
-setupPage =
-    commonHead "Claim this library"
+setupPage :: PageAssets -> Text
+setupPage pages =
+    commonHead pages "Claim this library"
         <> authPage
             "setup"
             ( T.unlines
@@ -174,9 +178,9 @@ setupPage =
 {- | A recovery code was redeemed: set a new password, then the old codes are
 replaced by ten new ones.
 -}
-recoverySetupPage :: Text -> Text
-recoverySetupPage username =
-    commonHead "Choose a new password"
+recoverySetupPage :: PageAssets -> Text -> Text
+recoverySetupPage pages username =
+    commonHead pages "Choose a new password"
         <> authPage
             "recovery-setup"
             ( T.unlines
@@ -199,9 +203,9 @@ recoverySetupPage username =
                 ]
             )
 
-recoverPage :: Text
-recoverPage =
-    commonHead "Recover access"
+recoverPage :: PageAssets -> Text
+recoverPage pages =
+    commonHead pages "Recover access"
         <> authPage
             "recover"
             ( T.unlines
@@ -222,9 +226,9 @@ recoverPage =
                 ]
             )
 
-addPasskeyPage :: Text
-addPasskeyPage =
-    commonHead "Add a passkey"
+addPasskeyPage :: PageAssets -> Text
+addPasskeyPage pages =
+    commonHead pages "Add a passkey"
         <> authPage
             "add-passkey"
             ( T.unlines

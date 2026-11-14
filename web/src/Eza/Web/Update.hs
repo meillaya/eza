@@ -36,7 +36,6 @@ import Eza.Types (
     GraphData (..),
     GraphRecord (..),
     Highlight (..),
-    ImportReport (..),
     SavedSearch (..),
     SearchPage (..),
     UndoResult (..),

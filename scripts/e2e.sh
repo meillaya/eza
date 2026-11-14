@@ -7,12 +7,16 @@
 # the exception: they start from an empty control database and claim the first
 # account through /setup themselves.
 #
-# The WASM bundle must have been built first (scripts/build-web.sh), and the
+# The content-addressed web bundle must have been built first
+# (scripts/build-web.sh, which ends by running scripts/bundle-web.sh), and the
 # root dev dependencies (@playwright/test) must be installed. CI does both
 # before this script runs; locally run
 #   bun install --frozen-lockfile && bash scripts/build-web.sh
 # Override EZA_BIN or EZA_E2E_SCRIPTS to narrow a local run, and set
-# EZA_E2E_SEED=none to skip the fixture import.
+# EZA_E2E_SEED=none to skip the fixture import. EZA_E2E_SKIP_STALE_CHECK=1 is a
+# local-only escape hatch for running a subset against an existing WASM build
+# while another checkout or agent is editing client sources; CI never sets it.
+# The bundle's own freshness check (manifest vs static sources) still runs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,17 +29,62 @@ if ! node -e "import('@playwright/test').then(() => process.exit(0), () => proce
   exit 1
 fi
 
+# The server requires the manifest to start and the suite drives the real
+# generated shell and service worker, so a missing bundle is an e2e setup error.
+if [[ ! -f static/asset-manifest.json ]]; then
+  echo "static/asset-manifest.json is missing; run bash scripts/build-web.sh (or bash scripts/bundle-web.sh --no-build over an existing static/app) first" >&2
+  exit 1
+fi
 if [[ ! -f static/app/app.wasm ]]; then
   echo "static/app/app.wasm is missing; run bash scripts/build-web.sh first" >&2
   exit 1
 fi
 
-# The client bundle is a build output: refuse to test a snapshot older than the
-# client sources it was supposed to be built from.
-stale_source="$(find core/src web/src cabal.project.wasm core/eza-core.cabal web/eza-web.cabal \
-  -type f -newer static/app/app.wasm -print -quit 2>/dev/null || true)"
-if [[ -n "$stale_source" ]]; then
-  echo "static/app/app.wasm is older than $stale_source; run bash scripts/build-web.sh first" >&2
+# manifest_get FIELD [KEY] prints one string from static/asset-manifest.json.
+# KEY is a full logical name (it may contain dots), so it is looked up verbatim.
+manifest_get() {
+  node -e 'const fs = require("fs"); const m = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); const top = m[process.argv[2]]; const value = process.argv[3] === ":" ? top : top && top[process.argv[3]]; if (typeof value !== "string" || value.length === 0) process.exit(1); process.stdout.write(value);' static/asset-manifest.json "$1" "${2:-:}"
+}
+
+BUILD_ID="$(manifest_get build_id)" || {
+  echo "static/asset-manifest.json has no build_id; rerun bash scripts/bundle-web.sh --no-build" >&2
+  exit 1
+}
+WASM_URL="$(manifest_get assets app.wasm)" || {
+  echo "static/asset-manifest.json does not name app.wasm; rerun bash scripts/bundle-web.sh --no-build" >&2
+  exit 1
+}
+if [[ ! -f "static/${WASM_URL#/assets/}" ]]; then
+  echo "the manifest's wasm path is static/${WASM_URL#/assets/}, which does not exist; rerun bash scripts/bundle-web.sh --no-build" >&2
+  exit 1
+fi
+if ! grep -qF "eza-app-shell-${BUILD_ID}" static/sw.js; then
+  echo "static/sw.js does not carry build id ${BUILD_ID}; rerun bash scripts/bundle-web.sh --no-build" >&2
+  exit 1
+fi
+if ! grep -qF "$(manifest_get assets eza.css)" static/index.html; then
+  echo "static/index.html does not reference the manifest's stylesheet; rerun bash scripts/bundle-web.sh --no-build" >&2
+  exit 1
+fi
+
+# The bundle is a build output: refuse to test a snapshot older than the client
+# sources or the tracked static sources it was supposed to be built from.
+if [[ "${EZA_E2E_SKIP_STALE_CHECK:-0}" != "1" ]]; then
+  source_roots=(core/src cabal.project.wasm core/eza-core.cabal web/eza-web.cabal)
+  for root in web/src web-logic/src; do
+    [[ -d "$root" ]] && source_roots+=("$root")
+  done
+  stale_source="$(find "${source_roots[@]}" -type f -newer static/app/app.wasm -print -quit 2>/dev/null || true)"
+  if [[ -n "$stale_source" ]]; then
+    echo "static/app/app.wasm is older than $stale_source; run bash scripts/build-web.sh first (or set EZA_E2E_SKIP_STALE_CHECK=1 for a deliberate local subset run)" >&2
+    exit 1
+  fi
+fi
+stale_bundle="$(find static/template static/eza.css static/theme.js static/pwa.js static/auth.js \
+  static/favicon.svg static/favicon-fallback.svg static/app/index.js static/fonts static/icons \
+  static/vendor/browser_wasi_shim -type f -newer static/asset-manifest.json -print -quit 2>/dev/null || true)"
+if [[ -n "$stale_bundle" ]]; then
+  echo "static/asset-manifest.json is older than $stale_bundle; run bash scripts/bundle-web.sh --no-build first" >&2
   exit 1
 fi
 

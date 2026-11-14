@@ -46,6 +46,7 @@ executable eza-web
                   , bytestring
                   , containers
                   , eza-core
+                  , eza-web-logic
                   , miso
                   , mtl
                   , text

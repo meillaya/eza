@@ -47,6 +47,20 @@ static/app/*
 static/*.gz
 static/vendor/**/*.gz
 
+# Content-addressed web bundle written by scripts/bundle-web.sh. The tracked
+# inputs are static/template/*, static/app/index.js (loader template), and the
+# plain static/*.css|js|svg sources; everything below is generated.
+static/asset-manifest.json
+static/index.html
+static/sw.js
+static/manifest.webmanifest
+static/*.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].css
+static/*.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].js
+static/*.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].svg
+static/fonts/*.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].woff2
+static/icons/*.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].png
+static/vendor/browser_wasi_shim.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/
+
 # Environments / secrets
 .env
 .env.local

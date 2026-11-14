@@ -33,7 +33,7 @@ import qualified Database.SQLite.Simple as Sqlite
 import Network.HTTP.Types (HeaderName)
 import qualified Network.Socket as Socket
 import qualified Network.Socket.ByteString as SocketBS
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (doesFileExist)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Posix.Files (ownerExecuteMode, ownerReadMode, ownerWriteMode, setFileMode, unionFileModes)
@@ -68,8 +68,10 @@ withStaticServer action =
     withSystemTempDirectory "eza-security-static" $ \dir -> do
         let root = dir </> "static"
             secret = dir </> "secret.txt"
-        createDirectoryIfMissing True root
-        BS.writeFile (root </> "eza.css") "/* asset body */"
+        -- The server now requires a validated asset bundle at startup, so the
+        -- fixture writes the same manifest/concrete-file shape the bundler
+        -- emits instead of one loose eza.css.
+        writeTestStaticBundle root
         BS.writeFile secret "TOP-SECRET-STATIC-PROBE"
         withTestServerCustom (\cfg -> cfg{cfgStaticDir = Just root}) (\_ -> pure ()) $ \server ->
             action server secret
@@ -78,9 +80,9 @@ staticAssetSpec :: Spec
 staticAssetSpec = describe "S1 static asset path traversal" $ do
     it "serves a normal asset and rejects encoded ..%2f traversal" $
         withStaticServer $ \server secret -> do
-            normal <- httpRequest server "GET" "/assets/eza.css" [] Nothing
+            normal <- httpRequest server "GET" (T.unpack testBundleCssPath) [] Nothing
             normal `shouldHaveStatus` 200
-            hrespBody normal `shouldSatisfy` containsText "/* asset body */"
+            hrespBody normal `shouldSatisfy` containsText "/* eza test asset */"
 
             first <- rawGet server "/assets/..%2fsecret.txt"
             assertUnsafe first secret
