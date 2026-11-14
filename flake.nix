@@ -243,6 +243,7 @@
                 "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
                 "PATH=${lib.makeBinPath [
                   pkgs.bash
+                  eza-bookmarks
                   pkgs.coreutils
                   pkgs.curl
                   pkgs.monolith

@@ -21,6 +21,7 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
+import Eza.Version (ezaVersionText)
 import Eza.Boot (BootPayload (..))
 import Eza.Db
 import Eza.Server (bootPayloadFor)
@@ -188,13 +189,13 @@ spec = do
             withSystemTempDirectory "eza-views-boot" $ \dir -> do
                 conn <- openDb (dir </> "test.db")
                 payload <- bootPayloadFor "http://localhost:8080" conn
-                bpVersion payload `shouldBe` "0.1.0"
+                bpVersion payload `shouldBe` ezaVersionText
                 bpOrigin payload `shouldBe` "http://localhost:8080"
                 map vSlug (bpViews payload) `shouldBe` ["graph"]
                 (decode (encode payload) :: Maybe BootPayload) `shouldBe` Just payload
                 case toJSON payload of
                     Object objectValue -> do
-                        KeyMap.lookup "version" objectValue `shouldBe` Just (String "0.1.0")
+                        KeyMap.lookup "version" objectValue `shouldBe` Just (String ezaVersionText)
                         KeyMap.lookup "origin" objectValue `shouldBe` Just (String "http://localhost:8080")
                         mapM_
                             (\key -> KeyMap.member key objectValue `shouldBe` True)

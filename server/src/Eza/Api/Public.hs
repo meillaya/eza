@@ -16,6 +16,7 @@ import Database.SQLite.Simple (Connection)
 import Network.HTTP.Types
 import Network.Wai
 
+import Eza.Version (ezaVersionText)
 import Eza.Bookmarks
 
 import qualified Eza.Db as Db
@@ -39,7 +40,7 @@ health :: AppState -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 health state respond = do
     result <- try (withControl state Db.ping) :: IO (Either SomeException Bool)
     case result of
-        Right True -> respond (jsonResponse status200 (object ["status" .= ("ok" :: Text), "version" .= ("0.1.0" :: Text)]))
+        Right True -> respond (jsonResponse status200 (object ["status" .= ("ok" :: Text), "version" .= ezaVersionText]))
         _ -> respond (jsonProblem status503 "unavailable" "database is unavailable")
 
 {- | A share link is public but still resolves to one account: the token prefix

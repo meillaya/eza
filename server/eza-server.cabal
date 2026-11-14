@@ -25,6 +25,7 @@ library
   import:           exe-common
   hs-source-dirs:   src
   exposed-modules:  Eza.Admin
+                    Eza.Version
                     Eza.AiTag
                     Eza.Assets
                     Eza.Api.Account

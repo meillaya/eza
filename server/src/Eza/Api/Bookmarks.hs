@@ -22,6 +22,7 @@ import Network.Wai
 
 import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist)
 
+import Eza.Version (ezaVersionText)
 import Eza.Assets (assetPath)
 
 import Eza.Bookmarks
@@ -63,7 +64,7 @@ bootPayloadFor origin conn = do
     pure
         BootPayload
             { bpWireVersion = wireVersion
-            , bpVersion = "0.1.0"
+            , bpVersion = ezaVersionText
             , bpOrigin = origin
             , bpTags = tags
             , bpSavedSearches = searches

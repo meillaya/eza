@@ -25,7 +25,7 @@ success payloads and the WebAuthn scope, but it is a **one-way** upgrade:
 
 | Release | Control schema | Library schema | Notes |
 |---|---|---|---|
-| 0.3.x | 1 | 15 | flat sessions/tokens, per-feature undo tables |
+| 0.2.x / 0.3 | 1 (the 0.2.0.0 image writes the same control tables with `user_version = 0`) | 15 | flat sessions/tokens, per-feature undo tables |
 | 0.4.x | 2 | 18 | checksummed migrations, journal, async jobs |
 
 `eza-bookmarks version` prints the binary version and
@@ -68,8 +68,13 @@ docker compose pull eza
 docker compose up -d eza
 
 # first start migrated the data; check it
+docker exec eza eza-bookmarks version   # must print eza 0.4.0.0
 docker exec eza eza-bookmarks verify
 ```
+
+`docker load < result` tags the image as `localhost/eza:<version>`; tag it as
+`eza:<version>` with `docker tag` if your Compose file or commands name that
+form.
 
 The Compose file keeps the named `eza-data` volume; do not recreate it. If you
 run the container with `--read-only --tmpfs /tmp`, keep those flags: the
@@ -108,9 +113,10 @@ Set `EZA_DATA_DIR` and `EZA_STATIC_DIR` exactly as the old process used them.
 
 ## What the migration does
 
-- Control database v1 -> v2: adds `schema_meta` and records the checksum of
-  the control migrations. Accounts, roles, database paths and WebAuthn handles
-  are preserved.
+- Control database (pre-versioning / v1) -> v2: adds `schema_meta`, records the
+  checksum of the control migrations and sets `user_version = 2`. Accounts,
+  roles, database paths and WebAuthn handles are preserved. The drill in
+  docs/release.md upgrades a real 0.2.0.0 installation this way.
 - Each account library v15 -> v18:
   - v16 adds `schema_meta` and backfills checksums for the migrations that were
     already applied, without re-running them.
@@ -152,7 +158,11 @@ The old binary cannot open a migrated database, so rollback is a restore:
 1. Stop the server.
 2. Restore the stamp from before the upgrade with the old binary:
    `eza-bookmarks restore <stamp> --yes` (it backs up the current installation
-   first and rewrites the control paths).
+   first and rewrites the control paths). If you copied the stamp with
+   `docker cp`, its files belong to the host uid while the container runs as
+   uid 10001; fix ownership first (`docker exec -u 0 <container> chown -R
+   10001:10001 /restore-path`) or the old binary's integrity check fails on a
+   read-only-permission error.
 3. Start the old binary against the restored data.
 
 Never copy a live SQLite database with `cp`; the stamp/restore path uses
@@ -162,7 +172,7 @@ Never copy a live SQLite database with `cp`; the stamp/restore path uses
 
 | Symptom | Meaning / action |
 |---|---|
-| `schema is newer than this binary` | You started an older binary against migrated data. Roll forward or restore the pre-upgrade stamp; do not edit `schema_meta`. |
+| `control database schema is newer than this binary: 2` (or the library equivalent) | You started an older binary against migrated data. Roll forward or restore the pre-upgrade stamp; do not edit `schema_meta`. |
 | `schema checksum mismatch` | A shipped migration was edited or the database was modified by hand. Deploy the matching release or restore the backup. |
 | `/healthz` returns 503 after upgrade | Check ownership/permissions of the data directory and the server log. A failed migration leaves the previous schema version in place (each migration is a transaction) and refuses to serve. |
 | Login works but a passkey fails | `PUBLIC_ORIGIN`/`EZA_RP_ID` changed, or the browser origin is not the same HTTPS origin. Restore them and use recovery if needed. |

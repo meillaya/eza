@@ -17,7 +17,9 @@ bash scripts/version.sh --check
 ```
 
 Version sources: `core/eza-core.cabal`, `server/eza-server.cabal`,
-`web/eza-web.cabal`, `web-logic/eza-web-logic.cabal`, `flake.nix`. The image
+`web/eza-web.cabal`, `web-logic/eza-web-logic.cabal`, `flake.nix`, and
+`server/src/Eza/Version.hs` (the `eza-bookmarks version`, boot payload and
+`/healthz` value; `scripts/version.sh` checks it too). The image
 examples in `docs/deployment-docker.md`, `docs/upgrade.md`, `README.md` and
 the Compose files name the current tag. `CHANGELOG.md` gets the release section
 and the new version's schema map.
@@ -63,16 +65,23 @@ Drill it with the released images, not only with unit tests:
    tag, a view and a webhook, and run `eza-bookmarks backup`.
 2. Copy the stamp off the volume. Start the release-candidate image on the
    same volume with the same `PUBLIC_ORIGIN`/`EZA_RP_ID`.
-3. `docker exec ... eza-bookmarks verify` must pass; the account, bookmark,
-   tag, view and webhook must be present; the undo history starts empty
-   (documented); one async job (snapshot/dead-check/AI/webhook test) must
-   finish through `GET /api/v1/jobs/{id}`.
+3. `docker exec ... eza-bookmarks version` must print the release tag (a
+   pre-0.4 image may print an older/hardcoded version — record it, do not
+   trust it as the migration check), and `docker exec ... eza-bookmarks verify`
+   must pass; the account, bookmark, tag, view and webhook must be present; the
+   undo history starts empty (documented); one async job
+   (snapshot/dead-check/AI/webhook test) must finish through
+   `GET /api/v1/jobs/{id}`. When copying a stamp with `docker cp` for the
+   rollback step, `chown` it to the image user (10001) or the old restore fails
+   its stamp integrity check.
 4. Negative: the previous-release binary against the migrated volume must
    refuse it ("schema is newer than this binary"), and
    `eza-bookmarks restore <stamp> --yes` with the previous release must bring
    the old installation back.
 5. If a step fails, fix it before tagging; the upgrade path is part of the
-   release contract.
+   release contract. `docker load` tags the local image as
+   `localhost/eza:<version>`; `docker tag` it to the published name when the
+   drill uses that name.
 
 ## 4. Tag and publish
 

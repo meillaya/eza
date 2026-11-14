@@ -43,6 +43,15 @@ smaller deployment surface. It is a **one-way** upgrade from 0.3.
 - Schema v18 adds the async job payload/result columns used by the egress
   workers; the legacy undo history is not migrated (it is ephemeral).
 
+### CLI and probes
+
+- `eza-bookmarks version`, the boot payload version and `/healthz` now report
+  the release version (checked against the Cabal/flake version by
+  `scripts/version.sh`) instead of a hardcoded 0.1.0. The container image
+  puts `eza-bookmarks` on `PATH`, so `docker exec <container> eza-bookmarks …`
+  works as documented; `docker load` tags the local image
+  `localhost/eza:<version>`.
+
 ### API
 
 - `POST /api/v1/bookmarks/{id}/snapshot`, `POST /api/v1/maintenance/check-dead`,

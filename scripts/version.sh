@@ -39,6 +39,13 @@ if [ -z "$flake_version" ]; then
 fi
 
 status=0
+server_version_literal="$(
+  sed -n 's/^ezaVersionText = "\([^"]*\)"$/\1/p' "$ROOT/server/src/Eza/Version.hs" | head -n 1
+)"
+if [ "$server_version_literal" != "$flake_version" ]; then
+  echo "version.sh: version drift: server/src/Eza/Version.hs has '$server_version_literal' but flake.nix has '$flake_version'" >&2
+  status=1
+fi
 for cabal_file in core/eza-core.cabal server/eza-server.cabal web/eza-web.cabal web-logic/eza-web-logic.cabal; do
   [ -f "$ROOT/$cabal_file" ] || continue
   cabal_version="$(sed -n 's/^version:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' "$ROOT/$cabal_file" | head -n 1)"

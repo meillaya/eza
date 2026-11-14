@@ -67,6 +67,7 @@ import qualified Eza.Password as Password
 import Eza.Problem (pMessage)
 import qualified Eza.Routes as Routes
 import Eza.Server (runServer)
+import Eza.Version (ezaVersionText)
 import Eza.Types (DedupReport (..), ImportReport (..), TagStat (..))
 import Eza.User (UserRole (..), userRoleText)
 
@@ -371,7 +372,7 @@ parseRole raw = case T.toLower (T.strip (T.pack raw)) of
 
 runCli :: Config -> PasswordSource -> CliCommand -> IO ()
 runCli cfg passwords cmd = case cmd of
-    Version -> putStrLn "eza 0.1.0"
+    Version -> TIO.putStrLn ("eza " <> ezaVersionText)
     RoutesCmd withMarkdown -> runRoutesCommand withMarkdown
     Init -> runInit cfg
     Serve -> runServer cfg
