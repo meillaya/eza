@@ -14,7 +14,6 @@ module Eza.Tokens (
 
 import Crypto.Hash (Digest, SHA256, hash)
 import qualified Crypto.Random as Random
-import Data.Aeson
 import qualified Data.ByteString.Base64.URL as B64
 import Data.List (isPrefixOf)
 import Data.Text (Text)
@@ -22,7 +21,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
-import GHC.Generics (Generic)
+
+import Eza.Account (TokenView (..))
 
 data Token = Token
     { tokenId :: Int
@@ -30,29 +30,6 @@ data Token = Token
     , tokenScopes :: [Text]
     }
     deriving (Show, Eq)
-
-data TokenView = TokenView
-    { tvId :: Int
-    , tvName :: Text
-    , tvPrefix :: Text
-    , tvScopes :: [Text]
-    , tvCreatedAt :: Int
-    , tvLastUsedAt :: Maybe Int
-    , tvRevokedAt :: Maybe Int
-    }
-    deriving (Show, Eq, Generic)
-
-instance ToJSON TokenView where
-    toJSON tv =
-        object
-            [ "id" .= tvId tv
-            , "name" .= tvName tv
-            , "prefix" .= tvPrefix tv
-            , "scopes" .= tvScopes tv
-            , "created_at" .= tvCreatedAt tv
-            , "last_used_at" .= tvLastUsedAt tv
-            , "revoked_at" .= tvRevokedAt tv
-            ]
 
 epoch :: IO Int
 epoch = floor <$> getPOSIXTime

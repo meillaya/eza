@@ -33,11 +33,11 @@ executable eza-web
   other-modules:    Eza.Web.History
                     Eza.Web.Api
                     Eza.Web.Detail
+                    Eza.Web.Error
                     Eza.Web.Graph
                     Eza.Web.Markdown
                     Eza.Web.Model
                     Eza.Web.Panels
-                    Eza.Web.Types
                     Eza.Web.Update
                     Eza.Web.View
                     Eza.Web.Widgets

@@ -19,7 +19,6 @@ module Eza.Shares (
 
 import Crypto.Hash (Digest, SHA256, hash)
 import qualified Crypto.Random as Random
-import Data.Aeson
 import qualified Data.ByteString.Base64.URL as B64
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -27,36 +26,9 @@ import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (getPOSIXTime, posixSecondsToUTCTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Database.SQLite.Simple
-import GHC.Generics (Generic)
 
+import Eza.Share (ShareView (..))
 import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), SavedSearch (..), SearchPage (..))
-
-data ShareView = ShareView
-    { svId :: Int
-    , svPrefix :: Text
-    , svScope :: Text
-    , svTargetId :: Int
-    , svIncludeNote :: Bool
-    , svCreatedAt :: Int
-    , svExpiresAt :: Int
-    , svRevokedAt :: Maybe Int
-    , svLastAccessedAt :: Maybe Int
-    }
-    deriving (Show, Eq, Generic)
-
-instance ToJSON ShareView where
-    toJSON sv =
-        object
-            [ "id" .= svId sv
-            , "prefix" .= svPrefix sv
-            , "scope" .= svScope sv
-            , "target_id" .= svTargetId sv
-            , "include_note" .= svIncludeNote sv
-            , "created_at" .= svCreatedAt sv
-            , "expires_at" .= svExpiresAt sv
-            , "revoked_at" .= svRevokedAt sv
-            , "last_accessed_at" .= svLastAccessedAt sv
-            ]
 
 data ShareRecord = ShareRecord
     { srId :: Int

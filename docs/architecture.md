@@ -230,6 +230,29 @@ and (v12) the clipped `captures` rows. `POST /api/v1/undo`
 restores the most recent snapshot and deletes the snapshot row. The UI asks for
 confirmation before merge or prune, and the API applies one snapshot at a time.
 
+## The client contract
+
+The server and the Miso client share one wire contract in `core`. Every JSON
+body that crosses the boundary is a core type: `Eza.Types` for the library,
+`Eza.Account`/`Eza.User` for the account surface, `Eza.Rule`, `Eza.Share`,
+`Eza.Ai`, `Eza.Consolidation`, `Eza.View`, `Eza.Webhook`, `Eza.Boot` for
+startup, and `Eza.GraphLayout` for the layout payload. The client decodes those
+types strictly: a missing or renamed field is reported as an error naming the
+endpoint, never papered over with a default. The boot document carries
+`wire_version`; a client built for a different shape shows a blocking reload
+screen instead of painting stale or empty state.
+
+`Eza.Routes` is the single route truth: one `Route` value per method and path
+family, with its authorization class and capability. `Eza.Authz` derives the
+access matrix from it, and `eza-bookmarks routes --markdown` generates
+[generated/routes.md](generated/routes.md), which CI checks for drift. Until
+the dispatch split, `Eza.Server` keeps its existing case tables and adds routes
+through `Eza.Routes` first.
+
+Graph layout is server-produced only. The server builds it deterministically
+and caches it per library revision; the client hydrates the shared
+`GraphLayoutWire` payload and has no fallback layout builder.
+
 ## Serving and caching
 
 Static files are served from `EZA_STATIC_DIR`: pages at `/`, a fixed entry at

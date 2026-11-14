@@ -1,9 +1,11 @@
 {- | HTTP client for the eza v1 JSON API.
 
 Every unsafe request carries @X-CSRF-Token@ read from the @eza_csrf@
-cookie.  Responses are decoded with the shared "Eza.Types" aeson instances;
-planned endpoints decode leniently (see "Eza.Web.Types") so a missing route
-only shows a soft notice instead of breaking the page.
+cookie.  Responses are decoded with the shared "Eza.Types" (and the other
+@eza-core@ wire modules) aeson instances; a missing or renamed field fails the
+call with an 'ApiError' that names the endpoint instead of filling in a
+default. Only calls whose response body the client never reads skip decoding
+('apiWrite' and 'apiDelete').
 -}
 module Eza.Web.Api (
     Eff,
@@ -20,7 +22,6 @@ module Eza.Web.Api (
     fetchBacklinks,
     fetchAutocomplete,
     fetchGraph,
-    LayoutWire (..),
     fetchGraphLayout,
     fetchViews,
     fetchView,
@@ -101,16 +102,16 @@ module Eza.Web.Api (
     revokeOtherSessions,
     logout,
     submitImport,
+    ImportResponse (..),
     -- links
     exportUrl,
     notesExportUrl,
 ) where
 
-import Data.Aeson (FromJSON, ToJSON, Value (..), object, toJSON, withObject, (.!=), (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), Result (..), ToJSON, Value (..), fromJSON, object, toJSON, withObject, (.:), (.:?), (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
-import Data.Aeson.Types (Parser, parseEither)
 import Data.Char (chr, isAlphaNum, ord)
 import Data.List (stripPrefix)
 import qualified Data.Map.Strict as M
@@ -122,8 +123,13 @@ import qualified Data.Text.Encoding as TE
 import Miso
 import qualified Miso.JSON as MJ
 
+import Eza.Account (AccountInfo, TokenView)
+import Eza.Ai (AiStatus, TagSuggestion)
 import Eza.Boot (BootPayload)
-import Eza.GraphLayout (LayoutPositions (..), LayoutPreset (..))
+import Eza.Consolidation (ConsolidationGroup)
+import Eza.GraphLayout (GraphLayoutWire, LayoutPreset (..), layoutPresetText)
+import Eza.Rule (Rule (..))
+import Eza.Share (ShareView)
 import Eza.Types (
     Backlink (..),
     Backlinks (..),
@@ -133,6 +139,7 @@ import Eza.Types (
     DedupReport,
     GraphData (..),
     Highlight,
+    ImportReport,
     LibraryStats (..),
     SavedSearch,
     SearchPage,
@@ -143,25 +150,8 @@ import Eza.Types (
  )
 import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..), UserView (..))
 import qualified Eza.View as EV
+import Eza.Web.Error (ApiError (..), mkApiError)
 import Eza.Webhook (DeliveryView, Webhook, WebhookInput (..))
-
-import Eza.Web.Types (
-    AccountInfo,
-    AiStatus,
-    ApiError,
-    ConsolGroup,
-    Credential,
-    Rule (..),
-    ShareView,
-    TagSuggestion,
-    TokenView,
-    fieldBool,
-    fieldInt,
-    fieldList,
-    fieldObject,
-    fieldText,
-    mkApiError,
- )
 
 -- | Convenience alias: the API module is polymorphic in the app model/action.
 type Eff model action = Effect () () model action
@@ -237,10 +227,11 @@ requestHeaders extra token =
         ++ extra
 
 {- | Map a raw exchange onto the API contract: transport failure, non-2xx
-(envelope message preserved), then body decoding.
+(envelope message preserved), then a strict JSON parse. The endpoint label goes
+into the error so the toast says which call returned an unreadable body.
 -}
-rawOutcome :: CONTENT_TYPE -> RawResponse -> Either ApiError Value
-rawOutcome responseType raw = case (rfStatus raw, rfError raw) of
+rawOutcome :: MisoString -> CONTENT_TYPE -> RawResponse -> Either ApiError Value
+rawOutcome endpoint responseType raw = case (rfStatus raw, rfError raw) of
     (0, Just message)
         | not (T.null (T.strip message)) -> Left (mkApiError Nothing (Just message))
     (status, _)
@@ -248,13 +239,23 @@ rawOutcome responseType raw = case (rfStatus raw, rfError raw) of
         | responseType == JSON ->
             case A.eitherDecodeStrict' (TE.encodeUtf8 (rfText raw)) :: Either String Value of
                 Right value -> Right value
-                Left err ->
-                    Left
-                        ( mkApiError
-                            (Just status)
-                            (Just ("the server sent a response the client could not read: " <> T.pack err))
-                        )
+                Left err -> Left (bodyError endpoint (T.pack err))
         | otherwise -> Right Null
+
+-- | A response body that is not the JSON the endpoint promises.
+bodyError :: MisoString -> Text -> ApiError
+bodyError endpoint detail =
+    mkApiError
+        Nothing
+        (Just ("The response from " <> describeEndpoint endpoint <> " could not be read: " <> detail))
+
+-- | How an endpoint is named in a client-side decode error.
+describeEndpoint :: MisoString -> Text
+describeEndpoint endpoint
+    | T.null text = "the server"
+    | otherwise = text
+  where
+    text = T.strip (toText endpoint)
 
 {- | The server answers failures with @{"error":{"code":...,"message":...}}@.
 The message is worth showing verbatim: it explains duplicates, expired
@@ -307,7 +308,7 @@ sendValue method url requestedBody extraHeaders responseType onOk onErr = withSi
     token <- csrfToken
     encodedBody <- traverse (toJSVal . MJ.encode) requestedBody
     let report raw =
-            case rawOutcome responseType raw of
+            case rawOutcome url responseType raw of
                 Left err -> onErr err
                 Right value -> onOk value
     finish <- asyncCallback3 $ \statusValue textValue errorValue -> do
@@ -324,12 +325,15 @@ sendValue method url requestedBody extraHeaders responseType onOk onErr = withSi
     _ <- net # ("fetch" :: MisoString) $ (urlValue, methodValue, bodyValue, headersValue, finish)
     pure ()
 
--- | Decode a raw body into the shared (or lenient) DTO.
-decode :: (FromJSON a) => Value -> Either ApiError a
-decode value =
+{- | Decode a response body into a shared core DTO. A parse failure becomes an
+'ApiError' that names the endpoint; the caller's error branch decides how the
+message is shown.
+-}
+decodeResponseAt :: (FromJSON a) => MisoString -> Value -> Either ApiError a
+decodeResponseAt endpoint value =
     case MJ.fromJSON value of
         MJ.Success a -> Right a
-        MJ.Error e -> Left (mkApiError Nothing (Just (toText e)))
+        MJ.Error e -> Left (bodyError endpoint (toText e))
 
 apiGet ::
     (FromJSON a) =>
@@ -338,7 +342,7 @@ apiGet ::
     (ApiError -> action) ->
     Eff model action
 apiGet url onOk onErr =
-    getValue url [] (\v -> either onErr onOk (decode v)) onErr
+    getValue url [] (\v -> either onErr onOk (decodeResponseAt url v)) onErr
 
 getValue ::
     MisoString ->
@@ -444,6 +448,206 @@ utf8 n
         , 0x80 + n `mod` 64
         ]
 
+-- ------------------------------------------------- response envelopes ------
+
+{- | Read one JSON number field that an endpoint always sends. A missing or
+mistyped field is an 'ApiError' that names the endpoint, never a zero.
+-}
+decodeIntFieldAt :: MisoString -> Text -> Value -> Either ApiError Int
+decodeIntFieldAt endpoint key value =
+    case MJ.parseMaybe (MJ.withObject "response" (\o -> o MJ..: fromText key)) value of
+        Just number -> Right number
+        Nothing -> Left (missingFieldError endpoint key)
+
+{- | Read the one array field an endpoint wraps its rows in. The wrapper key
+must be present, and every element must decode as its shared core type.
+-}
+decodeListFieldAt :: (FromJSON a) => MisoString -> Text -> Value -> Either ApiError [a]
+decodeListFieldAt endpoint key value =
+    case MJ.parseMaybe (MJ.withObject "response" (\o -> o MJ..: fromText key)) value of
+        Just rows -> Right rows
+        Nothing -> Left (missingFieldError endpoint key)
+
+missingFieldError :: MisoString -> Text -> ApiError
+missingFieldError endpoint key =
+    mkApiError
+        Nothing
+        ( Just
+            ( "The response from "
+                <> describeEndpoint endpoint
+                <> " has no valid \""
+                <> key
+                <> "\" field."
+            )
+        )
+
+-- | @POST /api/v1/quick-save@: the row id and whether it already existed.
+data QuickSaveResponse = QuickSaveResponse
+    { qsrId :: Int
+    , qsrExisting :: Bool
+    }
+
+instance FromJSON QuickSaveResponse where
+    parseJSON = withObject "quick-save" $ \o ->
+        QuickSaveResponse
+            <$> o .: "id"
+            <*> o .: "existing"
+
+-- | @PATCH /api/v1/bookmarks/{id}@: how many highlights were re-anchored away.
+newtype BookmarkPatchResponse = BookmarkPatchResponse {bprHighlightsRemoved :: Int}
+
+instance FromJSON BookmarkPatchResponse where
+    parseJSON = withObject "bookmark patch" $ \o ->
+        BookmarkPatchResponse <$> o .: "highlights_removed"
+
+-- | @POST /api/v1/dedup/merge@.
+data MergeResponse = MergeResponse
+    { mrMerged :: Int
+    , mrSnapshotId :: Int
+    }
+
+instance FromJSON MergeResponse where
+    parseJSON = withObject "merge" $ \o ->
+        MergeResponse
+            <$> o .: "merged"
+            <*> o .: "snapshot_id"
+
+-- | @POST /api/v1/maintenance/check-dead@.
+data CheckDeadResponse = CheckDeadResponse
+    { cdrChecked :: Int
+    , cdrDead :: Int
+    , cdrTotalDead :: Int
+    }
+
+instance FromJSON CheckDeadResponse where
+    parseJSON = withObject "check-dead" $ \o ->
+        CheckDeadResponse
+            <$> o .: "checked"
+            <*> o .: "dead"
+            <*> o .: "total_dead"
+
+-- | @POST /api/v1/rules/test@: the dry-run match count and its ids.
+data RuleTestResponse = RuleTestResponse
+    { rtrMatches :: Int
+    , rtrBookmarkIds :: [Int]
+    }
+
+instance FromJSON RuleTestResponse where
+    parseJSON = withObject "rule dry run" $ \o ->
+        RuleTestResponse
+            <$> o .: "matches"
+            <*> o .: "bookmark_ids"
+
+{- | @POST /api/v1/tokens@: the raw token appears exactly once, next to its
+metadata.
+-}
+data TokenCreatedResponse = TokenCreatedResponse
+    { tcrToken :: Text
+    , tcrTokenInfo :: TokenView
+    }
+
+instance FromJSON TokenCreatedResponse where
+    parseJSON = withObject "created token" $ \o ->
+        TokenCreatedResponse
+            <$> o .: "token"
+            <*> o .: "token_info"
+
+-- | @POST /api/v1/share-links@: the new share id and its public URL.
+data ShareCreatedResponse = ShareCreatedResponse
+    { scrId :: Int
+    , scrUrl :: Text
+    }
+
+instance FromJSON ShareCreatedResponse where
+    parseJSON = withObject "created share" $ \o ->
+        ShareCreatedResponse
+            <$> o .: "id"
+            <*> o .: "url"
+
+{- | @GET /api/v1/tags/{tag}/suggestions@. The server includes @notice@ only
+when it has something to say (for example that no AI provider is configured);
+@suggestions@ is always present.
+-}
+data SuggestionsResponse = SuggestionsResponse
+    { sgrSuggestions :: [TagSuggestion]
+    , sgrNotice :: Maybe Text
+    }
+
+instance FromJSON SuggestionsResponse where
+    parseJSON = withObject "suggestions" $ \o ->
+        SuggestionsResponse
+            <$> o .: "suggestions"
+            <*> o .:? "notice"
+
+-- | @POST /api/v1/webhooks@: the stored webhook and its one-time secret.
+data WebhookCreatedResponse = WebhookCreatedResponse
+    { wcrWebhook :: Webhook
+    , wcrSecret :: Text
+    }
+
+instance FromJSON WebhookCreatedResponse where
+    parseJSON = withObject "created webhook" $ \o ->
+        WebhookCreatedResponse
+            <$> o .: "webhook"
+            <*> o .: "secret"
+
+{- | @GET /api/v1/stats@ renames three fields of the shared 'LibraryStats'
+(@bookmarks@, @bookmark_tags@, @jobs_pending@) and adds @links@, so it cannot
+use the core instance directly. Every field the dashboard reads is required.
+-}
+decodeStatsAt :: MisoString -> Value -> Either ApiError LibraryStats
+decodeStatsAt endpoint value =
+    case MJ.parseMaybe statsParser value of
+        Just stats -> Right stats
+        Nothing -> Left (bodyError endpoint "the stats payload is missing a field")
+  where
+    statsParser =
+        MJ.withObject "LibraryStats" $ \o ->
+            LibraryStats
+                <$> o MJ..: "bookmarks"
+                <*> o MJ..: "tags"
+                <*> o MJ..: "bookmark_tags"
+                <*> o MJ..: "sources"
+                <*> o MJ..: "top_sources"
+                <*> o MJ..: "sources_once"
+                <*> o MJ..: "first_day"
+                <*> o MJ..: "last_day"
+                <*> o MJ..: "days"
+                <*> o MJ..: "years"
+                <*> o MJ..: "filing_days"
+                <*> o MJ..: "unread"
+                <*> o MJ..: "dead"
+                <*> o MJ..: "jobs_pending"
+                <*> o MJ..: "favicon_bytes"
+                <*> o MJ..: "highlights"
+                <*> o MJ..: "shares"
+
+{- | The import response. Both the Netscape parser and the JSON-export path
+answer with the summary counts @inserted@, @found@ and @existing@; the full
+'Eza.Types.ImportReport' is only present for the Netscape file flow.
+-}
+data ImportResponse = ImportResponse
+    { imrInserted :: Int
+    , imrFound :: Int
+    , imrExisting :: Int
+    , imrReport :: Maybe ImportReport
+    }
+    deriving (Eq, Show)
+
+instance FromJSON ImportResponse where
+    parseJSON value = do
+        (inserted, found, existing) <-
+            withObject "import response" (\o -> (,,) <$> o .: "inserted" <*> o .: "found" <*> o .: "existing") value
+        pure
+            ImportResponse
+                { imrInserted = inserted
+                , imrFound = found
+                , imrExisting = existing
+                , imrReport = case fromJSON value :: Result ImportReport of
+                    Success report -> Just report
+                    Error _ -> Nothing
+                }
+
 -- ------------------------------------------------------------------ reads --
 
 fetchBoot :: (BootPayload -> action) -> (ApiError -> action) -> Eff model action
@@ -463,23 +667,17 @@ fetchDetail ::
     Eff model action
 fetchDetail bid = apiGet ("/api/v1/bookmarks/" <> ms (show bid))
 
--- | Linked + unlinked backlinks; falls back to a lenient decode.
+-- | Linked + unlinked backlinks as one flat list.
 fetchBacklinks ::
     Int ->
     ([Backlink] -> action) ->
     (ApiError -> action) ->
     Eff model action
 fetchBacklinks bid onOk onErr =
-    getValue
-        ("/api/v1/bookmarks/" <> ms (show bid) <> "/backlinks")
-        []
-        (\v -> onOk (extractBacklinks v))
-        onErr
+    getValue url [] (either onErr (onOk . flatten) . decodeResponseAt url) onErr
   where
-    extractBacklinks v =
-        case decode v :: Either ApiError Backlinks of
-            Right bks -> bksLinked bks ++ bksUnlinked bks
-            Left _ -> fieldList "linked" v ++ fieldList "unlinked" v
+    url = "/api/v1/bookmarks/" <> ms (show bid) <> "/backlinks"
+    flatten bks = bksLinked bks ++ bksUnlinked bks
 
 fetchAutocomplete ::
     MisoString ->
@@ -487,69 +685,33 @@ fetchAutocomplete ::
     (ApiError -> action) ->
     Eff model action
 fetchAutocomplete q onOk onErr =
-    getValue
-        ("/api/v1/autocomplete?q=" <> percentEncode q)
-        []
-        ( \v ->
-            let items = fieldList "items" v
-             in onOk (if null items then fieldList "bookmarks" v else items)
-        )
-        onErr
+    getValue url [] (either onErr onOk . decodeListFieldAt url "items") onErr
+  where
+    url = "/api/v1/autocomplete?q=" <> percentEncode q
 
 fetchGraph ::
     (GraphData -> action) ->
     (ApiError -> action) ->
     Eff model action
-fetchGraph onOk onErr =
-    getValue "/api/v1/graph" [] (\value -> either onErr onOk (decode value)) onErr
+fetchGraph = apiGet "/api/v1/graph"
 
-{- | The server-built layout for one preset. The payload is the server's
-compact form: @{schema, revision, preset, tags, records, bounds}@ with integer
+{- | The server-built layout for one preset. The payload is the shared
+'GraphLayoutWire': @{schema, revision, preset, tags, records, bounds}@ with
 positions quantized to 1/100 world unit. The client validates the revision
 against 'gdRevision' before hydrating.
 -}
-data LayoutWire = LayoutWire
-    { lwRevision :: Text
-    , lwTags :: [(Double, Double)]
-    , lwRecords :: [(Double, Double)]
-    , lwBounds :: ((Double, Double), (Double, Double))
-    }
-    deriving (Eq, Show)
-
 fetchGraphLayout ::
     LayoutPreset ->
-    (LayoutWire -> action) ->
+    (GraphLayoutWire -> action) ->
     (ApiError -> action) ->
     Eff model action
 fetchGraphLayout preset onOk onErr =
-    getValue ("/api/v1/graph/layout?preset=" <> presetSlug preset) [] (\value -> either onErr onOk (decodeLayoutWire value)) onErr
+    getValue url [] (either onErr onOk . decodeResponseAt url) onErr
+  where
+    url = "/api/v1/graph/layout?preset=" <> presetSlug preset
 
 presetSlug :: LayoutPreset -> MisoString
-presetSlug preset = case preset of
-    Compact -> "compact"
-    Standard -> "standard"
-    Airy -> "airy"
-
-decodeLayoutWire :: Value -> Either ApiError LayoutWire
-decodeLayoutWire value =
-    case parseEither parseWire value of
-        Left message -> Left (mkApiError Nothing (Just (T.pack message)))
-        Right wire -> Right wire
-  where
-    parseWire = withObject "graph layout" $ \o -> do
-        schema <- o .: "schema" :: Parser Int
-        if schema /= (1 :: Int)
-            then fail ("unsupported graph layout schema " <> show schema)
-            else pure ()
-        revision <- o .: "revision"
-        tags <- o .: "tags" >>= traverse pairOf
-        records <- o .: "records" >>= traverse pairOf
-        bounds <- o .: "bounds" >>= boundsOf
-        pure (LayoutWire revision tags records bounds)
-    pairOf [x, y] = pure (x, y)
-    pairOf _ = fail "graph layout positions must be [x,y] pairs"
-    boundsOf [minX, minY, maxX, maxY] = pure ((minX, minY), (maxX, maxY))
-    boundsOf _ = fail "graph layout bounds must be [minx,miny,maxx,maxy]"
+presetSlug = ms . T.unpack . layoutPresetText
 
 {- | The user's declarative views. @GET /api/v1/views@ answers
 @{"views":[...]}@; create and patch answer the stored view object.
@@ -573,11 +735,11 @@ instance ToJSON ViewPatch where
 
 fetchViews :: ([EV.View] -> action) -> (ApiError -> action) -> Eff model action
 fetchViews onOk onErr =
-    getValue "/api/v1/views" [] (\value -> onOk (fieldList "views" value)) onErr
+    getValue "/api/v1/views" [] (either onErr onOk . decodeListFieldAt "/api/v1/views" "views") onErr
 
 fetchView :: Text -> (EV.View -> action) -> (ApiError -> action) -> Eff model action
 fetchView slug onOk onErr =
-    getValue ("/api/v1/views/" <> percentEncode (ms (T.unpack slug))) [] (\value -> either onErr onOk (decode value)) onErr
+    apiGet ("/api/v1/views/" <> percentEncode (ms (T.unpack slug))) onOk onErr
 
 createView :: EV.ViewInput -> (EV.View -> action) -> (ApiError -> action) -> Eff model action
 createView input onOk onErr =
@@ -587,19 +749,21 @@ createView input onOk onErr =
         (Just (toJSON input))
         []
         JSON
-        (\value -> either onErr onOk (decode value))
+        (either onErr onOk . decodeResponseAt "/api/v1/views")
         onErr
 
 patchView :: Text -> ViewPatch -> (EV.View -> action) -> (ApiError -> action) -> Eff model action
 patchView slug patch onOk onErr =
     sendValue
         "PATCH"
-        ("/api/v1/views/" <> percentEncode (ms (T.unpack slug)))
+        url
         (Just (toJSON patch))
         []
         JSON
-        (\value -> either onErr onOk (decode value))
+        (either onErr onOk . decodeResponseAt url)
         onErr
+  where
+    url = "/api/v1/views/" <> percentEncode (ms (T.unpack slug))
 
 deleteView :: Text -> action -> (ApiError -> action) -> Eff model action
 deleteView slug =
@@ -616,13 +780,21 @@ data WebhookTest = WebhookTest
     }
     deriving (Eq, Show)
 
+instance FromJSON WebhookTest where
+    parseJSON = withObject "webhook test" $ \o ->
+        WebhookTest
+            <$> o .: "ok"
+            <*> o .:? "status"
+            <*> o .: "error"
+
 fetchWebhooks :: ([Webhook] -> action) -> (ApiError -> action) -> Eff model action
 fetchWebhooks onOk onErr =
-    getValue "/api/v1/webhooks" [] (\value -> onOk (fieldList "webhooks" value)) onErr
+    getValue url [] (either onErr onOk . decodeListFieldAt url "webhooks") onErr
+  where
+    url = "/api/v1/webhooks"
 
 fetchWebhook :: Int -> (Webhook -> action) -> (ApiError -> action) -> Eff model action
-fetchWebhook webhookId onOk onErr =
-    getValue (webhookUrl webhookId) [] (\value -> either onErr onOk (decode value)) onErr
+fetchWebhook webhookId = apiGet (webhookUrl webhookId)
 
 createWebhook ::
     WebhookInput ->
@@ -632,17 +804,14 @@ createWebhook ::
 createWebhook input onOk onErr =
     sendValue
         "POST"
-        "/api/v1/webhooks"
+        url
         (Just (toJSON input))
         []
         JSON
-        ( \value -> case (fieldObject "webhook" value :: Maybe Value) of
-            Nothing -> onErr (mkApiError Nothing (Just "the create response had no webhook object"))
-            Just raw -> case decode raw of
-                Right webhook -> onOk (webhook, fieldText "secret" value)
-                Left err -> onErr err
-        )
+        (either onErr (\(wcr) -> onOk (wcrWebhook wcr, wcrSecret wcr)) . decodeResponseAt url)
         onErr
+  where
+    url = "/api/v1/webhooks"
 
 updateWebhook ::
     Int ->
@@ -653,12 +822,14 @@ updateWebhook ::
 updateWebhook webhookId input onOk onErr =
     sendValue
         "PATCH"
-        (webhookUrl webhookId)
+        url
         (Just (toJSON input))
         []
         JSON
-        (\value -> either onErr onOk (decode value))
+        (either onErr onOk . decodeResponseAt url)
         onErr
+  where
+    url = webhookUrl webhookId
 
 deleteWebhook :: Int -> action -> (ApiError -> action) -> Eff model action
 deleteWebhook webhookId = apiDelete (webhookUrl webhookId)
@@ -671,23 +842,14 @@ testWebhook webhookId onOk onErr =
         (Nothing :: Maybe Value)
         []
         JSON
-        ( \value ->
-            onOk
-                ( WebhookTest
-                    (fieldBool "ok" value)
-                    (fieldObject "status" value)
-                    (fieldText "error" value)
-                )
-        )
+        (either onErr onOk . decodeResponseAt (webhookUrl webhookId <> "/test"))
         onErr
 
 fetchWebhookDeliveries :: Int -> ([DeliveryView] -> action) -> (ApiError -> action) -> Eff model action
 fetchWebhookDeliveries webhookId onOk onErr =
-    getValue
-        (webhookUrl webhookId <> "/deliveries?limit=20")
-        []
-        (\value -> onOk (fieldList "deliveries" value))
-        onErr
+    getValue url [] (either onErr onOk . decodeListFieldAt url "deliveries") onErr
+  where
+    url = webhookUrl webhookId <> "/deliveries?limit=20"
 
 webhookUrl :: Int -> MisoString
 webhookUrl webhookId = "/api/v1/webhooks/" <> ms (show webhookId)
@@ -698,7 +860,9 @@ webhookUrl webhookId = "/api/v1/webhooks/" <> ms (show webhookId)
 -}
 fetchAdminUsers :: ([UserView] -> action) -> (ApiError -> action) -> Eff model action
 fetchAdminUsers onOk onErr =
-    getValue "/api/v1/admin/users" [] (\value -> onOk (fieldList "users" value)) onErr
+    getValue url [] (either onErr onOk . decodeListFieldAt url "users") onErr
+  where
+    url = "/api/v1/admin/users"
 
 createAdminUser ::
     UserCreateInput ->
@@ -712,18 +876,7 @@ createAdminUser input onOk onErr =
         (Just (toJSON input))
         []
         JSON
-        ( \value ->
-            case (fieldObject "user" value :: Maybe Value) of
-                Nothing -> onErr (mkApiError Nothing (Just "the create response had no user object"))
-                Just rawUser -> case decode rawUser of
-                    Right user ->
-                        onOk
-                            ( UserCreateResult
-                                user
-                                (fieldList "recovery_codes" value)
-                            )
-                    Left err -> onErr err
-        )
+        (either onErr onOk . decodeResponseAt "/api/v1/admin/users")
         onErr
 
 -- | Enable/disable or change a role. Absent fields keep their current value.
@@ -737,12 +890,14 @@ patchAdminUser ::
 patchAdminUser userId enabled role onOk onErr =
     sendValue
         "PATCH"
-        ("/api/v1/admin/users/" <> ms (show userId))
+        url
         (Just (object (["enabled" .= value | Just value <- [enabled]] ++ ["role" .= value | Just value <- [role]])))
         []
         JSON
-        (\value -> either onErr onOk (decode value))
+        (either onErr onOk . decodeResponseAt url)
         onErr
+  where
+    url = "/api/v1/admin/users/" <> ms (show userId)
 
 {- | Break-glass temporary password. The server clears the target's 2FA flag
 and revokes that user's sessions.
@@ -783,7 +938,9 @@ fetchSavedSearches ::
     (ApiError -> action) ->
     Eff model action
 fetchSavedSearches onOk onErr =
-    getValue "/api/v1/saved-searches" [] (\v -> onOk (fieldList "saved_searches" v)) onErr
+    getValue url [] (either onErr onOk . decodeListFieldAt url "saved_searches") onErr
+  where
+    url = "/api/v1/saved-searches"
 
 {- | One page of duplicate candidates. The two sections carry independent
 offsets and limits, and the report repeats the exact whole-library counts on
@@ -801,7 +958,7 @@ fetchDedupReport urlOffset urlLimit titleOffset titleLimit onOk onErr =
     getValue
         (dedupCandidatesUrl urlOffset urlLimit titleOffset titleLimit)
         []
-        (\v -> either onErr onOk (decode v))
+        (\v -> either onErr onOk (decodeResponseAt (dedupCandidatesUrl urlOffset urlLimit titleOffset titleLimit) v))
         onErr
 
 dedupCandidatesUrl :: Int -> Int -> Int -> Int -> MisoString
@@ -826,58 +983,41 @@ mergeDedupAll onOk onErr =
         (Just (object ["confirm" .= True]))
         []
         JSON
-        (\v -> either onErr onOk (decode v))
+        (either onErr onOk . decodeResponseAt "/api/v1/dedup/merge-all")
         onErr
 
 fetchConsolidation ::
-    ([ConsolGroup] -> action) ->
+    ([ConsolidationGroup] -> action) ->
     (ApiError -> action) ->
     Eff model action
 fetchConsolidation onOk onErr =
-    getValue
-        "/api/v1/tags/consolidation-candidates"
-        []
-        (\v -> onOk (fieldList "groups" v))
-        onErr
+    getValue url [] (either onErr onOk . decodeListFieldAt url "groups") onErr
+  where
+    url = "/api/v1/tags/consolidation-candidates"
 
-{- | @GET /api/v1/tags/{tag}/suggestions@.  The server answers an unconfigured
-provider with 200, @configured: false@, an empty list and a notice; hand all
-three to the caller so the page can say what happened instead of showing an
+{- | @GET /api/v1/tags/{tag}/suggestions@. The server answers an unconfigured
+provider with 200, an empty list and a notice; hand the suggestions and the
+notice to the caller so the page can say what happened instead of showing an
 empty result that looks like a clean scan.
 -}
 fetchSuggestions ::
     Text ->
-    (Bool -> [TagSuggestion] -> Maybe Text -> action) ->
+    ([TagSuggestion] -> Maybe Text -> action) ->
     (ApiError -> action) ->
     Eff model action
 fetchSuggestions tag onOk onErr =
-    getValue
-        ("/api/v1/tags/" <> percentEncode (ms tag) <> "/suggestions")
-        []
-        ( \v ->
-            let fields = case v of
-                    A.Object o -> o
-                    _ -> KM.empty
-                configured =
-                    not (KM.member (K.fromText "configured") fields)
-                        || fieldBool "configured" v
-                notice = case T.strip (fieldText "notice" v) of
-                    "" -> Nothing
-                    text -> Just text
-             in onOk configured (fieldList "suggestions" v) notice
-        )
-        onErr
+    getValue url [] (either onErr (\response -> onOk (sgrSuggestions response) (sgrNotice response)) . decodeResponseAt url) onErr
+  where
+    url = "/api/v1/tags/" <> percentEncode (ms tag) <> "/suggestions"
 
 fetchPruneCandidates ::
     ([BookmarkSummary] -> action) ->
     (ApiError -> action) ->
     Eff model action
 fetchPruneCandidates onOk onErr =
-    getValue
-        "/api/v1/maintenance/prune-candidates"
-        []
-        (\v -> onOk (fieldList "items" v))
-        onErr
+    getValue url [] (either onErr onOk . decodeListFieldAt url "items") onErr
+  where
+    url = "/api/v1/maintenance/prune-candidates"
 
 fetchAccount ::
     (AccountInfo -> action) ->
@@ -890,42 +1030,22 @@ fetchTags ::
     (ApiError -> action) ->
     Eff model action
 fetchTags onOk onErr =
-    getValue "/api/v1/tags" [] (\v -> onOk (fieldList "tags" v)) onErr
+    getValue url [] (either onErr onOk . decodeListFieldAt url "tags") onErr
+  where
+    url = "/api/v1/tags"
 
 {- | @GET /api/v1/stats@ — the whole library count read again after a write.
-The API names three fields differently from the shared DTO (@bookmarks@,
-@bookmark_tags@, @jobs_pending@); decode the payload straight onto
-'LibraryStats' rather than round-tripping through an intermediate 'Value'.
+The API renames three fields of the shared 'LibraryStats' and adds @links@, so
+the payload decodes onto a local wire record and converts to the shared type.
 -}
 fetchStats ::
-    (Maybe LibraryStats -> action) ->
+    (LibraryStats -> action) ->
     (ApiError -> action) ->
     Eff model action
 fetchStats onOk onErr =
-    getValue "/api/v1/stats" [] (\value -> onOk (statsFromPayload value)) onErr
-
-statsFromPayload :: Value -> Maybe LibraryStats
-statsFromPayload =
-    MJ.parseMaybe $
-        MJ.withObject "LibraryStats" $ \o ->
-            LibraryStats
-                <$> o MJ..: "bookmarks"
-                <*> o MJ..: "tags"
-                <*> o MJ..: "bookmark_tags"
-                <*> o MJ..: "sources"
-                <*> o MJ..: "top_sources"
-                <*> o MJ..: "sources_once"
-                <*> o MJ..: "first_day"
-                <*> o MJ..: "last_day"
-                <*> o MJ..: "days"
-                <*> o MJ..: "years"
-                <*> o MJ..: "filing_days"
-                <*> o MJ..: "unread"
-                <*> o MJ..: "dead"
-                <*> o MJ..: "jobs_pending"
-                <*> o MJ..: "favicon_bytes"
-                <*> o MJ..: "highlights"
-                <*> o MJ..: "shares"
+    getValue url [] (either onErr onOk . decodeStatsAt url) onErr
+  where
+    url = "/api/v1/stats"
 
 -- ----------------------------------------------------------------- writes --
 
@@ -950,11 +1070,10 @@ createBookmark url title tags onOk onErr =
         )
         []
         JSON
-        (\v -> onOk (fieldInt "id" v))
+        (either onErr onOk . decodeIntFieldAt "/api/v1/bookmarks" "id")
         onErr
 
-{- | @PATCH /api/v1/bookmarks/{id}@ — the detail editor save path.
-| @POST /api/v1/quick-save@ — idempotent capture used by the PWA share
+{- | @POST /api/v1/quick-save@ — idempotent capture used by the PWA share
 target and the account-page bookmarklet.
 -}
 quickSave ::
@@ -977,7 +1096,7 @@ quickSave url title onOk onErr =
         )
         []
         JSON
-        (\v -> onOk (fieldInt "id" v) (fieldBool "existing" v))
+        (either onErr (\response -> onOk (qsrId response) (qsrExisting response)) . decodeResponseAt "/api/v1/quick-save")
         onErr
 
 patchBookmark ::
@@ -1001,12 +1120,14 @@ patchBookmarkWithResult ::
 patchBookmarkWithResult bid payload onOk onErr =
     sendValue
         "PATCH"
-        ("/api/v1/bookmarks/" <> ms (show bid))
+        url
         (Just payload)
         []
         JSON
-        (\v -> onOk (fieldInt "highlights_removed" v))
+        (either onErr (onOk . bprHighlightsRemoved) . decodeResponseAt url)
         onErr
+  where
+    url = "/api/v1/bookmarks/" <> ms (show bid)
 
 deleteBookmark :: Int -> action -> (ApiError -> action) -> Eff model action
 deleteBookmark bid = apiDelete ("/api/v1/bookmarks/" <> ms (show bid))
@@ -1023,7 +1144,7 @@ markAllAbove aboveId onOk onErr =
         (Just (object ["above_id" .= aboveId]))
         []
         JSON
-        (\v -> onOk (fieldInt "updated" v))
+        (either onErr onOk . decodeIntFieldAt "/api/v1/inbox/mark-all-above" "updated")
         onErr
 
 trackOpen :: Int -> action -> (ApiError -> action) -> Eff model action
@@ -1049,7 +1170,7 @@ saveSavedSearch name q tags onOk onErr =
         (Just (object ["name" .= name, "q" .= q, "tags" .= tags]))
         []
         JSON
-        (\v -> onOk (fieldInt "id" v))
+        (either onErr onOk . decodeIntFieldAt "/api/v1/saved-searches" "id")
         onErr
 
 deleteSavedSearch :: Int -> action -> (ApiError -> action) -> Eff model action
@@ -1068,7 +1189,7 @@ mergeDedup keep mergeIds onOk onErr =
         (Just (object ["keep_id" .= keep, "merge_ids" .= mergeIds]))
         []
         JSON
-        (\v -> onOk (fieldInt "merged" v, fieldInt "snapshot_id" v))
+        (either onErr (\response -> onOk (mrMerged response, mrSnapshotId response)) . decodeResponseAt "/api/v1/dedup/merge")
         onErr
 
 mergeTags ::
@@ -1115,7 +1236,7 @@ runPrune ids onOk onErr =
         (Just (object ["ids" .= ids]))
         []
         JSON
-        (\v -> onOk (fieldInt "pruned" v))
+        (either onErr onOk . decodeIntFieldAt "/api/v1/maintenance/prune" "pruned")
         onErr
 
 checkDead :: ((Int, Int, Int) -> action) -> (ApiError -> action) -> Eff model action
@@ -1128,24 +1249,22 @@ checkDead onOk onErr =
         (Just (object ["include_dead" .= True]))
         []
         JSON
-        (\v -> onOk (fieldInt "checked" v, fieldInt "dead" v, fieldInt "total_dead" v))
+        ( either
+            onErr
+            (\response -> onOk (cdrChecked response, cdrDead response, cdrTotalDead response))
+            . decodeResponseAt "/api/v1/maintenance/check-dead"
+        )
         onErr
 
 fetchUndoEntries :: ([UndoEntry] -> action) -> (ApiError -> action) -> Eff model action
 fetchUndoEntries onOk onErr =
-    getValue
-        "/api/v1/undo?limit=5"
-        []
-        (\v -> onOk (fieldList "entries" v))
-        onErr
+    getValue url [] (either onErr onOk . decodeListFieldAt url "entries") onErr
+  where
+    url = "/api/v1/undo?limit=5"
 
 fetchUndoPreview :: Int -> (UndoPreview -> action) -> (ApiError -> action) -> Eff model action
 fetchUndoPreview snapshotId onOk onErr =
-    getValue
-        ("/api/v1/undo/" <> ms (show snapshotId))
-        []
-        (\v -> either onErr onOk (decode v))
-        onErr
+    apiGet ("/api/v1/undo/" <> ms (show snapshotId)) onOk onErr
 
 runUndo :: Int -> (UndoResult -> action) -> (ApiError -> action) -> Eff model action
 runUndo snapshotId onOk onErr =
@@ -1155,7 +1274,7 @@ runUndo snapshotId onOk onErr =
         (Just (object ["snapshot_id" .= snapshotId]))
         []
         JSON
-        (\v -> either onErr onOk (decode v))
+        (either onErr onOk . decodeResponseAt "/api/v1/undo")
         onErr
 
 markLinkAlive :: Int -> action -> (ApiError -> action) -> Eff model action
@@ -1172,7 +1291,7 @@ regenerateRecovery onOk onErr =
         (Nothing :: Maybe Value)
         []
         JSON
-        (\v -> onOk (fieldList "codes" v))
+        (either onErr onOk . decodeListFieldAt "/api/v1/account/recovery/regenerate" "codes")
         onErr
 
 renameCredential :: Text -> Text -> action -> (ApiError -> action) -> Eff model action
@@ -1252,7 +1371,7 @@ revokeOtherSessions onOk onErr =
         (Nothing :: Maybe Value)
         []
         JSON
-        (\v -> onOk (fieldInt "revoked" v))
+        (either onErr onOk . decodeIntFieldAt "/api/v1/account/sessions/revoke-others" "revoked")
         onErr
 
 logout :: action -> (ApiError -> action) -> Eff model action
@@ -1260,10 +1379,10 @@ logout = apiWrite "POST" "/api/auth/logout" (Nothing :: Maybe Value)
 
 {- | Multipart import of a Netscape bookmarks HTML file picked via the hidden
 @#import-file@ input.  Builds a @FormData@ in the browser and POSTs it with
-the CSRF header; the server answers with an "Eza.Types.ImportReport".
+the CSRF header; the server answers with an import report and summary counts.
 -}
 submitImport ::
-    (Value -> action) ->
+    (ImportResponse -> action) ->
     (ApiError -> action) ->
     Eff model action
 submitImport onOk onErr = withSink $ \sink -> do
@@ -1276,9 +1395,9 @@ submitImport onOk onErr = withSink $ \sink -> do
         body <- fromMaybe "" <$> (fromJSVal textValue :: IO (Maybe MisoString))
         transportError <- fromMaybe "" <$> (fromJSVal errorValue :: IO (Maybe MisoString))
         let status = maybe 0 round statusNumber
-        sink $ case rawOutcome JSON (rawResponse status body transportError) of
+        sink $ case rawOutcome "/api/v1/import" JSON (rawResponse status body transportError) of
             Left err -> onErr err
-            Right value -> onOk value
+            Right value -> either onErr onOk (decodeResponseAt "/api/v1/import" value)
     net <- jsg ("EzaNet" :: MisoString)
     inputId <- toJSVal ("import-file" :: MisoString)
     tokenValue <- toJSVal token
@@ -1311,7 +1430,7 @@ bulkUpdate bulkAction ids onOk onErr =
         (Just (object fields))
         []
         JSON
-        (\v -> onOk (fieldInt "updated" v))
+        (either onErr onOk . decodeIntFieldAt "/api/v1/bookmarks/bulk" "updated")
         onErr
   where
     fields = case bulkAction of
@@ -1335,7 +1454,9 @@ fetchTokens ::
     (ApiError -> action) ->
     Eff model action
 fetchTokens onOk onErr =
-    getValue "/api/v1/tokens" [] (\v -> onOk (fieldList "tokens" v)) onErr
+    getValue url [] (either onErr onOk . decodeListFieldAt url "tokens") onErr
+  where
+    url = "/api/v1/tokens"
 
 -- | @POST /api/v1/tokens@ — returns the raw token once plus its metadata.
 createApiToken ::
@@ -1351,10 +1472,7 @@ createApiToken name scopes onOk onErr =
         (Just (object ["name" .= name, "scopes" .= scopes]))
         []
         JSON
-        ( \v -> case fieldObject "token_info" v of
-            Just info -> onOk (fieldText "token" v) info
-            Nothing -> onErr (mkApiError Nothing (Just "token response is missing token_info"))
-        )
+        (either onErr (\response -> onOk (tcrToken response) (tcrTokenInfo response)) . decodeResponseAt "/api/v1/tokens")
         onErr
 
 -- | @DELETE /api/v1/tokens/{id}@ — revoke (keeps the row, sets revoked_at).
@@ -1370,11 +1488,9 @@ fetchHighlights ::
     (ApiError -> action) ->
     Eff model action
 fetchHighlights bookmarkId onOk onErr =
-    getValue
-        ("/api/v1/bookmarks/" <> ms (show bookmarkId) <> "/highlights")
-        []
-        (\v -> onOk (fieldList "highlights" v))
-        onErr
+    getValue url [] (either onErr onOk . decodeListFieldAt url "highlights") onErr
+  where
+    url = "/api/v1/bookmarks/" <> ms (show bookmarkId) <> "/highlights"
 
 {- | @POST /api/v1/bookmarks/{id}/highlights@ — offsets are character offsets
 into the extracted text; prefix/suffix are the server's drift anchors.
@@ -1398,10 +1514,7 @@ createHighlight bookmarkId quote prefix suffix startOffset endOffset note color 
         (Just (object fields))
         []
         JSON
-        ( \v -> case decodeHighlight v of
-            Just highlight -> onOk highlight
-            Nothing -> onErr (mkApiError Nothing (Just "invalid highlight response"))
-        )
+        (either onErr onOk . decodeResponseAt url)
         onErr
   where
     url = "/api/v1/bookmarks/" <> ms (show bookmarkId) <> "/highlights"
@@ -1415,12 +1528,6 @@ createHighlight bookmarkId quote prefix suffix startOffset endOffset note color 
         , "color" .= color
         ]
 
--- | Decode a raw 'Value' into the shared 'Highlight' DTO.
-decodeHighlight :: Value -> Maybe Highlight
-decodeHighlight value = case MJ.fromJSON value of
-    MJ.Success highlight -> Just highlight
-    MJ.Error _ -> Nothing
-
 -- | @PATCH /api/v1/bookmarks/{id}/highlights/{highlightId}@
 patchHighlight ::
     Int ->
@@ -1431,7 +1538,7 @@ patchHighlight ::
     (ApiError -> action) ->
     Eff model action
 patchHighlight bookmarkId highlightId note color onOk onErr =
-    sendValue "PATCH" url (Just payload) [] JSON (\_ -> onOk) onErr
+    sendValue "PATCH" url (Just payload) [] NONE (\_ -> onOk) onErr
   where
     url =
         "/api/v1/bookmarks/"
@@ -1469,7 +1576,9 @@ fetchShares ::
     (ApiError -> action) ->
     Eff model action
 fetchShares onOk onErr =
-    getValue "/api/v1/share-links" [] (\v -> onOk (fieldList "shares" v)) onErr
+    getValue url [] (either onErr onOk . decodeListFieldAt url "shares") onErr
+  where
+    url = "/api/v1/share-links"
 
 {- | @POST /api/v1/share-links@ — returns the share id and the public URL
 (the raw token is only ever shown here).
@@ -1497,7 +1606,11 @@ createShareLink scope targetId includeNote expiresInDays onOk onErr =
         )
         []
         JSON
-        (\v -> onOk (fieldInt "id" v) (fieldText "url" v))
+        ( either
+            onErr
+            (\response -> onOk (scrId response) (scrUrl response))
+            . decodeResponseAt "/api/v1/share-links"
+        )
         onErr
 
 -- | @DELETE /api/v1/share-links/{id}@ — revoke a share link.
@@ -1521,7 +1634,9 @@ fetchRules ::
     (ApiError -> action) ->
     Eff model action
 fetchRules onOk onErr =
-    getValue "/api/v1/rules" [] (\v -> onOk (fieldList "rules" v)) onErr
+    getValue url [] (either onErr onOk . decodeListFieldAt url "rules") onErr
+  where
+    url = "/api/v1/rules"
 
 ruleBody :: Text -> Bool -> Text -> Text -> [Text] -> Bool -> Value
 ruleBody name enabled field patternText addTags markRead =
@@ -1533,11 +1648,6 @@ ruleBody name enabled field patternText addTags markRead =
         , "add_tags" .= addTags
         , "mark_read" .= markRead
         ]
-
-decodeRule :: Value -> Maybe Rule
-decodeRule value = case MJ.fromJSON value of
-    MJ.Success rule -> Just rule
-    MJ.Error _ -> Nothing
 
 -- | @POST /api/v1/rules@
 createRule ::
@@ -1557,14 +1667,12 @@ createRule name enabled field patternText addTags markRead onOk onErr =
         (Just (ruleBody name enabled field patternText addTags markRead))
         []
         JSON
-        ( \v -> case decodeRule v of
-            Just rule -> onOk rule
-            Nothing -> onErr (mkApiError Nothing (Just "invalid rule response"))
-        )
+        (either onErr onOk . decodeResponseAt "/api/v1/rules")
         onErr
 
 {- | @PATCH /api/v1/rules/{id}@ — the API replaces all fields, so callers pass
-the complete rule with the change applied.
+the complete rule with the change applied. The response body is ignored: the
+caller already has the rule it submitted.
 -}
 patchRule ::
     Int ->
@@ -1573,7 +1681,7 @@ patchRule ::
     (ApiError -> action) ->
     Eff model action
 patchRule ruleId rule onOk onErr =
-    sendValue "PATCH" ("/api/v1/rules/" <> ms (show ruleId)) (Just body) [] JSON (\_ -> onOk) onErr
+    sendValue "PATCH" ("/api/v1/rules/" <> ms (show ruleId)) (Just body) [] NONE (\_ -> onOk) onErr
   where
     body =
         ruleBody
@@ -1602,7 +1710,7 @@ testRule field patternText onOk onErr =
         (Just (ruleBody "" True field patternText [] False))
         []
         JSON
-        (\v -> onOk (fieldInt "matches" v) (fieldList "bookmark_ids" v))
+        (either onErr (\response -> onOk (rtrMatches response) (rtrBookmarkIds response)) . decodeResponseAt "/api/v1/rules/test")
         onErr
 
 -- ------------------------------------------------------------------ links --
@@ -1612,7 +1720,3 @@ exportUrl = "/api/v1/export"
 
 notesExportUrl :: MisoString
 notesExportUrl = "/api/v1/export/notes"
-
--- | Keeps the lenient DTO imports exercised on the client.
-_unusedLenient :: Maybe (Credential, SavedSearch)
-_unusedLenient = Nothing

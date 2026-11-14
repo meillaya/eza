@@ -7,9 +7,11 @@
 #
 # The deployment flake is the source of truth: `version = "x"` in flake.nix
 # names the release asset, the container tag and the NixOS module defaults.
-# The Cabal package versions must match it, otherwise a release tarball and the
-# flake disagree about what was built. The extension and sidecar carry their
-# own three-part versions (0.1.0) and are deliberately not compared here.
+# The Cabal package versions and the deployment copies must match it, otherwise
+# a release tarball and the flake disagree about what was built. The extension
+# and sidecar carry their own three-part versions (0.1.0) and are deliberately
+# not compared here. Deployment copies that a later milestone removes are
+# skipped when the file is absent.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,7 +39,7 @@ if [ -z "$flake_version" ]; then
 fi
 
 status=0
-for cabal_file in core/eza-core.cabal server/eza-server.cabal web/eza-web.cabal; do
+for cabal_file in core/eza-core.cabal server/eza-server.cabal web/eza-web.cabal web-logic/eza-web-logic.cabal; do
   [ -f "$ROOT/$cabal_file" ] || continue
   cabal_version="$(sed -n 's/^version:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' "$ROOT/$cabal_file" | head -n 1)"
   if [ "$cabal_version" != "$flake_version" ]; then
@@ -45,6 +47,27 @@ for cabal_file in core/eza-core.cabal server/eza-server.cabal web/eza-web.cabal;
     status=1
   fi
 done
+
+# The Kubernetes manifests and the fixed-output web asset are removed in the
+# v0.4 deployment cleanup; check them only while they still exist.
+if [ -f "$ROOT/deploy/k8s/deployment.yaml" ]; then
+  k8s_version="$(
+    sed -n 's/.*image: ghcr\.io\/meillaya\/eza:\([^[:space:]]*\).*/\1/p' "$ROOT/deploy/k8s/deployment.yaml" | head -n 1
+  )"
+  if [ -n "$k8s_version" ] && [ "$k8s_version" != "$flake_version" ]; then
+    echo "version.sh: version drift: deploy/k8s/deployment.yaml has '$k8s_version' but flake.nix has '$flake_version'" >&2
+    status=1
+  fi
+fi
+if [ -f "$ROOT/nix/web-assets.json" ]; then
+  web_version="$(
+    sed -n 's#.*"url": ".*/download/v\([^/"]*\)/eza-web-[^"]*".*#\1#p' "$ROOT/nix/web-assets.json" | head -n 1
+  )"
+  if [ -n "$web_version" ] && [ "$web_version" != "$flake_version" ]; then
+    echo "version.sh: version drift: nix/web-assets.json names '$web_version' but flake.nix has '$flake_version'" >&2
+    status=1
+  fi
+fi
 
 if [ "$status" -ne 0 ]; then
   exit 1

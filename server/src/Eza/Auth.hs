@@ -1,5 +1,4 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -28,8 +27,6 @@ module Eza.Auth (
     NewSession (..),
     LoginOutcome (..),
     RegistrationOutcome (..),
-    CredentialView (..),
-    SessionView (..),
     Account (..),
     RateLimiter,
     newRateLimiter,
@@ -102,11 +99,11 @@ import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.Validation as V
 import Database.SQLite.Simple
-import GHC.Generics (Generic)
 import Time.System (dateCurrent)
 
 import qualified Crypto.WebAuthn as WA
 
+import qualified Eza.Account as Account
 import qualified Eza.Password as Password
 
 data AuthConfig = AuthConfig
@@ -152,45 +149,6 @@ data LoginOutcome
     = LoginComplete NewSession
     | LoginNeedsPasskey NewSession
     deriving (Show, Eq)
-
-data CredentialView = CredentialView
-    { cvId :: Text
-    , cvNickname :: Text
-    , cvCreatedAt :: Int
-    , cvLastUsedAt :: Maybe Int
-    , cvBackupEligible :: Bool
-    }
-    deriving (Show, Eq, Generic)
-
-instance ToJSON CredentialView where
-    toJSON cv =
-        object
-            [ "id" .= cvId cv
-            , "nickname" .= cvNickname cv
-            , "created_at" .= cvCreatedAt cv
-            , "last_used_at" .= cvLastUsedAt cv
-            , "backup_eligible" .= cvBackupEligible cv
-            ]
-
-{- | One browser session as the account page sees it: timestamps and a marker
-for the session making the request. Ids and hashes stay on the server.
--}
-data SessionView = SessionView
-    { svCreatedAt :: Int
-    , svLastSeenAt :: Maybe Int
-    , svExpiresAt :: Int
-    , svCurrent :: Bool
-    }
-    deriving (Show, Eq, Generic)
-
-instance ToJSON SessionView where
-    toJSON sv =
-        object
-            [ "created_at" .= svCreatedAt sv
-            , "last_seen_at" .= svLastSeenAt sv
-            , "expires_at" .= svExpiresAt sv
-            , "current" .= svCurrent sv
-            ]
 
 data RegistrationOutcome = RegistrationOutcome
     { roCodes :: Maybe [Text]
@@ -1054,7 +1012,7 @@ redeemRecoveryCode conn code = do
 session marked. Pending two-factor sessions are invisible here: they are an
 unfinished sign-in, not something the account page can list or revoke.
 -}
-listSessions :: Connection -> Maybe Session -> IO [SessionView]
+listSessions :: Connection -> Maybe Session -> IO [Account.SessionInfo]
 listSessions conn current = do
     now <- epoch
     rows <-
@@ -1064,13 +1022,13 @@ listSessions conn current = do
             (now, pendingScope) ::
             IO [(Text, Int, Maybe Int, Int)]
     pure
-        [ SessionView created lastSeen expires (Just sid == currentId)
+        [ Account.SessionInfo created lastSeen expires (Just sid == currentId)
         | (sid, created, lastSeen, expires) <- rows
         ]
   where
     currentId = sessId <$> current
 
-listCredentials :: Connection -> IO [CredentialView]
+listCredentials :: Connection -> IO [Account.Credential]
 listCredentials conn = do
     rows <-
         query_
@@ -1078,7 +1036,7 @@ listCredentials conn = do
             "SELECT credential_id,nickname,created_at,last_used_at,backup_eligible FROM passkey_credentials ORDER BY created_at ASC" ::
             IO [(BS.ByteString, Text, Int, Maybe Int, Int)]
     pure
-        [ CredentialView (base64Id cid) nick created lastUsed (be /= 0)
+        [ Account.Credential (base64Id cid) nick created lastUsed (be /= 0)
         | (cid, nick, created, lastUsed, be) <- rows
         ]
 

@@ -81,6 +81,11 @@ jobs:
         run: devenv shell -- bash scripts/check-specs.sh
       - name: Formatting and lint
         run: devenv shell -- bash -c 'fourmolu --mode check core server web && hlint core server web'
+      # Drift checks for the documents contributors and agents read first: the
+      # AGENTS.md layout vs the tracked source directories, the version copies
+      # named by scripts/version.sh, and generated reference tables.
+      - name: Documentation checks
+        run: devenv shell -- bash scripts/check-docs.sh
       # -Werror only rebuilds the local packages: dependencies come from the
       # cabal store built by the test step above, so third-party warnings do
       # not fail this gate.

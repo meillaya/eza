@@ -70,12 +70,14 @@ import System.FilePath (addTrailingPathSeparator, (</>))
 import System.IO (hPutStrLn, stderr)
 import qualified Web.Cookie as Cookie
 
+import Eza.Account (AccountInfo (..))
 import qualified Eza.Admin as Admin
+import Eza.Ai (AiStatus (..))
 import Eza.AiTag (aiSuggestions, resolveAiModel)
 import qualified Eza.Auth as Auth
 import qualified Eza.Authz as Authz
 import Eza.Bookmarks
-import Eza.Boot (BootPayload (..))
+import Eza.Boot (BootPayload (..), wireVersion)
 import Eza.Clip (ClipError, ClipRequest (..), ClipTemplate (..), SaveClipResult (..), TemplateError, clipErrorCode, clipErrorMessage, clipErrorStatus, createTemplate, deleteTemplate, getTemplate, previewClip, saveClip, templateErrorCode, templateErrorMessage, templateErrorStatus, templatesPayload, updateTemplate)
 import Eza.Config
 import Eza.Control (ControlUser (..))
@@ -1887,12 +1889,11 @@ authedRoute rctx req respond conn =
             respond
                 ( jsonResponse
                     status200
-                    ( object
-                        [ "provider" .= provider
-                        , "model" .= model
-                        , "configured" .= configured
-                        ]
-                    )
+                    AiStatus
+                        { asProvider = T.pack provider
+                        , asModel = model
+                        , asConfigured = configured
+                        }
                 )
         ("GET", ["api", "v1", "rules"]) -> do
             rules <- listRules conn
@@ -2218,7 +2219,17 @@ bootPayloadFor origin conn = do
     stats <- libraryStats conn
     searches <- listSavedSearches conn
     views <- listViews conn
-    pure (BootPayload "0.1.0" origin tags searches page stats views)
+    pure
+        BootPayload
+            { bpWireVersion = wireVersion
+            , bpVersion = "0.1.0"
+            , bpOrigin = origin
+            , bpTags = tags
+            , bpSavedSearches = searches
+            , bpInitial = page
+            , bpStats = stats
+            , bpViews = views
+            }
 
 {- | @GET /api/v1/graph/layout?preset=...@. The positions are built from the
 same graph data the graph endpoint returns and cached per database until the
@@ -3183,16 +3194,17 @@ accountPayload conn ctx role = do
     account <- Auth.loadAccount conn
     configured <- Auth.accountConfigured conn
     pure
-        ( object
-            [ "credentials" .= creds
-            , "recovery_codes_remaining" .= remaining
-            , "sessions" .= sessions
-            , "username" .= Auth.acctUsername account
-            , "role" .= role
-            , "has_password" .= Auth.accountHasPassword account
-            , "require_passkey" .= Auth.acctRequirePasskey account
-            , "account_configured" .= configured
-            ]
+        ( toJSON
+            AccountInfo
+                { aiUsername = Auth.acctUsername account
+                , aiRole = role
+                , aiHasPassword = Auth.accountHasPassword account
+                , aiRequirePasskey = Auth.acctRequirePasskey account
+                , aiAccountConfigured = configured
+                , aiCredentials = creds
+                , aiRecoveryCodesRemaining = remaining
+                , aiSessions = sessions
+                }
         )
 
 {- | Turn optional passkey two-factor on or off. Both directions need the

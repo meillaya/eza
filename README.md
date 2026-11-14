@@ -262,6 +262,7 @@ individual checks are:
 ```bash
 devenv shell -- test    # server tests
 devenv shell -- lint    # fourmolu + hlint
+devenv shell -- docs    # documentation and version drift checks
 devenv shell -- spec    # TLA+ models and JSON schemas
 devenv shell -- e2e     # Playwright browser suite
 ```

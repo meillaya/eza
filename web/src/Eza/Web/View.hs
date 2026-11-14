@@ -23,12 +23,12 @@ import qualified Miso.JSON as MJ
 import Text.Read (readMaybe)
 
 import Eza.SearchQuery (SearchQuery (..), parseSearchQuery)
+import Eza.Share (ShareView (..))
 import Eza.Types (BookmarkSummary (..), LibraryStats (..), SavedSearch (..), TagStat (..))
 import Eza.Web.Detail (detailPage)
 import Eza.Web.History (historyPage)
 import Eza.Web.Model
 import Eza.Web.Panels (accountPage, aiTagsPage, dedupPage, graphPage, maintenancePage, tagsPage, viewDialogs, viewsPage)
-import Eza.Web.Types (ShareView (..))
 import Eza.Web.Widgets (disabledAttr, formatCount)
 
 -- ------------------------------------------------------------------ shell --
@@ -37,28 +37,67 @@ hasUnsavedForView :: Model -> Bool
 hasUnsavedForView m = mDirty m || mExtractDirty m
 
 viewModel :: Model -> View () () Model Action
-viewModel m =
+viewModel m = case mBlockingError m of
+    -- The boot document belongs to another wire contract. Paint nothing else
+    -- and ask for a reload, so no stale or misread state reaches the screen.
+    Just message -> blockingPage message
+    Nothing ->
+        H.div_
+            [ HP.class_ "app ledg-app app-frame"
+            , HP.data_ "testid" "app-shell"
+            , HP.data_ "dirty" (if hasUnsavedForView m then "1" else "0")
+            ]
+            ( [ H.a_ [HP.class_ "skip-link", HP.href_ "#main"] [text "Skip to content"]
+              , mast m
+              , sectionsNav m
+              ]
+                ++ statusBanners m
+                ++ [routeBody m]
+                ++ [mobileNav m, toastsView m, importInput]
+                ++ savedSearchShareDialog m
+                ++ [addDialog m | mAddOpen m]
+                ++ [paletteView m | mPaletteOpen m]
+                ++ [guardDialog m | mGuardOpen m]
+                ++ [logoutDialog | mConfirmLogout m]
+                ++ [tagPromptDialog m | isJust (mTagPrompt m)]
+                ++ [bulkDeleteDialog m | mConfirmBulkDelete m]
+                ++ viewDialogs m
+            )
+
+{- | The screen shown when this build cannot read the server's boot document
+(wire-version mismatch). It replaces the whole interface and offers a reload,
+the one action that can load a matching build.
+-}
+blockingPage :: MisoString -> View () () Model Action
+blockingPage message =
     H.div_
         [ HP.class_ "app ledg-app app-frame"
-        , HP.data_ "testid" "app-shell"
-        , HP.data_ "dirty" (if hasUnsavedForView m then "1" else "0")
+        , HP.data_ "testid" "wire-mismatch"
         ]
-        ( [ H.a_ [HP.class_ "skip-link", HP.href_ "#main"] [text "Skip to content"]
-          , mast m
-          , sectionsNav m
-          ]
-            ++ statusBanners m
-            ++ [routeBody m]
-            ++ [mobileNav m, toastsView m, importInput]
-            ++ savedSearchShareDialog m
-            ++ [addDialog m | mAddOpen m]
-            ++ [paletteView m | mPaletteOpen m]
-            ++ [guardDialog m | mGuardOpen m]
-            ++ [logoutDialog | mConfirmLogout m]
-            ++ [tagPromptDialog m | isJust (mTagPrompt m)]
-            ++ [bulkDeleteDialog m | mConfirmBulkDelete m]
-            ++ viewDialogs m
-        )
+        [ H.main_
+            [HP.id_ "main", HP.class_ "screen"]
+            [ H.div_
+                [HP.class_ "detail-scroll"]
+                [ H.div_
+                    [HP.class_ "detail"]
+                    [ H.div_
+                        [HP.class_ "empty"]
+                        [ H.div_
+                            [HP.class_ "empty-note"]
+                            [ H.h2_ [HP.class_ "empty-title"] [text "This page is out of date."]
+                            , H.p_ [HP.class_ "empty-body"] [text message]
+                            , H.p_
+                                [HP.class_ "empty-try"]
+                                [ H.a_
+                                    [HP.class_ "try-link", HP.href_ "/"]
+                                    [text "reload the app"]
+                                ]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ]
 
 {- | Non-list pages: one main element holding the group page, which brings its
 own page scroll container.

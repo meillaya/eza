@@ -12,16 +12,23 @@ build-type:         Simple
 
 library
   hs-source-dirs:   src
-  exposed-modules:  Eza.Types
+  exposed-modules:  Eza.Account
+                    Eza.Ai
                     Eza.Authz
                     Eza.Boot
+                    Eza.Consolidation
                     Eza.GraphLayout
                     Eza.GraphMatch
                     Eza.Json
                     Eza.Ledger
+                    Eza.Problem
+                    Eza.Rule
+                    Eza.Routes
                     Eza.SearchQuery
+                    Eza.Share
                     Eza.Time
                     Eza.TokenPrefix
+                    Eza.Types
                     Eza.Url
                     Eza.User
                     Eza.View
@@ -42,4 +49,20 @@ library
     RecordWildCards
     ScopedTypeVariables
     TypeApplications
+  ghc-options:      -Wall -Wcompat -Wincomplete-uni-patterns
+
+test-suite eza-core-test
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test
+  main-is:          Spec.hs
+  other-modules:    ContractSpec
+  build-depends:    base >=4.18 && <5
+                  , aeson >=2.1 && <2.4
+                  , eza-core
+                  , hspec
+                  , text
+  default-language: Haskell2010
+  default-extensions:
+    LambdaCase
+    OverloadedStrings
   ghc-options:      -Wall -Wcompat -Wincomplete-uni-patterns

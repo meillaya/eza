@@ -25,7 +25,12 @@ import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
 
+import Eza.Account (AccountInfo (..), Credential (..), SessionInfo (..), TokenView (..))
+import Eza.Ai (AiStatus (..), TagSuggestion (..))
+import Eza.Consolidation (ConsolidationGroup (..))
 import Eza.GraphMatch (ColorAssignment (..))
+import Eza.Rule (Rule (..))
+import Eza.Share (ShareView (..))
 import Eza.Types (
     BookmarkSummary (..),
     DedupCounts (..),
@@ -58,17 +63,6 @@ import Eza.Web.Graph (
     labelCount,
  )
 import Eza.Web.Model
-import Eza.Web.Types (
-    AccountInfo (..),
-    AiStatus (..),
-    ConsolGroup (..),
-    Credential (..),
-    Rule (..),
-    SessionInfo (..),
-    ShareView (..),
-    TagSuggestion (..),
-    TokenView (..),
- )
 import Eza.Webhook (DeliveryView (..), Webhook (..), allEventTypes, eventTypeText, maxWebhooks)
 import Miso
 import qualified Miso.CSS as C
@@ -608,7 +602,7 @@ graphStatusText m layout
             <> if glLinkCount layout == 1 then " link" else " links"
     layoutSource
         | mGraphLayoutSource m == "server" = " · server layout"
-        | otherwise = " · local layout"
+        | otherwise = ""
     localInfo
         | not (mGraphLocal m) = ""
         | otherwise =
@@ -1824,7 +1818,7 @@ consolidationBlock m =
             quietNote "No case or near-duplicate names found."
         | otherwise = H.div_ [] (map consolRow (mConsol m))
 
-consolRow :: ConsolGroup -> View () () Model Action
+consolRow :: ConsolidationGroup -> View () () Model Action
 consolRow group =
     H.div_
         [HP.class_ "fz"]
@@ -2226,39 +2220,30 @@ noSuggestionsText m
 suggestionRow :: TagSuggestion -> View () () Model Action
 suggestionRow suggestion =
     H.tr_
-        [key_ (gid suggestion)]
-        [ H.td_ [HP.class_ "ai-acc mono"] [text recordCell]
+        [key_ (bsId bookmark)]
+        [ H.td_ [HP.class_ "ai-acc mono"] [text (accno (bsId bookmark))]
         , H.td_ [HP.class_ "ai-rec"] (titleCell ++ reasonCell)
         , H.td_ [HP.class_ "ai-sug"] (map suggestedTag (tsgTags suggestion))
         , H.td_ [HP.class_ "ai-act"] [actionCell]
         ]
   where
-    gid t = case tsgBookmark t of
-        Nothing -> 0
-        Just bookmark -> bsId bookmark
-    recordCell = case tsgBookmark suggestion of
-        Nothing -> "record"
-        Just bookmark -> accno (bsId bookmark)
-    titleCell = case tsgBookmark suggestion of
-        Nothing -> []
-        Just bookmark ->
-            [ H.a_
-                [ HP.class_ "ai-rec-title"
-                , HP.href_ (ms ("/bookmark/" <> show (bsId bookmark)))
-                , HE.onClickPrevent (Navigate (Bookmark (bsId bookmark)))
-                ]
-                [text (ms (bsTitle bookmark))]
-            , H.span_ [HP.class_ "ai-rec-src meta"] [text (showDomain (bsDomain bookmark))]
+    bookmark = tsgBookmark suggestion
+    titleCell =
+        [ H.a_
+            [ HP.class_ "ai-rec-title"
+            , HP.href_ (ms ("/bookmark/" <> show (bsId bookmark)))
+            , HE.onClickPrevent (Navigate (Bookmark (bsId bookmark)))
             ]
+            [text (ms (bsTitle bookmark))]
+        , H.span_ [HP.class_ "ai-rec-src meta"] [text (showDomain (bsDomain bookmark))]
+        ]
     reasonCell =
         if T.null (T.strip (tsgReason suggestion))
             then []
             else [H.span_ [HP.class_ "ai-reason meta"] [text (ms (tsgReason suggestion))]]
     suggestedTag tag = H.span_ [HP.class_ "tagpill tagpill--sug"] [text (ms tag)]
-    actionCell = case tsgBookmark suggestion of
-        Nothing -> H.span_ [HP.class_ "meta"] [text "no record"]
-        Just bookmark ->
-            strongAction "apply" [] (SuggestionApply (bsId bookmark) (tsgTags suggestion))
+    actionCell =
+        strongAction "apply" [] (SuggestionApply (bsId bookmark) (tsgTags suggestion))
 
 -- ============================================================ maintenance ===
 
@@ -3080,7 +3065,7 @@ recoveryPanel m =
   where
     remainingText = case mAccount m of
         Nothing -> "not loaded"
-        Just account -> ms (show (aiRecoveryRemaining account) <> " unused")
+        Just account -> ms (show (aiRecoveryCodesRemaining account) <> " unused")
     reveal =
         [ H.div_
             [HP.class_ "account-reveal"]

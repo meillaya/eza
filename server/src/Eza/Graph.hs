@@ -16,7 +16,7 @@ The positions are cached per database and keyed by revision and preset.
 module Eza.Graph (
     globalGraph,
     graphRevision,
-    GraphLayoutPayload (..),
+    GraphLayoutWire (..),
     graphLayoutPayload,
     LayoutCache (..),
     emptyLayoutCache,
@@ -26,7 +26,6 @@ module Eza.Graph (
     layoutPresetFromText,
 ) where
 
-import Data.Aeson (ToJSON (..), object, (.=))
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet as IntSet
 import Data.List (sort)
@@ -129,48 +128,25 @@ globalGraph conn = do
 
 -- ------------------------------------------------------------------ layout ---
 
-{- | The layout endpoint payload: one preset's node positions, quantized to
-1/100 world unit, plus the revision they were built from.
+{- | Build the layout payload for one preset from an already-read graph. The
+wire type lives in "Eza.GraphLayout" so the client decodes it with the same
+record definition the server encodes.
 -}
-data GraphLayoutPayload = GraphLayoutPayload
-    { glpSchema :: Int
-    , glpRevision :: Text
-    , glpPreset :: LayoutPreset
-    , glpTags :: [(Double, Double)]
-    , glpRecords :: [(Double, Double)]
-    , glpBounds :: (Double, Double, Double, Double)
-    }
-    deriving (Eq, Show)
-
-instance ToJSON GraphLayoutPayload where
-    toJSON payload =
-        object
-            [ "schema" .= glpSchema payload
-            , "revision" .= glpRevision payload
-            , "preset" .= layoutPresetText (glpPreset payload)
-            , "tags" .= glpTags payload
-            , "records" .= glpRecords payload
-            , "bounds" .= [minX, minY, maxX, maxY]
-            ]
-      where
-        (minX, minY, maxX, maxY) = glpBounds payload
-
--- | Build the layout payload for one preset from an already-read graph.
-graphLayoutPayload :: LayoutPreset -> GraphData -> GraphLayoutPayload
+graphLayoutPayload :: LayoutPreset -> GraphData -> GraphLayoutWire
 graphLayoutPayload preset graph =
-    GraphLayoutPayload
-        { glpSchema = 1
-        , glpRevision = gdRevision graph
-        , glpPreset = preset
-        , glpTags =
+    GraphLayoutWire
+        { glwSchema = graphLayoutWireSchema
+        , glwRevision = gdRevision graph
+        , glwPreset = preset
+        , glwTags =
             [ (quantize x, quantize y)
             | (_, (x, y)) <- IM.toList (lpTagPositions positions)
             ]
-        , glpRecords =
+        , glwRecords =
             [ (quantize x, quantize y)
             | (_, (x, y)) <- IM.toList (lpRecordPositions positions)
             ]
-        , glpBounds = (quantize minX, quantize minY, quantize maxX, quantize maxY)
+        , glwBounds = (quantize minX, quantize minY, quantize maxX, quantize maxY)
         }
   where
     positions = layoutPositions (buildLayoutWith (presetOptions preset) 0 graph)
@@ -182,45 +158,29 @@ so hundredths are well below anything visible and keep the payload small.
 quantize :: Double -> Double
 quantize value = fromIntegral (round (value * 100) :: Int) / 100
 
-layoutPresetText :: LayoutPreset -> Text
-layoutPresetText preset = case preset of
-    Compact -> "compact"
-    Standard -> "standard"
-    Airy -> "airy"
-
-{- | Parse the @preset@ query parameter. Unknown values are a 400, not a
-silent fallback.
--}
-layoutPresetFromText :: Text -> Maybe LayoutPreset
-layoutPresetFromText raw = case T.toLower (T.strip raw) of
-    "compact" -> Just Compact
-    "standard" -> Just Standard
-    "airy" -> Just Airy
-    _ -> Nothing
-
 {- | One database's layout cache. A change of revision throws the old preset
 entries away; the list at most holds the three presets of one revision.
 -}
 data LayoutCache = LayoutCache
     { lcRevision :: Text
-    , lcPresets :: [(LayoutPreset, GraphLayoutPayload)]
+    , lcPresets :: [(LayoutPreset, GraphLayoutWire)]
     }
     deriving (Eq, Show)
 
 emptyLayoutCache :: LayoutCache
 emptyLayoutCache = LayoutCache "" []
 
-lookupCachedLayout :: Text -> LayoutPreset -> LayoutCache -> Maybe GraphLayoutPayload
+lookupCachedLayout :: Text -> LayoutPreset -> LayoutCache -> Maybe GraphLayoutWire
 lookupCachedLayout revision preset cache
     | revision == lcRevision cache = lookup preset (lcPresets cache)
     | otherwise = Nothing
 
-storeCachedLayout :: Text -> LayoutPreset -> GraphLayoutPayload -> LayoutCache -> LayoutCache
+storeCachedLayout :: Text -> LayoutPreset -> GraphLayoutWire -> LayoutCache -> LayoutCache
 storeCachedLayout revision preset payload cache
     | revision == lcRevision cache =
         LayoutCache revision (insertPreset preset payload (lcPresets cache))
     | otherwise = LayoutCache revision [(preset, payload)]
 
-insertPreset :: LayoutPreset -> GraphLayoutPayload -> [(LayoutPreset, GraphLayoutPayload)] -> [(LayoutPreset, GraphLayoutPayload)]
+insertPreset :: LayoutPreset -> GraphLayoutWire -> [(LayoutPreset, GraphLayoutWire)] -> [(LayoutPreset, GraphLayoutWire)]
 insertPreset preset payload entries =
     (preset, payload) : filter ((/= preset) . fst) entries

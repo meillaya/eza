@@ -64,7 +64,7 @@ in
     echo "eza dev shell"
     echo "  ghc:  $(ghc --numeric-version 2>/dev/null || echo missing)"
     echo "  wasm: $(wasm32-wasi-ghc --numeric-version 2>/dev/null || echo missing)"
-    echo "  commands: dev web build test lint spec e2e bench import verify"
+    echo "  commands: dev web build test lint docs spec e2e bench import verify"
   '';
 
   scripts = {
@@ -73,6 +73,7 @@ in
     build.exec = "cabal build all && scripts/build-web.sh";
     test.exec = "cabal test all";
     lint.exec = "fourmolu --mode check core server web && hlint core server web";
+    docs.exec = "bash scripts/check-docs.sh";
     spec.exec = "bash scripts/check-specs.sh";
     # THIRD-PARTY-NOTICES.md vs the flake's pinned dependency set (and, when a
     # cabal build plan exists, the resolved versions).

@@ -21,6 +21,7 @@ import qualified AuthzSpec
 import qualified BackupSpec
 import qualified CliSpec
 import qualified ClipSpec
+import qualified ContractSpec
 import qualified ControlSpec
 import qualified CoreViewSpec
 import qualified DataIntegritySpec
@@ -30,7 +31,7 @@ import Eza.Bookmarks
 import Eza.Db (openDb, queryScalar, schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaVersion, targetSchemaVersion)
 import Eza.DeadLinks (LinkState (..), classifyHttp)
 import Eza.Favicon (Favicon (..), getFavicon, parseDataIcon, parseIconLinks, putFavicon, recordFaviconFailure, sniffImage)
-import Eza.Graph (GraphLayoutPayload (..), emptyLayoutCache, globalGraph, graphLayoutPayload, graphRevision, layoutPresetFromText, layoutPresetText, lookupCachedLayout, storeCachedLayout)
+import Eza.Graph (GraphLayoutWire (..), emptyLayoutCache, globalGraph, graphLayoutPayload, graphRevision, layoutPresetFromText, layoutPresetText, lookupCachedLayout, storeCachedLayout)
 import Eza.GraphLayout (LayoutPreset (..))
 import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateHighlight)
 import Eza.Import
@@ -47,6 +48,7 @@ import qualified IsolationSpec
 import qualified LedgerSpec
 import qualified OriginGuardSpec
 import qualified PerfSpec
+import qualified RoutesSpec
 import qualified SecuritySpec
 import qualified ViewContractSpec
 import qualified ViewServerSpec
@@ -593,18 +595,18 @@ main = hspec $ do
                 insertLink conn first second
                 graph <- globalGraph conn
                 let payload = graphLayoutPayload Standard graph
-                glpSchema payload `shouldBe` 1
-                glpRevision payload `shouldBe` gdRevision graph
-                glpPreset payload `shouldBe` Standard
-                length (glpTags payload) `shouldBe` 1
-                length (glpRecords payload) `shouldBe` 2
-                let (minX, minY, maxX, maxY) = glpBounds payload
+                glwSchema payload `shouldBe` 1
+                glwRevision payload `shouldBe` gdRevision graph
+                glwPreset payload `shouldBe` Standard
+                length (glwTags payload) `shouldBe` 1
+                length (glwRecords payload) `shouldBe` 2
+                let (minX, minY, maxX, maxY) = glwBounds payload
                 minX <= maxX `shouldBe` True
                 minY <= maxY `shouldBe` True
                 -- Every coordinate is a whole number of hundredths.
                 let quantized value =
                         (value * 100) `shouldBe` (fromIntegral (round (value * 100) :: Int) :: Double)
-                mapM_ quantized (concatMap (\(x, y) -> [x, y]) (glpTags payload <> glpRecords payload) <> [minX, minY, maxX, maxY])
+                mapM_ quantized (concatMap (\(x, y) -> [x, y]) (glwTags payload <> glwRecords payload) <> [minX, minY, maxX, maxY])
                 close conn
 
         it "encodes the documented layout object" $ do
@@ -651,7 +653,7 @@ main = hspec $ do
                         [GraphLink 1 2]
                         "r1"
                 spanOf payload =
-                    let (minX, minY, maxX, maxY) = glpBounds payload
+                    let (minX, minY, maxX, maxY) = glwBounds payload
                      in max (maxX - minX) (maxY - minY)
                 spans = map (spanOf . (`graphLayoutPayload` graph)) [Compact, Standard, Airy]
             spans
@@ -1126,6 +1128,8 @@ main = hspec $ do
     LedgerSpec.spec
     GraphLayoutSpec.spec
     AuthzSpec.authzSpec
+    ContractSpec.contractSpec
+    RoutesSpec.spec
     CoreViewSpec.coreViewSpec
     ControlSpec.controlSpec
     ViewContractSpec.viewContractSpec

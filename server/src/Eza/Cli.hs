@@ -24,6 +24,7 @@ module Eza.Cli (
     cliParserInfo,
     parseCliArgs,
     runCli,
+    runRoutesCommand,
     readHidden,
 ) where
 
@@ -59,6 +60,7 @@ import Eza.Export (exportBookmarks)
 import Eza.Import
 import Eza.JsonExport (exportJson, importJson)
 import qualified Eza.Password as Password
+import qualified Eza.Routes as Routes
 import Eza.Server (runServer)
 import Eza.Types (DedupReport (..), ImportReport (..), TagStat (..))
 import Eza.User (UserRole (..), userRoleText)
@@ -79,6 +81,7 @@ data CliCommand
     = Serve
     | Init
     | Version
+    | RoutesCmd Bool
     | ImportCmd ImportOpts
     | DedupeCmd DedupeOpts
     | Stats (Maybe Text)
@@ -208,6 +211,18 @@ commandParser =
         ( command "serve" (info (pure Serve <**> helper) (progDesc "Run the web server"))
             <> command "init" (info (pure Init <**> helper) (progDesc "Create or migrate the control database and the legacy database file"))
             <> command "version" (info (pure Version <**> helper) (progDesc "Print the version"))
+            <> command
+                "routes"
+                ( info
+                    ( RoutesCmd
+                        <$> switch
+                            ( long "markdown"
+                                <> help "Print the generated Markdown reference table (docs/generated/routes.md)"
+                            )
+                            <**> helper
+                    )
+                    (progDesc "Print the HTTP route table")
+                )
             <> command "stats" (info (Stats <$> userOption <**> helper) (progDesc "Print database counts and top tags"))
             <> command "verify" (info (Verify <$> userOption <**> helper) (progDesc "Verify counts and FTS index consistency"))
             <> command "repair-domains" (info (RepairDomains <$> userOption <**> helper) (progDesc "Backfill empty domain fields from URLs"))
@@ -352,6 +367,7 @@ parseRole raw = case T.toLower (T.strip (T.pack raw)) of
 runCli :: Config -> PasswordSource -> CliCommand -> IO ()
 runCli cfg passwords cmd = case cmd of
     Version -> putStrLn "eza 0.1.0"
+    RoutesCmd withMarkdown -> runRoutesCommand withMarkdown
     Init -> runInit cfg
     Serve -> runServer cfg
     Stats userSelector ->
@@ -422,6 +438,27 @@ die :: Text -> IO a
 die message = do
     hPutStrLn stderr ("eza: " <> T.unpack message)
     exitFailure
+
+{- | Print the route table. @--markdown@ is the generated reference that
+@docs/generated/routes.md@ is compared against; the plain form is the same
+table for a terminal. The command reads only the compiled route table, never a
+database.
+-}
+runRoutesCommand :: Bool -> IO ()
+runRoutesCommand withMarkdown
+    | withMarkdown = TIO.putStr Routes.routesMarkdown
+    | otherwise = TIO.putStr routesPlainText
+
+routesPlainText :: Text
+routesPlainText =
+    T.unlines
+        ( ("METHOD\tPATH\tCLASS\tCAPABILITY" :: Text)
+            : [ T.intercalate
+                    "\t"
+                    [method, path, Routes.routeClassText klass, Routes.capabilityText capability]
+              | (method, path, klass, capability) <- Routes.routeTable
+              ]
+        )
 
 runInit :: Config -> IO ()
 runInit cfg = do

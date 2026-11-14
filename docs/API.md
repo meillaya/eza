@@ -1,7 +1,10 @@
 # API reference
 
 The server returns JSON for every `/api/*` route. HTML pages for setup,
-login, and recovery are separate routes. All JSON is UTF-8.
+login, and recovery are separate routes. All JSON is UTF-8. The complete
+method/path/authorization table is [generated/routes.md](generated/routes.md),
+generated from `Eza.Routes` by `eza-bookmarks routes --markdown`; CI rejects a
+stale copy.
 
 Since M3 one instance serves several accounts. The control database
 (`EZA_CONTROL_DB`, default `$EZA_DATA_DIR/control.db`) holds identity and each
@@ -241,7 +244,7 @@ GET    /api/v1/tags/{tag}/suggestions
 GET    /api/v1/tags/consolidation-candidates
 POST   /api/v1/tags/apply
 POST   /api/v1/tags/merge
-POST   /api/v1/tags/{tag}/rename
+POST   /api/v1/tags/{tag}
 DELETE /api/v1/tags/{tag}
 GET    /api/v1/autocomplete?q=
 GET    /api/v1/bookmarks/{id}/backlinks
@@ -257,8 +260,9 @@ POST   /api/v1/saved-searches
 DELETE /api/v1/saved-searches/{id}
 ```
 
-`GET /api/v1/tags` returns `{"tags":[TagStat]}`, ordered by count. The
-rename and delete routes require an empty tag for deletion.
+`GET /api/v1/tags` returns `{"tags":[TagStat]}`, ordered by count. Rename is
+`POST /api/v1/tags/{tag}` with `{"name":Text}`; the delete route requires an
+empty tag.
 
 `GET /api/v1/tags/{tag}/suggestions` returns AI tag suggestions. When no
 provider key is configured it returns 200 with `configured: false`, an empty
@@ -379,9 +383,9 @@ compatibility, and with one it returns `409 undo_out_of_order` unless that
 snapshot is the newest usable one. A successful undo returns
 `{"restored","skipped","snapshot_id","op"}` and removes the snapshot.
 
-`POST /bookmarks/{id}/mark-alive` records a user override, keeps
+`POST /api/v1/bookmarks/{id}/mark-alive` records a user override, keeps
 `is_dead = 0`, and excludes the record from later sweeps until
-`POST /bookmarks/{id}/recheck-link` clears the override. The override is
+`POST /api/v1/bookmarks/{id}/recheck-link` clears the override. The override is
 restored by undo and follows a merge to the keeper.
 
 `GET /api/v1/dedup/candidates` pages the duplicate report. `url_limit`

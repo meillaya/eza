@@ -36,9 +36,12 @@ module Eza.Web.Model (
     selectedCount,
     isGraphRoute,
     activeGraphLayout,
+    ReaderSelection (..),
+    bootWireVersionSupported,
+    wireVersionMismatchMessage,
 ) where
 
-import Data.Aeson (Value)
+import Data.Aeson (FromJSON (..), withObject, (.:))
 import qualified Data.ByteString as BS
 import Data.Char (isDigit)
 import qualified Data.IntSet as IS
@@ -49,10 +52,15 @@ import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8')
 import Text.Read (readMaybe)
 
-import Eza.Boot (BootPayload)
+import Eza.Account (AccountInfo, SessionInfo, TokenView)
+import Eza.Ai (AiStatus, TagSuggestion)
+import Eza.Boot (BootPayload (..), wireVersion)
+import Eza.Consolidation (ConsolidationGroup)
 import Eza.GraphMatch (ColorAssignment)
 import Eza.Ledger (LedgerEntry (..))
 import qualified Eza.Ledger as Ledger
+import Eza.Rule (Rule (..))
+import Eza.Share (ShareView)
 import Eza.Types (
     Backlink,
     BookmarkDetail,
@@ -79,10 +87,12 @@ import Eza.View (
     View (..),
     ViewKind (..),
  )
-import Eza.Web.Api (LayoutWire (..), ListParams, WebhookTest (..))
+import Eza.Web.Api (ImportResponse (..), ListParams, WebhookTest (..))
+import Eza.Web.Error (ApiError (..))
 import Eza.Web.Graph (
     GraphDrag,
     GraphLayout,
+    GraphLayoutWire (..),
     GraphMatches,
     GraphView,
     LayoutPreset (..),
@@ -91,9 +101,26 @@ import Eza.Web.Graph (
  )
 import Eza.Webhook (DeliveryView, EventType, Webhook (..))
 
-import Eza.Web.Types (AccountInfo, AiStatus, ApiError, ConsolGroup, ReaderSelection, Rule (..), SessionInfo, ShareView, TagSuggestion, TokenView)
 import Miso hiding (View)
 import Miso.Router (Router (..), RoutingError (..), Token (..), parseURI, routes, toCapture, toPath, toQueryParam)
+
+{- | A text selection inside the reader, with character offsets relative to
+the extracted text (used for highlight creation). This is client-local UI
+state read from the DOM, not a server wire type.
+-}
+data ReaderSelection = ReaderSelection
+    { rsStart :: Int
+    , rsEnd :: Int
+    , rsQuote :: Text
+    }
+    deriving (Eq, Show)
+
+instance FromJSON ReaderSelection where
+    parseJSON = withObject "ReaderSelection" $ \o ->
+        ReaderSelection
+            <$> o .: "start"
+            <*> o .: "end"
+            <*> o .: "quote"
 
 -- | Which color-group field an editor keystroke changes.
 data ColorGroupField = GroupName | GroupQuery | GroupColor
@@ -271,6 +298,24 @@ isGraphRoute Graph = True
 isGraphRoute GraphLocal{} = True
 isGraphRoute _ = False
 
+{- | Does the boot document belong to this client's wire contract? A client
+built against another version could misread the payload, so the update path
+blocks the interface on a mismatch instead of painting defaults.
+-}
+bootWireVersionSupported :: BootPayload -> Bool
+bootWireVersionSupported payload = bpWireVersion payload == wireVersion
+
+-- | The blocking message shown when the boot document's wire version differs.
+wireVersionMismatchMessage :: Int -> MisoString
+wireVersionMismatchMessage serverVersion =
+    ms
+        ( "This page was built for wire version "
+            <> show wireVersion
+            <> ", but the server answers with wire version "
+            <> show serverVersion
+            <> ". Reload the page to load a matching build."
+        )
+
 routeTitle :: Route -> MisoString
 routeTitle = \case
     Index -> "Library"
@@ -437,6 +482,8 @@ data Action
     | -- boot
       BootLoaded BootPayload
     | BootFailed ApiError
+    | -- a boot document built for another wire contract: block the UI
+      WireVersionMismatch Int
     | ApiUnauthorized
     | ApiErrorRaised ApiError
     | ThemeLoaded Theme
@@ -447,7 +494,8 @@ data Action
     | QuickSaveFailed ApiError
     | ScrollMetrics (Maybe (Int, Int, Int))
     | TagsRefreshed [TagStat]
-    | StatsRefreshed (Maybe LibraryStats)
+    | StatsRefreshed LibraryStats
+    | StatsFailed ApiError
     | ReloadRoute
     | -- library
       SearchInput MisoString
@@ -527,7 +575,7 @@ data Action
     | -- import / export
       ImportStart
     | ImportFileChosen
-    | ImportDone Value
+    | ImportDone ImportResponse
     | ImportFailed ApiError
     | -- saved searches
       SavedSearchSave
@@ -561,7 +609,7 @@ data Action
     | GraphClearSelection
     | GraphSettled Int
     | GraphDetailStep Int Int
-    | GraphLayoutLoaded LayoutPreset LayoutWire
+    | GraphLayoutLoaded LayoutPreset GraphLayoutWire
     | GraphLayoutFailed ApiError
     | GraphLabelModeSelected LabelMode
     | GraphPresetSelected LayoutPreset
@@ -623,7 +671,7 @@ data Action
     | DedupMergeAllFailed ApiError
     | -- tags
       TagStatsLoaded [TagStat]
-    | ConsolLoaded [ConsolGroup]
+    | ConsolLoaded [ConsolidationGroup]
     | ConsolFailed ApiError
     | TagMerge [Text] Text
     | TagMerged
@@ -639,7 +687,7 @@ data Action
     | TagOpFailed ApiError
     | -- AI tags
       AiTagSelected (Maybe Text)
-    | SuggestionsLoaded Bool [TagSuggestion] (Maybe Text)
+    | SuggestionsLoaded [TagSuggestion] (Maybe Text)
     | SuggestionsFailed ApiError
     | SuggestionApply Int [Text]
     | SuggestionsApplied
@@ -867,6 +915,9 @@ data Model = Model
     , mWindowOrigin :: MisoString
     , mOnline :: Bool
     , mSignedOut :: Bool
+    , -- a blocking screen message: the page may not paint stale state. Set
+      -- when the boot document's wire version does not match this build.
+      mBlockingError :: Maybe MisoString
     , -- layout / virtualization
       mWidth :: Int
     , mHeight :: Int
@@ -1010,7 +1061,7 @@ data Model = Model
     , -- TODO(M1/task-13): the label mode comes from the active graph view.
       mGraphLabelMode :: LabelMode
     , mGraphPreset :: LayoutPreset
-    , mGraphLayoutWire :: Maybe (LayoutPreset, LayoutWire)
+    , mGraphLayoutWire :: Maybe (LayoutPreset, GraphLayoutWire)
     , mGraphLayoutSource :: MisoString
     , mViews :: [View]
     , mViewsLoading :: Bool
@@ -1054,7 +1105,7 @@ data Model = Model
     , mDedupMergeAllOpen :: Bool
     , mDedupMergeAllReport :: Maybe DedupMergeAllReport
     , -- tags / ai tags
-      mConsol :: [ConsolGroup]
+      mConsol :: [ConsolidationGroup]
     , mConsolLoading :: Bool
     , mConsolError :: Maybe MisoString
     , mTagDialog :: Maybe TagDialog
@@ -1156,6 +1207,7 @@ initialModel =
         , mWindowOrigin = ""
         , mOnline = True
         , mSignedOut = False
+        , mBlockingError = Nothing
         , mWidth = 1200
         , mHeight = 900
         , mScrollY = 0
@@ -1279,7 +1331,7 @@ initialModel =
         , mGraphLabelMode = LabelAuto
         , mGraphPreset = Standard
         , mGraphLayoutWire = Nothing
-        , mGraphLayoutSource = "local"
+        , mGraphLayoutSource = ""
         , mViews = []
         , mViewsLoading = False
         , mViewsError = Nothing

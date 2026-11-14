@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Eza.AiTag (
-    Suggestion (..),
+    TagSuggestion (..),
     aiSuggestions,
     resolveAiModel,
 ) where
@@ -15,29 +15,14 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Database.SQLite.Simple
-import GHC.Generics (Generic)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types.Header (hContentType)
 import System.Environment (lookupEnv)
 
+import Eza.Ai (TagSuggestion (..))
 import Eza.Bookmarks (allTags, bookmarksByIds)
 import Eza.Types (BookmarkSummary (..), TagStat (..))
-
-data Suggestion = Suggestion
-    { sugBookmark :: BookmarkSummary
-    , sugTags :: [Text]
-    , sugReason :: Text
-    }
-    deriving (Show, Eq, Generic)
-
-instance ToJSON Suggestion where
-    toJSON s =
-        object
-            [ "bookmark" .= sugBookmark s
-            , "tags" .= sugTags s
-            , "reason" .= sugReason s
-            ]
 
 stopwords :: Set.Set Text
 stopwords =
@@ -76,7 +61,7 @@ resolveAiModel provider configured =
             "anthropic" -> "claude-haiku-4-5"
             _ -> ""
 
-aiSuggestions :: Text -> Text -> Text -> Connection -> Text -> Int -> IO (Either Text [Suggestion])
+aiSuggestions :: Text -> Text -> Text -> Connection -> Text -> Int -> IO (Either Text [TagSuggestion])
 aiSuggestions provider configuredModel ollamaBase conn tagName sampleSize
     | provider == "none" =
         pure (Left "AI tagging is disabled (set EZA_AI_PROVIDER to ollama, openai, openai-compatible or anthropic)")
@@ -133,7 +118,7 @@ aiSuggestions provider configuredModel ollamaBase conn tagName sampleSize
                                         ]
                                 if null tags
                                     then pure (Right [])
-                                    else pure (Right [Suggestion s (take 8 tags) "Suggested for this tag bucket" | s <- summaries])
+                                    else pure (Right [TagSuggestion s (take 8 tags) "Suggested for this tag bucket" | s <- summaries])
 
 callProvider :: Text -> Text -> Text -> String -> Text -> IO (Either Text Text)
 callProvider provider model ollamaBase apiKey prompt = do

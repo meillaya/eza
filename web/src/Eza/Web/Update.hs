@@ -5,7 +5,7 @@
 module Eza.Web.Update (updateModel, subscriptions) where
 
 import Control.Monad (join, unless, void, when)
-import Data.Aeson (Result (..), Value (..), encode, fromJSON, object, (.=))
+import Data.Aeson (Value (..), encode, object, (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.IntMap.Strict as IM
@@ -21,8 +21,10 @@ import Miso
 import qualified Miso.JSON as MJ
 import Miso.Router (toURI)
 
+import Eza.Account (AccountInfo (..), TokenView (..))
 import Eza.Boot (BootPayload (..))
 import qualified Eza.GraphMatch as GM
+import Eza.Rule (Rule (..))
 import Eza.SearchQuery (parseSearchQuery)
 import Eza.Types (
     BookmarkDetail (..),
@@ -34,7 +36,7 @@ import Eza.Types (
     GraphData (..),
     GraphRecord (..),
     Highlight (..),
-    ImportReport,
+    ImportReport (..),
     SavedSearch (..),
     SearchPage (..),
     UndoResult (..),
@@ -42,16 +44,9 @@ import Eza.Types (
 import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..), UserView (..))
 import qualified Eza.View as EV
 import Eza.Web.Api
+import Eza.Web.Error (ApiError (..))
 import Eza.Web.Graph
 import Eza.Web.Model
-import Eza.Web.Types (
-    AccountInfo (..),
-    ApiError (..),
-    ReaderSelection (..),
-    Rule (..),
-    TokenView (..),
-    fieldInt,
- )
 import Eza.Webhook (Webhook (..), WebhookInput (..))
 
 {- | Component subscriptions: URL changes (back/forward), window scroll for
@@ -150,7 +145,7 @@ documentTitle route = case route of
 the panels stop showing a pre-write number.
 -}
 refreshStats :: Effect () () Model Action
-refreshStats = fetchStats StatsRefreshed (\_ -> Noop)
+refreshStats = fetchStats StatsRefreshed StatsFailed
 
 {- | The first page of both duplicate sections. The server's defaults are 60
 same-URL groups and 40 review-only title groups; the counts in the report always
@@ -817,6 +812,12 @@ updateModel = \case
             _ -> pure ()
     Noop -> pure ()
     -- boot ------------------------------------------------------------------
+    -- A boot document built against another wire contract must not be painted:
+    -- the payload could be read field-for-field into stale state. Block the
+    -- whole interface instead and ask for a reload.
+    BootLoaded payload
+        | not (bootWireVersionSupported payload) ->
+            updateModel (WireVersionMismatch (bpWireVersion payload))
     BootLoaded payload -> do
         putModel
             ( \m ->
@@ -885,12 +886,19 @@ updateModel = \case
         when (deferred && isListRoute (mRoute m)) reloadList
         handleApiError err
         when (aeStatus err == Just 401) $ liftSinkIO (redirectTo "/login")
+    WireVersionMismatch serverVersion ->
+        putModel
+            ( \m ->
+                m
+                    { mBootReady = True
+                    , mBlockingError = Just (wireVersionMismatchMessage serverVersion)
+                    }
+            )
     ApiUnauthorized -> putModel (\m -> m{mSignedOut = True})
     ApiErrorRaised err -> handleApiError err
     TagsRefreshed stats -> putModel (\m -> m{mTags = stats})
-    StatsRefreshed maybeStats -> case maybeStats of
-        Nothing -> putModel (\m -> m{mStatsError = Just "The library figures could not be read."})
-        Just stats -> putModel (\m -> m{mStats = Just stats, mStatsError = Nothing})
+    StatsRefreshed stats -> putModel (\m -> m{mStats = Just stats, mStatsError = Nothing})
+    StatsFailed err -> putModel (\m -> m{mStatsError = Just (ms (aeMessage err))})
     ReloadRoute -> reloadRoute
     LedgerCursorNext -> moveCursor 1
     LedgerCursorPrev -> moveCursor (-1)
@@ -1438,11 +1446,11 @@ updateModel = \case
     ImportFileChosen -> do
         putModel (\m -> m{mImporting = True})
         submitImport ImportDone ImportFailed
-    ImportDone value -> do
-        putModel (\m -> m{mImporting = False, mImportReport = either (const Nothing) Just (decodeImportReport value)})
-        let inserted = fieldInt "inserted" value
-            existing = fieldInt "existing" value
-            found = fieldInt "found" value
+    ImportDone response -> do
+        putModel (\m -> m{mImporting = False, mImportReport = imrReport response})
+        let inserted = imrInserted response
+            existing = imrExisting response
+            found = imrFound response
         notify
             ( ms
                 ( "Imported "
@@ -1522,8 +1530,7 @@ updateModel = \case
                         _ -> old
                 putModel
                     ( \x ->
-                        let upgraded = upgradeWithWire graph x
-                            scopedNow = applyGraphScope (recomputeGraphColors (upgraded{mGraph = Just graph}))
+                        let scopedNow = applyGraphScope (recomputeGraphColors x{mGraph = Just graph})
                          in scopedNow
                                 { mGraphView = view
                                 , mGraphMatches = mGraphMatches scopedNow
@@ -1536,74 +1543,85 @@ updateModel = \case
                 when (view /= old) (markGraphMoving >> scheduleGraphSettle)
                 unless (mGraphViewReady m) (measureGraphCanvas GraphMeasured)
                 focusGraphPlate m
-            _ -> do
+            _ ->
                 let generation = mGraphGen m + 1
                     preset = mGraphPreset m
                     wireMismatch =
                         case mGraphLayoutWire m of
-                            Just (wirePreset, wire) -> wirePreset == preset && lwRevision wire /= gdRevision graph
+                            Just (wirePreset, wire) -> wirePreset == preset && glwRevision wire /= gdRevision graph
                             Nothing -> False
                     hydrated = do
                         (wirePreset, wire) <- mGraphLayoutWire m
-                        if wirePreset == preset && lwRevision wire == gdRevision graph
+                        if wirePreset == preset && glwRevision wire == gdRevision graph
                             then hydrateWire graph wire
                             else Nothing
-                    whole =
-                        case hydrated of
-                            Just layout -> layout{glGen = generation}
-                            Nothing -> buildLayoutWith (presetOptions preset) generation graph
-                    seeded =
-                        m
-                            { mGraph = Just graph
-                            , mGraphLayout = Just whole
-                            , mGraphLayoutSource = if isJust hydrated then "server" else "local"
-                            , mGraphGen = generation
-                            , mGraphLoading = False
-                            , mGraphError = Nothing
-                            , mGraphHover = Nothing
-                            , mGraphSettled = False
-                            , mGraphSettleEpoch = mGraphSettleEpoch m + 1
-                            , mGraphDetailPhase = 0
-                            }
-                    scoped = applyGraphScope seeded
-                    old = mGraphView m
-                    view =
-                        case (mGraphFocus scoped, activeGraphLayout scoped) of
-                            (Just key, Just layout) ->
-                                focusView layout key (gvWidth old) (gvHeight old) (gvDpr old)
-                            (_, Just layout)
-                                | mGraphViewReady m ->
-                                    resizeView layout (gvWidth old) (gvHeight old) (gvDpr old) old
-                                | otherwise ->
-                                    fitView layout (gvWidth old) (gvHeight old) (gvDpr old)
-                            _ -> old
-                putModel
-                    ( \x ->
-                        let seededNow =
-                                x
-                                    { mGraph = Just graph
-                                    , mGraphLayout = Just whole
-                                    , mGraphLayoutSource =
-                                        if isJust hydrated then "server" else "local"
-                                    , mGraphGen = generation
-                                    , mGraphLoading = False
-                                    , mGraphError = Nothing
-                                    , mGraphHover = Nothing
-                                    , mGraphSettled = False
-                                    , mGraphSettleEpoch = mGraphSettleEpoch x + 1
-                                    , mGraphDetailPhase = 0
-                                    }
-                            scopedNow = applyGraphScope (recomputeGraphColors (upgradeWithWire graph seededNow))
-                         in scopedNow
-                                { mGraphView = view
-                                , mGraphSelected = mGraphFocus x
-                                }
-                    )
-                scheduleGraphSettle
-                when (wireMismatch || wirePresetDiffers m preset) $
-                    fetchGraphLayout preset (GraphLayoutLoaded preset) GraphLayoutFailed
-                unless (mGraphViewReady m) (measureGraphCanvas GraphMeasured)
-                focusGraphPlate m
+                 in case hydrated of
+                        -- The server is the only layout producer. A graph payload
+                        -- with no matching layout is an error state, never a
+                        -- client-side layout build.
+                        Nothing ->
+                            putModel
+                                ( \x ->
+                                    x
+                                        { mGraph = Just graph
+                                        , mGraphLayout = Nothing
+                                        , mGraphLoading = False
+                                        , mGraphError = Just (ms layoutMissingMessage)
+                                        }
+                                )
+                        Just hydratedLayout -> do
+                            let whole = hydratedLayout{glGen = generation}
+                                seeded =
+                                    m
+                                        { mGraph = Just graph
+                                        , mGraphLayout = Just whole
+                                        , mGraphLayoutSource = "server"
+                                        , mGraphGen = generation
+                                        , mGraphLoading = False
+                                        , mGraphError = Nothing
+                                        , mGraphHover = Nothing
+                                        , mGraphSettled = False
+                                        , mGraphSettleEpoch = mGraphSettleEpoch m + 1
+                                        , mGraphDetailPhase = 0
+                                        }
+                                scoped = applyGraphScope seeded
+                                old = mGraphView m
+                                view =
+                                    case (mGraphFocus scoped, activeGraphLayout scoped) of
+                                        (Just key, Just layout) ->
+                                            focusView layout key (gvWidth old) (gvHeight old) (gvDpr old)
+                                        (_, Just layout)
+                                            | mGraphViewReady m ->
+                                                resizeView layout (gvWidth old) (gvHeight old) (gvDpr old) old
+                                            | otherwise ->
+                                                fitView layout (gvWidth old) (gvHeight old) (gvDpr old)
+                                        _ -> old
+                            putModel
+                                ( \x ->
+                                    let seededNow =
+                                            x
+                                                { mGraph = Just graph
+                                                , mGraphLayout = Just whole
+                                                , mGraphLayoutSource = "server"
+                                                , mGraphGen = generation
+                                                , mGraphLoading = False
+                                                , mGraphError = Nothing
+                                                , mGraphHover = Nothing
+                                                , mGraphSettled = False
+                                                , mGraphSettleEpoch = mGraphSettleEpoch x + 1
+                                                , mGraphDetailPhase = 0
+                                                }
+                                        scopedNow = applyGraphScope (recomputeGraphColors seededNow)
+                                     in scopedNow
+                                            { mGraphView = view
+                                            , mGraphSelected = mGraphFocus x
+                                            }
+                                )
+                            scheduleGraphSettle
+                            when (wireMismatch || wirePresetDiffers m preset) $
+                                fetchGraphLayout preset (GraphLayoutLoaded preset) GraphLayoutFailed
+                            unless (mGraphViewReady m) (measureGraphCanvas GraphMeasured)
+                            focusGraphPlate m
     GraphFailed err -> do
         putModel (\x -> x{mGraphLoading = False, mGraphError = Just (ms (aeMessage err))})
         -- The error panel is only rendered while the plate has no layout to
@@ -1845,7 +1863,7 @@ updateModel = \case
                     putModel (\x -> x{mGraphLoading = True})
                     fetchGraph GraphLoaded GraphFailed
                 Just graph
-                    | gdRevision graph /= lwRevision wire -> do
+                    | gdRevision graph /= glwRevision wire -> do
                         -- The layout is for a newer library than the graph we
                         -- hold; fetch the records before hydrating.
                         putModel (\x -> x{mGraphLoading = True})
@@ -1880,41 +1898,37 @@ updateModel = \case
                                  in applyGraphScope (recomputeGraphColors seeded)
                             )
                         when (not same || view /= old) scheduleGraphSettle
-                Just _ -> putModel (\x -> x{mGraphLayoutSource = "local", mGraphLoading = False})
+                -- The graph payload and the layout disagree on the payload
+                -- size (tags or records): there is no client-side layout
+                -- fallback, so say so instead of painting a partial plate.
+                Just _ ->
+                    putModel
+                        ( \x ->
+                            x
+                                { mGraphLayout = Nothing
+                                , mGraphLayoutSource = ""
+                                , mGraphLoading = False
+                                , mGraphError = Just (ms layoutMissingMessage)
+                                }
+                        )
     GraphLayoutFailed err -> do
-        -- A failed refresh of an already-painted graph has no error panel to
-        -- show (the plate is still usable), so surface the failure as a toast.
+        -- A failed refresh of an already-painted graph keeps the current plate
+        -- and reports the failure as a toast; a graph with no server layout at
+        -- all shows a visible error panel. There is no client-side fallback:
+        -- the server is the only layout producer.
         handleApiError err
         m <- get
-        case mGraph m of
-            Nothing -> do
-                -- No records yet: get them, then GraphLoaded builds the local
-                -- fallback because no layout wire exists.
-                putModel (\x -> x{mGraphLayoutSource = "local", mGraphLayoutWire = Nothing, mGraphLoading = True})
-                fetchGraph GraphLoaded GraphFailed
-            Just graph -> do
-                -- A refresh or preset switch failed. Build the deterministic
-                -- local layout for the current preset rather than leaving a
-                -- plate whose positions belong to the previous preset.
-                let generation = mGraphGen m + 1
-                    whole = buildLayoutWith (presetOptions (mGraphPreset m)) generation graph
-                putModel
-                    ( \x ->
-                        let seeded =
-                                x
-                                    { mGraphLayout = Just whole
-                                    , mGraphGen = generation
-                                    , mGraphLayoutSource = "local"
-                                    , mGraphLoading = False
-                                    , mGraphHover = Nothing
-                                    , mGraphFocus = Nothing
-                                    , mGraphSettled = False
-                                    , mGraphSettleEpoch = mGraphSettleEpoch x + 1
-                                    , mGraphDetailPhase = 0
-                                    }
-                         in fitActiveView (applyGraphScope seeded)
-                    )
-                scheduleGraphSettle
+        putModel
+            ( \x ->
+                x
+                    { mGraphLoading = False
+                    , mGraphError =
+                        case mGraphLayout x of
+                            Just _ -> mGraphError x
+                            Nothing -> Just (ms (aeMessage err))
+                    }
+            )
+        when (isNothing (mGraph m)) (fetchGraph GraphLoaded GraphFailed)
     -- views ---------------------------------------------------------------
     ViewsLoaded views -> do
         putModel (\x -> x{mViews = views, mViewsLoading = False, mViewsError = Nothing})
@@ -2108,11 +2122,11 @@ updateModel = \case
         putModel (\x -> x{mGraphGroupDrafts = removeAt index (mGraphGroupDrafts x), mGraphGroupDirty = True, mGraphGroupEditor = True})
         putModel recomputeGraphColors
     ViewGroupField index field value -> do
-        let fieldText = fromMisoString value
+        let valueText = fromMisoString value
             update group = case field of
-                GroupName -> group{EV.cgName = fieldText}
-                GroupQuery -> group{EV.cgQuery = fieldText}
-                GroupColor -> group{EV.cgColor = fieldText}
+                GroupName -> group{EV.cgName = valueText}
+                GroupQuery -> group{EV.cgQuery = valueText}
+                GroupColor -> group{EV.cgColor = valueText}
         putModel (\x -> x{mGraphGroupDrafts = setAt index update (mGraphGroupDrafts x), mGraphGroupDirty = True, mGraphGroupEditor = True})
         putModel recomputeGraphColors
     ViewGroupToggleEnabled index -> do
@@ -2461,7 +2475,7 @@ updateModel = \case
         case tag of
             Nothing -> pure ()
             Just selected -> fetchSuggestions selected SuggestionsLoaded SuggestionsFailed
-    SuggestionsLoaded _configured suggestions notice ->
+    SuggestionsLoaded suggestions notice ->
         putModel
             ( \m ->
                 m
@@ -3733,11 +3747,6 @@ updateModel = \case
                 )
         pure ()
 
-    decodeImportReport :: Value -> Either String ImportReport
-    decodeImportReport value = case fromJSON value of
-        Error message -> Left message
-        Success report -> Right report
-
     -- \| Continue a return-to-position after a list page arrived. If the
     -- loaded content cannot reach the saved offset yet, fetch pages until it
     -- can (or until the list has no more rows), then set the model offset and
@@ -3926,15 +3935,22 @@ visibleHit m (Just key)
     | not (mGraphTagsShown m) && isTagKey key = Nothing
     | otherwise = Just key
 
-{- | Validate and hydrate a server layout. The revision and the two position
-arrays must line up with the graph payload, otherwise the caller keeps the
-local fallback.
+{- | Shown when the graph payload has no matching server layout. The client
+never computes a layout itself: the server is the only layout producer.
 -}
-hydrateWire :: GraphData -> LayoutWire -> Maybe GraphLayout
+layoutMissingMessage :: MisoString
+layoutMissingMessage =
+    "The server sent no layout for this library. Reload the page to ask for one."
+
+{- | Validate and hydrate a server layout. The revision and the two position
+arrays must line up with the graph payload, otherwise the caller shows a
+visible error instead of painting a client-computed layout.
+-}
+hydrateWire :: GraphData -> GraphLayoutWire -> Maybe GraphLayout
 hydrateWire graph wire
-    | lwRevision wire /= gdRevision graph = Nothing
-    | length (lwTags wire) /= length (gdTags graph) = Nothing
-    | length (lwRecords wire) /= length (gdRecords graph) = Nothing
+    | glwRevision wire /= gdRevision graph = Nothing
+    | length (glwTags wire) /= length (gdTags graph) = Nothing
+    | length (glwRecords wire) /= length (gdRecords graph) = Nothing
     | otherwise =
         Just
             ( hydrateLayout
@@ -3943,30 +3959,17 @@ hydrateWire graph wire
                     { -- Core hydrates tag positions by tag index and record
                       -- positions by bookmark id, so apply the node-key mapping
                       -- only there, never twice.
-                      lpTagPositions = IM.fromList (zip [0 :: Int ..] (lwTags wire))
+                      lpTagPositions = IM.fromList (zip [0 :: Int ..] (glwTags wire))
                     , lpRecordPositions =
                         IM.fromList
                             [ (recordKeyOf (grId record), point)
-                            | (record, point) <- zip (gdRecords graph) (lwRecords wire)
+                            | (record, point) <- zip (gdRecords graph) (glwRecords wire)
                             ]
-                    , lpBounds = lwBounds wire
+                    , lpBounds =
+                        let (minX, minY, maxX, maxY) = glwBounds wire
+                         in ((minX, minY), (maxX, maxY))
                     }
             )
-
--- | Replace a local fallback with a pending server layout for the same preset.
-upgradeWithWire :: GraphData -> Model -> Model
-upgradeWithWire graph m =
-    case (mGraphLayoutWire m, mGraphLayoutSource m) of
-        (Just (preset, wire), "local")
-            | preset == mGraphPreset m
-            , Just hydrated <- hydrateWire graph wire ->
-                let generation = mGraphGen m + 1
-                 in m
-                        { mGraphLayout = Just hydrated{glGen = generation}
-                        , mGraphGen = generation
-                        , mGraphLayoutSource = "server"
-                        }
-        _ -> m
 
 -- ------------------------------------------------------------- views glue --
 

@@ -14,51 +14,15 @@ module Eza.Rules (
 ) where
 
 import Control.Monad (forM_, when)
-import Data.Aeson
+import Data.Aeson (decode, encode)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
-import GHC.Generics (Generic)
 
-data Rule = Rule
-    { ruleId :: Int
-    , ruleName :: Text
-    , ruleEnabled :: Bool
-    , ruleField :: Text
-    , rulePattern :: Text
-    , ruleAddTags :: [Text]
-    , ruleMarkRead :: Bool
-    , ruleCreatedAt :: Int
-    }
-    deriving (Show, Eq, Generic)
-
-instance ToJSON Rule where
-    toJSON rule =
-        object
-            [ "id" .= ruleId rule
-            , "name" .= ruleName rule
-            , "enabled" .= ruleEnabled rule
-            , "field" .= ruleField rule
-            , "pattern" .= rulePattern rule
-            , "add_tags" .= ruleAddTags rule
-            , "mark_read" .= ruleMarkRead rule
-            , "created_at" .= ruleCreatedAt rule
-            ]
-
-instance FromJSON Rule where
-    parseJSON = withObject "Rule" $ \o ->
-        Rule
-            <$> o .:? "id" .!= 0
-            <*> o .: "name"
-            <*> o .:? "enabled" .!= True
-            <*> o .:? "field" .!= "url"
-            <*> o .: "pattern"
-            <*> o .:? "add_tags" .!= []
-            <*> o .:? "mark_read" .!= False
-            <*> o .:? "created_at" .!= 0
+import Eza.Rule (Rule (..))
 
 epoch :: IO Int
 epoch = floor <$> getPOSIXTime

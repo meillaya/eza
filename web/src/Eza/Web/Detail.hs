@@ -15,6 +15,7 @@ import qualified Miso.Html.Event as HE
 import qualified Miso.Html.Property as HP
 import Text.Read (readMaybe)
 
+import Eza.Share (ShareView (..))
 import Eza.Types (
     Backlink (..),
     BookmarkDetail (..),
@@ -23,7 +24,6 @@ import Eza.Types (
  )
 import Eza.Web.Markdown (renderMarkdown)
 import Eza.Web.Model
-import Eza.Web.Types (ReaderSelection (..), ShareView (..))
 import Eza.Web.Widgets (disabledAttr)
 
 -- ------------------------------------------------------------------ page --

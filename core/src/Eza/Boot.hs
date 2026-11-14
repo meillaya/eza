@@ -10,6 +10,7 @@ shape is unchanged: the same object keys as before, plus @views@.
 -}
 module Eza.Boot (
     BootPayload (..),
+    wireVersion,
 ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON, genericToJSON)
@@ -20,8 +21,16 @@ import Eza.Json (jsonOptions)
 import Eza.Types (LibraryStats, SavedSearch, SearchPage, TagStat)
 import Eza.View (View)
 
+{- | Wire-contract version for the boot document and the client that reads it.
+Bump when a client built against the old shape could silently misread the new
+one; the client refuses to paint on a mismatch instead of showing defaults.
+-}
+wireVersion :: Int
+wireVersion = 1
+
 data BootPayload = BootPayload
-    { bpVersion :: Text
+    { bpWireVersion :: Int
+    , bpVersion :: Text
     , bpOrigin :: Text
     , bpTags :: [TagStat]
     , bpSavedSearches :: [SavedSearch]

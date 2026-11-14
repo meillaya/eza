@@ -7,8 +7,8 @@
 
 -- | Tag consolidation candidates and the tag mutation actions.
 module Eza.Tags (
-    TagGroup (..),
-    TagCleanup (..),
+    ConsolidationGroup (..),
+    ConsolidationReport (..),
     consolidationCandidates,
     mergeTags,
     renameTag,
@@ -17,7 +17,6 @@ module Eza.Tags (
 ) where
 
 import Control.Monad (forM_)
-import Data.Aeson (ToJSON (..), genericToJSON)
 import Data.Char (toLower)
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
@@ -25,49 +24,30 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Database.SQLite.Simple
-import GHC.Generics (Generic)
 
-import Eza.Json (jsonOptions)
+import Eza.Consolidation (ConsolidationGroup (..), ConsolidationReport (..))
 import Eza.Types (TagStat (..))
 import Eza.Undo (recordTagUndo)
 
-data TagGroup = TagGroup
-    { tgKind :: Text
-    , tgTags :: [TagStat]
-    , tgSuggested :: Text
-    }
-    deriving (Show, Eq, Generic)
-
-instance ToJSON TagGroup where
-    toJSON = genericToJSON (jsonOptions "tg")
-
-data TagCleanup = TagCleanup
-    { tcGroups :: [TagGroup]
-    }
-    deriving (Show, Eq, Generic)
-
-instance ToJSON TagCleanup where
-    toJSON = genericToJSON (jsonOptions "tc")
-
-consolidationCandidates :: Connection -> IO TagCleanup
+consolidationCandidates :: Connection -> IO ConsolidationReport
 consolidationCandidates conn = do
     rows <- query_ conn "SELECT t.name,COUNT(bt.bookmark_id) FROM tags t LEFT JOIN bookmark_tags bt ON bt.tag_id=t.id GROUP BY t.id ORDER BY t.name" :: IO [(Text, Int)]
     let stats = [TagStat name count | (name, count) <- rows]
         byLower = Map.fromListWith (flip (<>)) [(T.toLower (tsName s), [s]) | s <- stats]
         caseGroups =
-            [ TagGroup "case" (sortOn (T.toLower . tsName) group) (mostUsed group)
+            [ ConsolidationGroup "case" (sortOn (T.toLower . tsName) group) (mostUsed group)
             | group <- Map.elems byLower
             , length group > 1
             ]
-        caseNames = Set.fromList (concatMap (map (T.toLower . tsName) . tgTags) caseGroups)
+        caseNames = Set.fromList (concatMap (map (T.toLower . tsName) . cgTags) caseGroups)
         nonCase = [s | s <- stats, not (Set.member (T.toLower (tsName s)) caseNames)]
         fuzzyGroups = fuzzyPairs nonCase
         junk =
-            [ TagGroup "junk" [s] ""
+            [ ConsolidationGroup "junk" [s] ""
             | s <- stats
             , Set.member (T.toLower (tsName s)) junkNames
             ]
-    pure (TagCleanup (caseGroups <> fuzzyGroups <> junk))
+    pure (ConsolidationReport (caseGroups <> fuzzyGroups <> junk))
 
 {- | Suggest the most-used member of a group as the merge target. Total: a
 group is never empty, but the empty branch keeps the function safe.
@@ -103,13 +83,13 @@ junkNames =
         , "general"
         ]
 
-fuzzyPairs :: [TagStat] -> [TagGroup]
+fuzzyPairs :: [TagStat] -> [ConsolidationGroup]
 fuzzyPairs stats = go (sortOn tsName stats) []
   where
     go [] acc = reverse acc
     go (x : xs) acc =
         let matches =
-                [ TagGroup "fuzzy" [x, y] (tsName (if tsCount y > tsCount x then y else x))
+                [ ConsolidationGroup "fuzzy" [x, y] (tsName (if tsCount y > tsCount x then y else x))
                 | y <- xs
                 , similarity (tsName x) (tsName y) >= 0.82
                 ]

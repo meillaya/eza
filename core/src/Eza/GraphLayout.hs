@@ -30,9 +30,17 @@ module Eza.GraphLayout (
     defaultLayoutOptions,
     presetOptions,
 
+    -- * Preset wire text
+    layoutPresetText,
+    layoutPresetFromText,
+
     -- * Server positions
     LayoutPositions (..),
     layoutPositions,
+
+    -- * Layout endpoint wire
+    GraphLayoutWire (..),
+    graphLayoutWireSchema,
 
     -- * Layout
     GraphLayout (..),
@@ -42,13 +50,17 @@ module Eza.GraphLayout (
     layoutWorldSpan,
 ) where
 
+import Data.Aeson (FromJSON (..), ToJSON (..), Value (String), genericParseJSON, genericToJSON, withText)
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet as IS
 import Data.List (sortOn)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
+import qualified Data.Text as T
+import GHC.Generics (Generic)
 
+import Eza.Json (jsonOptions)
 import Eza.Types (GraphData (..), GraphLink (..), GraphRecord (..), GraphTag (..))
 
 -- ------------------------------------------------------------------ keys ---
@@ -102,6 +114,73 @@ presetOptions = \case
     Compact -> LayoutOptions 0.82 0.8 3
     Standard -> defaultLayoutOptions
     Airy -> LayoutOptions 1.3 1.35 3
+
+-- ------------------------------------------------------------ preset text ---
+
+-- | The wire name of a preset: @compact@, @standard@ or @airy@.
+layoutPresetText :: LayoutPreset -> Text
+layoutPresetText = \case
+    Compact -> "compact"
+    Standard -> "standard"
+    Airy -> "airy"
+
+-- | Parse a preset name. Unknown values are 'Nothing', never a fallback.
+layoutPresetFromText :: Text -> Maybe LayoutPreset
+layoutPresetFromText raw = case T.toLower (T.strip raw) of
+    "compact" -> Just Compact
+    "standard" -> Just Standard
+    "airy" -> Just Airy
+    _ -> Nothing
+
+instance ToJSON LayoutPreset where
+    toJSON = String . layoutPresetText
+instance FromJSON LayoutPreset where
+    parseJSON = withText "LayoutPreset" $ \raw ->
+        maybe
+            (fail ("unknown layout preset: " <> T.unpack raw))
+            pure
+            (layoutPresetFromText raw)
+
+-- ------------------------------------------------- server layout endpoint ---
+
+{- | The wire schema of the layout endpoint. A payload announcing a schema a
+client does not know is refused rather than interpreted as the current one.
+-}
+graphLayoutWireSchema :: Int
+graphLayoutWireSchema = 1
+
+{- | One preset's node positions as the server ships them: tag positions keyed
+by index into 'gdTags', record positions keyed by bookmark id, and the world
+bounds as a four-element array. Coordinates are quantized to 1\/100 world unit
+by the server.
+
+This type is the contract, not a client-local view: the server encodes it and
+the client decodes it with the instances below, so a rename on either side is a
+compile error instead of a silently dropped field.
+-}
+data GraphLayoutWire = GraphLayoutWire
+    { glwSchema :: Int
+    -- ^ Always 'graphLayoutWireSchema' on the wire.
+    , glwRevision :: Text
+    -- ^ The 'gdRevision' the positions were built from.
+    , glwPreset :: LayoutPreset
+    , glwTags :: [(Double, Double)]
+    -- ^ Tag positions, in 'gdTags' order.
+    , glwRecords :: [(Double, Double)]
+    -- ^ Record positions, in 'gdRecords' order.
+    , glwBounds :: (Double, Double, Double, Double)
+    -- ^ @(minX, minY, maxX, maxY)@ world bounds.
+    }
+    deriving (Show, Eq, Generic)
+
+instance ToJSON GraphLayoutWire where
+    toJSON = genericToJSON (jsonOptions "glw")
+instance FromJSON GraphLayoutWire where
+    parseJSON value = do
+        wire <- genericParseJSON (jsonOptions "glw") value
+        if glwSchema wire == graphLayoutWireSchema
+            then pure wire
+            else fail ("unsupported graph layout schema " <> show (glwSchema wire))
 
 -- ------------------------------------------------------- server positions ---
 
