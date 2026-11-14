@@ -3,7 +3,8 @@
 #
 # What runs here:
 #   1. every schema, example, and bad document is valid JSON;
-#   2. TLC model-checks spec/MultiUser.tla and spec/Extensions.tla;
+#   2. TLC model-checks spec/MultiUser.tla, spec/Extensions.tla, spec/Jobs.tla
+#      and spec/Undo.tla;
 #   3. the example documents carry the fields the bounded plan requires;
 #   4. the bad documents violate one of those requirements.
 #
@@ -44,6 +45,10 @@ required_files=(
     "$spec_dir/MultiUser.cfg"
     "$spec_dir/Extensions.tla"
     "$spec_dir/Extensions.cfg"
+    "$spec_dir/Jobs.tla"
+    "$spec_dir/Jobs.cfg"
+    "$spec_dir/Undo.tla"
+    "$spec_dir/Undo.cfg"
     "$spec_dir/README.md"
     "$schema_dir/view.schema.json"
     "$schema_dir/webhook.schema.json"
@@ -152,6 +157,8 @@ run_tlc() {
 
 run_tlc MultiUser
 run_tlc Extensions
+run_tlc Jobs
+run_tlc Undo
 
 # ---------------------------------------------------------------------------
 # JSON shape

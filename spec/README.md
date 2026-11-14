@@ -1,8 +1,9 @@
 # Formal specifications
 
-This directory holds the formal foundation for the multi-user and extension
-program. It contains two bounded TLA+ models, the JSON schemas for the
-declarative extension documents, and example and counterexample fixtures.
+This directory holds the formal foundation for the multi-user, extension,
+durable-job and journal/undo designs. It contains four bounded TLA+ models, the
+JSON schemas for the declarative extension documents, and example and
+counterexample fixtures.
 
 The models are design checks. The Haskell server and the Miso client are not
 proved to refine them. The scope section below says exactly what is checked.
@@ -15,6 +16,10 @@ spec/
   MultiUser.cfg       bounds: two accounts, two databases, two usernames, two nonces
   Extensions.tla      bounded model of views, webhooks, and the event outbox
   Extensions.cfg      bounds: two accounts, two views, two webhooks, two events
+  Jobs.tla            bounded model of the durable egress job queue
+  Jobs.cfg            bounds: three jobs, two workers, two attempts
+  Undo.tla            bounded model of the journal and the restore/conflict rule
+  Undo.cfg            bounds: three rows, two values, journal depth 2
   README.md           this file
   schema/
     view.schema.json      view wrapper and graph/ledger definitions, draft 2020-12
@@ -23,8 +28,8 @@ spec/
   bad/                documents that violate exactly one plan constraint
 ```
 
-`scripts/check-specs.sh` runs TLC on both models and validates the JSON. The
-CI workflow runs the same script.
+`scripts/check-specs.sh` runs TLC on all four models and validates the JSON.
+The CI workflow runs the same script.
 
 ## Threat model
 
@@ -46,6 +51,14 @@ The design has to hold these lines under a compromised or careless client.
 - A webhook must only receive events from its owner's database. A disabled
   webhook must receive nothing. The delivery cursor must never move backwards.
 - Each (owner, kind) pair has at most one default view.
+- A job is claimed by at most one worker at a time, and at most one job per
+  (kind, target) is active; retries are bounded and a crash-reset returns the
+  job to the queue without losing its attempt count. A completed job has
+  performed its external effect at least once.
+- An undo restores the newest journal entry's before-images. A row whose key
+  now holds different content is refused as a URL conflict and never
+  overwritten; the abstract search index must match the restored rows (the
+  restore rebuilds FTS rather than leaving stale terms).
 
 Out of scope for these models: network attackers on the HTTP surface, TLS,
 rate limiting, password guessing, and WebAuthn ceremony correctness. Those
@@ -63,6 +76,14 @@ workstream.
 - Event delivery uses a transactional outbox, at-least-once delivery, an HMAC
   signature, retries, and disable on terminal failure. The models abstract
   timing, HTTP calls, and cryptography.
+- Egress jobs use the SQLite `jobs` table: an atomic conditional claim, a
+  bounded retry/backoff, a crash reset of running rows, and a partial unique
+  index for one active job per kind and target. The models abstract SQL and
+  treat each external effect as atomic.
+- Undo snapshots are before-images recorded in the same transaction as the
+  write. The journal/undo model abstracts row tables to one entity map, the
+  JSON encoding of a before-image, and the FTS triggers; it keeps the restore
+  selection rule and the conflict rule exact.
 - The token formats and the control database columns are those in the approved
   plan: `users(id, username UNIQUE COLLATE NOCASE, db_path UNIQUE, role,
   credential_handle, created_at, disabled_at, last_login_at)`.
@@ -101,12 +122,38 @@ check finishes in seconds.
 | `NoCodeExecution` | A run counter that no transition increments stays zero; the model has no transition that evaluates extension data. |
 | `CursorMonotone` | An action property checked by TLC: across every transition each webhook cursor never decreases. |
 
+`Jobs.tla` checks these:
+
+| Invariant | Meaning |
+|---|---|
+| `SingleOwner` | A running job has exactly one worker. |
+| `QueuedNoOwner` | Queued jobs are not owned by a worker. |
+| `NoActiveDuplicate` | At most one queued/running job per (kind, target). |
+| `AttemptsBounded` | The attempt counter never exceeds `MaxAttempts`. |
+| `DeliveredAfterClaim` | An external effect only occurs for a claimed job. |
+| `DoneDelivered` | A completed job performed its external effect. |
+| `CancelledUndelivered` | In this model delivery is atomic with completion, so a cancelled job has no effect. |
+
+`Undo.tla` checks these:
+
+| Invariant | Meaning |
+|---|---|
+| `IndexMatchesRows` | The abstract FTS index equals the current searchable rows (restores rebuild it). |
+| `JournalBounded` | The journal never exceeds `MaxEntries`; appends prune the oldest. |
+| `UndoConsistent` | After an undo, restored rows hold their before-image, deleted rows are absent again, conflicts are unchanged, and restored/conflicts/deleted partition the captured set. |
+| `ConflictNotOverwritten` | A conflict row never takes the captured value. |
+
 The bounds are part of the claim. Two accounts and two databases exercise one
 cross-account collision, one second-admin disable, and one two-user legacy
 fallback. Two views exercise the default rule for both kinds. Two webhooks and
-two events exercise owner matching, disable, and cursor progress. A larger
+two events exercise owner matching, disable, and cursor progress. Three jobs
+(two sharing a kind+target) and two workers exercise duplicate suppression,
+the retry bound, completion delivery and crash reset. Three journaled rows,
+two values and journal depth two exercise update/insert/delete undo, URL
+conflict refusal, oldest-entry pruning and FTS index consistency. A larger
 bound adds states but not a new kind of transition; it is not required for
-these invariants.
+these invariants. Current bounds find about 48,000 (`MultiUser`), 232,000
+(`Extensions`), 2,000 (`Jobs`) and 216,000 (`Undo`) distinct states.
 
 The JSON checks are shape checks. `view.schema.json` and
 `webhook.schema.json` are draft 2020-12 schemas. The validator in the script
@@ -125,8 +172,16 @@ available; otherwise `jq` checks the same constraints the schemas state.
 - HTTP details are out of scope: CSRF, `Origin` checks, cookies, status codes,
   and body limits are not in the models.
 - Timing and liveness are out of scope. Retries, backoff, HMAC freshness,
-  session expiry, and worker shutdown are not checked. The models would need
-  fairness and time to state those.
+  session expiry, worker shutdown, and "a queued job is eventually claimed" are
+  not checked. The models would need fairness and time to state those.
+- Worker/network failure modes are abstracted: a job failure is a modeled
+  transition, not a timeout; an external effect (webhook POST, snapshot file,
+  provider call) is atomic with job completion and can be attempted again after
+  a retry. The implementation must keep the claim atomic and the effects
+  idempotent enough for at-least-once delivery.
+- The journal model abstracts before-image encoding and FTS trigger mechanics:
+  the index is a derived set, not an FTS5 table, and the model checks that the
+  restore leaves it consistent rather than checking trigger SQL.
 - The schemas check shape, not semantics. A query string of 512 characters can
   still be nonsense; the Haskell parser is the deeper check. The decoder
   contract is covered: `server/test/ViewContractSpec.hs` (run by
