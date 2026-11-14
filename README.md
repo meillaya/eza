@@ -399,6 +399,8 @@ Node sidecar (`EZA_DEFUDDLE_CMD`) handles extraction for the server. See
 | Document | What is in it |
 |---|---|
 | [docs/API.md](docs/API.md) | Routes, auth and scopes, status codes, DTO reference |
+| [CHANGELOG.md](CHANGELOG.md) | Release notes and the one-way 0.4 upgrade summary |
+| [docs/upgrade.md](docs/upgrade.md) | Upgrade from 0.3 to 0.4: backup, schema map, Docker/NixOS/source steps, verify and rollback |
 | [docs/architecture.md](docs/architecture.md) | Data layout, request path, import math, search model, storage invariants |
 | [docs/UI.md](docs/UI.md) | Tokens, type, layout, screens, keyboard, accessibility, voice |
 | [docs/import.md](docs/import.md) | Netscape import rules and the reference result |
