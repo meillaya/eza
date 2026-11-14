@@ -35,8 +35,10 @@ each account library.
 ## Before you start
 
 1. Stop the server (and the backup timer if you enabled one).
-2. Take a backup with the **old** binary:
-   `eza-bookmarks backup`. It writes a stamp directory with `control.db`,
+2. Take a backup with the **old** binary: `eza-bookmarks backup` (on a
+   pre-0.4 Docker image the binary may not be on `PATH`; use
+   `sh -c '/nix/store/*eza-server-*/bin/eza-bookmarks backup'` inside the
+   container). It writes a stamp directory with `control.db`,
    `manifest.json` and every account library (`users/<id>/eza.db`); page
    snapshots are not part of a stamp.
 3. Copy the stamp off the host (for example `docker cp`, `rsync`, or the
@@ -58,7 +60,9 @@ each account library.
 
 ```bash
 # with the old container still running: take the stamp
-docker exec eza eza-bookmarks backup
+# Pre-0.4 images predate the PATH fix, so run the binary through a shell that
+# expands its store path (the 0.4 image accepts the plain command):
+docker exec eza sh -c '/nix/store/*eza-server-*/bin/eza-bookmarks backup'
 
 # copy the stamp off the host
 docker cp eza:/data/backups/<stamp> /backup/

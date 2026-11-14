@@ -46,7 +46,7 @@ Captured 2026-11-14 from `main` at commit `57639c0` before any program change.
 | M4 Server architecture | complete | M4-C read-path auth + `Eza.Library`; M4-A dispatch from `Eza.Routes`; M4-B one `Eza.Problem` error path + catch-all JSON 500/503; M4-D async egress: schema v18 job columns, four 202 job routes (`snapshot`, `check-dead`, `ai/suggestions` tag-bucket, `webhooks/{id}/test`), `GET /api/v1/jobs/{id}` own-library only, per-library `Eza.Egress` worker (claimKind, cancel, bounded retry, restart requeue), handlers enqueue-only; snapshot file READ stays; 370 server examples/JobsSpec. |
 | M5 Data layer/journal/upgrade | complete | M5-A checksummed `Eza.Migrate` engine (`schema_meta`, user v16/control v2). M5-B journal: user v17 adds `journal`/`journal_rows`, drops the undo tables/legacy JSON undo, captures before-images for bookmarks/tag links/highlights/links/captures/dead overrides, restores newest-first with URL-conflict refusal + FTS rebuild; Undo API unchanged. M5-C removed the 0.3 compatibility branches: no flat `EZA_DB` adoption (diagnosis-only hint), no unprefixed tokens, retired passkey sign-in routes removed (JSON 404; passkeys stay the second factor), flat backup stamps/flat layouts refused. One-way upgrade documented in docs/upgrade.md; 368 server examples. |
 | M6 Feature completion, formal specs, deployment subtraction | complete | M6-DS removed Kubernetes/rclone/Tailscale; M6-formal added Jobs/Undo TLA+ models; M4-D completed the async spine (snapshot/dead-check/AI/webhook-test as durable jobs with client polling); the last feature TODO (graph label mode from the active saved view) is fixed with `ViewSpec` (158 logic tests); the client feature audit confirmed every shipped surface is wired and routed the remaining polish items (webhook-test failure visibility, AI status error, snapshot-404 state, busy guards, dead actions) into task-30. |
-| M7 Validation/release | in progress | Release notes, one-way upgrade guide and release checklist are written. Size investigation shows the <7.7M raw/<2.2M gzip target is unreachable by trimming (baseline 7,706,279 already misses it); the measured lever is the planned Model-partition program (task-29), with the temporary 8,000,000/2,300,000 ceilings in force until it lands. Remaining: task-29 size program, client polish (task-30), version bump/tag 0.4.0.0, and the drilled upgrade against a released artifact. |
+| M7 Validation/release | in progress | Model-partition size program (task-29) recovered the bundle from 7,938,321 raw / 2,285,188 gzip to **5,313,531 raw / 1,714,657 gzip** (15 nested Model groups, 263 INLINE selectors, 462 record-update sites), meeting both targets; ceilings restored to 7,800,000/2,250,000 and the recorded M4-D exception is closed. Real-artifact upgrade drill (old `ghcr.io/meillaya/eza:0.2.0.0` image -> 0.4.0.0): setup/bookmark/backup -> upgrade control v2/library v18 -> data/session/async job survive -> old binary refuses `control database schema is newer than this binary: 2` -> rollback via old restore works; version/PATH release blocker found and fixed (`Eza.Version`, boot/health version, image PATH, version.sh check) and re-drilled PASS. Remaining: versioned release build, tag `v0.4.0.0`, push/publish by the operator. |
 
 ## Gate log
 
@@ -125,6 +125,10 @@ Append one entry per gate run: milestone, date, commands, result, commit.
 2026-11-14 M5-C: bash scripts/build-web.sh       -> ok, 7,938,321 raw / 2,285,188 gzip, bundle d6204524293296bc
 2026-11-14 M5-C: check-docs/version/notices/spec/fourmolu/hlint -> ok
 2026-11-14 round-7 e2e: bash scripts/e2e.sh      -> ok, 27/27 scripts (no legacy passkey login; graph label mode unchanged at route level)
+2026-11-14 M7 size program (task-29): build-web  -> ok, 5,313,531 raw / 1,714,657 gzip (targets <7.7M/<2.2M met); ceilings restored to 7,800,000/2,250,000
+2026-11-14 M7 release blocker: version/PATH fix  -> `eza-bookmarks version` = 0.4.0.0; boot/health version; image PATH; version.sh checks Eza/Version.hs
+2026-11-14 M7 upgrade drill (fixed image)        -> PASS all steps (old 0.2.0.0 -> 0.4.0.0 control v2/library v18, async job done, old binary refuses newer schema, rollback via old restore with documented chown)
+2026-11-14 round-8 gates: build/test/build-web/e2e/lint/docs/spec/version/notices -> ok (158 logic + 35 core + 368 server; e2e 27/27; wasm 5,313,531/1,714,657)
 ```
 
 ## Round-4 note
@@ -331,3 +335,22 @@ recorded above.
   second-factor routes and accepts only stamp-directory backups. The upgrade
   path is backup + forward migration (docs/upgrade.md); old flat data/tokens/
   routes are refused with a diagnosis, not a fallback.
+
+## Round-8 decisions (recorded)
+
+- **WASM ceiling exception closed.** The Model-partition program split the
+  flat 261-field record into 15 nested groups behind total INLINE selectors;
+  the 462 record-update sites now copy ~15-25 fields instead of the whole
+  record. Measured bundle: 5,313,531 raw / 1,714,657 gzip (from 7,938,321 /
+  2,285,188), matching the measured ~12 KB/field copy cost. The hard ceilings
+  are back to 7,800,000/2,250,000; the 1,700,000 gzip target stays the warning
+  threshold (current bundle is 14.6 KB above it, a known remaining polish).
+- **Release version is single-source and checked.** `server/src/Eza/Version.hs`
+  holds the one literal used by `eza-bookmarks version`, the boot payload and
+  `/healthz`; `scripts/version.sh` compares it with flake.nix and the Cabal
+  versions. Pre-0.4 images printed a hardcoded 0.1.0 and lacked the server bin
+  on PATH; both fixed and documented in docs/upgrade.md/docs/release.md.
+- **Upgrade path is drilled, not assumed.** The local 0.2.0.0 image upgraded a
+  real account/bookmark/backup to control v2/library v18, kept sessions and the
+  async job path working, refused the old binary on the migrated schema, and
+  restored the old installation from the pre-upgrade stamp.

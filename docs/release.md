@@ -62,7 +62,10 @@ Drill it with the released images, not only with unit tests:
 
 1. Start the previous release image (`ghcr.io/meillaya/eza:<previous>`) on a
    scratch volume, claim an account, import a small Netscape file, create a
-   tag, a view and a webhook, and run `eza-bookmarks backup`.
+   tag, a view and a webhook, and run `eza-bookmarks backup`. Pre-0.4 images
+   may not put the binary on `PATH`; use
+   `docker exec <c> sh -c '/nix/store/*eza-server-*/bin/eza-bookmarks backup'`
+   or the full store path for the old image.
 2. Copy the stamp off the volume. Start the release-candidate image on the
    same volume with the same `PUBLIC_ORIGIN`/`EZA_RP_ID`.
 3. `docker exec ... eza-bookmarks version` must print the release tag (a
