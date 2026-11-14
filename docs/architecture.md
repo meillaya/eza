@@ -249,11 +249,13 @@ endpoint, never papered over with a default. The boot document carries
 screen instead of painting stale or empty state.
 
 `Eza.Routes` is the single route truth: one `Route` value per method and path
-family, with its authorization class and capability. `Eza.Authz` derives the
-access matrix from it, and `eza-bookmarks routes --markdown` generates
-[generated/routes.md](generated/routes.md), which CI checks for drift. Until
-the dispatch split, `Eza.Server` keeps its existing case tables and adds routes
-through `Eza.Routes` first.
+family, with its authorization class and capability. `Eza.Server` parses each
+request once with `Routes.matchRoute` and dispatches to the `Eza.Api.*` handler
+families; `Eza.Authz` derives the access matrix from the same table, and
+`eza-bookmarks routes --markdown` generates
+[generated/routes.md](generated/routes.md), which CI checks for drift. Unknown
+`/api` paths return JSON 404; a known path with an unsupported method returns
+JSON 405 with an `Allow` header (the table is the only source of both).
 
 Graph layout is server-produced only. The server builds it deterministically
 and caches it per library revision; the client hydrates the shared

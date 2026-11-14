@@ -27,6 +27,7 @@ import qualified ControlSpec
 import qualified CoreViewSpec
 import qualified DataIntegritySpec
 import qualified DedupSpec
+import qualified DispatchSpec
 import qualified Eza.Auth as Auth
 import Eza.Bookmarks
 import Eza.Db (openDb, queryScalar, schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaVersion, targetSchemaVersion)
@@ -1128,6 +1129,7 @@ main = hspec $ do
     AssetsSpec.spec
     DataIntegritySpec.spec
     DedupSpec.spec
+    DispatchSpec.spec
     LedgerSpec.spec
     LibrarySpec.spec
     GraphLayoutSpec.spec

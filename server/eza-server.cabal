@@ -27,6 +27,18 @@ library
   exposed-modules:  Eza.Admin
                     Eza.AiTag
                     Eza.Assets
+                    Eza.Api.Account
+                    Eza.Api.Admin
+                    Eza.Api.Auth
+                    Eza.Api.Bookmarks
+                    Eza.Api.Common
+                    Eza.Api.Context
+                    Eza.Api.Extensions
+                    Eza.Api.Graph
+                    Eza.Api.Maintenance
+                    Eza.Api.Public
+                    Eza.Api.Static
+                    Eza.Api.Tags
                     Eza.Auth
                     Eza.Backup
                     Eza.Bench
@@ -140,6 +152,7 @@ test-suite eza-test
                     CoreViewSpec
                     DataIntegritySpec
                     DedupSpec
+                    DispatchSpec
                     GraphLayoutSpec
                     PerfSpec
                     RoutesSpec

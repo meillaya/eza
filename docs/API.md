@@ -47,6 +47,7 @@ token. See [architecture.md](architecture.md) for the data layout.
 | 401 | No session, a failed username/password login, or an expired pending two-factor sign-in |
 | 403 | CSRF, origin, session-scope, recovery-scope, or admin-role failure; retired passkey ceremony |
 | 404 | Row or route missing; unknown account |
+| 405 | Known path with an unsupported method; `Allow` lists the methods |
 | 409 | URL, tag, last-credential, last-admin, self-disable, or username conflict; two-factor precondition |
 | 410 | Share link revoked or expired; passkey setup retired |
 | 413 | Request body too large |
