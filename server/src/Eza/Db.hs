@@ -8,6 +8,9 @@ and a verified online backup is written before an existing database changes.
 module Eza.Db (
     initDb,
     openDb,
+    closeDb,
+    ConnectionStats (..),
+    connectionStats,
     migrate,
     ping,
     queryScalar,
@@ -35,7 +38,8 @@ module Eza.Db (
     DbError (..),
 ) where
 
-import Control.Exception (Exception, SomeException, bracket, throwIO, try)
+import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
+import Control.Exception (Exception, SomeException, bracket, onException, throwIO, try)
 import Control.Monad (forM_, when)
 import Crypto.Random (getRandomBytes)
 import qualified Data.ByteString as BS
@@ -49,6 +53,7 @@ import qualified Database.SQLite.Simple as Sqlite
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Environment (lookupEnv)
 import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.IO.Unsafe (unsafePerformIO)
 
 import Eza.Clip (clipSchema)
 import Eza.Views (seedDefaultViews)
@@ -91,17 +96,62 @@ normaliseTimestamp raw
 
 {- | Open the database and bring the schema up to date. Every open also makes
 sure the default graph view exists, so a fresh or migrated database always
-has something the graph screen can open.
+has something the graph screen can open. A connection that fails during setup
+is closed again instead of being leaked.
 -}
 openDb :: FilePath -> IO Sqlite.Connection
 openDb path = do
     createDirectoryIfMissing True (takeDirectory path)
     conn <- Sqlite.open path
-    mapM_ (Sqlite.execute_ conn) pragmas
-    checkFts conn
-    migrate path conn
-    seedDefaultViews conn
+    ( do
+            mapM_ (Sqlite.execute_ conn) pragmas
+            checkFts conn
+            migrate path conn
+            seedDefaultViews conn
+        )
+        `onException` Sqlite.close conn
+    recordOpen
     pure conn
+
+{- | Close a connection opened through 'openDb'. Server code closes its
+handles through this function so 'connectionStats' can catch a worker or slot
+that forgets to close one; the raw @Sqlite.close@ is still fine for
+connections opened directly by a caller that does not use the counter.
+-}
+closeDb :: Sqlite.Connection -> IO ()
+closeDb conn = do
+    recordClose
+    Sqlite.close conn
+
+-- | Cumulative connections opened and closed through this module.
+data ConnectionStats = ConnectionStats
+    { csOpened :: !Int
+    , csClosed :: !Int
+    }
+    deriving (Show, Eq)
+
+{- | How many connections were opened and closed through "Eza.Db" in this
+process. The background-worker lifecycle tests compare the deltas around an
+open/start/stop/close cycle; production never reads the counter.
+-}
+connectionStats :: IO ConnectionStats
+connectionStats = do
+    (opened, closed) <- readMVar connectionCounter
+    pure ConnectionStats{csOpened = opened, csClosed = closed}
+
+{-# NOINLINE connectionCounter #-}
+connectionCounter :: MVar (Int, Int)
+connectionCounter = unsafePerformIO (newMVar (0, 0))
+
+recordOpen :: IO ()
+recordOpen =
+    modifyMVar_ connectionCounter $ \(opened, closed) ->
+        pure (opened + 1, closed)
+
+recordClose :: IO ()
+recordClose =
+    modifyMVar_ connectionCounter $ \(opened, closed) ->
+        pure (opened, closed + 1)
 
 initDb :: FilePath -> IO ()
 initDb path = openDb path >> pure ()

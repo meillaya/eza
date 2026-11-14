@@ -17,7 +17,6 @@ module Eza.Server (
     closeAppState,
     userSlotFor,
     userSlotCount,
-    enableWorkers,
     syncUserWorkers,
     stopAllUserWorkers,
     userWorkerIds,
@@ -28,11 +27,11 @@ module Eza.Server (
 ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (Async, async, cancel, poll)
+import Control.Concurrent.Async (async, cancel)
 import Control.Concurrent.MVar
 import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
 import Control.Exception (IOException, SomeException, bracket, bracket_, onException, throwIO, try)
-import Control.Monad (filterM, forM, forM_, void, when)
+import Control.Monad (forM, forM_, unless, void, when)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (parseMaybe)
@@ -44,7 +43,6 @@ import Data.Int (Int64)
 import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, fromMaybe, isNothing, mapMaybe)
-import Data.Pool (Pool, defaultPoolConfig, destroyAllResources, newPool, withResource)
 import qualified Data.Set as Set
 import Data.String (fromString)
 import Data.Text (Text)
@@ -86,14 +84,15 @@ import qualified Eza.Control as Control
 import qualified Eza.Db as Db
 import Eza.DeadLinks (checkDead)
 import Eza.Dedup (DedupQuery (..), dedupCandidates, mergeBookmarksWithSnapshot, mergeUrlDuplicatesAll)
-import Eza.Enrich (enqueueEnrichment, runEnrichWorkerFor, runFaviconWorkerFor)
+import Eza.Enrich (enqueueEnrichment)
 import Eza.Export (exportBookmarks)
 import Eza.Favicon (Favicon (..), getFavicon)
-import Eza.Graph (LayoutCache (..), emptyLayoutCache, globalGraph, graphLayoutPayload, graphRevision, layoutPresetFromText, lookupCachedLayout, storeCachedLayout)
+import Eza.Graph (globalGraph, graphLayoutPayload, graphRevision, layoutPresetFromText, lookupCachedLayout, storeCachedLayout)
 import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateHighlight)
 import Eza.Import (defaultImportOptions, importParsed, parseNetscape)
-import Eza.Jobs (resetRunningJobs)
 import Eza.JsonExport (JsonImportReport (..), exportJson, importJson)
+import Eza.Library (LibraryWorkerConfig (..))
+import qualified Eza.Library as Library
 import Eza.Pages (addPasskeyPage, loginPage, passkeyLoginPage, recoverPage, recoverySetupPage, setupPage)
 import Eza.Password (validatePassword, validateUsername)
 import qualified Eza.Password as Password
@@ -104,21 +103,20 @@ import Eza.Shell (pageAssets, shellPage)
 import Eza.Snapshot (captureSnapshot)
 import Eza.Tags (consolidationCandidates, deleteTag, deleteTagWithLinks, mergeTags, renameTag)
 import qualified Eza.TokenPrefix as TokenPrefix
-import Eza.Tokens (Token (..), authenticateToken, createToken, listTokens, revokeToken)
+import Eza.Tokens (Token (..), createToken, listTokens, revokeToken, tokenActivityDue, touchToken, validateToken)
 import Eza.Types
 import Eza.Undo (UndoFailure (..), listUndoEntries, undoById, undoLast, undoPreview)
 import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..))
 import Eza.View (ViewInput (..))
 import Eza.Views (ViewError, ViewPatch (..), createView, deleteView, getView, listViews, updateView, viewErrorCode, viewErrorMessage, viewErrorStatus)
 import Eza.Webhook (WebhookInput (..))
-import Eza.Webhooks (WebhookError, WebhookWorkerConfig (..), createWebhook, defaultWebhookWorkerConfig, deleteWebhook, getWebhook, listDeliveries, listWebhooks, runWebhookWorker, testWebhook, updateWebhook, webhookErrorCode, webhookErrorMessage, webhookErrorStatus)
+import Eza.Webhooks (WebhookError, createWebhook, defaultWebhookWorkerConfig, deleteWebhook, getWebhook, listDeliveries, listWebhooks, testWebhook, updateWebhook, webhookErrorCode, webhookErrorMessage, webhookErrorStatus)
 import Network.Wai.Parse (File, FileInfo (..), Param, defaultParseRequestBodyOptions, lbsBackEnd, parseRequestBodyEx, setMaxRequestFileSize, setMaxRequestFilesSize, setMaxRequestNumFiles, setMaxRequestParmsSize)
 
 runServer :: Config -> IO ()
 runServer cfg = do
     state <- newAppState cfg
     logStartupWarnings cfg state
-    enableWorkers state
     supervisor <- async (workerSupervisor state) `onException` closeAppState state
     let settings =
             setHost (fromString (bindHost (cfgBind cfg)))
@@ -199,24 +197,22 @@ data AppState = AppState
     , asLoginGlobalLimiter :: Auth.RateLimiter
     , asArgon2Sem :: QSem
     , asTrustedProxies :: [TrustedProxy]
-    , asWorkersEnabled :: MVar Bool
     , asEnrichSem :: QSem
     , asLastSessionCleanup :: MVar Int
     , asWorkerLimitWarned :: MVar [Int]
     }
 
-{- | An opened user library. Slots are created on first use and closed at
-shutdown. The map in 'asUsers' is the only place a request gets a database
+{- | One account's runtime slot: the control row, the snapshot directory, and
+the opened "Eza.Library" that owns the database connections, the graph layout
+cache, and the background workers. Slots are created on first use and closed at
+shutdown; the map in 'asUsers' is the only place a request gets a database
 path, and every path comes from the control row, never from a request.
 -}
 data UserSlot = UserSlot
     { usUser :: Control.ControlUser
     , usDbPath :: FilePath
-    , usWrite :: MVar Connection
-    , usRead :: Pool Connection
-    , usLayoutCache :: MVar LayoutCache
     , usSnapshotDir :: FilePath
-    , usWorkers :: MVar [Async ()]
+    , usLibrary :: Library.Library
     }
 
 {- | What one authenticated request resolved to. Handlers keep their plain
@@ -229,23 +225,6 @@ data RequestContext = RequestContext
     , rcSlot :: UserSlot
     , rcAuth :: AuthContext
     }
-
-{- | A pooled read-only connection. WAL lets these run alongside the writer;
-@query_only@ turns an accidental write from a GET route into a loud error
-instead of a lock.
--}
-openReadConnection :: FilePath -> IO Connection
-openReadConnection path = do
-    conn <- Sqlite.open path
-    mapM_
-        (Sqlite.execute_ conn)
-        [ "PRAGMA busy_timeout = 5000"
-        , "PRAGMA temp_store = MEMORY"
-        , "PRAGMA mmap_size = 268435456"
-        , "PRAGMA cache_size = -65536"
-        , "PRAGMA query_only = ON"
-        ]
-    pure conn
 
 authConfig :: Config -> Auth.AuthConfig
 authConfig cfg =
@@ -323,7 +302,6 @@ newAppState cfg = do
     argon2Sem <- newQSem argon2Slots
     controlVar <- newMVar control
     usersVar <- newMVar Map.empty
-    workersEnabledVar <- newMVar False
     enrichSem <- newQSem (max 1 (cfgEnrichWorkers cfg))
     lastCleanupVar <- newMVar 0
     limitWarnedVar <- newMVar []
@@ -340,7 +318,6 @@ newAppState cfg = do
             , asLoginGlobalLimiter = loginGlobalLimiter
             , asArgon2Sem = argon2Sem
             , asTrustedProxies = proxies
-            , asWorkersEnabled = workersEnabledVar
             , asEnrichSem = enrichSem
             , asLastSessionCleanup = lastCleanupVar
             , asWorkerLimitWarned = limitWarnedVar
@@ -472,9 +449,7 @@ closeAppState state = do
     withMVar (asControl state) Sqlite.close
 
 closeUserSlot :: UserSlot -> IO ()
-closeUserSlot slot = do
-    destroyAllResources (usRead slot)
-    withMVar (usWrite slot) Sqlite.close
+closeUserSlot slot = Library.closeLibrary (usLibrary slot)
 
 {- | The slot for one account, opening the library the first time this process
 needs it. The registry cap is enforced here so a request cannot make the
@@ -491,11 +466,7 @@ userSlotFor state user = do
                 | otherwise -> do
                     slot <- openUserSlot (asConfig state) user
                     pure (Map.insert (cuId user) slot slots, Right slot)
-    case opened of
-        Left message -> pure (Left message)
-        Right slot -> do
-            startUserWorkers state slot
-            pure (Right slot)
+    pure opened
 
 -- | How many user databases this process currently has open (tests use it).
 userSlotCount :: AppState -> IO Int
@@ -503,36 +474,20 @@ userSlotCount state = Map.size <$> readMVar (asUsers state)
 
 openUserSlot :: Config -> Control.ControlUser -> IO UserSlot
 openUserSlot cfg user = do
-    conn <- Db.openDb (cuDbPath user)
-    Auth.cleanupExpired conn
-    resetRunningJobs conn
-    writeVar <- newMVar conn
-    readPool <-
-        newPool
-            ( defaultPoolConfig
-                (openReadConnection (cuDbPath user))
-                Sqlite.close
-                60
-                4
-            )
-    layoutCache <- newMVar emptyLayoutCache
-    workersVar <- newMVar []
+    library <- Library.openLibrary (cuDbPath user)
     pure
         UserSlot
             { usUser = user
             , usDbPath = cuDbPath user
-            , usWrite = writeVar
-            , usRead = readPool
-            , usLayoutCache = layoutCache
             , usSnapshotDir = Admin.userSnapshotDir cfg (cuId user)
-            , usWorkers = workersVar
+            , usLibrary = library
             }
 
 withDb :: UserSlot -> (Connection -> IO a) -> IO a
-withDb slot = withMVar (usWrite slot)
+withDb slot = Library.withLibraryWriter (usLibrary slot)
 
 withReadDb :: UserSlot -> (Connection -> IO a) -> IO a
-withReadDb slot = withResource (usRead slot)
+withReadDb slot = Library.withLibraryReader (usLibrary slot)
 
 withControl :: AppState -> (Connection -> IO a) -> IO a
 withControl state = withMVar (asControl state)
@@ -658,7 +613,7 @@ resolveSession state wire = do
         Left message -> pure (Left message)
         Right Nothing -> pure (Right Nothing)
         Right (Just (user, slot, bare)) -> do
-            found <- withDb slot $ \conn -> Auth.getSession conn bare
+            found <- withReadDb slot $ \conn -> Auth.validateSession conn bare
             pure (Right (fmap (\session -> (user, slot, session)) found))
 
 resolveApiToken ::
@@ -677,67 +632,34 @@ resolveShareOwner state wire = resolveOwner state (stripSessionPrefix wire) wire
 -- Per-user workers
 -- ---------------------------------------------------------------------------
 
-{- | Turn worker supervision on for this process. A plain 'newAppState' (tests,
--- tools) leaves it off so no worker touches a temporary database unexpectedly;
--- 'runServer' enables it at startup.
+{- | The worker inputs for one 'AppState'. The supervisor is the only caller
+that starts workers, so a library opened by a request does no background work
+until the first supervisor tick.
 -}
-enableWorkers :: AppState -> IO ()
-enableWorkers state = modifyMVar_ (asWorkersEnabled state) (const (pure True))
+libraryWorkerConfig :: AppState -> LibraryWorkerConfig
+libraryWorkerConfig state =
+    LibraryWorkerConfig
+        { lwcConfig = asConfig state
+        , lwcManager = asManager state
+        , lwcEnrichSem = asEnrichSem state
+        }
 
 -- | How many live worker loops each open account currently has (tests use it).
 userWorkerIds :: AppState -> IO [(Int, Int)]
 userWorkerIds state = do
     slots <- Map.elems <$> readMVar (asUsers state)
     forM slots $ \slot -> do
-        workers <- readMVar (usWorkers slot)
-        pure (cuId (usUser slot), length workers)
+        workers <- Library.libraryWorkerIds (usLibrary slot)
+        pure (cuId (usUser slot), workers)
 
-{- | Start (or restart) the enrichment and webhook loops for one open user
-database. A healthy set is left alone; a set with a dead member is replaced.
-The enrich semaphore is process-wide, so @EZA_ENRICH_WORKERS@ caps total
-network work across every account while each database keeps its own claimer.
--}
+-- | Start (or restart) one open account's enrichment, favicon, and webhook loops.
 startUserWorkers :: AppState -> UserSlot -> IO ()
-startUserWorkers state slot = do
-    enabled <- readMVar (asWorkersEnabled state)
-    when enabled $ do
-        let user = usUser slot
-        when (isNothing (cuDisabledAt user)) $
-            modifyMVar_ (usWorkers slot) $ \running -> do
-                alive <- filterM stillRunning running
-                if not (null running) && length alive == length running
-                    then pure running
-                    else do
-                        mapM_ cancel running
-                        spawnUserWorkers state slot
-
-spawnUserWorkers :: AppState -> UserSlot -> IO [Async ()]
-spawnUserWorkers state slot = do
-    let cfg = asConfig state
-        manager = asManager state
-        databasePath = usDbPath slot
-        enrichCount = cfgEnrichWorkers cfg
-        webhookCfg = (defaultWebhookWorkerConfig cfg manager){wwcDatabase = databasePath}
-    enrichWorkers <-
-        forM [1 .. enrichCount] $ \_ ->
-            async (runEnrichWorkerFor manager cfg databasePath (asEnrichSem state))
-    webhookWorker <- async (runWebhookWorker webhookCfg)
-    -- One favicon backfill loop per account: cached domains cost no network,
-    -- and each new domain costs one fetch no matter how many links it has.
-    faviconWorkers <-
-        if cfgFaviconBackfill cfg && enrichCount > 0
-            then (: []) <$> async (runFaviconWorkerFor manager cfg databasePath (asEnrichSem state))
-            else pure []
-    pure (enrichWorkers <> [webhookWorker] <> faviconWorkers)
-
-stillRunning :: Async () -> IO Bool
-stillRunning worker = isNothing <$> poll worker
+startUserWorkers state slot =
+    Library.startLibraryWorkers (libraryWorkerConfig state) (usLibrary slot)
 
 -- | Stop one account's workers (disable, shutdown, or tests).
 stopUserWorkers :: UserSlot -> IO ()
-stopUserWorkers slot = modifyMVar_ (usWorkers slot) $ \running -> do
-    mapM_ cancel running
-    pure []
+stopUserWorkers slot = Library.stopLibraryWorkers (usLibrary slot)
 
 stopAllUserWorkers :: AppState -> IO ()
 stopAllUserWorkers state = do
@@ -745,29 +667,28 @@ stopAllUserWorkers state = do
     mapM_ stopUserWorkers (Map.elems slots)
 
 {- | One reconciliation pass: workers exist only for enabled accounts, enabled
-accounts get their database opened, disabled or removed accounts lose their
+accounts get their library opened, and disabled or removed accounts lose their
 workers. Disabling therefore stops enrichment and webhook delivery at the next
-tick (five seconds in the server) without touching the control row again.
+tick without touching the control row again. The supervisor is the only place
+workers start, so a library opened by a request never starts them implicitly.
 -}
 syncUserWorkers :: AppState -> IO ()
 syncUserWorkers state = do
     users <- withControl state Control.listUsers
-    let enabledIds = Set.fromList [cuId user | user <- users, isNothing (cuDisabledAt user)]
+    let enabledUsers = [user | user <- users, isNothing (cuDisabledAt user)]
+        enabledIds = Set.fromList (map cuId enabledUsers)
     slots <- readMVar (asUsers state)
     forM_ (Map.elems slots) $ \slot ->
-        if cuId (usUser slot) `Set.member` enabledIds
-            then startUserWorkers state slot
-            else stopUserWorkers slot
+        unless (cuId (usUser slot) `Set.member` enabledIds) (stopUserWorkers slot)
     misses <-
         fmap catMaybes $
-            forM users $ \user ->
-                if isNothing (cuDisabledAt user) && not (Map.member (cuId user) slots)
-                    then do
-                        opened <- userSlotFor state user
-                        pure $ case opened of
-                            Left message -> Just (cuId user, message)
-                            Right _ -> Nothing
-                    else pure Nothing
+            forM enabledUsers $ \user -> do
+                opened <- userSlotFor state user
+                case opened of
+                    Left message -> pure (Just (cuId user, message))
+                    Right slot -> do
+                        startUserWorkers state slot
+                        pure Nothing
     warnWorkerLimit state misses
 
 {- | Report accounts the process cannot open because of the user cap once per
@@ -2254,13 +2175,14 @@ graphLayoutHandler slot conn req respond =
             respond (jsonError status400 "bad_request" "preset must be compact, standard, or airy")
         Just preset -> do
             revision <- graphRevision conn
-            cached <- withMVar (usLayoutCache slot) $ \cache -> pure (lookupCachedLayout revision preset cache)
+            let cacheVar = Library.libraryLayoutCache (usLibrary slot)
+            cached <- withMVar cacheVar $ \cache -> pure (lookupCachedLayout revision preset cache)
             payload <- case cached of
                 Just hit -> pure hit
                 Nothing -> do
                     graph <- globalGraph conn
                     let built = graphLayoutPayload preset graph
-                    modifyMVar_ (usLayoutCache slot) $ \cache ->
+                    modifyMVar_ cacheVar $ \cache ->
                         pure (storeCachedLayout (gdRevision graph) preset built cache)
                     pure built
             respond (jsonResponse status200 payload)
@@ -2350,8 +2272,9 @@ webhookErrorResponse err =
 
 {- | Resolve the request principal, then run the handler on the right
 connection: reads use the user database's read pool, writes use its one writer.
-Authentication itself runs on the writer because a session lookup records
-@last_seen_at@.
+Authentication is a read-only validation on the read pool; only the throttled
+activity timestamp write (at most once a minute per session or token) takes the
+writer.
 -}
 withAuthed ::
     Config ->
@@ -2401,7 +2324,7 @@ authenticateRequest state req =
                 Left message -> pure (Left (jsonError status503 "user_limit" message))
                 Right Nothing -> pure (Left invalidBearerToken)
                 Right (Just (user, slot, bare)) -> do
-                    mtoken <- withDb slot $ \conn -> authenticateToken conn bare
+                    mtoken <- withReadDb slot $ \conn -> validateToken conn bare
                     case mtoken of
                         Nothing -> pure (Left invalidBearerToken)
                         Just token
@@ -2409,24 +2332,43 @@ authenticateRequest state req =
                                 pure (Left (jsonError status403 "token_scope" "this token does not allow the request"))
                             | not (requestOriginAllowed cfg req) ->
                                 pure (Left (jsonError status403 "origin" "origin is not allowed"))
-                            | otherwise -> pure (Right (user, slot, BearerToken token))
+                            | otherwise -> do
+                                recordTokenActivity slot token
+                                pure (Right (user, slot, BearerToken token))
 
     cookieAuth =
         case cookieValue req Auth.sessionCookieName of
             Nothing -> pure (Left (unauthorized req))
             Just wire -> do
                 resolved <- resolveSession state wire
-                pure $ case resolved of
-                    Left message -> Left (jsonError status503 "user_limit" message)
-                    Right Nothing -> Left (unauthorized req)
+                case resolved of
+                    Left message -> pure (Left (jsonError status503 "user_limit" message))
+                    Right Nothing -> pure (Left (unauthorized req))
                     Right (Just (user, slot, sess))
                         | not (sessionScopeAllows (cuRole user) (Auth.sessScope sess) method path) ->
-                            Left (jsonError status403 "session_scope" "this session may not use this route")
+                            pure (Left (jsonError status403 "session_scope" "this session may not use this route"))
                         | not (requestOriginAllowed cfg req) ->
-                            Left (jsonError status403 "origin" "origin is not allowed")
+                            pure (Left (jsonError status403 "origin" "origin is not allowed"))
                         | not (csrfOk req sess) ->
-                            Left (jsonError status403 "csrf" "missing or invalid CSRF token")
-                        | otherwise -> Right (user, slot, CookieSession sess)
+                            pure (Left (jsonError status403 "csrf" "missing or invalid CSRF token"))
+                        | otherwise -> do
+                            recordSessionActivity slot sess
+                            pure (Right (user, slot, CookieSession sess))
+
+{- | Record a session's activity on the writer only when the throttle window
+has passed. The common GET path is a read-only validation: the stored
+timestamp is already fresh, so this never acquires the writer.
+-}
+recordSessionActivity :: UserSlot -> Auth.Session -> IO ()
+recordSessionActivity slot session = do
+    due <- Auth.sessionActivityDue session
+    when due $ withDb slot $ \conn -> Auth.touchSession conn session
+
+-- | The same throttled activity write for a bearer token's @last_used_at@.
+recordTokenActivity :: UserSlot -> Token -> IO ()
+recordTokenActivity slot token = do
+    due <- tokenActivityDue token
+    when due $ withDb slot $ \conn -> touchToken conn token
 
 invalidBearerToken :: Response
 invalidBearerToken = jsonError status401 "unauthenticated" "invalid bearer token"

@@ -30,7 +30,6 @@ import Eza.Enrich (backfillCachedFavicons, enqueueEnrichment)
 import Eza.Favicon (putFavicon)
 import Eza.Server (
     closeAppState,
-    enableWorkers,
     newAppState,
     stopAllUserWorkers,
     syncUserWorkers,
@@ -47,7 +46,6 @@ spec = describe "per-user workers" $ do
         withWorkerConfig $ \cfg -> do
             (alice, bob) <- createAccounts cfg
             state <- newAppState cfg
-            enableWorkers state
             syncUserWorkers state
             workers <- userWorkerIds state
             length workers `shouldBe` 2
@@ -86,7 +84,6 @@ spec = describe "per-user workers" $ do
             let cfg = cfg0{cfgEnrichWorkers = 0}
             (alice, _) <- createAccounts cfg
             state <- newAppState cfg
-            enableWorkers state
             syncUserWorkers state
             workers <- userWorkerIds state
             length workers `shouldBe` 2

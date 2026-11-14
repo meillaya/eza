@@ -47,6 +47,7 @@ import Eza.Url (dedupeKey, dedupeLookupUrls, normalizeUrl)
 import qualified GraphLayoutSpec
 import qualified IsolationSpec
 import qualified LedgerSpec
+import qualified LibrarySpec
 import qualified OriginGuardSpec
 import qualified PerfSpec
 import qualified RoutesSpec
@@ -1128,6 +1129,7 @@ main = hspec $ do
     DataIntegritySpec.spec
     DedupSpec.spec
     LedgerSpec.spec
+    LibrarySpec.spec
     GraphLayoutSpec.spec
     AuthzSpec.authzSpec
     ContractSpec.contractSpec

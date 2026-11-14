@@ -36,6 +36,7 @@ module Eza.Webhooks (
 ) where
 
 import Control.Concurrent (threadDelay)
+import Control.Exception (bracket)
 import Control.Monad (forM_, void, when)
 import Crypto.Hash (SHA256)
 import Crypto.MAC.HMAC (HMAC, hmac, hmacGetDigest)
@@ -355,10 +356,11 @@ purgeAfterSeconds :: Int
 purgeAfterSeconds = 30 * 86400
 
 runWebhookWorker :: WebhookWorkerConfig -> IO ()
-runWebhookWorker cfg = do
-    conn <- Db.openDb (wwcDatabase cfg)
-    resetDeliveringDeliveries conn
-    loop conn (0 :: Int)
+runWebhookWorker cfg =
+    -- The worker owns this connection; cancellation closes it again.
+    bracket (Db.openDb (wwcDatabase cfg)) Db.closeDb $ \conn -> do
+        resetDeliveringDeliveries conn
+        loop conn (0 :: Int)
   where
     loop conn tick = do
         dispatchAll conn

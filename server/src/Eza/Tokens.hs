@@ -8,7 +8,9 @@ module Eza.Tokens (
     createToken,
     listTokens,
     revokeToken,
-    authenticateToken,
+    validateToken,
+    touchToken,
+    tokenActivityDue,
     tokenAllows,
 ) where
 
@@ -28,6 +30,7 @@ data Token = Token
     { tokenId :: Int
     , tokenName :: Text
     , tokenScopes :: [Text]
+    , tokenLastUsedAt :: Maybe Int
     }
     deriving (Show, Eq)
 
@@ -72,21 +75,43 @@ revokeToken conn tokenId = do
         changed <- changes conn
         pure (changed > 0)
 
-authenticateToken :: Connection -> Text -> IO (Maybe Token)
-authenticateToken conn raw = do
+{- | Resolve a bearer token to its row. This is a pure read: the activity
+timestamp is recorded separately by 'touchToken', which the auth guard runs on
+the writer only when 'tokenActivityDue' says the throttle window has passed.
+Revoked tokens never resolve.
+-}
+validateToken :: Connection -> Text -> IO (Maybe Token)
+validateToken conn raw = do
     rows <-
         query
             conn
-            "SELECT id, name, scopes FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL"
+            "SELECT id, name, scopes, last_used_at FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL"
             (Only (hashToken raw)) ::
-            IO [(Int, Text, Text)]
-    case rows of
-        [] -> pure Nothing
-        (tid, name, scopes) : _ -> do
-            now <- epoch
-            withImmediateTransaction conn $
-                execute conn "UPDATE api_tokens SET last_used_at = ? WHERE id = ?" (now, tid)
-            pure (Just (Token tid name (splitScopes scopes)))
+            IO [(Int, Text, Text, Maybe Int)]
+    pure $ case rows of
+        [] -> Nothing
+        (tid, name, scopes, lastUsed) : _ -> Just (Token tid name (splitScopes scopes) lastUsed)
+
+-- | How often one token's activity timestamp is written back at most.
+activityTouchSeconds :: Int
+activityTouchSeconds = 60
+
+{- | True when the stored activity timestamp is missing or older than the
+throttle window, so the caller should record one activity write.
+-}
+tokenActivityDue :: Token -> IO Bool
+tokenActivityDue token = do
+    now <- epoch
+    pure (maybe True (\seen -> now - seen >= activityTouchSeconds) (tokenLastUsedAt token))
+
+{- | Record token activity. Callers throttle this through 'tokenActivityDue'
+and run it on the user database writer.
+-}
+touchToken :: Connection -> Token -> IO ()
+touchToken conn token = do
+    now <- epoch
+    withImmediateTransaction conn $
+        execute conn "UPDATE api_tokens SET last_used_at = ? WHERE id = ?" (now, tokenId token)
 
 tokenAllows :: Token -> Text -> [Text] -> Bool
 tokenAllows token method path =

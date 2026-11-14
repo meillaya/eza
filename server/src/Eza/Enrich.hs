@@ -15,7 +15,7 @@ module Eza.Enrich (
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
-import Control.Exception (SomeException, bracket_, try)
+import Control.Exception (SomeException, bracket, bracket_, try)
 import Control.Monad (forM_, forever)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -221,27 +221,29 @@ so @EZA_ENRICH_WORKERS@ bounds the network work across every account while
 each database still gets its own claimer.
 -}
 runEnrichWorkerFor :: Manager -> Config -> FilePath -> QSem -> IO ()
-runEnrichWorkerFor manager cfg databasePath sem = do
-    conn <- Db.openDb databasePath
-    forever $ do
-        claim <- claimJob conn
-        case claim of
-            Nothing -> threadDelay (2 * 1000000)
-            Just job
-                | jobKind job /= "enrich" -> do
-                    completeJob conn (jobId job)
-                | otherwise ->
-                    case jobBookmarkId job of
-                        Nothing -> completeJob conn (jobId job)
-                        Just bookmarkId -> do
-                            result <-
-                                bracket_ (waitQSem sem) (signalQSem sem) $
-                                    try (enrichBookmark manager cfg conn bookmarkId) ::
-                                    IO (Either SomeException (Either Text ()))
-                            case result of
-                                Left err -> failJob conn (jobId job) (T.pack (show err)) (jobAttempts job)
-                                Right (Left err) -> failJob conn (jobId job) err (jobAttempts job)
-                                Right (Right ()) -> completeJob conn (jobId job)
+runEnrichWorkerFor manager cfg databasePath sem =
+    -- The worker owns this connection for its whole life; cancellation (stop
+    -- or a dead supervisor) runs the closing bracket instead of leaking it.
+    bracket (Db.openDb databasePath) Db.closeDb $ \conn ->
+        forever $ do
+            claim <- claimJob conn
+            case claim of
+                Nothing -> threadDelay (2 * 1000000)
+                Just job
+                    | jobKind job /= "enrich" -> do
+                        completeJob conn (jobId job)
+                    | otherwise ->
+                        case jobBookmarkId job of
+                            Nothing -> completeJob conn (jobId job)
+                            Just bookmarkId -> do
+                                result <-
+                                    bracket_ (waitQSem sem) (signalQSem sem) $
+                                        try (enrichBookmark manager cfg conn bookmarkId) ::
+                                        IO (Either SomeException (Either Text ()))
+                                case result of
+                                    Left err -> failJob conn (jobId job) (T.pack (show err)) (jobAttempts job)
+                                    Right (Left err) -> failJob conn (jobId job) err (jobAttempts job)
+                                    Right (Right ()) -> completeJob conn (jobId job)
 
 newQSemFor :: Config -> IO QSem
 newQSemFor cfg = newQSem (max 1 (cfgEnrichWorkers cfg))
@@ -449,21 +451,22 @@ domain that yields a fresh icon still costs a single fetch regardless of how
 many bookmarks use it.
 -}
 runFaviconWorkerFor :: Manager -> Config -> FilePath -> QSem -> IO ()
-runFaviconWorkerFor manager cfg databasePath sem = do
-    conn <- Db.openDb databasePath
-    repaired <- try (repairStoredFavicons conn) :: IO (Either SomeException ())
-    case repaired of
-        Left err -> hPutStrLn stderr ("eza: favicon repair: " <> show err)
-        Right () -> pure ()
-    forever $ do
-        outcome <-
-            bracket_ (waitQSem sem) (signalQSem sem) $
-                try (backfillFaviconStep manager cfg conn) ::
-                IO (Either SomeException Bool)
-        case outcome of
-            Left err -> hPutStrLn stderr ("eza: favicon worker: " <> show err)
-            Right _ -> pure ()
-        threadDelay $
+runFaviconWorkerFor manager cfg databasePath sem =
+    -- One connection for the loop, closed when the worker is cancelled.
+    bracket (Db.openDb databasePath) Db.closeDb $ \conn -> do
+        repaired <- try (repairStoredFavicons conn) :: IO (Either SomeException ())
+        case repaired of
+            Left err -> hPutStrLn stderr ("eza: favicon repair: " <> show err)
+            Right () -> pure ()
+        forever $ do
+            outcome <-
+                bracket_ (waitQSem sem) (signalQSem sem) $
+                    try (backfillFaviconStep manager cfg conn) ::
+                    IO (Either SomeException Bool)
             case outcome of
-                Right True -> 250 * 1000
-                _ -> 2 * 1000 * 1000
+                Left err -> hPutStrLn stderr ("eza: favicon worker: " <> show err)
+                Right _ -> pure ()
+            threadDelay $
+                case outcome of
+                    Right True -> 250 * 1000
+                    _ -> 2 * 1000 * 1000

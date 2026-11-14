@@ -50,6 +50,7 @@ library
                     Eza.Import
                     Eza.JsonExport
                     Eza.Jobs
+                    Eza.Library
                     Eza.Links
                     Eza.Pages
                     Eza.Password
@@ -131,6 +132,7 @@ test-suite eza-test
                     ContractSpec
                     IsolationSpec
                     LedgerSpec
+                    LibrarySpec
                     OriginGuardSpec
                     TestHarness
                     WorkerSpec

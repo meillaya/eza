@@ -59,7 +59,10 @@ module Eza.Auth (
     verifyAddPasskey,
     completePendingLogin,
     createSession,
+    validateSession,
     getSession,
+    touchSession,
+    sessionActivityDue,
     listSessions,
     deleteSession,
     deleteSessionHash,
@@ -130,6 +133,7 @@ data Session = Session
     , sessCsrf :: Text
     , sessScope :: Text
     , sessExpiresAt :: Int
+    , sessLastSeenAt :: Maybe Int
     }
     deriving (Show, Eq)
 
@@ -902,12 +906,13 @@ completePendingLogin conn ac pending
         deleteSessionHash conn (sessId pending)
         pure (Right sess)
 
-{- | Resolve a cookie token to a live session. The write that records activity
-is throttled to once a minute so a busy browser does not turn every request
-into a database write.
+{- | Resolve a cookie token to a live session. This is a pure read: the
+activity timestamp is recorded separately by 'touchSession', which the auth
+guard calls on the connection's writer only when 'sessionActivityDue' says the
+throttle window has passed. That keeps the common GET path free of writes.
 -}
-getSession :: Connection -> Text -> IO (Maybe Session)
-getSession conn rawToken
+validateSession :: Connection -> Text -> IO (Maybe Session)
+validateSession conn rawToken
     | T.null rawToken = pure Nothing
     | otherwise = do
         now <- epoch
@@ -917,15 +922,39 @@ getSession conn rawToken
                 "SELECT csrf_hash,scope,expires_at,last_seen_at FROM sessions WHERE id = ?"
                 (Only (hashToken rawToken)) ::
                 IO [(Text, Text, Int, Maybe Int)]
-        case rows of
-            [] -> pure Nothing
+        pure $ case rows of
             ((csrfHash, scope, expires, lastSeen) : _)
-                | expires <= now -> pure Nothing
-                | otherwise -> do
-                    when (maybe True (\seen -> now - seen >= 60) lastSeen) $
-                        withImmediateTransaction conn $
-                            execute conn "UPDATE sessions SET last_seen_at = ? WHERE id = ?" (now, hashToken rawToken)
-                    pure (Just (Session (hashToken rawToken) csrfHash scope expires))
+                | expires > now ->
+                    Just (Session (hashToken rawToken) csrfHash scope expires lastSeen)
+            _ -> Nothing
+
+{- | Kept for callers that only need the session row; identical to the
+read-only 'validateSession'.
+-}
+getSession :: Connection -> Text -> IO (Maybe Session)
+getSession = validateSession
+
+-- | How often one session's activity timestamp is written back at most.
+activityTouchSeconds :: Int
+activityTouchSeconds = 60
+
+{- | True when the stored activity timestamp is missing or older than the
+throttle window, so the caller should record one activity write. This is a
+read of the in-memory session value plus the clock, never a database access.
+-}
+sessionActivityDue :: Session -> IO Bool
+sessionActivityDue sess = do
+    now <- epoch
+    pure (maybe True (\seen -> now - seen >= activityTouchSeconds) (sessLastSeenAt sess))
+
+{- | Record session activity. Callers throttle this through
+'sessionActivityDue' and run it on the user database writer.
+-}
+touchSession :: Connection -> Session -> IO ()
+touchSession conn sess = do
+    now <- epoch
+    withImmediateTransaction conn $
+        execute conn "UPDATE sessions SET last_seen_at = ? WHERE id = ?" (now, sessId sess)
 
 deleteSession :: Connection -> Text -> IO ()
 deleteSession conn rawToken =
