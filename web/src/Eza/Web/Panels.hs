@@ -2106,37 +2106,60 @@ aiBanner :: Model -> View () () Model Action
 aiBanner m =
     H.div_
         [HP.class_ "ai-banner", testId "ai-banner"]
-        ( case mAiStatus m of
-            Nothing ->
-                [ H.p_
-                    [HP.class_ "ai-banner-lead read"]
-                    [text "The provider status has not loaded."]
-                , H.div_
-                    [HP.class_ "ai-tools"]
-                    [ H.button_
-                        [ HP.class_ "btn btn--sm"
-                        , HP.type_ "button"
-                        , HP.data_ "testid" "ai-status-retry"
-                        , HE.onClick AiStatusReload
+        ( aiStatusErrorViews m
+            ++ case mAiStatus m of
+                Nothing ->
+                    [ H.p_
+                        [HP.class_ "ai-banner-lead read"]
+                        [text "The provider status has not loaded."]
+                    , H.div_
+                        [HP.class_ "ai-tools"]
+                        [ H.button_
+                            [ HP.class_ "btn btn--sm"
+                            , HP.type_ "button"
+                            , HP.data_ "testid" "ai-status-retry"
+                            , HE.onClick AiStatusReload
+                            ]
+                            [text "read the provider status"]
                         ]
-                        [text "read the provider status"]
                     ]
-                ]
-            Just status ->
-                [ H.p_
-                    [HP.class_ "ai-banner-lead read"]
-                    ( if asConfigured status
-                        then
-                            [ H.strong_ [] [text "A tag provider is configured."]
-                            , text " Nothing is written until you apply a suggestion."
-                            ]
-                        else
-                            [ H.strong_ [] [text "No tag provider is configured."]
-                            , text " Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or EZA_AI_PROVIDER=ollama to enable suggestions."
-                            ]
-                    )
-                ]
+                Just status ->
+                    [ H.p_
+                        [HP.class_ "ai-banner-lead read"]
+                        ( if asConfigured status
+                            then
+                                [ H.strong_ [] [text "A tag provider is configured."]
+                                , text " Nothing is written until you apply a suggestion."
+                                ]
+                            else
+                                [ H.strong_ [] [text "No tag provider is configured."]
+                                , text " Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or EZA_AI_PROVIDER=ollama to enable suggestions."
+                                ]
+                        )
+                    ]
         )
+
+{- | A failed provider-status read: the banner says so and offers a retry
+instead of silently showing stale (or no) provider information.
+-}
+aiStatusErrorViews :: Model -> [View () () Model Action]
+aiStatusErrorViews m = case mAiStatusError m of
+    Nothing -> []
+    Just message ->
+        [ H.p_
+            [HP.class_ "ai-banner-lead read", HP.role_ "status"]
+            [text (ms ("The provider status could not be read: " <> T.unpack message))]
+        , H.div_
+            [HP.class_ "ai-tools"]
+            [ H.button_
+                [ HP.class_ "btn btn--sm"
+                , HP.type_ "button"
+                , HP.data_ "testid" "ai-status-retry"
+                , HE.onClick AiStatusReload
+                ]
+                [text "try again"]
+            ]
+        ]
 
 suggestionSection :: Model -> [View () () Model Action]
 suggestionSection m =
@@ -2209,7 +2232,7 @@ suggestionBody m
                                     , H.th_ [HP.class_ "r"] [text "action"]
                                     ]
                                 ]
-                            , H.tbody_ [] (map suggestionRow (mSuggestions m))
+                            , H.tbody_ [] (map (suggestionRow m) (mSuggestions m))
                             ]
                         ]
                    ]
@@ -2221,8 +2244,8 @@ noSuggestionsText m
     | Just status <- mAiStatus m, not (asConfigured status) = "No suggestions."
     | otherwise = "No suggestions for this bucket."
 
-suggestionRow :: TagSuggestion -> View () () Model Action
-suggestionRow suggestion =
+suggestionRow :: Model -> TagSuggestion -> View () () Model Action
+suggestionRow m suggestion =
     H.tr_
         [key_ (bsId bookmark)]
         [ H.td_ [HP.class_ "ai-acc mono"] [text (accno (bsId bookmark))]
@@ -2247,7 +2270,10 @@ suggestionRow suggestion =
             else [H.span_ [HP.class_ "ai-reason meta"] [text (ms (tsgReason suggestion))]]
     suggestedTag tag = H.span_ [HP.class_ "tagpill tagpill--sug"] [text (ms tag)]
     actionCell =
-        strongAction "apply" [] (SuggestionApply (bsId bookmark) (tsgTags suggestion))
+        strongAction
+            (if mSuggestionApplyBusy m then "applying…" else "apply")
+            (attrDisabled (mSuggestionApplyBusy m))
+            (SuggestionApply (bsId bookmark) (tsgTags suggestion))
 
 -- ============================================================ maintenance ===
 
@@ -3261,6 +3287,12 @@ webhookRecord m webhook =
 
 webhookTestNote :: Model -> Int -> [View () () Model Action]
 webhookTestNote m webhookId
+    | Just (id_, message) <- mWebhookTestError m
+    , id_ == webhookId =
+        [ H.p_
+            [HP.class_ "account-record-meta meta webhook-test-result is-error", HP.role_ "status"]
+            [text (ms ("the test failed · " <> T.unpack message))]
+        ]
     | mWebhookTestBusy m =
         [ H.p_
             [HP.class_ "account-record-meta meta webhook-test-result", HP.role_ "status"]

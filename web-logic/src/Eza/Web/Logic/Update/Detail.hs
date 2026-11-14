@@ -112,7 +112,7 @@ reloadDetail bookmarkId = do
     m <- get
     let epoch = nextRequestId (mDetailEpoch m)
     put
-        m{gDetail = (gDetail m){dtDetail = Nothing, dtDetailLoading = True, dtDetailError = Nothing, dtDetailEpoch = epoch, dtReadRequest = nextRequestId (mReadRequest m), dtReadPending = False, dtEditTitle = "", dtEditNote = "", dtEditTags = [], dtNewTag = "", dtDirty = False, dtExtractEditing = False, dtExtractDraft = "", dtExtractDirty = False, dtExtractSaving = False, dtNoteMode = NoteWrite, dtLinkQuery = Nothing, dtLinkResults = [], dtBacklinks = [], dtHighlights = [], dtHighlightsLoading = True, dtReaderSel = Nothing, dtHighlightNoteOpen = False, dtHighlightNote = "", dtHighlightEdit = Nothing, dtSnapshotOpen = False}, gShares = (gShares m){srShareDialogOpen = False, srShareUrl = Nothing}, gLedger = (gLedger m){lfConfirmDelete = Nothing}}
+        m{gDetail = (gDetail m){dtDetail = Nothing, dtDetailLoading = True, dtDetailError = Nothing, dtDetailEpoch = epoch, dtReadRequest = nextRequestId (mReadRequest m), dtReadPending = False, dtEditTitle = "", dtEditNote = "", dtEditTags = [], dtNewTag = "", dtDirty = False, dtExtractEditing = False, dtExtractDraft = "", dtExtractDirty = False, dtExtractSaving = False, dtNoteMode = NoteWrite, dtLinkQuery = Nothing, dtLinkResults = [], dtBacklinks = [], dtHighlights = [], dtReaderSel = Nothing, dtHighlightNoteOpen = False, dtHighlightNote = "", dtHighlightEdit = Nothing, dtSnapshotOpen = False}, gShares = (gShares m){srShareDialogOpen = False, srShareUrl = Nothing}, gLedger = (gLedger m){lfConfirmDelete = Nothing}}
     fetchDetail bookmarkId (DetailLoaded epoch) (DetailFailed epoch)
     fetchBacklinks bookmarkId (BacklinksLoaded epoch) (BacklinksFailed epoch)
     fetchHighlights bookmarkId (HighlightsLoaded epoch) (HighlightsFailed epoch)
@@ -356,7 +356,6 @@ handle = \case
                     | otherwise -> dispatch (DetailReload (bdId detail))
                 Nothing -> pure ()
             handleApiError err
-    OpenToggled -> pure ()
     BacklinksLoaded epoch links -> sameEpoch epoch $ do
         m <- get
         case mRoute m of
@@ -381,18 +380,17 @@ handle = \case
                 setNoteCursor newCursor
     LinkSuggestions suggestions -> putModel (\m -> m{gDetail = (gDetail m){dtLinkResults = suggestions, dtLinkSel = 0}})
     RunBookmarkAction bookmarkId "snapshot" -> do
-        putModel (\m -> m{gDetail = (gDetail m){dtSnapshotBusy = True}})
+        putModel (\m -> m{gDetail = (gDetail m){dtSnapshotBusy = True, dtSnapshotViewerFailed = False}})
         notify "Capturing a snapshot…" ToastInfo
         createSnapshotJob
             bookmarkId
             (SnapshotJobQueued bookmarkId)
             (\err -> SnapshotJobFailed bookmarkId (Just (aeMessage err)))
     RunBookmarkAction bookmarkId verb -> bookmarkAction bookmarkId verb (ToastAdd ((T.toTitle verb <> " queued")) ToastOk) (\err -> ApiErrorRaised err)
-    SnapshotJobQueued bookmarkId jobId -> do
-        putModel (\m -> m{gDetail = (gDetail m){dtSnapshotJob = Just jobId}})
+    SnapshotJobQueued bookmarkId jobId ->
         dispatch (JobStarted (SnapshotJob bookmarkId) jobId)
     SnapshotJobDone bookmarkId result -> do
-        putModel (\m -> m{gDetail = (gDetail m){dtSnapshotBusy = False, dtSnapshotJob = Nothing}})
+        putModel (\m -> m{gDetail = (gDetail m){dtSnapshotBusy = False, dtSnapshotViewerFailed = False}})
         case result of
             Nothing -> notify "The snapshot job returned no result." ToastError
             Just value -> case decodeSnapshotJobResult value of
@@ -401,10 +399,10 @@ handle = \case
                     notify "Snapshot captured" ToastOk
                     dispatch (DetailReload bookmarkId)
     SnapshotJobFailed _ message -> do
-        putModel (\m -> m{gDetail = (gDetail m){dtSnapshotBusy = False, dtSnapshotJob = Nothing}})
+        putModel (\m -> m{gDetail = (gDetail m){dtSnapshotBusy = False}})
         notify (fromMaybe "The snapshot capture failed." message) ToastError
     SnapshotJobAbandoned _ ->
-        putModel (\m -> m{gDetail = (gDetail m){dtSnapshotBusy = False, dtSnapshotJob = Nothing}})
+        putModel (\m -> m{gDetail = (gDetail m){dtSnapshotBusy = False}})
     DeleteBookmarkRequest bookmarkId -> do
         m <- get
         case currentDetail m of
@@ -459,11 +457,9 @@ handle = \case
     HighlightsLoaded epoch highlights -> sameEpoch epoch $ do
         m <- get
         case mRoute m of
-            Bookmark _ -> putModel (\x -> x{gDetail = (gDetail x){dtHighlights = highlights, dtHighlightsLoading = False}})
+            Bookmark _ -> putModel (\x -> x{gDetail = (gDetail x){dtHighlights = highlights}})
             _ -> pure ()
-    HighlightsFailed epoch err -> sameEpoch epoch $ do
-        putModel (\m -> m{gDetail = (gDetail m){dtHighlightsLoading = False}})
-        handleApiError err
+    HighlightsFailed epoch err -> sameEpoch epoch (handleApiError err)
     ReaderMouseUp -> readReaderSelection
     ReaderSelectionFound selection -> putModel (\m -> m{gDetail = (gDetail m){dtReaderSel = selection}})
     ReaderSelectionClear -> putModel (\m -> m{gDetail = (gDetail m){dtReaderSel = Nothing}})
@@ -593,13 +589,22 @@ handle = \case
         putModel (\m -> m{gShares = (gShares m){srShareBusy = False}})
         handleApiError err
     ShareCopy url -> copyText ((url :: Text)) "Share link copied" "Copy failed. Select the text instead"
-    ShareRevoke shareId -> revokeShareLink shareId ShareRevoked ShareCreateFailed
+    ShareRevoke shareId -> do
+        m <- get
+        if mShareBusy m
+            then pure ()
+            else do
+                putModel (\x -> x{gShares = (gShares x){srShareBusy = True}})
+                revokeShareLink shareId ShareRevoked ShareCreateFailed
     ShareRevoked -> do
+        putModel (\m -> m{gShares = (gShares m){srShareBusy = False}})
         notify "Share link revoked" ToastOk
         refreshShares
         refreshStats
     -- snapshot -------------------------------------------------------------
-    SnapshotOpen -> putModel (\m -> m{gDetail = (gDetail m){dtSnapshotOpen = True}})
-    SnapshotClose -> putModel (\m -> m{gDetail = (gDetail m){dtSnapshotOpen = False}})
+    SnapshotOpen -> putModel (\m -> m{gDetail = (gDetail m){dtSnapshotOpen = True, dtSnapshotViewerFailed = False}})
+    SnapshotClose -> putModel (\m -> m{gDetail = (gDetail m){dtSnapshotOpen = False, dtSnapshotViewerFailed = False}})
+    SnapshotViewerFailed -> putModel (\m -> m{gDetail = (gDetail m){dtSnapshotViewerFailed = True}})
+    SnapshotViewerRetry -> putModel (\m -> m{gDetail = (gDetail m){dtSnapshotViewerFailed = False}})
     -- ai status ------------------------------------------------------------
     _ -> pure ()

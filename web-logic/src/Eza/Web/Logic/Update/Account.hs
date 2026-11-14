@@ -436,9 +436,9 @@ handle = \case
         putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookTestBusy = False}})
         case result of
             Nothing ->
-                putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookTestError = Just "The webhook test returned no result."}})
+                putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookTestError = Just (webhookId, "The webhook test returned no result.")}})
             Just value -> case decodeWebhookTestJobResult value of
-                Left err -> putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookTestError = Just (aeMessage err)}})
+                Left err -> putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookTestError = Just (webhookId, aeMessage err)}})
                 Right report ->
                     putModel
                         ( \m ->
@@ -457,13 +457,13 @@ handle = \case
                                         }
                                 }
                         )
-    WebhookTestJobFailed _ message ->
+    WebhookTestJobFailed webhookId message ->
         putModel
             ( \m ->
-                m{gWebhooks = (gWebhooks m){wkWebhookTestBusy = False, wkWebhookTest = Nothing, wkWebhookTestError = Just (fromMaybe "The webhook test failed." message)}}
+                m{gWebhooks = (gWebhooks m){wkWebhookTestBusy = False, wkWebhookTest = Nothing, wkWebhookTestError = Just (webhookId, fromMaybe "The webhook test failed." message)}}
             )
-    WebhookTestJobAbandoned _ ->
-        putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookTestBusy = False, wkWebhookTestError = Nothing}})
+    WebhookTestJobAbandoned webhookId ->
+        putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookTestBusy = False, wkWebhookTestError = Just (webhookId, "The webhook test was cancelled.")}})
     WebhookDelete webhookId ->
         deleteWebhook webhookId (WebhookDeleted webhookId) WebhookDeleteFailed
     WebhookDeleted webhookId -> do

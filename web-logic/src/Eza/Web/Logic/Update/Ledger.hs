@@ -6,6 +6,7 @@ module Eza.Web.Logic.Update.Ledger (handle) where
 
 import Control.Monad
 import qualified Data.IntSet as IS
+import Data.Maybe (isNothing)
 import qualified Data.Text as T
 import Eza.Web.Logic.Effect (nextRequestId, requestIsCurrent)
 
@@ -119,9 +120,14 @@ handle = \case
     SavedSearchDone -> do
         notify "Saved searches updated" ToastOk
         putModel (\m -> m{gLedger = (gLedger m){lfSavedName = ""}})
-        fetchSavedSearches SavedSearchesLoaded (\_ -> Noop)
+        fetchSavedSearches SavedSearchesLoaded SavedSearchesRefreshFailed
     SavedSearchFailed err -> handleApiError err
-    SavedSearchesLoaded saved -> putModel (\m -> m{gLedger = (gLedger m){lfSaved = saved}})
+    SavedSearchesLoaded saved ->
+        putModel (\m -> m{gLedger = (gLedger m){lfSaved = saved, lfSavedSearchesError = Nothing}})
+    SavedSearchesRefreshFailed err -> do
+        m <- get
+        when (isNothing (mSavedSearchesError m)) (notify "Saved searches could not be refreshed." ToastError)
+        putModel (\x -> x{gLedger = (gLedger x){lfSavedSearchesError = Just (aeMessage err)}})
     SavedSearchShareOpen saved -> do
         m <- get
         let epoch = mDetailEpoch m

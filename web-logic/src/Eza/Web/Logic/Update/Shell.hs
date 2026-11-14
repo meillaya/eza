@@ -317,7 +317,6 @@ handle = \case
             ( \m ->
                 m{gShell = (gShell m){sfBootReady = True, sfBlockingError = Just (wireVersionMismatchMessage serverVersion)}}
             )
-    ApiUnauthorized -> putModel (\m -> m{gShell = (gShell m){sfSignedOut = True}})
     ApiErrorRaised err -> handleApiError err
     ReloadRoute -> reloadRoute
     LedgerCursorNext -> moveCursor 1

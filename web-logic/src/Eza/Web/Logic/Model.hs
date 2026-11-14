@@ -268,7 +268,6 @@ data Action
     | BootFailed ApiError
     | -- a boot document built for another wire contract: block the UI
       WireVersionMismatch Int
-    | ApiUnauthorized
     | ApiErrorRaised ApiError
     | ThemeLoaded Theme
     | ConnectivityChanged Bool
@@ -343,7 +342,6 @@ data Action
     | ReadToggled
     | ReadPatched RequestId Bool
     | ReadPatchFailed RequestId Bool ApiError
-    | OpenToggled
     | BacklinksLoaded RequestId [Backlink]
     | BacklinksFailed RequestId ApiError
     | LinkPrev
@@ -369,6 +367,7 @@ data Action
     | SavedSearchDone
     | SavedSearchFailed ApiError
     | SavedSearchesLoaded [SavedSearch]
+    | SavedSearchesRefreshFailed ApiError
     | SavedSearchShareOpen SavedSearch
     | SavedSearchShareClose
     | SavedSearchShareCreate
@@ -611,6 +610,8 @@ data Action
     | SnapshotJobFailed Int (Maybe Text)
     | SnapshotJobAbandoned Int
     | SnapshotClose
+    | SnapshotViewerFailed
+    | SnapshotViewerRetry
     | -- ai status
       AiStatusLoaded AiStatus
     | AiStatusFailed ApiError
@@ -781,6 +782,7 @@ data LedgerFields = LedgerFields
     , lfSaved :: [SavedSearch]
     , lfSavedName :: Text
     , lfSavedShare :: Maybe SavedSearch
+    , lfSavedSearchesError :: Maybe Text
     , -- selection / bulk
       lfSelection :: IS.IntSet
     , lfSelectAnchor :: Maybe Int
@@ -828,7 +830,6 @@ data DetailFields = DetailFields
     , dtLinkSel :: Int
     , dtBacklinks :: [Backlink]
     , dtHighlights :: [Highlight]
-    , dtHighlightsLoading :: Bool
     , dtReaderSel :: Maybe ReaderSelection
     , dtHighlightNoteOpen :: Bool
     , dtHighlightNote :: Text
@@ -846,7 +847,7 @@ data DetailFields = DetailFields
     , -- snapshot capture in flight: busy while the enqueue/poll runs, and the
       -- job id once the server accepted it
       dtSnapshotBusy :: Bool
-    , dtSnapshotJob :: Maybe Int
+    , dtSnapshotViewerFailed :: Bool
     }
     deriving (Eq)
 
@@ -923,6 +924,8 @@ data TagsFields = TagsFields
     , tgSuggestionsLoading :: Bool
     , tgSuggestionNotice :: Maybe Text
     , tgSuggestionError :: Maybe Text
+    , tgAiStatusError :: Maybe Text
+    , tgSuggestionApplyBusy :: Bool
     }
     deriving (Eq)
 
@@ -1045,7 +1048,7 @@ data WebhookFields = WebhookFields
     , wkWebhookFormError :: Maybe Text
     , wkWebhookBusy :: Bool
     , wkWebhookTest :: Maybe (Int, WebhookTest)
-    , wkWebhookTestError :: Maybe Text
+    , wkWebhookTestError :: Maybe (Int, Text)
     , wkWebhookDeliveries :: Maybe (Int, [DeliveryView])
     , wkWebhookDeliveriesError :: Maybe Text
     , wkWebhookTestBusy :: Bool
@@ -1161,6 +1164,7 @@ initialModel =
                 , lfSaved = []
                 , lfSavedName = ""
                 , lfSavedShare = Nothing
+                , lfSavedSearchesError = Nothing
                 , lfSelection = IS.empty
                 , lfSelectAnchor = Nothing
                 , lfSelectingAll = False
@@ -1194,7 +1198,6 @@ initialModel =
                 , dtLinkSel = 0
                 , dtBacklinks = []
                 , dtHighlights = []
-                , dtHighlightsLoading = False
                 , dtReaderSel = Nothing
                 , dtHighlightNoteOpen = False
                 , dtHighlightNote = ""
@@ -1209,7 +1212,7 @@ initialModel =
                 , dtExtractDirty = False
                 , dtExtractSaving = False
                 , dtSnapshotBusy = False
-                , dtSnapshotJob = Nothing
+                , dtSnapshotViewerFailed = False
                 }
         , gGraph =
             GraphFields
@@ -1272,6 +1275,8 @@ initialModel =
                 , tgSuggestionsLoading = False
                 , tgSuggestionNotice = Nothing
                 , tgSuggestionError = Nothing
+                , tgAiStatusError = Nothing
+                , tgSuggestionApplyBusy = False
                 }
         , gDedup =
             DedupFields
@@ -1783,10 +1788,6 @@ mBacklinks model = dtBacklinks (gDetail model)
 {-# INLINE mHighlights #-}
 mHighlights :: Model -> [Highlight]
 mHighlights model = dtHighlights (gDetail model)
-
-{-# INLINE mHighlightsLoading #-}
-mHighlightsLoading :: Model -> Bool
-mHighlightsLoading model = dtHighlightsLoading (gDetail model)
 
 {-# INLINE mReaderSel #-}
 mReaderSel :: Model -> Maybe ReaderSelection
@@ -2325,7 +2326,7 @@ mWebhookTest :: Model -> Maybe (Int, WebhookTest)
 mWebhookTest model = wkWebhookTest (gWebhooks model)
 
 {-# INLINE mWebhookTestError #-}
-mWebhookTestError :: Model -> Maybe Text
+mWebhookTestError :: Model -> Maybe (Int, Text)
 mWebhookTestError model = wkWebhookTestError (gWebhooks model)
 
 {-# INLINE mWebhookDeliveries #-}
@@ -2455,10 +2456,6 @@ mJobRequestNext model = jbJobRequestNext (gJobs model)
 {-# INLINE mSnapshotBusy #-}
 mSnapshotBusy :: Model -> Bool
 mSnapshotBusy model = dtSnapshotBusy (gDetail model)
-
-{-# INLINE mSnapshotJob #-}
-mSnapshotJob :: Model -> Maybe Int
-mSnapshotJob model = dtSnapshotJob (gDetail model)
 
 {-# INLINE mWebhookTestBusy #-}
 mWebhookTestBusy :: Model -> Bool
@@ -2662,3 +2659,19 @@ sortLabel = \case
 -- | Keeps the detail DTO in the import graph for the model record field type.
 _unusedBookmarkDetail :: BookmarkDetail -> Text
 _unusedBookmarkDetail _ = ""
+
+{-# INLINE mSnapshotViewerFailed #-}
+mSnapshotViewerFailed :: Model -> Bool
+mSnapshotViewerFailed model = dtSnapshotViewerFailed (gDetail model)
+
+{-# INLINE mAiStatusError #-}
+mAiStatusError :: Model -> Maybe Text
+mAiStatusError model = tgAiStatusError (gTags model)
+
+{-# INLINE mSuggestionApplyBusy #-}
+mSuggestionApplyBusy :: Model -> Bool
+mSuggestionApplyBusy model = tgSuggestionApplyBusy (gTags model)
+
+{-# INLINE mSavedSearchesError #-}
+mSavedSearchesError :: Model -> Maybe Text
+mSavedSearchesError model = lfSavedSearchesError (gLedger model)

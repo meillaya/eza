@@ -121,7 +121,9 @@ handle = \case
     AiSuggestionsJobFailed message ->
         putModel (\m -> m{gTags = (gTags m){tgSuggestionsLoading = False, tgSuggestionError = Just (fromMaybe "The suggestion job failed." message)}})
     AiSuggestionsJobAbandoned -> putModel (\m -> m{gTags = (gTags m){tgSuggestionsLoading = False}})
-    AiStatusReload -> fetchAiStatus AiStatusLoaded AiStatusFailed
+    AiStatusReload -> do
+        putModel (\m -> m{gTags = (gTags m){tgAiStatusError = Nothing}})
+        fetchAiStatus AiStatusLoaded AiStatusFailed
     AiSuggestRetry -> do
         m <- get
         putModel (\x -> x{gTags = (gTags x){tgSuggestionsLoading = True, tgSuggestionError = Nothing, tgSuggestionNotice = Nothing}})
@@ -131,12 +133,18 @@ handle = \case
             ( \m ->
                 m{gTags = (gTags m){tgSuggestions = [], tgSuggestionsLoading = False, tgSuggestionNotice = Nothing, tgSuggestionError = Nothing}}
             )
-    SuggestionApply bookmarkId tags ->
-        applyTagSuggestion bookmarkId tags SuggestionsApplied (\err -> SuggestionApplyFailed err)
+    SuggestionApply bookmarkId tags -> do
+        m <- get
+        if mSuggestionApplyBusy m
+            then pure ()
+            else do
+                putModel (\x -> x{gTags = (gTags x){tgSuggestionApplyBusy = True}})
+                applyTagSuggestion bookmarkId tags SuggestionsApplied (\err -> SuggestionApplyFailed err)
     SuggestionApplyFailed err -> do
-        putModel (\m -> m{gTags = (gTags m){tgSuggestionError = Just (aeMessage err)}})
+        putModel (\m -> m{gTags = (gTags m){tgSuggestionApplyBusy = False, tgSuggestionError = Just (aeMessage err)}})
         when (aeStatus err == Just 401) (handleApiError err)
     SuggestionsApplied -> do
+        putModel (\m -> m{gTags = (gTags m){tgSuggestionApplyBusy = False}})
         notify "Tags applied" ToastOk
         refreshTags
         refreshStats
@@ -144,7 +152,7 @@ handle = \case
         putModel (\x -> x{gTags = (gTags x){tgSuggestionsLoading = True, tgSuggestionError = Nothing, tgSuggestionNotice = Nothing}})
         createAiSuggestionsJob (mAiTag m) (AiSuggestionsJobQueued (mAiTag m)) (\err -> AiSuggestionsJobFailed (Just (aeMessage err)))
     -- maintenance ----------------------------------------------------------
-    AiStatusLoaded status -> putModel (\m -> m{gTags = (gTags m){tgAiStatus = Just status}})
-    AiStatusFailed _ -> pure ()
+    AiStatusLoaded status -> putModel (\m -> m{gTags = (gTags m){tgAiStatus = Just status, tgAiStatusError = Nothing}})
+    AiStatusFailed err -> putModel (\m -> m{gTags = (gTags m){tgAiStatusError = Just (aeMessage err)}})
     -- rules ----------------------------------------------------------------
     _ -> pure ()

@@ -98,7 +98,6 @@ jobSpec = describe "M4-D job polling" $ do
             effectsOf effects `shouldSatisfy` any (isInfixOf "ApiRequest ApiTestWebhook 3")
         it "queuing records the poll and schedules the first tick" $ do
             let (model, effects) = run (SnapshotJobQueued 7 42)
-            mSnapshotJob model `shouldBe` Just 42
             IM.keys (jobPolls model) `shouldBe` [42]
             case effects of
                 [OpScheduleAction delay (JobTick (SnapshotJob 7) 42 (TimerId 1))] ->
@@ -147,7 +146,6 @@ jobSpec = describe "M4-D job polling" $ do
                 (model2, effects2) = update model (JobStatusLoaded (SnapshotJob 7) 42 requestId (doneWith result))
             IM.keys (jobPolls model2) `shouldBe` []
             mSnapshotBusy model2 `shouldBe` False
-            mSnapshotJob model2 `shouldBe` Nothing
             effectsOf effects2 `shouldSatisfy` any (isInfixOf "OpScheduleAction")
         it "a failed snapshot shows the error and clears the busy state" $ do
             let (model, requestId) = startSnapshot

@@ -7,6 +7,7 @@ import HelperSpec (helperSpec)
 import JobSpec (jobSpec)
 import LedgerSpec (ledgerSpec)
 import ModelSpec (modelSpec)
+import PolishSpec (polishSpec)
 import PuritySpec (puritySpec)
 import RouteSpec (routeSpec)
 import UpdateSpec (updateSpec)
@@ -18,6 +19,7 @@ main = hspec $ do
     apiSpec
     ledgerSpec
     modelSpec
+    polishSpec
     updateSpec
     jobSpec
     viewSpec

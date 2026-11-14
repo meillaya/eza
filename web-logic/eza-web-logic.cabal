@@ -73,6 +73,7 @@ test-suite eza-web-logic-test
                     UpdateSpec
                     ViewSpec
                     PuritySpec
+                    PolishSpec
                     RouteSpec
   build-depends:    base >=4.18 && <5
                   , aeson

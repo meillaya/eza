@@ -53,7 +53,6 @@ dispatchAll action = case action of
     BootLoaded{} -> Shell.handle action
     BootFailed{} -> Shell.handle action
     WireVersionMismatch{} -> Shell.handle action
-    ApiUnauthorized{} -> Shell.handle action
     ApiErrorRaised{} -> Shell.handle action
     ThemeLoaded{} -> Shell.handle action
     ConnectivityChanged{} -> Shell.handle action
@@ -123,7 +122,6 @@ dispatchAll action = case action of
     ReadToggled{} -> Detail.handle action
     ReadPatched{} -> Detail.handle action
     ReadPatchFailed{} -> Detail.handle action
-    OpenToggled{} -> Detail.handle action
     BacklinksLoaded{} -> Detail.handle action
     BacklinksFailed{} -> Detail.handle action
     LinkPrev{} -> Detail.handle action
@@ -147,6 +145,7 @@ dispatchAll action = case action of
     SavedSearchDone{} -> Ledger.handle action
     SavedSearchFailed{} -> Ledger.handle action
     SavedSearchesLoaded{} -> Ledger.handle action
+    SavedSearchesRefreshFailed{} -> Ledger.handle action
     SavedSearchShareOpen{} -> Ledger.handle action
     SavedSearchShareClose{} -> Ledger.handle action
     SavedSearchShareCreate{} -> Ledger.handle action
@@ -376,6 +375,8 @@ dispatchAll action = case action of
     SnapshotJobFailed{} -> Detail.handle action
     SnapshotJobAbandoned{} -> Detail.handle action
     SnapshotClose{} -> Detail.handle action
+    SnapshotViewerFailed{} -> Detail.handle action
+    SnapshotViewerRetry{} -> Detail.handle action
     AiStatusLoaded{} -> Tags.handle action
     AiStatusFailed{} -> Tags.handle action
     AdminUsersLoaded{} -> Account.handle action

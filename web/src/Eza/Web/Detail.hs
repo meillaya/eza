@@ -1090,11 +1090,13 @@ shareLinksSection m detail
                 [HP.class_ "dshare-link-expiry meta"]
                 [text (ms ("expires " <> prose (ms (formatFiled (svExpiresAt share)))))]
             , H.button_
-                [ HP.class_ "btn btn--sm"
-                , HP.data_ "testid" "share-revoke"
-                , HP.type_ "button"
-                , HE.onClick (ShareRevoke (svId share))
-                ]
+                ( [ HP.class_ "btn btn--sm"
+                  , HP.data_ "testid" "share-revoke"
+                  , HP.type_ "button"
+                  , HE.onClick (ShareRevoke (svId share))
+                  ]
+                    ++ disabledAttr (mShareBusy m)
+                )
                 [text "revoke"]
             ]
 
@@ -1340,15 +1342,7 @@ snapshotDialog m detail
                     ]
                 , H.div_
                     [HP.class_ "dialog__body"]
-                    [ H.iframe_
-                        [ HP.class_ "snapshot-frame"
-                        , HP.data_ "testid" "snapshot-frame"
-                        , HP.src_ (snapshotUrl detail)
-                        , HP.title_ "Saved snapshot"
-                        , HP.sandbox_ ""
-                        ]
-                        []
-                    ]
+                    [snapshotViewer m detail]
                 , H.div_
                     [HP.class_ "dialog__foot"]
                     [ H.a_
@@ -1360,11 +1354,67 @@ snapshotDialog m detail
                         [text "open in a new tab"]
                     , H.span_ [HP.class_ "spacer"] []
                     , H.button_
+                        ( [ HP.class_ "btn"
+                          , HP.type_ "button"
+                          , HP.data_ "testid" "snapshot-recapture"
+                          , HE.onClick (RunBookmarkAction (bdId detail) "snapshot")
+                          ]
+                            ++ disabledAttr (mSnapshotBusy m)
+                        )
+                        [text (if mSnapshotBusy m then "capturing…" else "capture again")]
+                    , H.button_
                         [HP.class_ "btn btn--strong", HE.onClick SnapshotClose]
                         [text "done"]
                     ]
                 ]
             ]
+
+{- | The saved snapshot body. The read-only GET is a normal file read, so a
+missing or expired file (404) leaves the browser with nothing useful to paint
+inside the sandboxed frame; a load failure switches to an explicit
+"unavailable" state with a re-capture action.
+-}
+snapshotViewer :: Model -> BookmarkDetail -> View () () Model Action
+snapshotViewer m detail
+    | mSnapshotViewerFailed m = snapshotUnavailable m detail
+    | otherwise =
+        H.iframe_
+            [ HP.class_ "snapshot-frame"
+            , HP.data_ "testid" "snapshot-frame"
+            , HP.src_ (snapshotUrl detail)
+            , HP.title_ "Saved snapshot"
+            , HP.sandbox_ ""
+            , H.onError SnapshotViewerFailed
+            ]
+            []
+
+snapshotUnavailable :: Model -> BookmarkDetail -> View () () Model Action
+snapshotUnavailable m detail =
+    H.div_
+        [HP.class_ "snapshot-unavailable", HP.data_ "testid" "snapshot-unavailable"]
+        [ H.p_
+            [HP.role_ "status"]
+            [text "The saved snapshot could not be loaded. It may have been deleted, or the browser blocked the viewer."]
+        , H.div_
+            [HP.class_ "dialog__actions"]
+            [ H.button_
+                [ HP.class_ "btn btn--sm"
+                , HP.type_ "button"
+                , HP.data_ "testid" "snapshot-unavailable-retry"
+                , HE.onClick SnapshotViewerRetry
+                ]
+                [text "try again"]
+            , H.button_
+                ( [ HP.class_ "btn btn--sm btn--strong"
+                  , HP.type_ "button"
+                  , HP.data_ "testid" "snapshot-unavailable-capture"
+                  , HE.onClick (RunBookmarkAction (bdId detail) "snapshot")
+                  ]
+                    ++ disabledAttr (mSnapshotBusy m)
+                )
+                [text (if mSnapshotBusy m then "capturing…" else "capture a snapshot")]
+            ]
+        ]
 
 snapshotUrl :: BookmarkDetail -> MisoString
 snapshotUrl detail = ms (bookmarkSnapshotUrl (bdId detail))
