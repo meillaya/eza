@@ -338,6 +338,24 @@ recorded above.
   path is backup + forward migration (docs/upgrade.md); old flat data/tokens/
   routes are refused with a diagnosis, not a fallback.
 
+## Post-release follow-ups (round 9)
+
+- `AGENTS.md` is tracked in the repository again (commit `576a394`); it had
+  been kept in `.git/info/exclude` locally, so a fresh checkout lacked the
+  layout/database/auth rules and `scripts/check-docs.sh` could not validate
+  them.
+- task-30 client polish: webhook-test failure visibility, AI-provider status
+  error + retry, snapshot-viewer unavailable/retry/re-capture states, busy
+  guards for share revoke and suggestion apply, dead action/field cleanup and
+  the single-toast saved-search refresh error. Native logic suite 172 examples
+  (+14 PolishSpec); wasm 5,327,760 raw / 1,718,475 gzip under the restored
+  ceilings; full e2e rerun (the known graph-views flake appeared once and the
+  script passes in isolation). Recorded in CHANGELOG Unreleased; tag
+  `v0.4.0.0` stays at the release commit and these are post-tag commits.
+- Known remaining flake: `graph-views-smoke` still intermittently reports
+  "opening a ledger view lands on the ledger" as `/graph` in a full suite run;
+  it passes 61/61 in isolation. Not release-blocking for 0.4.0.0.
+
 ## Round-8 decisions (recorded)
 
 - **WASM ceiling exception closed.** The Model-partition program split the

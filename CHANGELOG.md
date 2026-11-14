@@ -3,6 +3,31 @@
 All notable changes to eza are recorded here. The container image and the Nix
 outputs are the installable artifacts; both are built from the same revision.
 
+## Unreleased
+
+### Client polish
+
+- Webhook test failures are visible per webhook (the failure carries the
+  webhook id and clears on retry/success; an abandoned test reports
+  "cancelled").
+- An AI provider status failure shows an inline error with a retry action
+  instead of leaving a stale or empty status.
+- The snapshot viewer has a "snapshot unavailable" state with retry and a
+  "capture a snapshot" action (reusing the existing job); a "capture again"
+  action covers missing or expired files that a sandboxed iframe cannot
+  detect.
+- Share revoke and suggestion apply are busy-guarded, so repeated clicks do
+  not send duplicate requests.
+- Removed never-constructed `OpenToggled`/`ApiUnauthorized` actions and the
+  write-only highlights-loading/snapshot-job fields.
+- A failed saved-search background refresh keeps the previous list and raises
+  one toast until a successful refresh.
+
+### Repository
+
+- `AGENTS.md` is tracked again: the project knowledge base is part of the
+  checkout and validated by `scripts/check-docs.sh`.
+
 ## 0.4.0.0
 
 The 0.4 line is the architecture program: the same feature set, a typed
