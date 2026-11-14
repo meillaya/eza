@@ -23,6 +23,10 @@ module Eza.Web.Logic.Route (
     routeTitle,
     routeSubtitle,
     isGraphRoute,
+    isDetailRoute,
+    isListRoute,
+    isSaveRoute,
+    isLocalGraphRoute,
     percentDecode,
     percentEncode,
 ) where
@@ -211,6 +215,27 @@ isGraphRoute :: Route -> Bool
 isGraphRoute Graph = True
 isGraphRoute GraphLocal{} = True
 isGraphRoute _ = False
+
+-- | The record detail page.
+isDetailRoute :: Route -> Bool
+isDetailRoute (Bookmark _) = True
+isDetailRoute _ = False
+
+-- | The two ledger pages: the whole library and the inbox.
+isListRoute :: Route -> Bool
+isListRoute Index = True
+isListRoute Inbox = True
+isListRoute _ = False
+
+-- | The share-target save form.
+isSaveRoute :: Route -> Bool
+isSaveRoute Save{} = True
+isSaveRoute _ = False
+
+-- | The neighbourhood graph (@find?local=1@), as opposed to the whole plate.
+isLocalGraphRoute :: Route -> Bool
+isLocalGraphRoute GraphLocal{} = True
+isLocalGraphRoute _ = False
 
 -- ------------------------------------------------------------------ labels ---
 

@@ -35,11 +35,24 @@ executable eza-web
                     Eza.Web.Detail
                     Eza.Web.Error
                     Eza.Web.Graph
-                    Eza.Web.LedgerBridge
+                    Eza.Web.Interpreter
                     Eza.Web.Markdown
                     Eza.Web.Model
                     Eza.Web.Panels
                     Eza.Web.Update
+                    Eza.Web.Update.Account
+                    Eza.Web.Update.Common
+                    Eza.Web.Update.Dedup
+                    Eza.Web.Update.Detail
+                    Eza.Web.Update.Graph
+                    Eza.Web.Update.ImportExport
+                    Eza.Web.Update.Ledger
+                    Eza.Web.Update.Maintenance
+                    Eza.Web.Update.Route
+                    Eza.Web.Update.Shell
+                    Eza.Web.Update.Tags
+                    Eza.Web.Update.ViewDefs
+                    Eza.Web.Update.Views
                     Eza.Web.View
                     Eza.Web.Widgets
   build-depends:    base >=4.18 && <5

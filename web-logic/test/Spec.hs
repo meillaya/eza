@@ -3,6 +3,7 @@ module Main (main) where
 import Test.Hspec
 
 import ApiSpec (apiSpec)
+import HelperSpec (helperSpec)
 import LedgerSpec (ledgerSpec)
 import PuritySpec (puritySpec)
 import RouteSpec (routeSpec)
@@ -12,4 +13,5 @@ main = hspec $ do
     routeSpec
     apiSpec
     ledgerSpec
+    helperSpec
     puritySpec

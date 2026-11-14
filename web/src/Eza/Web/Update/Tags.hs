@@ -1,0 +1,183 @@
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+
+-- | Part of the client update function; see "Eza.Web.Update".
+module Eza.Web.Update.Tags (handle) where
+
+import Control.Monad
+import Data.Maybe
+import qualified Data.Text as T
+
+import Miso
+
+import Eza.Web.Api
+import Eza.Web.Error
+import Eza.Web.Interpreter
+import Eza.Web.Model
+import {-# SOURCE #-} Eza.Web.Update (updateModel)
+import Eza.Web.Update.Common (putModel, refreshStats, refreshTags, reloadList)
+
+handle :: Action -> Effect () () Model Action
+handle = \case
+    TagsRefreshed stats -> putModel (\m -> m{mTags = stats})
+    TagStatsLoaded stats -> putModel (\m -> m{mTags = stats})
+    ConsolLoaded groups ->
+        putModel (\m -> m{mConsol = groups, mConsolLoading = False, mConsolError = Nothing})
+    ConsolFailed err -> do
+        putModel (\m -> m{mConsolLoading = False, mConsolError = Just (ms (aeMessage err))})
+        handleApiError err
+    TagMerge from into -> mergeTags from into TagMerged TagOpFailed
+    TagRenamed old newName -> renameTag old (fromMisoString newName) TagMerged TagOpFailed
+    TagDeleted tag -> deleteTag tag TagMerged TagOpFailed
+    TagDialogOpen dialog -> do
+        let draft = case dialog of
+                TagRenameDialog tag -> ms tag
+                _ -> ""
+        putModel
+            ( \m ->
+                m
+                    { mTagDialog = Just dialog
+                    , mTagDialogInput = draft
+                    , mTagDialogBusy = False
+                    , mTagDialogError = Nothing
+                    }
+            )
+        case dialog of
+            TagRenameDialog _ -> focusElementDelayed "tag-rename-input"
+            _ -> pure ()
+    TagDialogInput value -> putModel (\m -> m{mTagDialogInput = value})
+    TagDialogDetach -> do
+        m <- get
+        case mTagDialog m of
+            Just (TagDeleteDialog tag) -> do
+                putModel (\x -> x{mTagDialogBusy = True, mTagDialogError = Nothing})
+                detachTag tag TagMerged TagOpFailed
+            _ -> pure ()
+    TagDialogConfirm -> do
+        m <- get
+        case mTagDialog m of
+            Nothing -> pure ()
+            Just (TagRenameDialog old) -> do
+                let wanted = T.strip (fromMisoString (mTagDialogInput m))
+                if T.null wanted
+                    then putModel (\x -> x{mTagDialogError = Just "Enter a name for the tag."})
+                    else
+                        if wanted == old
+                            then putModel (\x -> x{mTagDialogError = Just "That is already this tag's name."})
+                            else do
+                                putModel (\x -> x{mTagDialogBusy = True, mTagDialogError = Nothing})
+                                updateModel (TagRenamed old (ms wanted))
+            Just (TagDeleteDialog tag) -> do
+                putModel (\x -> x{mTagDialogBusy = True, mTagDialogError = Nothing})
+                updateModel (TagDeleted tag)
+            Just (TagMergeDialog from into) -> do
+                putModel (\x -> x{mTagDialogBusy = True, mTagDialogError = Nothing})
+                updateModel (TagMerge from into)
+    TagDialogClose ->
+        putModel
+            ( \m ->
+                m
+                    { mTagDialog = Nothing
+                    , mTagDialogInput = ""
+                    , mTagDialogBusy = False
+                    , mTagDialogError = Nothing
+                    }
+            )
+    FilterByTag tag -> do
+        putModel (\m -> m{mTagsFilter = [tag]})
+        updateModel (Navigate Index)
+    -- Open the ledger on an explicit query (a history year, day or
+    -- source, or a tag from the graph). The query replaces the old one so
+    -- the total matches the figure the reader clicked.
+    FilterByQuery query -> do
+        m <- get
+        putModel
+            ( \x ->
+                x
+                    { mQ = ms (T.unpack query)
+                    , mTagsFilter = []
+                    , mUnreadOnly = False
+                    , mSort = "created"
+                    }
+            )
+        if mRoute m == Index
+            then reloadList
+            else updateModel (Navigate Index)
+    TagMerged -> do
+        putModel
+            ( \m ->
+                m
+                    { mTagDialog = Nothing
+                    , mTagDialogInput = ""
+                    , mTagDialogBusy = False
+                    , mTagDialogError = Nothing
+                    }
+            )
+        notify "Tag vocabulary updated" ToastOk
+        fetchConsolidation ConsolLoaded ConsolFailed
+        refreshTags
+        refreshStats
+        reloadList
+    TagOpFailed err -> do
+        putModel (\m -> m{mTagDialogBusy = False, mTagDialogError = Just (ms (aeMessage err))})
+        when (aeStatus err == Just 401) (handleApiError err)
+    -- ai tags ---------------------------------------------------------------
+    AiTagSelected tag -> do
+        putModel
+            ( \m ->
+                m
+                    { mAiTag = tag
+                    , mSuggestions = []
+                    , mSuggestionsLoading = isJust tag
+                    , mSuggestionNotice = Nothing
+                    , mSuggestionError = Nothing
+                    }
+            )
+        case tag of
+            Nothing -> pure ()
+            Just selected -> fetchSuggestions selected SuggestionsLoaded SuggestionsFailed
+    SuggestionsLoaded suggestions notice ->
+        putModel
+            ( \m ->
+                m
+                    { mSuggestions = suggestions
+                    , mSuggestionsLoading = False
+                    , mSuggestionError = Nothing
+                    , mSuggestionNotice = fmap ms notice
+                    }
+            )
+    SuggestionsFailed err -> do
+        putModel (\m -> m{mSuggestionsLoading = False, mSuggestionError = Just (ms (aeMessage err))})
+        when (aeStatus err == Just 401) (handleApiError err)
+    AiStatusReload -> fetchAiStatus AiStatusLoaded AiStatusFailed
+    AiSuggestRetry -> do
+        m <- get
+        case mAiTag m of
+            Nothing -> pure ()
+            Just tag -> do
+                putModel (\x -> x{mSuggestionsLoading = True, mSuggestionError = Nothing, mSuggestionNotice = Nothing})
+                fetchSuggestions tag SuggestionsLoaded SuggestionsFailed
+    AiSuggestDiscard ->
+        putModel
+            ( \m ->
+                m
+                    { mSuggestions = []
+                    , mSuggestionsLoading = False
+                    , mSuggestionNotice = Nothing
+                    , mSuggestionError = Nothing
+                    }
+            )
+    SuggestionApply bookmarkId tags -> applyTagSuggestion bookmarkId tags SuggestionsApplied SuggestionsFailed
+    SuggestionsApplied -> do
+        notify "Tags applied" ToastOk
+        refreshTags
+        refreshStats
+        m <- get
+        case mAiTag m of
+            Nothing -> pure ()
+            Just tag -> fetchSuggestions tag SuggestionsLoaded SuggestionsFailed
+    -- maintenance ----------------------------------------------------------
+    AiStatusLoaded status -> putModel (\m -> m{mAiStatus = Just status})
+    AiStatusFailed _ -> pure ()
+    -- rules ----------------------------------------------------------------
+    _ -> pure ()

@@ -32,6 +32,7 @@ module Eza.Web.Logic.Effect (
     TimerId (..),
     Effect (..),
     nextRequestId,
+    requestIsCurrent,
 ) where
 
 import Data.Text (Text)
@@ -80,3 +81,9 @@ data Effect
 -- | The successor of a request id. Reducers allocate ids from their state.
 nextRequestId :: RequestId -> RequestId
 nextRequestId (RequestId n) = RequestId (n + 1)
+
+{- | Does a response stamped with @stamped@ still answer the @current@ request?
+The comparison lives here so every slice shares one staleness rule.
+-}
+requestIsCurrent :: RequestId -> RequestId -> Bool
+requestIsCurrent current stamped = stamped == current

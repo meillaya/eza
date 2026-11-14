@@ -100,7 +100,7 @@ import Eza.Web.Graph (
     emptyMatches,
     initialGraphView,
  )
-import Eza.Web.Logic.Effect (RequestId, TimerId)
+import Eza.Web.Logic.Effect (RequestId (..), TimerId)
 import Eza.Web.Logic.Route (Route (..), isGraphRoute)
 import qualified Eza.Web.Logic.Route as ClientRoute
 import Eza.Webhook (DeliveryView, EventType, Webhook (..))
@@ -383,8 +383,8 @@ data Action
     | PaletteChoose Int
     | PaletteSelect
     | -- detail
-      DetailLoaded Int BookmarkDetail
-    | DetailFailed Int ApiError
+      DetailLoaded RequestId BookmarkDetail
+    | DetailFailed RequestId ApiError
     | TitleInput MisoString
     | NoteChanged MisoString DOMRef
     | NoteMeta Int (Maybe Text)
@@ -404,11 +404,11 @@ data Action
     | SavedOk Int
     | SaveFailed ApiError
     | ReadToggled
-    | ReadPatched Int Bool
-    | ReadPatchFailed Int Bool ApiError
+    | ReadPatched RequestId Bool
+    | ReadPatchFailed RequestId Bool ApiError
     | OpenToggled
-    | BacklinksLoaded Int [Backlink]
-    | BacklinksFailed Int ApiError
+    | BacklinksLoaded RequestId [Backlink]
+    | BacklinksFailed RequestId ApiError
     | LinkPrev
     | LinkNext
     | LinkChoose Int
@@ -455,8 +455,8 @@ data Action
     | GraphTagsToggled
     | GraphSelect Int
     | GraphClearSelection
-    | GraphSettled Int
-    | GraphDetailStep Int Int
+    | GraphSettled RequestId
+    | GraphDetailStep RequestId Int
     | GraphLayoutLoaded LayoutPreset GraphLayoutWire
     | GraphLayoutFailed ApiError
     | GraphLabelModeSelected LabelMode
@@ -600,8 +600,8 @@ data Action
     | SelectAllLoaded
     | SelectAllMatchingStart
     | SelectAllMatchingCancel
-    | SelectPageLoaded Int [Int] Bool
-    | SelectPageFailed Int ApiError
+    | SelectPageLoaded RequestId [Int] Bool
+    | SelectPageFailed RequestId ApiError
     | BulkTagPromptOpen Bool
     | BulkTagInput MisoString
     | BulkTagCancel
@@ -628,8 +628,8 @@ data Action
       RetryEnrich Int
     | DetailReload Int
     | -- highlights
-      HighlightsLoaded Int [Highlight]
-    | HighlightsFailed Int ApiError
+      HighlightsLoaded RequestId [Highlight]
+    | HighlightsFailed RequestId ApiError
     | ReaderMouseUp
     | ReaderSelectionFound (Maybe ReaderSelection)
     | ReaderSelectionClear
@@ -649,8 +649,8 @@ data Action
     | HighlightDeleted
     | HighlightFailed ApiError
     | -- sharing
-      SharesLoaded Int [ShareView]
-    | SharesFailed Int ApiError
+      SharesLoaded RequestId [ShareView]
+    | SharesFailed RequestId ApiError
     | ShareDialogOpen
     | ShareDialogClose
     | ShareIncludeNoteToggle
@@ -756,8 +756,8 @@ data Model = Model
     , mBootSeeded :: Bool
     , mRouted :: Bool
     , mListDeferred :: Bool
-    , -- list fetch epoch: a response for an older query is dropped
-      mListEpoch :: Int
+    , -- list fetch request id: a response for an older query is dropped
+      mListEpoch :: RequestId
     , mVersion :: MisoString
     , mOrigin :: MisoString
     , mWindowOrigin :: MisoString
@@ -794,7 +794,7 @@ data Model = Model
     , mStats :: Maybe LibraryStats
     , mStatsError :: Maybe MisoString
     , -- the current stats request id: an answer for an older refresh is dropped
-      mStatsEpoch :: Int
+      mStatsEpoch :: RequestId
     , mYearHere :: [(Int, Int)]
     , mLedgerCursor :: Maybe Int
     , mDrawer :: Maybe Int
@@ -818,10 +818,10 @@ data Model = Model
     , -- token for the "select all matching" paging chain; every start, clear,
       -- search change, reload or route load bumps it so a response for an
       -- abandoned chain cannot repopulate the selection
-      mSelectEpoch :: Int
+      mSelectEpoch :: RequestId
     , -- the list epoch captured when the chain started; a newer result set
       -- stops the chain even when a reload only bumps the list epoch
-      mSelectListEpoch :: Int
+      mSelectListEpoch :: RequestId
     , -- the stable query/filter/sort the chain pages through
       mSelectParams :: Maybe ListParams
     , mBulkBusy :: Bool
@@ -846,10 +846,11 @@ data Model = Model
       mDetail :: Maybe BookmarkDetail
     , mDetailLoading :: Bool
     , mDetailError :: Maybe MisoString
-    , mDetailEpoch :: Int
+    , -- detail fetch request id: a response for an older record is dropped
+      mDetailEpoch :: RequestId
     , -- monotonically increasing id for read-state PATCHes; a response older
       -- than the latest toggle is dropped
-      mReadRequest :: Int
+      mReadRequest :: RequestId
     , -- a read PATCH is in flight, so a note save must not echo a possibly
       -- stale is_read flag back to the server
       mReadPending :: Bool
@@ -932,7 +933,10 @@ data Model = Model
     , mGraphLocalRoot :: Maybe Int
     , mGraphLocalCapped :: Bool
     , mGraphSettled :: Bool
-    , mGraphSettleEpoch :: Int
+    , -- settle/settle-plate request id: a timer armed for an older gesture is
+      -- dropped; mGraphDetailPhase and mGraphDetailChunks are the frame
+      -- progress counters of the accepted settle, not staleness ids
+      mGraphSettleEpoch :: RequestId
     , mGraphDetailPhase :: Int
     , mGraphDetailChunks :: Int
     , mGraphTagsShown :: Bool
@@ -1055,7 +1059,7 @@ initialModel =
         , mBootSeeded = False
         , mRouted = False
         , mListDeferred = False
-        , mListEpoch = 0
+        , mListEpoch = RequestId 0
         , mVersion = "0.1.0"
         , mOrigin = ""
         , mWindowOrigin = ""
@@ -1087,7 +1091,7 @@ initialModel =
         , mTags = []
         , mStats = Nothing
         , mStatsError = Nothing
-        , mStatsEpoch = 0
+        , mStatsEpoch = RequestId 0
         , mYearHere = []
         , mLedgerCursor = Nothing
         , mDrawer = Nothing
@@ -1107,8 +1111,8 @@ initialModel =
         , mSelectAnchor = Nothing
         , mSelectingAll = False
         , mSelectFetched = 0
-        , mSelectEpoch = 0
-        , mSelectListEpoch = 0
+        , mSelectEpoch = RequestId 0
+        , mSelectListEpoch = RequestId 0
         , mSelectParams = Nothing
         , mBulkBusy = False
         , mTagPrompt = Nothing
@@ -1129,8 +1133,8 @@ initialModel =
         , mDetail = Nothing
         , mDetailLoading = False
         , mDetailError = Nothing
-        , mDetailEpoch = 0
-        , mReadRequest = 0
+        , mDetailEpoch = RequestId 0
+        , mReadRequest = RequestId 0
         , mReadPending = False
         , mEditTitle = ""
         , mEditNote = ""
@@ -1204,7 +1208,7 @@ initialModel =
         , mGraphLocalRoot = Nothing
         , mGraphLocalCapped = False
         , mGraphSettled = False
-        , mGraphSettleEpoch = 0
+        , mGraphSettleEpoch = RequestId 0
         , mGraphDetailPhase = 0
         , mGraphDetailChunks = 0
         , mGraphTagsShown = True

@@ -41,9 +41,9 @@ Captured 2026-11-14 from `main` at commit `57639c0` before any program change.
 |---|---|---|
 | M0 Guardrails | complete | `docs/program/README.md` created; `scripts/check-docs.sh` green; `devenv shell -- docs` added; baseline build/test captured |
 | M1 Contract spine | complete | `Eza.Routes` (127 routes) is the single route truth and `Eza.Authz` derives from it; all boundary DTOs are core types; client strict decode (no `Eza.Web.Types`, no lenient helpers); graph layout wire in core and server-only; boot `wire_version`; 35 core golden tests + 316 server examples; full e2e 27/27; fourmolu/hlint/docs/spec gates green |
-| M2 Client architecture | in progress | M2-A: native `eza-web-logic` (Route/ClientRequest, 27 tests). M2-B1: Miso-free `Effect`/`RequestId` layer + native-tested `LedgerState`/`updateLedger` + web bridge, 68 logic tests; wasm 7,775,360 raw / 2,197,921 gzip. M2-B2 (whole-Model migration, Update split, write requests, size recovery) pending |
+| M2 Client architecture | in progress | M2-A: native `eza-web-logic` (Route/ClientRequest, 27 tests). M2-B1: Miso-free `Effect`/`RequestId` layer + native ledger reducer, 68 tests. M2-B2a: `Update.hs` 4,355→437-line dispatcher over 13 group modules, single `Eza.Web.Interpreter` (only FFI/effect executor), seven epoch counters → `RequestId`, all 53 write requests adopted (0 `/api/` literals in web), 89 logic tests; wasm 7,762,124 raw / 2,230,125 gzip (still above the 7.7 MB raw target). M2-B2b (Model/Action → web-logic with Text, size recovery) pending |
 | M3 Build/assets/runtime | complete | M3-A: content-addressed bundle + manifest + server `Eza.Assets`/`Eza.Shell`. M3-B: WASM built inside Nix from pinned FOD tarballs + vendored cabal revisions + a deterministic local Hackage index; `nix build .#eza-web` (7,775,380 raw / 2,201,325 gzip), `.#docker`, module check and docker smoke green; SRI pin/release-asset chain deleted; gates enforced in the Nix path |
-| M4 Server architecture | in progress | M4-C complete: read-path authentication (throttled activity touch) + `Eza.Library` writer/pool/worker lifecycle, 336 server examples incl. `LibrarySpec`; M4-A (dispatch from `Eza.Routes`), M4-B (Problem errors), M4-D (egress jobs) pending |
+| M4 Server architecture | in progress | M4-C: read-path auth + `Eza.Library` lifecycle. M4-A: dispatch parses once via `Eza.Routes.matchRoute` and cases on `Route`; `Server.hs` 3,595→469 lines; 12 `Eza.Api.*` modules; JSON 405/404; `DispatchSpec`; 341 server examples. M4-B (Problem errors) and M4-D (egress jobs) pending |
 | M5 Data layer/journal/upgrade | not started | — |
 | M6 Feature completion, formal specs, deployment subtraction | not started | — |
 | M7 Validation/release | not started | — |
@@ -90,15 +90,35 @@ Append one entry per gate run: milestone, date, commands, result, commit.
 2026-11-14 M3-B: cabal test all                 -> ok, 68 logic + 35 core + 336 server examples, 0 failures, 1 pending
 2026-11-14 M3-B: bash scripts/e2e.sh            -> ok, 27 scripts passed, 0 failed
 2026-11-14 M3-B: fourmolu/hlint/version/check-docs/check-notices -> ok
+2026-11-14 M4-A: cabal build all                -> ok; server lib 0 GHC warnings
+2026-11-14 M4-A: cabal test eza-test            -> ok, 341 examples, 0 failures, 1 pending (336 + 5 DispatchSpec)
+2026-11-14 M4-A: Server.hs                       -> 3,595 -> 469 lines; 12 Eza.Api.* modules; JSON 405/404
+2026-11-14 M2-B2a: cabal test eza-web-logic      -> ok, 89 examples (68 + 21 HelperSpec)
+2026-11-14 M2-B2a: bash scripts/build-web.sh     -> ok, 7,762,124 raw / 2,230,125 gzip, bundle 288c009c8777b95b
+2026-11-14 M2-B2a: Update.hs                     -> 4,355 -> 437-line dispatcher over 13 group modules; 53 write requests adopted; 0 `/api/` literals in web
+2026-11-14 M4-A+M2-B2a: fourmolu/hlint/check-docs/check-specs/version -> ok
+2026-11-14 M4-A+M2-B2a: bash scripts/e2e.sh       -> 27/27; first full run flaked only `graph-views-smoke` (ledger-view navigation stayed on /graph), the script passes in isolation and the full rerun is green. Known flake to stabilise in M6/M7; the client ViewOpen flow was not changed after the isolated pass.
 ```
 
 ## M2-B1 / M4-C decisions (recorded)
 
-- M2-B1 is a **strangler slice**: `LedgerState`/`updateLedger` and the Miso-free
-  `Effect` ADT live in `web-logic`; the Miso `Model` stays the single store and
-  `Eza.Web.LedgerBridge` projects/embeds the ledger fields. M2-B2 removes the
-  projection (Model type moves to logic), splits `Update.hs` per route group,
-  adopts the write requests in the Fetch table, and must recover bundle size.
+- M2-B1 was a **strangler slice**: `LedgerState`/`updateLedger` and the
+  Miso-free `Effect` ADT live in `web-logic`; the Miso `Model` stayed the single
+  store behind a projection. M2-B2a replaced the projection with one
+  `Eza.Web.Interpreter` and split the update reducer; M2-B2b moves the whole
+  `Model`/`Action` into `web-logic` with `Text`, which is the remaining native
+  test seam and the bundle-size recovery lever.
+- M2-B2a: `Update.hs` is a compiler-enforced 406-arm dispatcher (437 lines) over
+  13 group modules; `Update.hs-boot` breaks the recursive dispatch cycle and is
+  a tracked source file. `Eza.Web.Interpreter` is the only web module that runs
+  browser FFI/Miso effects. Seven epoch counters became typed `RequestId`
+  streams; documented Int survivors are timeout handles/frame phases/counts, not
+  staleness. All 53 write `ClientRequest`s are adopted and the native `ApiSpec`
+  pins every method/path; zero `/api/` literals remain in `web/src`.
+- M2-B2a bundle: 7,762,124 raw (−13,236 vs M2-B1) / 2,230,125 gzip
+  (+32,204). The raw < 7,700,000 target is still unmet; module boundaries cost
+  gzip even as raw went down, so M2-B2b must recover headroom before more client
+  code lands. No ceilings were raised in this slice.
 - Auth is read-only: sessions/tokens validate on the read pool; activity
   (`last_seen_at`/`last_used_at`) is a throttled (60 s) writer touch only when
   stale. A normal GET takes no writer. The test-only `enableWorkers` global is
@@ -156,6 +176,20 @@ Append one entry per gate run: milestone, date, commands, result, commit.
 - CI cold `.#eza-web`/`.#docker` builds are long without a binary cache. Follow-up
   (M6/M7): push/cache the wasm-deps derivation (Cachix) or run the Nix wasm build
   nightly so the 120-minute docker-smoke job stays reliable.
+
+## M4-A decisions (recorded)
+
+- Dispatch parses each request once with `Routes.matchRoute` and cases on the
+  `Route` ADT; the handler families live in `Eza.Api.*` (Common/Context are
+  internal modules that break the Server↔handler import cycle). No bare
+  method+path literals remain in dispatch.
+- Unknown `/api` paths now return JSON 404 before the guard (previously
+  401/403); a known path with an unsupported method returns JSON 405 with an
+  `Allow` header computed from Routes. HEAD on token read routes runs the GET
+  handler; OPTIONS on the public surface is derived from Routes instead of the
+  old hand-written allow list.
+- `Update.hs-boot` is used to break the recursive dispatch cycle in the client
+  update groups; it is a tracked source file, not a build product.
 
 ## M1 deviations (recorded, no open decisions)
 

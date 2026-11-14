@@ -22,6 +22,7 @@ import Eza.Types (
     BookmarkSummary (..),
     Highlight (..),
  )
+import Eza.Web.Api (bookmarkSnapshotUrl)
 import Eza.Web.Markdown (renderMarkdown)
 import Eza.Web.Model
 import Eza.Web.Widgets (disabledAttr)
@@ -1357,8 +1358,7 @@ snapshotDialog m detail
             ]
 
 snapshotUrl :: BookmarkDetail -> MisoString
-snapshotUrl detail =
-    ms ("/api/v1/bookmarks/" <> show (bdId detail) <> "/snapshot")
+snapshotUrl detail = bookmarkSnapshotUrl (bdId detail)
 
 -- --------------------------------------------------------------- helpers --
 

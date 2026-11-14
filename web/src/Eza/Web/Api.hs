@@ -105,7 +105,9 @@ module Eza.Web.Api (
     ImportResponse (..),
     -- links
     exportUrl,
+    exportJsonUrl,
     notesExportUrl,
+    bookmarkSnapshotUrl,
 ) where
 
 import Data.Aeson (FromJSON (..), Result (..), ToJSON, Value (..), fromJSON, object, toJSON, withObject, (.:), (.:?), (.=))
@@ -342,26 +344,85 @@ decodeResponseAt endpoint value =
         MJ.Success a -> Right a
         MJ.Error e -> Left (bodyError endpoint (toText e))
 
--- | A write whose response body we do not care about.
-apiWrite ::
+{- | Send a write through the shared client request table. The HTTP method and
+the concrete URL of every write come from "Eza.Web.Logic.Api" (and through it
+from the route truth), so a write can never drift from the endpoint it names;
+only the body is caller-supplied.
+
+The four variants mirror the old @apiWrite@/@apiDelete@ helpers: ignored body,
+shared-type decode, caller decode and ignored-body delete.
+-}
+apiWriteRequest ::
     (ToJSON b) =>
-    MisoString ->
-    MisoString ->
+    ClientRequest ->
     Maybe b ->
     action ->
     (ApiError -> action) ->
     Eff model action
+apiWriteRequest request requestBody onOk onErr =
+    sendValue
+        (requestMethodText request)
+        (requestUrl request)
+        (toJSON <$> requestBody)
+        []
+        NONE
+        (\_ -> onOk)
+        onErr
 
-{- | Writes whose response body the client never reads.  They use 'NONE':
-the server answers most of them with @204 No Content@, and a JSON decode of
-an empty 204 body would turn a successful write into an error.
+-- | A write with a JSON body whose answer decodes as a shared core type.
+requestWriteJson ::
+    (ToJSON b, FromJSON a) =>
+    ClientRequest ->
+    Maybe b ->
+    (a -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+requestWriteJson request requestBody onOk onErr =
+    sendValue
+        (requestMethodText request)
+        url
+        (toJSON <$> requestBody)
+        []
+        JSON
+        (\value -> either onErr onOk (decodeResponseAt url value))
+        onErr
+  where
+    url = requestUrl request
+
+{- | A write whose caller decodes the JSON answer: endpoints that rename a core
+field or answer a local wire record.
 -}
-apiWrite method url requestBody onOk onErr =
-    sendValue method url (toJSON <$> requestBody) [] NONE (\_ -> onOk) onErr
+requestWriteValue ::
+    (ToJSON b) =>
+    ClientRequest ->
+    Maybe b ->
+    (MisoString -> Value -> Either ApiError a) ->
+    (a -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+requestWriteValue request requestBody decodeResponse onOk onErr =
+    sendValue
+        (requestMethodText request)
+        url
+        (toJSON <$> requestBody)
+        []
+        JSON
+        (\value -> either onErr onOk (decodeResponse url value))
+        onErr
+  where
+    url = requestUrl request
 
-apiDelete :: MisoString -> action -> (ApiError -> action) -> Eff model action
-apiDelete url onOk onErr =
-    sendValue "DELETE" url Nothing [] NONE (\_ -> onOk) onErr
+-- | A delete whose answer body the client never reads.
+apiDeleteRequest :: ClientRequest -> action -> (ApiError -> action) -> Eff model action
+apiDeleteRequest request onOk onErr =
+    sendValue
+        (requestMethodText request)
+        (requestUrl request)
+        Nothing
+        []
+        NONE
+        (\_ -> onOk)
+        onErr
 
 -- ------------------------------------------------------------- list query --
 
@@ -735,31 +796,14 @@ fetchView slug onOk onErr =
 
 createView :: EV.ViewInput -> (EV.View -> action) -> (ApiError -> action) -> Eff model action
 createView input onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/views"
-        (Just (toJSON input))
-        []
-        JSON
-        (either onErr onOk . decodeResponseAt "/api/v1/views")
-        onErr
+    requestWriteJson ApiCreateView (Just input) onOk onErr
 
 patchView :: Text -> ViewPatch -> (EV.View -> action) -> (ApiError -> action) -> Eff model action
 patchView slug patch onOk onErr =
-    sendValue
-        "PATCH"
-        url
-        (Just (toJSON patch))
-        []
-        JSON
-        (either onErr onOk . decodeResponseAt url)
-        onErr
-  where
-    url = "/api/v1/views/" <> percentEncode (ms (T.unpack slug))
+    requestWriteJson (ApiPatchView slug) (Just patch) onOk onErr
 
 deleteView :: Text -> action -> (ApiError -> action) -> Eff model action
-deleteView slug =
-    apiDelete ("/api/v1/views/" <> percentEncode (ms (T.unpack slug)))
+deleteView slug = apiDeleteRequest (ApiDeleteView slug)
 
 {- | Account webhooks. Management is session-only on the server; a bearer
 token gets 403 @session_required@. The create response is the only place the
@@ -792,16 +836,12 @@ createWebhook ::
     (ApiError -> action) ->
     Eff model action
 createWebhook input onOk onErr =
-    sendValue
-        "POST"
-        url
-        (Just (toJSON input))
-        []
-        JSON
-        (either onErr (\(wcr) -> onOk (wcrWebhook wcr, wcrSecret wcr)) . decodeResponseAt url)
+    requestWriteValue
+        ApiCreateWebhook
+        (Just input)
+        decodeResponseAt
+        (\created -> onOk (wcrWebhook created, wcrSecret created))
         onErr
-  where
-    url = "/api/v1/webhooks"
 
 updateWebhook ::
     Int ->
@@ -810,42 +850,24 @@ updateWebhook ::
     (ApiError -> action) ->
     Eff model action
 updateWebhook webhookId input onOk onErr =
-    sendValue
-        "PATCH"
-        url
-        (Just (toJSON input))
-        []
-        JSON
-        (either onErr onOk . decodeResponseAt url)
-        onErr
-  where
-    url = webhookUrl webhookId
+    requestWriteJson (ApiPatchWebhook webhookId) (Just input) onOk onErr
 
 deleteWebhook :: Int -> action -> (ApiError -> action) -> Eff model action
-deleteWebhook webhookId = apiDelete (webhookUrl webhookId)
+deleteWebhook webhookId = apiDeleteRequest (ApiDeleteWebhook webhookId)
 
 testWebhook :: Int -> (WebhookTest -> action) -> (ApiError -> action) -> Eff model action
 testWebhook webhookId onOk onErr =
-    sendValue
-        "POST"
-        (webhookUrl webhookId <> "/test")
+    requestWriteValue
+        (ApiTestWebhook webhookId)
         (Nothing :: Maybe Value)
-        []
-        JSON
-        (either onErr onOk . decodeResponseAt (webhookUrl webhookId <> "/test"))
+        decodeResponseAt
+        onOk
         onErr
 
 fetchWebhookDeliveries :: Int -> ([DeliveryView] -> action) -> (ApiError -> action) -> Eff model action
 fetchWebhookDeliveries webhookId onOk onErr =
     requestGet (ApiWebhookDeliveries webhookId) (\url value -> decodeListFieldAt url "deliveries" value) onOk onErr
 
-webhookUrl :: Int -> MisoString
-webhookUrl webhookId = "/api/v1/webhooks/" <> ms (show webhookId)
-
-{- | Admin user management. The server admits only admin browser sessions
-(Authz AdminClass); members get 403 @forbidden@ and bearer tokens 403
-@session_required@. Recovery codes are revealed once on create.
--}
 fetchAdminUsers :: ([UserView] -> action) -> (ApiError -> action) -> Eff model action
 fetchAdminUsers onOk onErr =
     requestGet ApiAdminUsers (\url value -> decodeListFieldAt url "users" value) onOk onErr
@@ -856,16 +878,7 @@ createAdminUser ::
     (ApiError -> action) ->
     Eff model action
 createAdminUser input onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/admin/users"
-        (Just (toJSON input))
-        []
-        JSON
-        (either onErr onOk . decodeResponseAt "/api/v1/admin/users")
-        onErr
-
--- | Enable/disable or change a role. Absent fields keep their current value.
+    requestWriteJson ApiCreateAdminUser (Just input) onOk onErr
 patchAdminUser ::
     Int ->
     Maybe Bool ->
@@ -874,20 +887,12 @@ patchAdminUser ::
     (ApiError -> action) ->
     Eff model action
 patchAdminUser userId enabled role onOk onErr =
-    sendValue
-        "PATCH"
-        url
+    requestWriteValue
+        (ApiPatchAdminUser userId)
         (Just (object (["enabled" .= value | Just value <- [enabled]] ++ ["role" .= value | Just value <- [role]])))
-        []
-        JSON
-        (either onErr onOk . decodeResponseAt url)
+        decodeResponseAt
+        onOk
         onErr
-  where
-    url = "/api/v1/admin/users/" <> ms (show userId)
-
-{- | Break-glass temporary password. The server clears the target's 2FA flag
-and revokes that user's sessions.
--}
 resetAdminPassword ::
     Int ->
     Text ->
@@ -895,16 +900,7 @@ resetAdminPassword ::
     (ApiError -> action) ->
     Eff model action
 resetAdminPassword userId password onOk onErr =
-    apiWrite
-        "POST"
-        ("/api/v1/admin/users/" <> ms (show userId) <> "/password")
-        (Just (object ["password" .= password]))
-        onOk
-        onErr
-
-{- | Delete an account. The library and snapshots are removed only when
-@deleteDb@ is set; the server refuses the last enabled admin and self-delete.
--}
+    apiWriteRequest (ApiResetAdminPassword userId) (Just (object ["password" .= password])) onOk onErr
 deleteAdminUser ::
     Int ->
     Bool ->
@@ -912,9 +908,8 @@ deleteAdminUser ::
     (ApiError -> action) ->
     Eff model action
 deleteAdminUser userId deleteDb onOk onErr =
-    apiWrite
-        "DELETE"
-        ("/api/v1/admin/users/" <> ms (show userId))
+    apiWriteRequest
+        (ApiDeleteAdminUser userId)
         (Just (object ["confirm" .= True, "delete_db" .= deleteDb]))
         onOk
         onErr
@@ -949,14 +944,7 @@ one undo snapshot and answers the report the interface shows.
 -}
 mergeDedupAll :: (DedupMergeAllReport -> action) -> (ApiError -> action) -> Eff model action
 mergeDedupAll onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/dedup/merge-all"
-        (Just (object ["confirm" .= True]))
-        []
-        JSON
-        (either onErr onOk . decodeResponseAt "/api/v1/dedup/merge-all")
-        onErr
+    requestWriteJson ApiMergeDedupAll (Just (object ["confirm" .= True])) onOk onErr
 
 fetchConsolidation ::
     ([ConsolidationGroup] -> action) ->
@@ -1023,9 +1011,8 @@ createBookmark ::
     (ApiError -> action) ->
     Eff model action
 createBookmark url title tags onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/bookmarks"
+    requestWriteValue
+        ApiCreateBookmark
         ( Just
             ( object
                 [ "url" .= url
@@ -1034,14 +1021,9 @@ createBookmark url title tags onOk onErr =
                 ]
             )
         )
-        []
-        JSON
-        (either onErr onOk . decodeIntFieldAt "/api/v1/bookmarks" "id")
+        (\endpoint value -> decodeIntFieldAt endpoint "id" value)
+        onOk
         onErr
-
-{- | @POST /api/v1/quick-save@ — idempotent capture used by the PWA share
-target and the account-page bookmarklet.
--}
 quickSave ::
     MisoString ->
     MisoString ->
@@ -1049,9 +1031,8 @@ quickSave ::
     (ApiError -> action) ->
     Eff model action
 quickSave url title onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/quick-save"
+    requestWriteValue
+        ApiQuickSave
         ( Just
             ( object
                 [ "url" .= url
@@ -1060,9 +1041,8 @@ quickSave url title onOk onErr =
                 ]
             )
         )
-        []
-        JSON
-        (either onErr (\response -> onOk (qsrId response) (qsrExisting response)) . decodeResponseAt "/api/v1/quick-save")
+        decodeResponseAt
+        (\response -> onOk (qsrId response) (qsrExisting response))
         onErr
 
 patchBookmark ::
@@ -1072,11 +1052,7 @@ patchBookmark ::
     (ApiError -> action) ->
     Eff model action
 patchBookmark bid payload =
-    apiWrite "PATCH" ("/api/v1/bookmarks/" <> ms (show bid)) (Just payload)
-
-{- | PATCH with the server's highlight-repair count. The note/title/read editor
-keeps the simple 'patchBookmark'; the extracted-text save uses this one.
--}
+    apiWriteRequest (ApiPatchBookmark bid) (Just payload)
 patchBookmarkWithResult ::
     Int ->
     Value ->
@@ -1084,19 +1060,15 @@ patchBookmarkWithResult ::
     (ApiError -> action) ->
     Eff model action
 patchBookmarkWithResult bid payload onOk onErr =
-    sendValue
-        "PATCH"
-        url
+    requestWriteValue
+        (ApiPatchBookmark bid)
         (Just payload)
-        []
-        JSON
-        (either onErr (onOk . bprHighlightsRemoved) . decodeResponseAt url)
+        decodeResponseAt
+        (onOk . bprHighlightsRemoved)
         onErr
-  where
-    url = "/api/v1/bookmarks/" <> ms (show bid)
 
 deleteBookmark :: Int -> action -> (ApiError -> action) -> Eff model action
-deleteBookmark bid = apiDelete ("/api/v1/bookmarks/" <> ms (show bid))
+deleteBookmark bid = apiDeleteRequest (ApiDeleteBookmark bid)
 
 markAllAbove ::
     Maybe Int ->
@@ -1104,23 +1076,19 @@ markAllAbove ::
     (ApiError -> action) ->
     Eff model action
 markAllAbove aboveId onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/inbox/mark-all-above"
+    requestWriteValue
+        ApiMarkAllAbove
         (Just (object ["above_id" .= aboveId]))
-        []
-        JSON
-        (either onErr onOk . decodeIntFieldAt "/api/v1/inbox/mark-all-above" "updated")
+        (\endpoint value -> decodeIntFieldAt endpoint "updated" value)
+        onOk
         onErr
 
 trackOpen :: Int -> action -> (ApiError -> action) -> Eff model action
 trackOpen bid =
-    apiWrite "POST" ("/api/v1/bookmarks/" <> ms (show bid) <> "/open") (Nothing :: Maybe Value)
-
--- | One of the bookmark post-actions: open/enrich/extract/snapshot.
+    apiWriteRequest (ApiTrackOpen bid) (Nothing :: Maybe Value)
 bookmarkAction :: Int -> Text -> action -> (ApiError -> action) -> Eff model action
 bookmarkAction bid verb =
-    apiWrite "POST" ("/api/v1/bookmarks/" <> ms (show bid) <> "/" <> ms verb) (Nothing :: Maybe Value)
+    apiWriteRequest (ApiBookmarkAction bid verb) (Nothing :: Maybe Value)
 
 saveSavedSearch ::
     MisoString ->
@@ -1130,17 +1098,15 @@ saveSavedSearch ::
     (ApiError -> action) ->
     Eff model action
 saveSavedSearch name q tags onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/saved-searches"
+    requestWriteValue
+        ApiCreateSavedSearch
         (Just (object ["name" .= name, "q" .= q, "tags" .= tags]))
-        []
-        JSON
-        (either onErr onOk . decodeIntFieldAt "/api/v1/saved-searches" "id")
+        (\endpoint value -> decodeIntFieldAt endpoint "id" value)
+        onOk
         onErr
 
 deleteSavedSearch :: Int -> action -> (ApiError -> action) -> Eff model action
-deleteSavedSearch sid = apiDelete ("/api/v1/saved-searches/" <> ms (show sid))
+deleteSavedSearch sid = apiDeleteRequest (ApiDeleteSavedSearch sid)
 
 mergeDedup ::
     Int ->
@@ -1149,13 +1115,11 @@ mergeDedup ::
     (ApiError -> action) ->
     Eff model action
 mergeDedup keep mergeIds onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/dedup/merge"
+    requestWriteValue
+        ApiMergeDedup
         (Just (object ["keep_id" .= keep, "merge_ids" .= mergeIds]))
-        []
-        JSON
-        (either onErr (\response -> onOk (mrMerged response, mrSnapshotId response)) . decodeResponseAt "/api/v1/dedup/merge")
+        decodeResponseAt
+        (\response -> onOk (mrMerged response, mrSnapshotId response))
         onErr
 
 mergeTags ::
@@ -1165,22 +1129,16 @@ mergeTags ::
     (ApiError -> action) ->
     Eff model action
 mergeTags from into =
-    apiWrite "POST" "/api/v1/tags/merge" (Just (object ["from" .= from, "into" .= into]))
+    apiWriteRequest ApiMergeTags (Just (object ["from" .= from, "into" .= into]))
 
 renameTag :: Text -> Text -> action -> (ApiError -> action) -> Eff model action
 renameTag old newName =
-    apiWrite "POST" ("/api/v1/tags/" <> percentEncode (ms old)) (Just (object ["name" .= newName]))
+    apiWriteRequest (ApiRenameTag old) (Just (object ["name" .= newName]))
 
 deleteTag :: Text -> action -> (ApiError -> action) -> Eff model action
-deleteTag tag = apiDelete ("/api/v1/tags/" <> percentEncode (ms tag))
-
-{- | @DELETE /api/v1/tags/{tag}?detach=true@ removes a non-empty tag from every
-record that carries it and leaves the records in place. A server that predates
-the detach query ignores it and answers 409 for a non-empty tag; the UI shows
-that message instead of pretending the tag was removed.
--}
+deleteTag tag = apiDeleteRequest (ApiDeleteTag tag)
 detachTag :: Text -> action -> (ApiError -> action) -> Eff model action
-detachTag tag = apiDelete ("/api/v1/tags/" <> percentEncode (ms tag) <> "?detach=true")
+detachTag tag = apiDeleteRequest (ApiDetachTag tag)
 
 applyTagSuggestion ::
     Int ->
@@ -1189,36 +1147,29 @@ applyTagSuggestion ::
     (ApiError -> action) ->
     Eff model action
 applyTagSuggestion bid tags =
-    apiWrite
-        "POST"
-        "/api/v1/tags/apply"
+    apiWriteRequest
+        ApiApplyTagSuggestion
         (Just (object ["bookmark_id" .= bid, "tags" .= tags]))
 
 runPrune :: [Int] -> (Int -> action) -> (ApiError -> action) -> Eff model action
 runPrune ids onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/maintenance/prune"
+    requestWriteValue
+        ApiRunPrune
         (Just (object ["ids" .= ids]))
-        []
-        JSON
-        (either onErr onOk . decodeIntFieldAt "/api/v1/maintenance/prune" "pruned")
+        (\endpoint value -> decodeIntFieldAt endpoint "pruned" value)
+        onOk
         onErr
 
 checkDead :: ((Int, Int, Int) -> action) -> (ApiError -> action) -> Eff model action
 checkDead onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/maintenance/check-dead"
+    requestWriteValue
+        ApiCheckDead
         -- The handler parses a JSON object; include_dead makes the explicit
         -- maintenance recheck revisit records that are already marked dead.
         (Just (object ["include_dead" .= True]))
-        []
-        JSON
-        ( either
-            onErr
-            (\response -> onOk (cdrChecked response, cdrDead response, cdrTotalDead response))
-            . decodeResponseAt "/api/v1/maintenance/check-dead"
+        decodeResponseAt
+        ( \response ->
+            onOk (cdrChecked response, cdrDead response, cdrTotalDead response)
         )
         onErr
 
@@ -1232,48 +1183,39 @@ fetchUndoPreview snapshotId onOk onErr =
 
 runUndo :: Int -> (UndoResult -> action) -> (ApiError -> action) -> Eff model action
 runUndo snapshotId onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/undo"
+    requestWriteValue
+        ApiRunUndo
         (Just (object ["snapshot_id" .= snapshotId]))
-        []
-        JSON
-        (either onErr onOk . decodeResponseAt "/api/v1/undo")
+        decodeResponseAt
+        onOk
         onErr
 
 markLinkAlive :: Int -> action -> (ApiError -> action) -> Eff model action
-markLinkAlive bid = apiWrite "POST" ("/api/v1/bookmarks/" <> ms (show bid) <> "/mark-alive") (Nothing :: Maybe Value)
+markLinkAlive bid =
+    apiWriteRequest (ApiMarkLinkAlive bid) (Nothing :: Maybe Value)
 
 recheckLink :: Int -> action -> (ApiError -> action) -> Eff model action
-recheckLink bid = apiWrite "POST" ("/api/v1/bookmarks/" <> ms (show bid) <> "/recheck-link") (Nothing :: Maybe Value)
+recheckLink bid =
+    apiWriteRequest (ApiRecheckLink bid) (Nothing :: Maybe Value)
 
 regenerateRecovery :: ([Text] -> action) -> (ApiError -> action) -> Eff model action
 regenerateRecovery onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/account/recovery/regenerate"
+    requestWriteValue
+        ApiRegenerateRecovery
         (Nothing :: Maybe Value)
-        []
-        JSON
-        (either onErr onOk . decodeListFieldAt "/api/v1/account/recovery/regenerate" "codes")
+        (\endpoint value -> decodeListFieldAt endpoint "codes" value)
+        onOk
         onErr
 
 renameCredential :: Text -> Text -> action -> (ApiError -> action) -> Eff model action
 renameCredential cid nickname =
-    apiWrite
-        "PATCH"
-        ("/api/v1/account/passkeys/" <> percentEncode (ms cid))
-        (Just (object ["nickname" .= nickname]))
+    apiWriteRequest (ApiRenameCredential cid) (Just (object ["nickname" .= nickname]))
 
 deleteCredential :: Text -> action -> (ApiError -> action) -> Eff model action
-deleteCredential cid = apiDelete ("/api/v1/account/passkeys/" <> percentEncode (ms cid))
-
-{- | @POST /api/v1/account/username@ renames the one account. Once a password
-exists the current password must be sent with the change.
--}
+deleteCredential cid = apiDeleteRequest (ApiDeleteCredential cid)
 patchUsername :: Maybe Text -> Text -> action -> (ApiError -> action) -> Eff model action
 patchUsername currentPassword username =
-    apiWrite "POST" "/api/v1/account/username" (Just payload)
+    apiWriteRequest ApiPatchUsername (Just payload)
   where
     payload =
         object
@@ -1282,10 +1224,6 @@ patchUsername currentPassword username =
                    | Just value <- [currentPassword]
                    ]
             )
-
-{- | @POST /api/v1/account/password@ sets or changes the password. Other
-browser sessions are revoked by the server on success.
--}
 changePassword ::
     Maybe Text ->
     Text ->
@@ -1294,7 +1232,7 @@ changePassword ::
     (ApiError -> action) ->
     Eff model action
 changePassword currentPassword newPassword confirm =
-    apiWrite "POST" "/api/v1/account/password" (Just payload)
+    apiWriteRequest ApiChangePassword (Just payload)
   where
     payload =
         object
@@ -1303,12 +1241,6 @@ changePassword currentPassword newPassword confirm =
                    | Just value <- [currentPassword]
                    ]
             )
-
-{- | @POST /api/v1/account/2fa@ requires or clears the passkey second factor.
-The body is @{"required": Bool, "current_password": Text?}@; the option is
-listed in "docs/API.md" as planned, so a server that has not shipped it yet is
-reported rather than papered over.
--}
 setPasskeyRequirement ::
     Bool ->
     Maybe Text ->
@@ -1316,7 +1248,7 @@ setPasskeyRequirement ::
     (ApiError -> action) ->
     Eff model action
 setPasskeyRequirement required currentPassword =
-    apiWrite "POST" "/api/v1/account/2fa" (Just payload)
+    apiWriteRequest ApiSetPasskeyRequirement (Just payload)
   where
     payload =
         object
@@ -1325,26 +1257,17 @@ setPasskeyRequirement required currentPassword =
                    | Just value <- [currentPassword]
                    ]
             )
-
--- | @POST /api/v1/account/sessions/revoke-others@ — keep only this browser.
 revokeOtherSessions :: (Int -> action) -> (ApiError -> action) -> Eff model action
 revokeOtherSessions onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/account/sessions/revoke-others"
+    requestWriteValue
+        ApiRevokeOtherSessions
         (Nothing :: Maybe Value)
-        []
-        JSON
-        (either onErr onOk . decodeIntFieldAt "/api/v1/account/sessions/revoke-others" "revoked")
+        (\endpoint value -> decodeIntFieldAt endpoint "revoked" value)
+        onOk
         onErr
 
 logout :: action -> (ApiError -> action) -> Eff model action
-logout = apiWrite "POST" "/api/auth/logout" (Nothing :: Maybe Value)
-
-{- | Multipart import of a Netscape bookmarks HTML file picked via the hidden
-@#import-file@ input.  Builds a @FormData@ in the browser and POSTs it with
-the CSRF header; the server answers with an import report and summary counts.
--}
+logout = apiWriteRequest ApiLogout (Nothing :: Maybe Value)
 submitImport ::
     (ImportResponse -> action) ->
     (ApiError -> action) ->
@@ -1359,14 +1282,18 @@ submitImport onOk onErr = withSink $ \sink -> do
         body <- fromMaybe "" <$> (fromJSVal textValue :: IO (Maybe MisoString))
         transportError <- fromMaybe "" <$> (fromJSVal errorValue :: IO (Maybe MisoString))
         let status = maybe 0 round statusNumber
-        sink $ case rawOutcome "/api/v1/import" JSON (rawResponse status body transportError) of
+        sink $ case rawOutcome endpoint JSON (rawResponse status body transportError) of
             Left err -> onErr err
-            Right value -> either onErr onOk (decodeResponseAt "/api/v1/import" value)
+            Right value -> either onErr onOk (decodeResponseAt endpoint value)
     net <- jsg ("EzaNet" :: MisoString)
     inputId <- toJSVal ("import-file" :: MisoString)
     tokenValue <- toJSVal token
     _ <- net # ("upload" :: MisoString) $ (inputId, tokenValue, finish)
     pure ()
+  where
+    -- The multipart transport lives in pwa.js; the endpoint label still comes
+    -- from the shared request table.
+    endpoint = requestUrl ApiSubmitImport
 
 -- ------------------------------------------------------------------ bulk --
 
@@ -1388,13 +1315,11 @@ bulkUpdate ::
     (ApiError -> action) ->
     Eff model action
 bulkUpdate bulkAction ids onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/bookmarks/bulk"
+    requestWriteValue
+        ApiBulkUpdate
         (Just (object fields))
-        []
-        JSON
-        (either onErr onOk . decodeIntFieldAt "/api/v1/bookmarks/bulk" "updated")
+        (\endpoint value -> decodeIntFieldAt endpoint "updated" value)
+        onOk
         onErr
   where
     fields = case bulkAction of
@@ -1408,11 +1333,6 @@ bulkUpdate bulkAction ids onOk onErr =
         , "ids" .= ids
         ]
 
--- ---------------------------------------------------------------- tokens ---
-
-{- | @GET /api/v1/tokens@ — browser-session only (bearer tokens cannot manage
-tokens).
--}
 fetchTokens ::
     ([TokenView] -> action) ->
     (ApiError -> action) ->
@@ -1428,22 +1348,15 @@ createApiToken ::
     (ApiError -> action) ->
     Eff model action
 createApiToken name scopes onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/tokens"
+    requestWriteValue
+        ApiCreateApiToken
         (Just (object ["name" .= name, "scopes" .= scopes]))
-        []
-        JSON
-        (either onErr (\response -> onOk (tcrToken response) (tcrTokenInfo response)) . decodeResponseAt "/api/v1/tokens")
+        decodeResponseAt
+        (\response -> onOk (tcrToken response) (tcrTokenInfo response))
         onErr
 
--- | @DELETE /api/v1/tokens/{id}@ — revoke (keeps the row, sets revoked_at).
 revokeApiToken :: Int -> action -> (ApiError -> action) -> Eff model action
-revokeApiToken tokenId = apiDelete ("/api/v1/tokens/" <> ms (show tokenId))
-
--- ------------------------------------------------------------ highlights --
-
--- | @GET /api/v1/bookmarks/{id}/highlights@
+revokeApiToken tokenId = apiDeleteRequest (ApiRevokeApiToken tokenId)
 fetchHighlights ::
     Int ->
     ([Highlight] -> action) ->
@@ -1468,16 +1381,13 @@ createHighlight ::
     (ApiError -> action) ->
     Eff model action
 createHighlight bookmarkId quote prefix suffix startOffset endOffset note color onOk onErr =
-    sendValue
-        "POST"
-        url
+    requestWriteValue
+        (ApiCreateHighlight bookmarkId)
         (Just (object fields))
-        []
-        JSON
-        (either onErr onOk . decodeResponseAt url)
+        decodeResponseAt
+        onOk
         onErr
   where
-    url = "/api/v1/bookmarks/" <> ms (show bookmarkId) <> "/highlights"
     fields =
         [ "quote" .= quote
         , "prefix" .= prefix
@@ -1488,7 +1398,6 @@ createHighlight bookmarkId quote prefix suffix startOffset endOffset note color 
         , "color" .= color
         ]
 
--- | @PATCH /api/v1/bookmarks/{id}/highlights/{highlightId}@
 patchHighlight ::
     Int ->
     Int ->
@@ -1498,20 +1407,17 @@ patchHighlight ::
     (ApiError -> action) ->
     Eff model action
 patchHighlight bookmarkId highlightId note color onOk onErr =
-    sendValue "PATCH" url (Just payload) [] NONE (\_ -> onOk) onErr
+    apiWriteRequest
+        (ApiPatchHighlight bookmarkId highlightId)
+        (Just payload)
+        onOk
+        onErr
   where
-    url =
-        "/api/v1/bookmarks/"
-            <> ms (show bookmarkId)
-            <> "/highlights/"
-            <> ms (show highlightId)
     payload =
         object
             ( [("note" .= value) | Just value <- [note]]
                 ++ [("color" .= value) | Just value <- [color]]
             )
-
--- | @DELETE /api/v1/bookmarks/{id}/highlights/{highlightId}@
 deleteHighlight ::
     Int ->
     Int ->
@@ -1519,18 +1425,7 @@ deleteHighlight ::
     (ApiError -> action) ->
     Eff model action
 deleteHighlight bookmarkId highlightId onOk onErr =
-    apiDelete
-        ( "/api/v1/bookmarks/"
-            <> ms (show bookmarkId)
-            <> "/highlights/"
-            <> ms (show highlightId)
-        )
-        onOk
-        onErr
-
--- ---------------------------------------------------------------- shares ---
-
--- | @GET /api/v1/share-links@ (all share links for the account).
+    apiDeleteRequest (ApiDeleteHighlight bookmarkId highlightId) onOk onErr
 fetchShares ::
     ([ShareView] -> action) ->
     (ApiError -> action) ->
@@ -1550,9 +1445,8 @@ createShareLink ::
     (ApiError -> action) ->
     Eff model action
 createShareLink scope targetId includeNote expiresInDays onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/share-links"
+    requestWriteValue
+        ApiCreateShareLink
         ( Just
             ( object
                 [ "scope" .= scope
@@ -1562,22 +1456,12 @@ createShareLink scope targetId includeNote expiresInDays onOk onErr =
                 ]
             )
         )
-        []
-        JSON
-        ( either
-            onErr
-            (\response -> onOk (scrId response) (scrUrl response))
-            . decodeResponseAt "/api/v1/share-links"
-        )
+        decodeResponseAt
+        (\response -> onOk (scrId response) (scrUrl response))
         onErr
 
--- | @DELETE /api/v1/share-links/{id}@ — revoke a share link.
 revokeShareLink :: Int -> action -> (ApiError -> action) -> Eff model action
-revokeShareLink shareId = apiDelete ("/api/v1/share-links/" <> ms (show shareId))
-
--- ---------------------------------------------------------------- ai ------
-
--- | @GET /api/v1/ai/status@ — provider/model/configured for the AI-tags page.
+revokeShareLink shareId = apiDeleteRequest (ApiRevokeShareLink shareId)
 fetchAiStatus ::
     (AiStatus -> action) ->
     (ApiError -> action) ->
@@ -1617,19 +1501,13 @@ createRule ::
     (ApiError -> action) ->
     Eff model action
 createRule name enabled field patternText addTags markRead onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/rules"
+    requestWriteValue
+        ApiCreateRule
         (Just (ruleBody name enabled field patternText addTags markRead))
-        []
-        JSON
-        (either onErr onOk . decodeResponseAt "/api/v1/rules")
+        decodeResponseAt
+        onOk
         onErr
 
-{- | @PATCH /api/v1/rules/{id}@ — the API replaces all fields, so callers pass
-the complete rule with the change applied. The response body is ignored: the
-caller already has the rule it submitted.
--}
 patchRule ::
     Int ->
     Rule ->
@@ -1637,7 +1515,7 @@ patchRule ::
     (ApiError -> action) ->
     Eff model action
 patchRule ruleId rule onOk onErr =
-    sendValue "PATCH" ("/api/v1/rules/" <> ms (show ruleId)) (Just body) [] NONE (\_ -> onOk) onErr
+    apiWriteRequest (ApiPatchRule ruleId) (Just body) onOk onErr
   where
     body =
         ruleBody
@@ -1647,12 +1525,8 @@ patchRule ruleId rule onOk onErr =
             (rulePattern rule)
             (ruleAddTags rule)
             (ruleMarkRead rule)
-
--- | @DELETE /api/v1/rules/{id}@
 deleteRule :: Int -> action -> (ApiError -> action) -> Eff model action
-deleteRule ruleId = apiDelete ("/api/v1/rules/" <> ms (show ruleId))
-
--- | @POST /api/v1/rules/test@ — dry run against the existing library.
+deleteRule ruleId = apiDeleteRequest (ApiDeleteRule ruleId)
 testRule ::
     Text ->
     Text ->
@@ -1660,19 +1534,23 @@ testRule ::
     (ApiError -> action) ->
     Eff model action
 testRule field patternText onOk onErr =
-    sendValue
-        "POST"
-        "/api/v1/rules/test"
+    requestWriteValue
+        ApiTestRule
         (Just (ruleBody "" True field patternText [] False))
-        []
-        JSON
-        (either onErr (\response -> onOk (rtrMatches response) (rtrBookmarkIds response)) . decodeResponseAt "/api/v1/rules/test")
+        decodeResponseAt
+        (\response -> onOk (rtrMatches response) (rtrBookmarkIds response))
         onErr
-
--- ------------------------------------------------------------------ links --
 
 exportUrl :: MisoString
 exportUrl = requestUrl ApiExport
 
+-- | The JSON export download the views page links to.
+exportJsonUrl :: MisoString
+exportJsonUrl = requestUrl ApiExport <> "?format=json"
+
 notesExportUrl :: MisoString
 notesExportUrl = requestUrl ApiExportNotes
+
+-- | The reading-copy download link for one record (a GET navigation).
+bookmarkSnapshotUrl :: Int -> MisoString
+bookmarkSnapshotUrl bookmarkId = requestUrl (ApiBookmarkAction bookmarkId "snapshot")

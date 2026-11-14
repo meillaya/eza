@@ -47,7 +47,7 @@ import Eza.Types (
  )
 import Eza.User (UserRole (..), UserView (..), userRoleText)
 import qualified Eza.View as EV
-import Eza.Web.Api (WebhookTest (..))
+import Eza.Web.Api (WebhookTest (..), exportJsonUrl, exportUrl)
 import Eza.Web.Graph (
     GraphDraw (..),
     GraphLayout (..),
@@ -4128,10 +4128,10 @@ importPanel m =
             , H.div_
                 [HP.class_ "account-actions"]
                 [ H.a_
-                    [HP.class_ "btn btn--strong", HP.href_ "/api/v1/export"]
+                    [HP.class_ "btn btn--strong", HP.href_ exportUrl]
                     [text "export bookmarks.html"]
                 , H.a_
-                    [HP.class_ "btn btn--ghost", HP.href_ "/api/v1/export?format=json"]
+                    [HP.class_ "btn btn--ghost", HP.href_ exportJsonUrl]
                     [text "export eza.json"]
                 ]
             ]

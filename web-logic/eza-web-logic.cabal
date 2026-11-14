@@ -25,6 +25,7 @@ library
   hs-source-dirs:   src
   exposed-modules:  Eza.Web.Logic.Api
                     Eza.Web.Logic.Effect
+                    Eza.Web.Logic.Input
                     Eza.Web.Logic.Ledger
                     Eza.Web.Logic.Route
   build-depends:    base >=4.18 && <5
@@ -38,6 +39,7 @@ test-suite eza-web-logic-test
   hs-source-dirs:   test
   main-is:          Spec.hs
   other-modules:    ApiSpec
+                    HelperSpec
                     LedgerSpec
                     PuritySpec
                     RouteSpec
