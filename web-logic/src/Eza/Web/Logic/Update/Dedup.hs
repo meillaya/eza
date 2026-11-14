@@ -73,11 +73,7 @@ initialChoices urlGroups titleGroups = addDedupChoices (urlGroups ++ titleGroups
 
 dropDedupGroup :: Text -> Model -> Model
 dropDedupGroup key m =
-    m
-        { mDedupUrlGroups = filter ((/= key) . dgKey) (mDedupUrlGroups m)
-        , mDedupTitleGroups = filter ((/= key) . dgKey) (mDedupTitleGroups m)
-        , mDedupCounts = adjustedCounts
-        }
+    m{gDedup = (gDedup m){ddDedupUrlGroups = filter ((/= key) . dgKey) (mDedupUrlGroups m), ddDedupTitleGroups = filter ((/= key) . dgKey) (mDedupTitleGroups m), ddDedupCounts = adjustedCounts}}
   where
     inUrl = any ((== key) . dgKey) (mDedupUrlGroups m)
     inTitle = any ((== key) . dgKey) (mDedupTitleGroups m)
@@ -104,31 +100,18 @@ handle = \case
     DedupLoaded report -> do
         putModel
             ( \m ->
-                m
-                    { mDedupCounts = Just (drCounts report)
-                    , mDedupUrlGroups = drUrlGroups report
-                    , mDedupTitleGroups = drTitleGroups report
-                    , mDedupLoading = False
-                    , mDedupMoreBusy = False
-                    , mDedupError = Nothing
-                    , mDedupChoice = initialChoices (drUrlGroups report) (drTitleGroups report)
-                    }
+                m{gDedup = (gDedup m){ddDedupCounts = Just (drCounts report), ddDedupUrlGroups = drUrlGroups report, ddDedupTitleGroups = drTitleGroups report, ddDedupLoading = False, ddDedupMoreBusy = False, ddDedupError = Nothing, ddDedupChoice = initialChoices (drUrlGroups report) (drTitleGroups report)}}
             )
     DedupFailed err -> do
         putModel
             ( \m ->
-                m
-                    { mDedupLoading = False
-                    , mDedupMoreBusy = False
-                    , mDedupBusy = False
-                    , mDedupError = Just ((aeMessage err))
-                    }
+                m{gDedup = (gDedup m){ddDedupLoading = False, ddDedupMoreBusy = False, ddDedupBusy = False, ddDedupError = Just ((aeMessage err))}}
             )
         handleApiError err
     DedupMoreUrl -> do
         m <- get
         when (dedupHasMoreUrl m && not (mDedupMoreBusy m) && not (mDedupLoading m)) $ do
-            putModel (\x -> x{mDedupMoreBusy = True})
+            putModel (\x -> x{gDedup = (gDedup x){ddDedupMoreBusy = True}})
             fetchDedupReport
                 (length (mDedupUrlGroups m))
                 60
@@ -139,7 +122,7 @@ handle = \case
     DedupMoreTitle -> do
         m <- get
         when (dedupHasMoreTitle m && not (mDedupMoreBusy m) && not (mDedupLoading m)) $ do
-            putModel (\x -> x{mDedupMoreBusy = True})
+            putModel (\x -> x{gDedup = (gDedup x){ddDedupMoreBusy = True}})
             fetchDedupReport
                 0
                 1
@@ -151,50 +134,53 @@ handle = \case
         putModel
             ( \m ->
                 m
-                    { mDedupCounts = Just (drCounts report)
-                    , mDedupUrlGroups =
-                        if moreUrls
-                            then mDedupUrlGroups m ++ drUrlGroups report
-                            else mDedupUrlGroups m
-                    , mDedupTitleGroups =
-                        if moreUrls
-                            then mDedupTitleGroups m
-                            else mDedupTitleGroups m ++ drTitleGroups report
-                    , mDedupMoreBusy = False
-                    , mDedupError = Nothing
-                    , mDedupChoice =
-                        addDedupChoices
-                            (drUrlGroups report ++ drTitleGroups report)
-                            (mDedupChoice m)
+                    { gDedup =
+                        (gDedup m)
+                            { ddDedupCounts = Just (drCounts report)
+                            , ddDedupUrlGroups =
+                                if moreUrls
+                                    then mDedupUrlGroups m ++ drUrlGroups report
+                                    else mDedupUrlGroups m
+                            , ddDedupTitleGroups =
+                                if moreUrls
+                                    then mDedupTitleGroups m
+                                    else mDedupTitleGroups m ++ drTitleGroups report
+                            , ddDedupMoreBusy = False
+                            , ddDedupError = Nothing
+                            , ddDedupChoice =
+                                addDedupChoices
+                                    (drUrlGroups report ++ drTitleGroups report)
+                                    (mDedupChoice m)
+                            }
                     }
             )
-    DedupKeep key bookmarkId -> putModel (\m -> m{mDedupChoice = M.insert key bookmarkId (mDedupChoice m)})
+    DedupKeep key bookmarkId -> putModel (\m -> m{gDedup = (gDedup m){ddDedupChoice = M.insert key bookmarkId (mDedupChoice m)}})
     DedupMerge key -> do
         m <- get
         case dedupGroup m key of
             Just group
                 | length (dgItems group) > 1 ->
-                    putModel (\x -> x{mDedupConfirm = Just key})
+                    putModel (\x -> x{gDedup = (gDedup x){ddDedupConfirm = Just key}})
             _ -> notify "Nothing to merge in this group" ToastInfo
-    DedupMergeCancel -> putModel (\m -> m{mDedupConfirm = Nothing})
+    DedupMergeCancel -> putModel (\m -> m{gDedup = (gDedup m){ddDedupConfirm = Nothing}})
     DedupRefresh -> do
-        putModel (\m -> m{mDedupLoading = True, mDedupMoreBusy = False, mDedupError = Nothing})
+        putModel (\m -> m{gDedup = (gDedup m){ddDedupLoading = True, ddDedupMoreBusy = False, ddDedupError = Nothing}})
         dedupFirstPage DedupLoaded DedupFailed
     DedupMergeConfirm -> do
         m <- get
         case mDedupConfirm m >>= dedupGroup m of
-            Nothing -> putModel (\x -> x{mDedupConfirm = Nothing})
+            Nothing -> putModel (\x -> x{gDedup = (gDedup x){ddDedupConfirm = Nothing}})
             Just group -> case dgItems group of
-                [] -> putModel (\x -> x{mDedupConfirm = Nothing})
+                [] -> putModel (\x -> x{gDedup = (gDedup x){ddDedupConfirm = Nothing}})
                 (firstItem : rest) -> do
                     let kept = fromMaybe (bsId firstItem) (M.lookup (dgKey group) (mDedupChoice m))
                         mergeIds = [bsId item | item <- rest, bsId item /= kept]
                     if null mergeIds
                         then do
-                            putModel (\x -> x{mDedupConfirm = Nothing})
+                            putModel (\x -> x{gDedup = (gDedup x){ddDedupConfirm = Nothing}})
                             notify "Nothing to merge in this group" ToastInfo
                         else do
-                            putModel (\x -> x{mDedupBusy = True})
+                            putModel (\x -> x{gDedup = (gDedup x){ddDedupBusy = True}})
                             mergeDedup
                                 kept
                                 mergeIds
@@ -203,12 +189,7 @@ handle = \case
     DedupMerged key merged keeper snapshotId -> do
         putModel
             ( \m ->
-                (dropDedupGroup key m)
-                    { mDedupConfirm = Nothing
-                    , mDedupBusy = False
-                    , mDedupLast = Just (merged, keeper)
-                    , mDedupLastSnapshot = snapshotId
-                    }
+                (dropDedupGroup key m){gDedup = (gDedup (dropDedupGroup key m)){ddDedupConfirm = Nothing, ddDedupBusy = False, ddDedupLast = Just (merged, keeper), ddDedupLastSnapshot = snapshotId}}
             )
         notify
             ( "Merged "
@@ -218,24 +199,27 @@ handle = \case
             )
             ToastOk
         refreshStats
-    DedupMergeAllOpen -> putModel (\m -> m{mDedupMergeAllOpen = True})
-    DedupMergeAllCancel -> putModel (\m -> m{mDedupMergeAllOpen = False})
+    DedupMergeAllOpen -> putModel (\m -> m{gDedup = (gDedup m){ddDedupMergeAllOpen = True}})
+    DedupMergeAllCancel -> putModel (\m -> m{gDedup = (gDedup m){ddDedupMergeAllOpen = False}})
     DedupMergeAllConfirm -> do
-        putModel (\m -> m{mDedupBusy = True})
+        putModel (\m -> m{gDedup = (gDedup m){ddDedupBusy = True}})
         mergeDedupAll DedupMergeAllDone DedupMergeAllFailed
     DedupMergeAllDone report -> do
         putModel
             ( \m ->
                 m
-                    { mDedupMergeAllOpen = False
-                    , mDedupBusy = False
-                    , mDedupMergeAllReport = Just report
-                    , mDedupUrlGroups = []
-                    , mDedupConfirm = Nothing
-                    , mDedupCounts =
-                        fmap
-                            (\counts -> counts{dcUrlGroups = 0, dcUrlRecords = 0})
-                            (mDedupCounts m)
+                    { gDedup =
+                        (gDedup m)
+                            { ddDedupMergeAllOpen = False
+                            , ddDedupBusy = False
+                            , ddDedupMergeAllReport = Just report
+                            , ddDedupUrlGroups = []
+                            , ddDedupConfirm = Nothing
+                            , ddDedupCounts =
+                                fmap
+                                    (\counts -> counts{dcUrlGroups = 0, dcUrlRecords = 0})
+                                    (mDedupCounts m)
+                            }
                     }
             )
         notify
@@ -254,7 +238,7 @@ handle = \case
             ToastOk
         refreshStats
     DedupMergeAllFailed err -> do
-        putModel (\m -> m{mDedupBusy = False})
+        putModel (\m -> m{gDedup = (gDedup m){ddDedupBusy = False}})
         handleApiError err
     -- tags -----------------------------------------------------------------
     _ -> pure ()

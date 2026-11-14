@@ -15,10 +15,10 @@ handle :: Action -> Update ()
 handle = \case
     ImportStart -> triggerFileInput "import-file"
     ImportFileChosen -> do
-        putModel (\m -> m{mImporting = True})
+        putModel (\m -> m{gImport = (gImport m){ipImporting = True}})
         submitImport ImportDone ImportFailed
     ImportDone response -> do
-        putModel (\m -> m{mImporting = False, mImportReport = imrReport response})
+        putModel (\m -> m{gImport = (gImport m){ipImporting = False, ipImportReport = imrReport response}})
         let inserted = imrInserted response
             existing = imrExisting response
             found = imrFound response
@@ -38,7 +38,7 @@ handle = \case
         refreshTags
         refreshStats
     ImportFailed err -> do
-        putModel (\m -> m{mImporting = False})
+        putModel (\m -> m{gImport = (gImport m){ipImporting = False}})
         handleApiError err
     -- saved searches --------------------------------------------------------
     _ -> pure ()

@@ -27,7 +27,7 @@ handle = \case
         putModel resetShellForSearch
         runLedger (Ledger.SearchInput query)
     SearchCommit -> reloadList
-    TimerRegistered timer -> putModel (\m -> m{mDebounce = Just timer})
+    TimerRegistered timer -> putModel (\m -> m{gLedger = (gLedger m){lfDebounce = Just timer}})
     TimerFired timerId -> fireTimer timerId
     TagToggled tag -> do
         putModel resetShellForReload
@@ -53,7 +53,7 @@ handle = \case
         m <- get
         when (Ledger.listRequestIsCurrent (projectLedger m) requestId) $ do
             runLedger (Ledger.ListFailed requestId (aeMessage err))
-            putModel (\x -> x{mScrollRestore = Nothing, mConfirmMarkAll = False})
+            putModel (\x -> x{gShell = (gShell x){sfScrollRestore = Nothing}, gLedger = (gLedger x){lfConfirmMarkAll = False}})
             handleApiError err
     -- The old call sent the first row's id to an id-cutoff endpoint and marked
     -- rows the reader could not see.  Now the client confirms and sends the
@@ -65,7 +65,7 @@ handle = \case
             [] -> notify "No loaded unread records to mark read." ToastInfo
             ids
                 | not (mConfirmMarkAll m) -> do
-                    putModel (\x -> x{mConfirmMarkAll = True})
+                    putModel (\x -> x{gLedger = (gLedger x){lfConfirmMarkAll = True}})
                     notify
                         ( T.pack
                             ( "Mark "
@@ -77,10 +77,10 @@ handle = \case
                         )
                         ToastInfo
                 | otherwise -> do
-                    putModel (\x -> x{mConfirmMarkAll = False, mBulkBusy = True})
+                    putModel (\x -> x{gLedger = (gLedger x){lfConfirmMarkAll = False, lfBulkBusy = True}})
                     bulkUpdate (BulkMarkRead True) ids MarkAllDone MarkAllFailed
     MarkAllDone updated -> do
-        putModel (\m -> m{mBulkBusy = False, mConfirmMarkAll = False})
+        putModel (\m -> m{gLedger = (gLedger m){lfBulkBusy = False, lfConfirmMarkAll = False}})
         notify
             ( T.pack
                 ( "Marked "
@@ -95,15 +95,12 @@ handle = \case
         refreshTags
         refreshStats
     MarkAllFailed err -> do
-        putModel (\m -> m{mBulkBusy = False, mConfirmMarkAll = False})
+        putModel (\m -> m{gLedger = (gLedger m){lfBulkBusy = False, lfConfirmMarkAll = False}})
         handleApiError err
     SavedSearchApply saved -> do
         putModel
             ( \m ->
-                m
-                    { mQ = (ssQ saved)
-                    , mTagsFilter = if null (ssTags saved) then mTagsFilter m else ssTags saved
-                    }
+                m{gLedger = (gLedger m){lfQ = (ssQ saved), lfTagsFilter = if null (ssTags saved) then mTagsFilter m else ssTags saved}}
             )
         reloadList
     ExportClicked -> redirect exportUrl
@@ -117,35 +114,29 @@ handle = \case
             else do
                 let name = if T.null explicitName then mQ m else mSavedName m
                 saveSavedSearch name (mQ m) (mTagsFilter m) (\_ -> SavedSearchDone) SavedSearchFailed
-    SavedSearchNameInput name -> putModel (\m -> m{mSavedName = name})
+    SavedSearchNameInput name -> putModel (\m -> m{gLedger = (gLedger m){lfSavedName = name}})
     SavedSearchDelete savedSearchId -> deleteSavedSearch savedSearchId SavedSearchDone SavedSearchFailed
     SavedSearchDone -> do
         notify "Saved searches updated" ToastOk
-        putModel (\m -> m{mSavedName = ""})
+        putModel (\m -> m{gLedger = (gLedger m){lfSavedName = ""}})
         fetchSavedSearches SavedSearchesLoaded (\_ -> Noop)
     SavedSearchFailed err -> handleApiError err
-    SavedSearchesLoaded saved -> putModel (\m -> m{mSaved = saved})
+    SavedSearchesLoaded saved -> putModel (\m -> m{gLedger = (gLedger m){lfSaved = saved}})
     SavedSearchShareOpen saved -> do
         m <- get
         let epoch = mDetailEpoch m
         putModel
             ( \x ->
-                x
-                    { mSavedShare = Just saved
-                    , mShareUrl = Nothing
-                    , mShareBusy = False
-                    , mSharesLoading = True
-                    , mSharesError = Nothing
-                    }
+                x{gLedger = (gLedger x){lfSavedShare = Just saved}, gShares = (gShares x){srShareUrl = Nothing, srShareBusy = False, srSharesLoading = True, srSharesError = Nothing}}
             )
         fetchShares (\shares -> SharesLoaded epoch shares) (SharesFailed epoch)
-    SavedSearchShareClose -> putModel (\m -> m{mSavedShare = Nothing, mShareUrl = Nothing})
+    SavedSearchShareClose -> putModel (\m -> m{gLedger = (gLedger m){lfSavedShare = Nothing}, gShares = (gShares m){srShareUrl = Nothing}})
     SavedSearchShareCreate -> do
         m <- get
         case mSavedShare m of
             Nothing -> pure ()
             Just saved -> do
-                putModel (\x -> x{mShareBusy = True})
+                putModel (\x -> x{gShares = (gShares x){srShareBusy = True}})
                 createShareLink
                     "saved_search"
                     (ssId saved)
@@ -167,20 +158,20 @@ handle = \case
                     Just currentIndex -> do
                         let (from, to) = (min anchorIndex currentIndex, max anchorIndex currentIndex)
                             rangeIds = [bsId item | (i, item) <- zip [0 :: Int ..] (mItems m), i >= from, i <= to]
-                        putModel (\x -> x{mSelection = IS.union current (IS.fromList rangeIds)})
+                        putModel (\x -> x{gLedger = (gLedger x){lfSelection = IS.union current (IS.fromList rangeIds)}})
                     Nothing -> pure ()
             _ ->
                 let next =
                         if IS.member bookmarkId current
                             then IS.delete bookmarkId current
                             else IS.insert bookmarkId current
-                 in putModel (\x -> x{mSelection = next, mSelectAnchor = Just bookmarkId})
-    SelectClear -> putModel (\m -> (cancelSelectAllPaging m){mSelection = IS.empty, mSelectAnchor = Nothing})
+                 in putModel (\x -> x{gLedger = (gLedger x){lfSelection = next, lfSelectAnchor = Just bookmarkId}})
+    SelectClear -> putModel (\m -> (cancelSelectAllPaging m){gLedger = (gLedger (cancelSelectAllPaging m)){lfSelection = IS.empty, lfSelectAnchor = Nothing}})
     -- Stop the paging run but keep the ids already collected.
     SelectAllMatchingCancel -> putModel cancelSelectAllPaging
     SelectAllLoaded -> do
         m <- get
-        putModel (\x -> x{mSelection = IS.fromList (map bsId (mItems m)), mSelectAnchor = Nothing})
+        putModel (\x -> x{gLedger = (gLedger x){lfSelection = IS.fromList (map bsId (mItems m)), lfSelectAnchor = Nothing}})
     SelectAllMatchingStart -> do
         m <- get
         unless (mSelectingAll m) $ do
@@ -190,15 +181,7 @@ handle = \case
             let selectEpoch = nextRequestId (mSelectEpoch m)
                 params = (listParams m False){lpOffset = 0, lpLimit = 200}
             put
-                m
-                    { mSelectingAll = True
-                    , mSelection = IS.empty
-                    , mSelectAnchor = Nothing
-                    , mSelectFetched = 0
-                    , mSelectEpoch = selectEpoch
-                    , mSelectListEpoch = mListEpoch m
-                    , mSelectParams = Just params
-                    }
+                m{gLedger = (gLedger m){lfSelectingAll = True, lfSelection = IS.empty, lfSelectAnchor = Nothing, lfSelectFetched = 0, lfSelectEpoch = selectEpoch, lfSelectListEpoch = mListEpoch m, lfSelectParams = Just params}}
             fetchBookmarks
                 params
                 (\page -> SelectPageLoaded selectEpoch (map bsId (spItems page)) (spHasMore page))
@@ -211,7 +194,7 @@ handle = \case
             let fetched = mSelectFetched m + length ids
                 merged = IS.union (mSelection m) (IS.fromList ids)
                 capped = if IS.size merged > 10000 then IS.fromList (take 10000 (IS.toList merged)) else merged
-            put m{mSelection = capped, mSelectFetched = fetched}
+            put m{gLedger = (gLedger m){lfSelection = capped, lfSelectFetched = fetched}}
             if hasMore && IS.size capped < 10000
                 then case mSelectParams m of
                     Nothing -> putModel cancelSelectAllPaging
@@ -221,7 +204,7 @@ handle = \case
                             (\page -> SelectPageLoaded selectEpoch (map bsId (spItems page)) (spHasMore page))
                             (SelectPageFailed selectEpoch)
                 else do
-                    putModel (\x -> (cancelSelectAllPaging x){mSelection = capped})
+                    putModel (\x -> (cancelSelectAllPaging x){gLedger = (gLedger (cancelSelectAllPaging x)){lfSelection = capped}})
                     if IS.size capped >= 10000
                         then notify "Selected the first 10,000 bookmarks" ToastInfo
                         else notify (T.pack ("Selected " <> show (IS.size capped) <> " bookmarks")) ToastOk
@@ -231,10 +214,10 @@ handle = \case
             putModel cancelSelectAllPaging
             handleApiError err
     BulkTagPromptOpen adding -> do
-        putModel (\m -> m{mTagPrompt = Just adding, mTagPromptValue = ""})
+        putModel (\m -> m{gLedger = (gLedger m){lfTagPrompt = Just adding, lfTagPromptValue = ""}})
         focusElementDelayed "bulk-tag-input"
-    BulkTagInput value -> putModel (\m -> m{mTagPromptValue = value})
-    BulkTagCancel -> putModel (\m -> m{mTagPrompt = Nothing, mTagPromptValue = ""})
+    BulkTagInput value -> putModel (\m -> m{gLedger = (gLedger m){lfTagPromptValue = value}})
+    BulkTagCancel -> putModel (\m -> m{gLedger = (gLedger m){lfTagPrompt = Nothing, lfTagPromptValue = ""}})
     BulkTagSubmit -> do
         m <- get
         let ids = IS.toList (mSelection m)
@@ -246,7 +229,7 @@ handle = \case
                 if null tags
                     then notify "Type at least one tag" ToastInfo
                     else do
-                        putModel (\x -> x{mBulkBusy = True, mTagPrompt = Nothing, mTagPromptValue = ""})
+                        putModel (\x -> x{gLedger = (gLedger x){lfBulkBusy = True, lfTagPrompt = Nothing, lfTagPromptValue = ""}})
                         bulkUpdate
                             (if adding then BulkAddTags tags else BulkRemoveTags tags)
                             ids
@@ -258,45 +241,34 @@ handle = \case
         if null ids
             then notify "Select at least one bookmark first" ToastInfo
             else do
-                putModel (\x -> x{mBulkBusy = True})
+                putModel (\x -> x{gLedger = (gLedger x){lfBulkBusy = True}})
                 bulkUpdate (BulkMarkRead readFlag) ids BulkActionDone BulkActionFailed
     BulkDeleteRequest -> do
         m <- get
         if IS.null (mSelection m)
             then notify "Select at least one bookmark first" ToastInfo
-            else putModel (\x -> x{mConfirmBulkDelete = True})
-    BulkDeleteCancel -> putModel (\m -> m{mConfirmBulkDelete = False})
+            else putModel (\x -> x{gLedger = (gLedger x){lfConfirmBulkDelete = True}})
+    BulkDeleteCancel -> putModel (\m -> m{gLedger = (gLedger m){lfConfirmBulkDelete = False}})
     BulkDeleteConfirm -> do
         m <- get
-        putModel (\x -> x{mConfirmBulkDelete = False, mBulkBusy = True})
+        putModel (\x -> x{gLedger = (gLedger x){lfConfirmBulkDelete = False, lfBulkBusy = True}})
         bulkUpdate BulkDelete (IS.toList (mSelection m)) BulkActionDone BulkActionFailed
     BulkActionDone updated -> do
         putModel
             ( \m ->
-                m
-                    { mSelection = IS.empty
-                    , mSelectAnchor = Nothing
-                    , mSelectingAll = False
-                    , mBulkBusy = False
-                    , mTagPrompt = Nothing
-                    , mTagPromptValue = ""
-                    , mConfirmBulkDelete = False
-                    }
+                m{gLedger = (gLedger m){lfSelection = IS.empty, lfSelectAnchor = Nothing, lfSelectingAll = False, lfBulkBusy = False, lfTagPrompt = Nothing, lfTagPromptValue = "", lfConfirmBulkDelete = False}}
             )
         notify (T.pack ("Updated " <> show updated <> " bookmarks")) ToastOk
         reloadList
         refreshTags
         refreshStats
     BulkActionFailed err -> do
-        putModel (\m -> m{mBulkBusy = False})
+        putModel (\m -> m{gLedger = (gLedger m){lfBulkBusy = False}})
         handleApiError err
     RetryEnrich bookmarkId -> do
         putModel
             ( \m ->
-                m
-                    { mDetail =
-                        fmap (\detail -> detail{bdEnrichState = "queued", bdEnrichError = ""}) (mDetail m)
-                    }
+                m{gDetail = (gDetail m){dtDetail = fmap (\detail -> detail{bdEnrichState = "queued", bdEnrichError = ""}) (mDetail m)}}
             )
         bookmarkAction bookmarkId "enrich" (DetailReload bookmarkId) (\err -> ApiErrorRaised err)
     DetailReload bookmarkId -> reloadDetail bookmarkId

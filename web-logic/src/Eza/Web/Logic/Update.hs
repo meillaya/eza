@@ -15,7 +15,7 @@ without a module cycle.
 module Eza.Web.Logic.Update (update) where
 
 import Eza.Web.Logic.Effect (Effect)
-import Eza.Web.Logic.Model (Action (..), Model)
+import Eza.Web.Logic.Model
 import Eza.Web.Logic.Update.Monad (Env (..), Update, runUpdate)
 
 import qualified Eza.Web.Logic.Update.Account as Account

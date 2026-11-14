@@ -16,27 +16,7 @@ import Eza.Types (SavedSearch (..))
 
 import Eza.Web.Logic.Effect (RequestId (..))
 import Eza.Web.Logic.Graph (GraphView (..), initialGraphView)
-import Eza.Web.Logic.Model (
-    AccountTab (..),
-    KeyEvent (..),
-    Model (..),
-    NoteMode (..),
-    ReaderSelection (..),
-    Theme (..),
-    accountTabFromSlug,
-    accountTabSlug,
-    activeGraphLayout,
-    formatFiled,
-    formatProseDate,
-    formatStamp,
-    formatStampUtc,
-    initialModel,
-    paletteEntries,
-    sortLabel,
-    themeOfText,
-    themeToText,
-    wireVersionMismatchMessage,
- )
+import Eza.Web.Logic.Model
 import Eza.Web.Logic.Route (Route (..))
 import Eza.Web.Logic.Wire (ImportResponse (..), ListParams (..), WebhookTest (..))
 
@@ -95,12 +75,12 @@ modelSpec = describe "native client model" $ do
             let actions = [action | (_, _, action) <- paletteEntries initialModel]
             null actions `shouldBe` False
         it "filters the catalogue by the palette query" $ do
-            let model = initialModel{mPaletteQ = "theme"}
+            let model = initialModel{gShell = (gShell initialModel){sfPaletteQ = "theme"}}
                 labels = [T.toLower label | (label, _, _) <- paletteEntries model]
             labels `shouldSatisfy` all (T.isInfixOf "theme")
         it "adds a saved-search entry" $ do
             let saved = SavedSearch 3 "rust reading" "rust" [] 0
-                model = initialModel{mSaved = [saved], mPaletteQ = "rust"}
+                model = initialModel{gLedger = (gLedger initialModel){lfSaved = [saved]}, gShell = (gShell initialModel){sfPaletteQ = "rust"}}
             any (\(label, hint, _) -> label == "rust reading" && hint == "saved search") (paletteEntries model)
                 `shouldBe` True
     describe "graph state types" $ do

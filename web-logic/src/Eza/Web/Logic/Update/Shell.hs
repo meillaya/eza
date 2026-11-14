@@ -57,28 +57,28 @@ hasModalLayer m =
 closeTopLayer :: Model -> Update ()
 closeTopLayer m
     | mUndoPreviewLoading m || isJust (mUndoPreview m) || isJust (mUndoPreviewError m) = dispatch UndoPreviewClose
-    | vuSaveOpen (mViewUi m) = putModel (\x -> x{mViewUi = (mViewUi x){vuSaveOpen = False, vuError = Nothing}})
-    | vuImportOpen (mViewUi m) = putModel (\x -> x{mViewUi = (mViewUi x){vuImportOpen = False, vuError = Nothing}})
-    | isJust (vuExport (mViewUi m)) = putModel (\x -> x{mViewUi = (mViewUi x){vuExport = Nothing}})
-    | mConfirmLogout m = putModel (\x -> x{mConfirmLogout = False})
-    | mHighlightNoteOpen m = putModel (\x -> x{mHighlightNoteOpen = False, mHighlightNote = ""})
-    | isJust (mHighlightEdit m) = putModel (\x -> x{mHighlightEdit = Nothing, mHighlightEditNote = ""})
-    | mShareDialogOpen m = putModel (\x -> x{mShareDialogOpen = False, mShareUrl = Nothing})
-    | isJust (mSavedShare m) = putModel (\x -> x{mSavedShare = Nothing, mShareUrl = Nothing})
-    | isJust (mTagDialog m) = putModel (\x -> x{mTagDialog = Nothing, mTagDialogError = Nothing})
-    | isJust (mDedupConfirm m) = putModel (\x -> x{mDedupConfirm = Nothing})
-    | mDedupMergeAllOpen m = putModel (\x -> x{mDedupMergeAllOpen = False})
-    | mSnapshotOpen m = putModel (\x -> x{mSnapshotOpen = False})
-    | isJust (mReaderSel m) = putModel (\x -> x{mReaderSel = Nothing})
-    | mPaletteOpen m = putModel (\x -> x{mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})
-    | mAddOpen m = putModel (\x -> x{mAddOpen = False})
+    | vuSaveOpen (mViewUi m) = putModel (\x -> x{gViews = (gViews x){vwViewUi = (mViewUi x){vuSaveOpen = False, vuError = Nothing}}})
+    | vuImportOpen (mViewUi m) = putModel (\x -> x{gViews = (gViews x){vwViewUi = (mViewUi x){vuImportOpen = False, vuError = Nothing}}})
+    | isJust (vuExport (mViewUi m)) = putModel (\x -> x{gViews = (gViews x){vwViewUi = (mViewUi x){vuExport = Nothing}}})
+    | mConfirmLogout m = putModel (\x -> x{gShell = (gShell x){sfConfirmLogout = False}})
+    | mHighlightNoteOpen m = putModel (\x -> x{gDetail = (gDetail x){dtHighlightNoteOpen = False, dtHighlightNote = ""}})
+    | isJust (mHighlightEdit m) = putModel (\x -> x{gDetail = (gDetail x){dtHighlightEdit = Nothing, dtHighlightEditNote = ""}})
+    | mShareDialogOpen m = putModel (\x -> x{gShares = (gShares x){srShareDialogOpen = False, srShareUrl = Nothing}})
+    | isJust (mSavedShare m) = putModel (\x -> x{gLedger = (gLedger x){lfSavedShare = Nothing}, gShares = (gShares x){srShareUrl = Nothing}})
+    | isJust (mTagDialog m) = putModel (\x -> x{gTags = (gTags x){tgTagDialog = Nothing, tgTagDialogError = Nothing}})
+    | isJust (mDedupConfirm m) = putModel (\x -> x{gDedup = (gDedup x){ddDedupConfirm = Nothing}})
+    | mDedupMergeAllOpen m = putModel (\x -> x{gDedup = (gDedup x){ddDedupMergeAllOpen = False}})
+    | mSnapshotOpen m = putModel (\x -> x{gDetail = (gDetail x){dtSnapshotOpen = False}})
+    | isJust (mReaderSel m) = putModel (\x -> x{gDetail = (gDetail x){dtReaderSel = Nothing}})
+    | mPaletteOpen m = putModel (\x -> x{gShell = (gShell x){sfPaletteOpen = False, sfPaletteQ = "", sfPaletteSel = 0}})
+    | mAddOpen m = putModel (\x -> x{gAdd = (gAdd x){adAddOpen = False}})
     | mGuardOpen m = dispatch DirtyGuardClose
-    | isJust (mTagPrompt m) = putModel (\x -> x{mTagPrompt = Nothing, mTagPromptValue = ""})
-    | mConfirmBulkDelete m = putModel (\x -> x{mConfirmBulkDelete = False})
-    | isJust (mLinkQuery m) = putModel (\x -> x{mLinkQuery = Nothing, mLinkResults = []})
-    | isJust (mDrawer m) = putModel (\x -> x{mDrawer = Nothing})
-    | isJust (mConfirmDelete m) = putModel (\x -> x{mConfirmDelete = Nothing})
-    | not (IS.null (mSelection m)) = putModel (\x -> (cancelSelectAllPaging x){mSelection = IS.empty, mSelectAnchor = Nothing})
+    | isJust (mTagPrompt m) = putModel (\x -> x{gLedger = (gLedger x){lfTagPrompt = Nothing, lfTagPromptValue = ""}})
+    | mConfirmBulkDelete m = putModel (\x -> x{gLedger = (gLedger x){lfConfirmBulkDelete = False}})
+    | isJust (mLinkQuery m) = putModel (\x -> x{gDetail = (gDetail x){dtLinkQuery = Nothing, dtLinkResults = []}})
+    | isJust (mDrawer m) = putModel (\x -> x{gLedger = (gLedger x){lfDrawer = Nothing}})
+    | isJust (mConfirmDelete m) = putModel (\x -> x{gLedger = (gLedger x){lfConfirmDelete = Nothing}})
+    | not (IS.null (mSelection m)) = putModel (\x -> (cancelSelectAllPaging x){gLedger = (gLedger (cancelSelectAllPaging x)){lfSelection = IS.empty, lfSelectAnchor = Nothing}})
     | mSelectingAll m = putModel cancelSelectAllPaging
     | otherwise = pure ()
 
@@ -89,7 +89,7 @@ choosePalette offsetFromSelection = do
         selection = max 0 (mPaletteSel m + offsetFromSelection)
     case drop selection entries of
         ((_, _, nextAction) : _) -> do
-            putModel (\x -> x{mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})
+            putModel (\x -> x{gShell = (gShell x){sfPaletteOpen = False, sfPaletteQ = "", sfPaletteSel = 0}})
             dispatch nextAction
         [] -> pure ()
 
@@ -106,7 +106,7 @@ activateRow :: Int -> Update ()
 activateRow bookmarkId = do
     m <- get
     case indexOfBookmark (mItems m) bookmarkId of
-        Just idx -> putModel (\x -> x{mLedgerCursor = Just idx})
+        Just idx -> putModel (\x -> x{gLedger = (gLedger x){lfLedgerCursor = Just idx}})
         Nothing -> pure ()
     dispatch (Navigate (Bookmark bookmarkId))
 
@@ -115,7 +115,7 @@ activateRow bookmarkId = do
 handle :: Action -> Update ()
 handle = \case
     Mounted -> do
-        putModel (\m -> m{mBooted = True})
+        putModel (\m -> m{gShell = (gShell m){sfBooted = True}})
         fetchBoot BootLoaded BootFailed
         bootstrapEnvironment
     -- The share-target landing page is a real page now: it renders the
@@ -125,19 +125,19 @@ handle = \case
         -- The fragment is applied in the same update as the route, so it
         -- cannot land after a tab click and undo it.
         when (route == Account) $
-            putModel (\x -> x{mAccountTab = accountTabFromSlug fragmentText})
+            putModel (\x -> x{gAccount = (gAccount x){acAccountTab = accountTabFromSlug fragmentText}})
         if hasUnsaved m && route /= mRoute m && isDetailRoute (mRoute m)
             then
                 -- The browser already changed the address before the
                 -- subscription delivered this route. Remember that so
                 -- cancelling can put the address back and discarding
                 -- can avoid a duplicate history entry.
-                put m{mGuardOpen = True, mPendingRoute = Just route, mGuardFromHistory = True}
+                put m{gShell = (gShell m){sfGuardOpen = True, sfPendingRoute = Just route, sfGuardFromHistory = True}}
             else do
                 -- A history navigation that lands on the rendered route
                 -- (e.g. Forward while the guard is open) closes the guard
                 -- instead of re-deriving it.
-                putModel (\x -> x{mGuardOpen = False, mPendingRoute = Nothing, mGuardFromHistory = False})
+                putModel (\x -> x{gShell = (gShell x){sfGuardOpen = False, sfPendingRoute = Nothing, sfGuardFromHistory = False}})
                 Job.cancelAllJobs
                 loadRoute route
     Navigate route -> do
@@ -146,14 +146,14 @@ handle = \case
             then pure ()
             else
                 if hasUnsaved m && isDetailRoute (mRoute m)
-                    then put m{mGuardOpen = True, mPendingRoute = Just route, mGuardFromHistory = False}
+                    then put m{gShell = (gShell m){sfGuardOpen = True, sfPendingRoute = Just route, sfGuardFromHistory = False}}
                     else do
                         Job.cancelAllJobs
                         navigateTo route
     ThemeToggled -> toggleTheme
-    ThemeLoaded theme -> putModel (\m -> m{mTheme = theme})
-    ConnectivityChanged online -> putModel (\m -> m{mOnline = online})
-    WindowOriginKnown origin -> putModel (\m -> m{mWindowOrigin = origin})
+    ThemeLoaded theme -> putModel (\m -> m{gShell = (gShell m){sfTheme = theme}})
+    ConnectivityChanged online -> putModel (\m -> m{gShell = (gShell m){sfOnline = online}})
+    WindowOriginKnown origin -> putModel (\m -> m{gShell = (gShell m){sfWindowOrigin = origin}})
     QuickSaved bookmarkId existing -> do
         notify
             ( if existing
@@ -170,7 +170,7 @@ handle = \case
             notify "Bookmarklet unavailable." ToastInfo
         | otherwise -> copyText bookmarklet "Bookmarklet copied" "Copy failed. Drag the link instead"
     LayoutChanged width height -> do
-        putModel (\m -> m{mWidth = width, mHeight = height})
+        putModel (\m -> m{gShell = (gShell m){sfWidth = width, sfHeight = height}})
         measureLedgerScroll
     Resized -> do
         refreshLayout
@@ -187,12 +187,7 @@ handle = \case
         let restoring = isJust (mScrollRestore previous)
         putModel
             ( \m ->
-                m
-                    { mScrollY = scrollY
-                    , mHeight = height
-                    , mGridTop = gridTop
-                    , mScrollRestore = if restoring then mScrollRestore m else Nothing
-                    }
+                m{gShell = (gShell m){sfScrollY = scrollY, sfHeight = height, sfGridTop = gridTop, sfScrollRestore = if restoring then mScrollRestore m else Nothing}}
             )
         m <- get
         let content = gridTop + ledgerContentHeight m
@@ -270,15 +265,7 @@ handle = \case
     BootLoaded payload -> do
         putModel
             ( \m ->
-                m
-                    { mVersion = (bpVersion payload)
-                    , mOrigin = (bpOrigin payload)
-                    , mTags = bpTags payload
-                    , mStats = Just (bpStats payload)
-                    , mSaved = bpSavedSearches payload
-                    , mViews = bpViews payload
-                    , mBootReady = True
-                    }
+                m{gShell = (gShell m){sfVersion = (bpVersion payload), sfOrigin = (bpOrigin payload), sfBootReady = True}, gLedger = (gLedger m){lfTags = bpTags payload, lfStats = Just (bpStats payload), lfSaved = bpSavedSearches payload}, gViews = (gViews m){vwViews = bpViews payload}}
             )
         -- A cold load of /graph?focus=..&local=1 must keep the URL's scope:
         -- the route already applied local mode, so the default whole-library
@@ -306,44 +293,31 @@ handle = \case
             then
                 put
                     m
-                        { mItems = spItems page
-                        , mTotal = spTotal page
-                        , mYearHere = spYearCounts page
-                        , mHasMore = spHasMore page
-                        , mOffset = spOffset page + length (spItems page)
-                        , mLoading = False
-                        , mLoadingMore = False
-                        , mListDeferred = False
-                        , mError = Nothing
-                        , mSelection = IS.empty
-                        , mSelectAnchor = Nothing
-                        , mSelectingAll = False
-                        , mConfirmMarkAll = False
-                        , mLedgerCursor = Nothing
-                        , -- A route loaded before the boot answer consumed the
-                          -- seed immediately; a route still to come consumes the
-                          -- flag in loadIndexList instead of refetching.
-                          mBootSeeded = not deferred
+                        { gLedger = (gLedger m){lfItems = spItems page, lfTotal = spTotal page, lfYearHere = spYearCounts page, lfHasMore = spHasMore page, lfOffset = spOffset page + length (spItems page), lfLoading = False, lfLoadingMore = False, lfListDeferred = False, lfError = Nothing, lfSelection = IS.empty, lfSelectAnchor = Nothing, lfSelectingAll = False, lfConfirmMarkAll = False, lfLedgerCursor = Nothing}
+                        , gShell =
+                            (gShell m)
+                                { -- A route loaded before the boot answer consumed the
+                                  -- seed immediately; a route still to come consumes the
+                                  -- flag in loadIndexList instead of refetching.
+                                  sfBootSeeded = not deferred
+                                }
                         }
             else when deferred $ do
-                putModel (\x -> x{mListDeferred = False})
+                putModel (\x -> x{gLedger = (gLedger x){lfListDeferred = False}})
                 when (isListRoute (mRoute m)) reloadList
     BootFailed err -> do
         m <- get
         let deferred = mListDeferred m
-        putModel (\x -> x{mBootReady = True, mListDeferred = False})
+        putModel (\x -> x{gShell = (gShell x){sfBootReady = True}, gLedger = (gLedger x){lfListDeferred = False}})
         when (deferred && isListRoute (mRoute m)) reloadList
         handleApiError err
         when (aeStatus err == Just 401) $ redirect "/login"
     WireVersionMismatch serverVersion ->
         putModel
             ( \m ->
-                m
-                    { mBootReady = True
-                    , mBlockingError = Just (wireVersionMismatchMessage serverVersion)
-                    }
+                m{gShell = (gShell m){sfBootReady = True, sfBlockingError = Just (wireVersionMismatchMessage serverVersion)}}
             )
-    ApiUnauthorized -> putModel (\m -> m{mSignedOut = True})
+    ApiUnauthorized -> putModel (\m -> m{gShell = (gShell m){sfSignedOut = True}})
     ApiErrorRaised err -> handleApiError err
     ReloadRoute -> reloadRoute
     LedgerCursorNext -> moveCursor 1
@@ -354,24 +328,24 @@ handle = \case
         let cursor = case indexOfBookmark (mItems m) bid of
                 Just idx -> Just idx
                 Nothing -> mLedgerCursor m
-        putModel (\x -> x{mDrawer = Just bid, mLedgerCursor = cursor})
-    DrawerClose -> putModel (\m -> m{mDrawer = Nothing})
+        putModel (\x -> x{gLedger = (gLedger x){lfDrawer = Just bid, lfLedgerCursor = cursor}})
+    DrawerClose -> putModel (\m -> m{gLedger = (gLedger m){lfDrawer = Nothing}})
     PaletteOpen -> do
-        putModel (\m -> m{mPaletteOpen = True, mPaletteQ = "", mPaletteSel = 0})
+        putModel (\m -> m{gShell = (gShell m){sfPaletteOpen = True, sfPaletteQ = "", sfPaletteSel = 0}})
         focusElementDelayed "palette-input"
-    PaletteClose -> putModel (\m -> m{mPaletteOpen = False, mPaletteQ = "", mPaletteSel = 0})
-    PaletteInput query -> putModel (\m -> m{mPaletteQ = query, mPaletteSel = 0})
+    PaletteClose -> putModel (\m -> m{gShell = (gShell m){sfPaletteOpen = False, sfPaletteQ = "", sfPaletteSel = 0}})
+    PaletteInput query -> putModel (\m -> m{gShell = (gShell m){sfPaletteQ = query, sfPaletteSel = 0}})
     PalettePrev -> do
         m <- get
         let count = length (paletteEntries m)
-        putModel (\x -> x{mPaletteSel = if count == 0 then 0 else max 0 (mPaletteSel x - 1)})
+        putModel (\x -> x{gShell = (gShell x){sfPaletteSel = if count == 0 then 0 else max 0 (mPaletteSel x - 1)}})
     PaletteNext -> do
         m <- get
         let count = length (paletteEntries m)
-        putModel (\x -> x{mPaletteSel = if count == 0 then 0 else min (count - 1) (mPaletteSel x + 1)})
+        putModel (\x -> x{gShell = (gShell x){sfPaletteSel = if count == 0 then 0 else min (count - 1) (mPaletteSel x + 1)}})
     PaletteSelect -> choosePalette 0
     PaletteChoose offsetFromSelection -> choosePalette offsetFromSelection
     -- detail ----------------------------------------------------------------
     ToastAdd message kind -> notify message kind
-    ToastDismiss dismissed -> putModel (\m -> m{mToasts = filter (\toast -> toastId toast /= dismissed) (mToasts m)})
+    ToastDismiss dismissed -> putModel (\m -> m{gShell = (gShell m){sfToasts = filter (\toast -> toastId toast /= dismissed) (mToasts m)}})
     _ -> pure ()

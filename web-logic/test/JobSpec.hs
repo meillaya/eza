@@ -162,11 +162,14 @@ jobSpec = describe "M4-D job polling" $ do
                 -- the queued action schedules the first tick rather than a request
                 model2 =
                     model1
-                        { mJobPolls =
-                            IM.adjust
-                                (\poll -> poll{jpTimer = Nothing, jpRequest = Just requestId})
-                                5
-                                (jobPolls model1)
+                        { gJobs =
+                            (gJobs model1)
+                                { jbJobPolls =
+                                    IM.adjust
+                                        (\poll -> poll{jpTimer = Nothing, jpRequest = Just requestId})
+                                        5
+                                        (jobPolls model1)
+                                }
                         }
                 result = Just (object ["checked" .= (9 :: Int), "dead" .= (2 :: Int)])
                 (model3, _) = update model2 (JobStatusLoaded DeadCheckJob 5 requestId (doneWith result))
@@ -179,11 +182,14 @@ jobSpec = describe "M4-D job polling" $ do
                 requestId = mJobRequestNext model1
                 model2 =
                     model1
-                        { mJobPolls =
-                            IM.adjust
-                                (\poll -> poll{jpTimer = Nothing, jpRequest = Just requestId})
-                                9
-                                (jobPolls model1)
+                        { gJobs =
+                            (gJobs model1)
+                                { jbJobPolls =
+                                    IM.adjust
+                                        (\poll -> poll{jpTimer = Nothing, jpRequest = Just requestId})
+                                        9
+                                        (jobPolls model1)
+                                }
                         }
                 result = Just (object ["suggestions" .= ([] :: [Int])])
                 (model3, _) = update model2 (JobStatusLoaded (AiSuggestionsJob (Just "rust")) 9 requestId (doneWith result))
@@ -194,11 +200,14 @@ jobSpec = describe "M4-D job polling" $ do
                 requestId = mJobRequestNext model1
                 model2 =
                     model1
-                        { mJobPolls =
-                            IM.adjust
-                                (\poll -> poll{jpTimer = Nothing, jpRequest = Just requestId})
-                                11
-                                (jobPolls model1)
+                        { gJobs =
+                            (gJobs model1)
+                                { jbJobPolls =
+                                    IM.adjust
+                                        (\poll -> poll{jpTimer = Nothing, jpRequest = Just requestId})
+                                        11
+                                        (jobPolls model1)
+                                }
                         }
                 result = Just (object ["ok" .= True, "status" .= (200 :: Int)])
                 (model3, _) = update model2 (JobStatusLoaded (WebhookTestJob 3) 11 requestId (doneWith result))
@@ -211,11 +220,14 @@ jobSpec = describe "M4-D job polling" $ do
             let (model, requestId) = startSnapshot
                 nearlyOut =
                     model
-                        { mJobPolls =
-                            IM.adjust
-                                (\poll -> poll{jpElapsedMs = jobPollBudgetMs})
-                                42
-                                (jobPolls model)
+                        { gJobs =
+                            (gJobs model)
+                                { jbJobPolls =
+                                    IM.adjust
+                                        (\poll -> poll{jpElapsedMs = jobPollBudgetMs})
+                                        42
+                                        (jobPolls model)
+                                }
                         }
                 (model2, _) = update nearlyOut (JobStatusLoaded (SnapshotJob 7) 42 requestId queued)
             IM.keys (jobPolls model2) `shouldBe` []

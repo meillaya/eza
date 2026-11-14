@@ -70,10 +70,7 @@ startJob kind jobId = do
                 }
     putModel
         ( \m ->
-            m
-                { mJobPolls = IM.insert jobId poll (mJobPolls m)
-                , mJobTimerNext = timerId
-                }
+            m{gJobs = (gJobs m){jbJobPolls = IM.insert jobId poll (mJobPolls m), jbJobTimerNext = timerId}}
         )
     scheduleAction (jpDelayMs poll) (JobTick kind jobId timerId)
 
@@ -93,10 +90,7 @@ tick kind jobId timerId = do
                             }
                 putModel
                     ( \m ->
-                        m
-                            { mJobPolls = IM.insert jobId poll' (mJobPolls m)
-                            , mJobRequestNext = nextRequestId requestId
-                            }
+                        m{gJobs = (gJobs m){jbJobPolls = IM.insert jobId poll' (mJobPolls m), jbJobRequestNext = nextRequestId requestId}}
                     )
                 fetchJobStatus
                     jobId
@@ -159,10 +153,7 @@ advance poll
                     }
         putModel
             ( \m ->
-                m
-                    { mJobPolls = IM.insert (jpJobId poll) poll' (mJobPolls m)
-                    , mJobTimerNext = timerId
-                    }
+                m{gJobs = (gJobs m){jbJobPolls = IM.insert (jpJobId poll) poll' (mJobPolls m), jbJobTimerNext = timerId}}
             )
         scheduleAction delay (JobTick (jpKind poll) (jpJobId poll) timerId)
 
@@ -183,11 +174,11 @@ cancelAllJobs :: Update ()
 cancelAllJobs = do
     model <- get
     let polls = IM.elems (mJobPolls model)
-    putModel (\m -> m{mJobPolls = IM.empty})
+    putModel (\m -> m{gJobs = (gJobs m){jbJobPolls = IM.empty}})
     mapM_ (\poll -> dispatch (abandonedAction (jpKind poll) (jpJobId poll))) polls
 
 removeJob :: Int -> Update ()
-removeJob jobId = putModel (\m -> m{mJobPolls = IM.delete jobId (mJobPolls m)})
+removeJob jobId = putModel (\m -> m{gJobs = (gJobs m){jbJobPolls = IM.delete jobId (mJobPolls m)}})
 
 -- ------------------------------------------------------ flow-specific glue ---
 

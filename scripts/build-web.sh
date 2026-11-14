@@ -128,18 +128,19 @@ gzip_asset static/app/app.wasm
 # paths (the Nix derivation does not override them); the 1.7 MB target is
 # unchanged and M2-B2 must recover headroom rather than raise this again.
 #
-# M4-D (2026-11-14): the async job client (polling state machine, job status
-# decoding and four result handlers) grew the linked binary to 7,937,977 raw /
-# 2,285,814 gzip. A timeboxed trim pass (per-kind slots, removing generic
-# containers, -fno-specialise, DCE checks) did not recover the ~232 KB, which is
-# linked codegen spread across modules rather than the new source. The hard
-# ceilings are therefore raised to 8,000,000 / 2,300,000 as a RECORDED, TEMPORARY
-# exception so the M4-D slice can land with its 27/27 e2e gate. M7 must recover
-# the 1,700,000 gzip target and then lower these ceilings back to 7,800,000 /
-# 2,250,000; do not raise them again without a new recorded reason.
+# M4-D (2026-11-14) temporarily raised the ceilings to 8,000,000 / 2,300,000
+# because the async job client grew the linked binary to 7,937,977 raw /
+# 2,285,814 gzip and a trim pass could not recover it. M7 (2026-11-14) resolved
+# the exception with the Model-partition program: the 261-field flat record was
+# split into 15 nested groups so putModel copies ~15-25 fields instead of 261.
+# The bundle fell to 5,313,531 raw / 1,714,657 gzip (~2.62 MB raw recovered,
+# matching the measured ~12 KB/field copy cost), so the ceilings are back to
+# 7,800,000 / 2,250,000. The 1,700,000 gzip target is the product goal and
+# remains the warning threshold; do not raise either ceiling again without a
+# new recorded reason in docs/program/README.md.
 WASM_GZIP_TARGET_BYTES="${EZA_WASM_GZIP_TARGET_BYTES:-1700000}"
-WASM_GZIP_MAX_BYTES="${EZA_WASM_GZIP_MAX_BYTES:-2300000}"
-WASM_RAW_MAX_BYTES="${EZA_WASM_RAW_MAX_BYTES:-8000000}"
+WASM_GZIP_MAX_BYTES="${EZA_WASM_GZIP_MAX_BYTES:-2250000}"
+WASM_RAW_MAX_BYTES="${EZA_WASM_RAW_MAX_BYTES:-7800000}"
 WASM_RAW_BYTES="$(wc -c < static/app/app.wasm)"
 WASM_GZIP_BYTES="$(wc -c < static/app/app.wasm.gz)"
 if (( WASM_RAW_BYTES > WASM_RAW_MAX_BYTES )); then

@@ -100,26 +100,7 @@ projectLedger model =
 
 embedLedger :: Ledger.LedgerState -> Model -> Model
 embedLedger ledger model =
-    model
-        { mQ = Ledger.ldQuery ledger
-        , mTagsFilter = Ledger.ldTagFilters ledger
-        , mSort = Ledger.ldSort ledger
-        , mUnreadOnly = Ledger.ldUnreadOnly ledger
-        , mOffset = Ledger.ldOffset ledger
-        , mItems = Ledger.ldItems ledger
-        , mTotal = Ledger.ldTotal ledger
-        , mYearHere = Ledger.ldYearCounts ledger
-        , mHasMore = Ledger.ldHasMore ledger
-        , mLoading = Ledger.ldLoading ledger
-        , mLoadingMore = Ledger.ldLoadingMore ledger
-        , mError = Ledger.ldError ledger
-        , mListEpoch = Ledger.ldListRequest ledger
-        , mDebounceTimer = Ledger.ldDebounceTimer ledger
-        , mTimerSeq = TimerId (Ledger.ldTimerSeq ledger)
-        , mStats = Ledger.ldStats ledger
-        , mStatsError = Ledger.ldStatsError ledger
-        , mStatsEpoch = Ledger.ldStatsRequest ledger
-        }
+    model{gLedger = (gLedger model){lfQ = Ledger.ldQuery ledger, lfTagsFilter = Ledger.ldTagFilters ledger, lfSort = Ledger.ldSort ledger, lfUnreadOnly = Ledger.ldUnreadOnly ledger, lfOffset = Ledger.ldOffset ledger, lfItems = Ledger.ldItems ledger, lfTotal = Ledger.ldTotal ledger, lfYearHere = Ledger.ldYearCounts ledger, lfHasMore = Ledger.ldHasMore ledger, lfLoading = Ledger.ldLoading ledger, lfLoadingMore = Ledger.ldLoadingMore ledger, lfError = Ledger.ldError ledger, lfListEpoch = Ledger.ldListRequest ledger, lfDebounceTimer = Ledger.ldDebounceTimer ledger, lfTimerSeq = TimerId (Ledger.ldTimerSeq ledger), lfStats = Ledger.ldStats ledger, lfStatsError = Ledger.ldStatsError ledger, lfStatsEpoch = Ledger.ldStatsRequest ledger}}
 
 {- | Read the whole library count again after a write, so the masthead and
 the panels stop showing a pre-write number.
@@ -193,18 +174,21 @@ request-id fields are reset by the native reducer, which then emits the fetch.
 resetShellForReload :: Model -> Model
 resetShellForReload m =
     m
-        { mListDeferred = False
-        , mBootSeeded = False
-        , -- a new result set invalidates the old selection
-          mSelection = IS.empty
-        , mSelectAnchor = Nothing
-        , mSelectingAll = False
-        , mSelectFetched = 0
-        , mSelectEpoch = nextRequestId (mSelectEpoch m)
-        , mSelectParams = Nothing
-        , mConfirmMarkAll = False
-        , mBulkBusy = False
-        , mConfirmBulkDelete = False
+        { gLedger =
+            (gLedger m)
+                { lfListDeferred = False
+                , -- a new result set invalidates the old selection
+                  lfSelection = IS.empty
+                , lfSelectAnchor = Nothing
+                , lfSelectingAll = False
+                , lfSelectFetched = 0
+                , lfSelectEpoch = nextRequestId (mSelectEpoch m)
+                , lfSelectParams = Nothing
+                , lfConfirmMarkAll = False
+                , lfBulkBusy = False
+                , lfConfirmBulkDelete = False
+                }
+        , gShell = (gShell m){sfBootSeeded = False}
         }
 
 {- | The shell half of the search box: the uncommitted query invalidates the
@@ -212,15 +196,7 @@ selection at once, but it does not consume the boot seed.
 -}
 resetShellForSearch :: Model -> Model
 resetShellForSearch m =
-    m
-        { mSelection = IS.empty
-        , mSelectAnchor = Nothing
-        , mSelectingAll = False
-        , mSelectFetched = 0
-        , mSelectEpoch = nextRequestId (mSelectEpoch m)
-        , mSelectParams = Nothing
-        , mConfirmMarkAll = False
-        }
+    m{gLedger = (gLedger m){lfSelection = IS.empty, lfSelectAnchor = Nothing, lfSelectingAll = False, lfSelectFetched = 0, lfSelectEpoch = nextRequestId (mSelectEpoch m), lfSelectParams = Nothing, lfConfirmMarkAll = False}}
 
 {- | The shell half of a list response: a replace clears the selection, an
 append keeps it but clamps the keyboard cursor to the rows that now exist.
@@ -228,17 +204,19 @@ append keeps it but clamps the keyboard cursor to the rows that now exist.
 settleLedgerSelection :: Bool -> Model -> Model
 settleLedgerSelection append m =
     m
-        { mConfirmMarkAll = False
-        , mSelection = if append then mSelection m else IS.empty
-        , mSelectAnchor = if append then mSelectAnchor m else Nothing
-        , mSelectingAll = if append then mSelectingAll m else False
-        , mSelectEpoch = if append then mSelectEpoch m else nextRequestId (mSelectEpoch m)
-        , mSelectParams = if append then mSelectParams m else Nothing
-        , mLedgerCursor =
-            case (append, mLedgerCursor m) of
-                (False, _) -> Nothing
-                (True, Just idx) | idx < length (mItems m) -> Just idx
-                _ -> Nothing
+        { gLedger =
+            (gLedger m)
+                { lfConfirmMarkAll = False
+                , lfSelection = if append then mSelection m else IS.empty
+                , lfSelectAnchor = if append then mSelectAnchor m else Nothing
+                , lfSelectingAll = if append then mSelectingAll m else False
+                , lfSelectEpoch = if append then mSelectEpoch m else nextRequestId (mSelectEpoch m)
+                , lfSelectParams = if append then mSelectParams m else Nothing
+                , lfLedgerCursor = case (append, mLedgerCursor m) of
+                    (False, _) -> Nothing
+                    (True, Just idx) | idx < length (mItems m) -> Just idx
+                    _ -> Nothing
+                }
         }
 
 -- | Reload the first page of the current ledger query.
@@ -256,10 +234,10 @@ loadIndexList :: Update ()
 loadIndexList = do
     m <- get
     if mBootSeeded m
-        then putModel (\x -> x{mBootSeeded = False, mListDeferred = False, mLoading = False, mError = Nothing})
+        then putModel (\x -> x{gShell = (gShell x){sfBootSeeded = False}, gLedger = (gLedger x){lfListDeferred = False, lfLoading = False, lfError = Nothing}})
         else
             if not (mBootReady m)
-                then putModel (\x -> x{mLoading = True, mListDeferred = True, mError = Nothing})
+                then putModel (\x -> x{gLedger = (gLedger x){lfLoading = True, lfListDeferred = True, lfError = Nothing}})
                 else reloadList
 
 {- | Ask the native reducer for the next page. It owns the guards, so the
@@ -276,7 +254,7 @@ fireTimer :: TimerId -> Update ()
 fireTimer timerId = do
     m <- get
     when (Ledger.debounceTimerIsCurrent (projectLedger m) timerId) $ do
-        putModel (\x -> x{mDebounce = Nothing})
+        putModel (\x -> x{gLedger = (gLedger x){lfDebounce = Nothing}})
         putModel resetShellForReload
         runLedger (Ledger.SearchDebounceElapsed timerId)
 
@@ -321,7 +299,7 @@ setCursor idx = do
     case itemAt (mItems m) idx of
         Nothing -> pure ()
         Just b -> do
-            putModel (\x -> x{mLedgerCursor = Just idx, mDrawer = Just (bsId b)})
+            putModel (\x -> x{gLedger = (gLedger x){lfLedgerCursor = Just idx, lfDrawer = Just (bsId b)}})
             if mWidth m < 768
                 then scrollRowIntoView ("ledger-row-" <> T.pack (show (bsId b)))
                 else do
@@ -367,12 +345,7 @@ indexOfBookmark items bookmarkId =
 
 cancelSelectAllPaging :: Model -> Model
 cancelSelectAllPaging x =
-    x
-        { mSelectingAll = False
-        , mSelectFetched = 0
-        , mSelectEpoch = nextRequestId (mSelectEpoch x)
-        , mSelectParams = Nothing
-        }
+    x{gLedger = (gLedger x){lfSelectingAll = False, lfSelectFetched = 0, lfSelectEpoch = nextRequestId (mSelectEpoch x), lfSelectParams = Nothing}}
 
 -- \| Continue a return-to-position after a list page arrived. If the
 -- loaded content cannot reach the saved offset yet, fetch pages until it
@@ -391,7 +364,7 @@ continueScrollRestore = do
                 seek = min target maxScroll
             if target <= maxScroll || not (mHasMore m)
                 then do
-                    putModel (\x -> x{mScrollY = seek, mScrollRestore = Nothing})
+                    putModel (\x -> x{gShell = (gShell x){sfScrollY = seek, sfScrollRestore = Nothing}})
                     scrollLedger seek
                 else loadMore
 

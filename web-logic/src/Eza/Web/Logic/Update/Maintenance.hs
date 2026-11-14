@@ -21,21 +21,16 @@ handle = \case
     PruneLoaded items ->
         putModel
             ( \m ->
-                m
-                    { mPrune = items
-                    , mPruneSel = []
-                    , mConfirmPrune = False
-                    , mPruneError = Nothing
-                    }
+                m{gMaint = (gMaint m){mnPrune = items, mnPruneSel = [], mnConfirmPrune = False, mnPruneError = Nothing}}
             )
     PruneFailed err -> do
-        putModel (\m -> m{mPruneError = Just ((aeMessage err))})
+        putModel (\m -> m{gMaint = (gMaint m){mnPruneError = Just ((aeMessage err))}})
         handleApiError err
-    PruneToggle bookmarkId -> putModel (\m -> m{mPruneSel = toggleMember bookmarkId (mPruneSel m)})
+    PruneToggle bookmarkId -> putModel (\m -> m{gMaint = (gMaint m){mnPruneSel = toggleMember bookmarkId (mPruneSel m)}})
     PruneAll -> do
         m <- get
         let allIds = map bsId (mPrune m)
-        putModel (\x -> x{mPruneSel = if length (mPruneSel x) == length allIds then [] else allIds})
+        putModel (\x -> x{gMaint = (gMaint x){mnPruneSel = if length (mPruneSel x) == length allIds then [] else allIds}})
     PruneRun -> do
         m <- get
         if null (mPruneSel m)
@@ -43,24 +38,24 @@ handle = \case
             else
                 if not (mConfirmPrune m)
                     then do
-                        putModel (\x -> x{mConfirmPrune = True})
+                        putModel (\x -> x{gMaint = (gMaint x){mnConfirmPrune = True}})
                         notify "Prune writes an undo snapshot. Click again to confirm." ToastInfo
                     else do
-                        putModel (\x -> x{mMaintBusy = True, mConfirmPrune = False})
+                        putModel (\x -> x{gMaint = (gMaint x){mnMaintBusy = True, mnConfirmPrune = False}})
                         runPrune (mPruneSel m) PruneDone MaintFailed
-    PruneCancel -> putModel (\m -> m{mConfirmPrune = False})
+    PruneCancel -> putModel (\m -> m{gMaint = (gMaint m){mnConfirmPrune = False}})
     PruneDone pruned -> do
-        putModel (\m -> m{mMaintBusy = False})
+        putModel (\m -> m{gMaint = (gMaint m){mnMaintBusy = False}})
         notify (T.pack ("Pruned " <> show pruned <> " record(s). Undo is available")) ToastOk
         fetchPruneCandidates PruneLoaded PruneFailed
         refreshTags
         refreshStats
     DeadCheckRun -> do
-        putModel (\m -> m{mMaintBusy = True})
+        putModel (\m -> m{gMaint = (gMaint m){mnMaintBusy = True}})
         createDeadCheckJob DeadCheckJobQueued MaintFailed
     DeadCheckJobQueued jobId -> dispatch (JobStarted DeadCheckJob jobId)
     DeadCheckJobDone result -> do
-        putModel (\m -> m{mMaintBusy = False})
+        putModel (\m -> m{gMaint = (gMaint m){mnMaintBusy = False}})
         case result of
             Nothing -> notify "The dead-link check returned no result." ToastError
             Just value -> case decodeDeadCheckJobResult value of
@@ -68,10 +63,7 @@ handle = \case
                 Right report -> do
                     putModel
                         ( \m ->
-                            m
-                                { mCheckedCount = Just (dcjrChecked report)
-                                , mDeadCount = Just (dcjrDead report)
-                                }
+                            m{gMaint = (gMaint m){mnCheckedCount = Just (dcjrChecked report), mnDeadCount = Just (dcjrDead report)}}
                         )
                     notify
                         ( T.pack
@@ -86,38 +78,32 @@ handle = \case
                     reloadList
                     refreshStats
     DeadCheckJobFailed message -> do
-        putModel (\m -> m{mMaintBusy = False})
+        putModel (\m -> m{gMaint = (gMaint m){mnMaintBusy = False}})
         notify (fromMaybe "The dead-link check failed." message) ToastError
-    DeadCheckJobAbandoned -> putModel (\m -> m{mMaintBusy = False})
+    DeadCheckJobAbandoned -> putModel (\m -> m{gMaint = (gMaint m){mnMaintBusy = False}})
     UndoRefresh -> do
-        putModel (\m -> m{mUndoLoading = True, mUndoError = Nothing})
+        putModel (\m -> m{gMaint = (gMaint m){mnUndoLoading = True, mnUndoError = Nothing}})
         fetchUndoEntries UndoEntriesLoaded UndoEntriesFailed
     UndoEntriesLoaded entries ->
-        putModel (\m -> m{mUndoEntries = entries, mUndoLoading = False, mUndoError = Nothing})
+        putModel (\m -> m{gMaint = (gMaint m){mnUndoEntries = entries, mnUndoLoading = False, mnUndoError = Nothing}})
     UndoEntriesFailed err ->
-        putModel (\m -> m{mUndoLoading = False, mUndoError = Just ((aeMessage err))})
+        putModel (\m -> m{gMaint = (gMaint m){mnUndoLoading = False, mnUndoError = Just ((aeMessage err))}})
     UndoPreviewRequest snapshotId -> do
-        putModel (\m -> m{mUndoPreview = Nothing, mUndoPreviewLoading = True, mUndoPreviewError = Nothing})
+        putModel (\m -> m{gMaint = (gMaint m){mnUndoPreview = Nothing, mnUndoPreviewLoading = True, mnUndoPreviewError = Nothing}})
         fetchUndoPreview snapshotId UndoPreviewLoaded UndoPreviewFailed
     UndoPreviewLoaded preview ->
-        putModel (\m -> m{mUndoPreview = Just preview, mUndoPreviewLoading = False, mUndoPreviewError = Nothing})
+        putModel (\m -> m{gMaint = (gMaint m){mnUndoPreview = Just preview, mnUndoPreviewLoading = False, mnUndoPreviewError = Nothing}})
     UndoPreviewFailed err ->
-        putModel (\m -> m{mUndoPreviewLoading = False, mUndoPreviewError = Just ((aeMessage err))})
+        putModel (\m -> m{gMaint = (gMaint m){mnUndoPreviewLoading = False, mnUndoPreviewError = Just ((aeMessage err))}})
     UndoPreviewClose ->
-        putModel (\m -> m{mUndoPreview = Nothing, mUndoPreviewLoading = False, mUndoPreviewError = Nothing})
+        putModel (\m -> m{gMaint = (gMaint m){mnUndoPreview = Nothing, mnUndoPreviewLoading = False, mnUndoPreviewError = Nothing}})
     UndoConfirm snapshotId -> do
-        putModel (\m -> m{mUndoBusy = True, mUndoPreviewError = Nothing})
+        putModel (\m -> m{gMaint = (gMaint m){mnUndoBusy = True, mnUndoPreviewError = Nothing}})
         runUndo snapshotId UndoDone UndoFailed
     UndoDone result -> do
         putModel
             ( \m ->
-                m
-                    { mUndoBusy = False
-                    , mUndoPreview = Nothing
-                    , mDedupLast = Nothing
-                    , mDedupLastSnapshot = Nothing
-                    , mDedupMergeAllReport = Nothing
-                    }
+                m{gMaint = (gMaint m){mnUndoBusy = False, mnUndoPreview = Nothing}, gDedup = (gDedup m){ddDedupLast = Nothing, ddDedupLastSnapshot = Nothing, ddDedupMergeAllReport = Nothing}}
             )
         notify
             ("Undid " <> urOp result <> "; restored " <> T.pack (show (urRestored result)) <> " row(s)")
@@ -128,9 +114,9 @@ handle = \case
         reloadList
         refreshStats
     UndoFailed err -> do
-        putModel (\m -> m{mUndoBusy = False, mUndoPreviewError = Just ((aeMessage err))})
+        putModel (\m -> m{gMaint = (gMaint m){mnUndoBusy = False, mnUndoPreviewError = Just ((aeMessage err))}})
     MaintFailed err -> do
-        putModel (\m -> m{mMaintBusy = False})
+        putModel (\m -> m{gMaint = (gMaint m){mnMaintBusy = False}})
         handleApiError err
     -- account --------------------------------------------------------------
     _ -> pure ()

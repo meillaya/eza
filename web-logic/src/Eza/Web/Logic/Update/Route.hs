@@ -52,114 +52,7 @@ loadRoute route = do
         keepDetail = isDetailRoute route && not enteringNewDetail
         epoch = nextRequestId (mDetailEpoch m)
     put
-        m
-            { mRoute = route
-            , mRouted = True
-            , mListDeferred = isListRoute route && mListDeferred m
-            , mDetailEpoch = epoch
-            , mLoading = isListRoute route
-            , mLoadingMore = False
-            , mScrollY = if enteringList then 0 else mScrollY m
-            , mScrollRestore = restoreTarget
-            , mError = Nothing
-            , mNotice = Nothing
-            , mStatsError = Nothing
-            , mDetail = if keepDetail then mDetail m else Nothing
-            , mDetailError = if keepDetail then mDetailError m else Nothing
-            , mDetailLoading = isDetailRoute route
-            , mEditTitle = if keepDetail then mEditTitle m else ""
-            , mEditNote = if keepDetail then mEditNote m else ""
-            , mEditTags = if keepDetail then mEditTags m else []
-            , mNewTag = ""
-            , mNoteMode = NoteWrite
-            , mNoteCursor = 0
-            , mLinkQuery = Nothing
-            , mLinkResults = []
-            , mLinkSel = 0
-            , mBacklinks = if keepDetail then mBacklinks m else []
-            , mHighlights = if keepDetail then mHighlights m else []
-            , mHighlightsLoading = isDetailRoute route
-            , mReaderSel = Nothing
-            , mHighlightNoteOpen = False
-            , mHighlightNote = ""
-            , mHighlightEdit = Nothing
-            , mHighlightEditNote = ""
-            , mHighlightEditColor = "yellow"
-            , mSnapshotOpen = False
-            , mShares = if keepDetail then mShares m else []
-            , mSharesLoading = False
-            , mSharesError = Nothing
-            , mShareDialogOpen = False
-            , mShareIncludeNote = False
-            , mShareExpiryDays = 30
-            , mShareBusy = False
-            , mShareUrl = Nothing
-            , mSaving = False
-            , mDirty = if keepDetail then mDirty m else False
-            , mExtractEditing = if keepDetail then mExtractEditing m else False
-            , mExtractDraft = if keepDetail then mExtractDraft m else ""
-            , mExtractDirty = if keepDetail then mExtractDirty m else False
-            , mExtractSaving = False
-            , mUndoPreview = Nothing
-            , mUndoPreviewLoading = False
-            , mUndoPreviewError = Nothing
-            , mUndoBusy = False
-            , mConfirmDelete = Nothing
-            , mConfirmMarkAll = False
-            , mGraphLoading = route == Graph
-            , mDedupLoading = route == Dedup
-            , mDedupError = Nothing
-            , mConsolLoading = route == Tags
-            , mConsolError = Nothing
-            , mAccountLoading = route == Account
-            , mAccountError = Nothing
-            , mSecurityUsername = ""
-            , mSecurityCurrent = ""
-            , mSecurityNew = ""
-            , mSecurityConfirm = ""
-            , mSecurity2faWanted = False
-            , mSecurityBusy = False
-            , mSecurityError = Nothing
-            , mSavedShare = Nothing
-            , mTagDialog = Nothing
-            , mTagDialogInput = ""
-            , mTagDialogBusy = False
-            , mTagDialogError = Nothing
-            , mDedupConfirm = Nothing
-            , mDedupLast = Nothing
-            , mDedupLastSnapshot = Nothing
-            , mDedupMoreBusy = False
-            , mDedupBusy = False
-            , mDedupMergeAllOpen = False
-            , mDedupMergeAllReport = Nothing
-            , mSuggestionNotice = Nothing
-            , mSuggestionError = Nothing
-            , mPruneError = Nothing
-            , mTokensError = Nothing
-            , mRulesError = Nothing
-            , mAiTag = if route == AiTags then mAiTag m else Nothing
-            , mSuggestions = if route == AiTags then mSuggestions m else []
-            , mSelection = IS.empty
-            , mSelectAnchor = Nothing
-            , mSelectingAll = False
-            , mSelectFetched = 0
-            , mSelectEpoch = nextRequestId (mSelectEpoch m)
-            , mSelectParams = Nothing
-            , mReadRequest = nextRequestId (mReadRequest m)
-            , mReadPending = False
-            , mGuardFromHistory = False
-            , mBulkBusy = False
-            , mTagPrompt = Nothing
-            , mTagPromptValue = ""
-            , mConfirmBulkDelete = False
-            , mAddOpen = False
-            , mAddBusy = False
-            , mAddError = Nothing
-            , mAddUrl = if isSaveRoute route then mAddUrl m else ""
-            , mAddTitle = if isSaveRoute route then mAddTitle m else ""
-            , mAddTags = if isSaveRoute route then mAddTags m else ""
-            , mAddNote = if isSaveRoute route then mAddNote m else ""
-            }
+        m{gShell = (gShell m){sfRoute = route, sfRouted = True, sfScrollY = if enteringList then 0 else mScrollY m, sfScrollRestore = restoreTarget, sfGuardFromHistory = False}, gLedger = (gLedger m){lfListDeferred = isListRoute route && mListDeferred m, lfLoading = isListRoute route, lfLoadingMore = False, lfError = Nothing, lfNotice = Nothing, lfStatsError = Nothing, lfConfirmDelete = Nothing, lfConfirmMarkAll = False, lfSavedShare = Nothing, lfSelection = IS.empty, lfSelectAnchor = Nothing, lfSelectingAll = False, lfSelectFetched = 0, lfSelectEpoch = nextRequestId (mSelectEpoch m), lfSelectParams = Nothing, lfBulkBusy = False, lfTagPrompt = Nothing, lfTagPromptValue = "", lfConfirmBulkDelete = False}, gDetail = (gDetail m){dtDetailEpoch = epoch, dtDetail = if keepDetail then mDetail m else Nothing, dtDetailError = if keepDetail then mDetailError m else Nothing, dtDetailLoading = isDetailRoute route, dtEditTitle = if keepDetail then mEditTitle m else "", dtEditNote = if keepDetail then mEditNote m else "", dtEditTags = if keepDetail then mEditTags m else [], dtNewTag = "", dtNoteMode = NoteWrite, dtNoteCursor = 0, dtLinkQuery = Nothing, dtLinkResults = [], dtLinkSel = 0, dtBacklinks = if keepDetail then mBacklinks m else [], dtHighlights = if keepDetail then mHighlights m else [], dtHighlightsLoading = isDetailRoute route, dtReaderSel = Nothing, dtHighlightNoteOpen = False, dtHighlightNote = "", dtHighlightEdit = Nothing, dtHighlightEditNote = "", dtHighlightEditColor = "yellow", dtSnapshotOpen = False, dtSaving = False, dtDirty = if keepDetail then mDirty m else False, dtExtractEditing = if keepDetail then mExtractEditing m else False, dtExtractDraft = if keepDetail then mExtractDraft m else "", dtExtractDirty = if keepDetail then mExtractDirty m else False, dtExtractSaving = False, dtReadRequest = nextRequestId (mReadRequest m), dtReadPending = False}, gShares = (gShares m){srShares = if keepDetail then mShares m else [], srSharesLoading = False, srSharesError = Nothing, srShareDialogOpen = False, srShareIncludeNote = False, srShareExpiryDays = 30, srShareBusy = False, srShareUrl = Nothing}, gMaint = (gMaint m){mnUndoPreview = Nothing, mnUndoPreviewLoading = False, mnUndoPreviewError = Nothing, mnUndoBusy = False, mnPruneError = Nothing}, gGraph = (gGraph m){grGraphLoading = route == Graph}, gDedup = (gDedup m){ddDedupLoading = route == Dedup, ddDedupError = Nothing, ddDedupConfirm = Nothing, ddDedupLast = Nothing, ddDedupLastSnapshot = Nothing, ddDedupMoreBusy = False, ddDedupBusy = False, ddDedupMergeAllOpen = False, ddDedupMergeAllReport = Nothing}, gTags = (gTags m){tgConsolLoading = route == Tags, tgConsolError = Nothing, tgTagDialog = Nothing, tgTagDialogInput = "", tgTagDialogBusy = False, tgTagDialogError = Nothing, tgSuggestionNotice = Nothing, tgSuggestionError = Nothing, tgAiTag = if route == AiTags then mAiTag m else Nothing, tgSuggestions = if route == AiTags then mSuggestions m else []}, gAccount = (gAccount m){acAccountLoading = route == Account, acAccountError = Nothing, acSecurityUsername = "", acSecurityCurrent = "", acSecurityNew = "", acSecurityConfirm = "", acSecurity2faWanted = False, acSecurityBusy = False, acSecurityError = Nothing, acTokensError = Nothing}, gRules = (gRules m){ruRulesError = Nothing}, gAdd = (gAdd m){adAddOpen = False, adAddBusy = False, adAddError = Nothing, adAddUrl = if isSaveRoute route then mAddUrl m else "", adAddTitle = if isSaveRoute route then mAddTitle m else "", adAddTags = if isSaveRoute route then mAddTags m else "", adAddNote = if isSaveRoute route then mAddNote m else ""}}
     setDocumentTitle (documentTitle route)
     case route of
         Index -> loadIndexList
@@ -172,7 +65,7 @@ loadRoute route = do
         Graph -> enterGraphRoute False Nothing 1
         GraphLocal rootKey depth -> enterGraphRoute True (Just rootKey) depth
         Views -> do
-            putModel (\x -> x{mViewsLoading = True, mViewsError = Nothing})
+            putModel (\x -> x{gViews = (gViews x){vwViewsLoading = True, vwViewsError = Nothing}})
             fetchViews ViewsLoaded ViewsFailed
         ViewOpen slug -> openSavedView slug
         Dedup -> dedupFirstPage DedupLoaded DedupFailed
@@ -183,11 +76,11 @@ loadRoute route = do
             refreshTags
             fetchAiStatus AiStatusLoaded (\_ -> Noop)
         Maintenance -> do
-            putModel (\x -> x{mUndoLoading = True, mUndoError = Nothing})
+            putModel (\x -> x{gMaint = (gMaint x){mnUndoLoading = True, mnUndoError = Nothing}})
             fetchPruneCandidates PruneLoaded PruneFailed
             fetchUndoEntries UndoEntriesLoaded UndoEntriesFailed
         Account -> do
-            putModel (\x -> x{mTokensLoading = True, mSharesLoading = True, mRulesLoading = True, mWebhooksLoading = True})
+            putModel (\x -> x{gAccount = (gAccount x){acTokensLoading = True}, gShares = (gShares x){srSharesLoading = True}, gRules = (gRules x){ruRulesLoading = True}, gWebhooks = (gWebhooks x){wkWebhooksLoading = True}})
             fetchAccount AccountLoaded AccountFailed
             fetchTokens TokensLoaded TokensFailed
             fetchWebhooks WebhooksLoaded WebhooksFailed
@@ -209,13 +102,7 @@ loadRoute route = do
                             Nothing -> Nothing
             putModel
                 ( \x ->
-                    x
-                        { mAddUrl = urlFromShare
-                        , mAddTitle = titleFromShare
-                        , mAddTags = ""
-                        , mAddNote = noteFromShare
-                        , mAddError = Nothing
-                        }
+                    x{gAdd = (gAdd x){adAddUrl = urlFromShare, adAddTitle = titleFromShare, adAddTags = "", adAddNote = noteFromShare, adAddError = Nothing}}
                 )
         NotFound -> pure ()
 

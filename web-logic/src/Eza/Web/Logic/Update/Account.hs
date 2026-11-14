@@ -27,50 +27,53 @@ import Eza.Webhook
 
 setSecurityError :: Text -> Update ()
 setSecurityError message =
-    putModel (\m -> m{mSecurityBusy = False, mSecurityError = Just message})
+    putModel (\m -> m{gAccount = (gAccount m){acSecurityBusy = False, acSecurityError = Just message}})
 
 -- \| EA-00417: the accession form used by the dedup toast and dialog.
 
 handle :: Action -> Update ()
 handle = \case
     AccountTabSelected tab -> do
-        putModel (\m -> m{mAccountTab = tab})
+        putModel (\m -> m{gAccount = (gAccount m){acAccountTab = tab}})
         selectAccountTab (accountTabSlug tab)
         when (tab == AccountWebhooks) $ do
             m <- get
             when (null (mWebhooks m) && not (mWebhooksLoading m)) $ do
-                putModel (\x -> x{mWebhooksLoading = True, mWebhooksError = Nothing})
+                putModel (\x -> x{gWebhooks = (gWebhooks x){wkWebhooksLoading = True, wkWebhooksError = Nothing}})
                 fetchWebhooks WebhooksLoaded WebhooksFailed
         when (tab == AccountUsers) $ do
             m <- get
             when (null (mAdminUsers m) && not (mAdminUsersLoading m)) $ do
-                putModel (\x -> x{mAdminUsersLoading = True, mAdminUsersError = Nothing})
+                putModel (\x -> x{gAccount = (gAccount x){acAdminUsersLoading = True, acAdminUsersError = Nothing}})
                 fetchAdminUsers AdminUsersLoaded AdminUsersFailed
     -- library ---------------------------------------------------------------
     AccountLoaded info -> do
         putModel
             ( \m ->
                 m
-                    { mAccount = Just info
-                    , mAccountLoading = False
-                    , mAccountError = Nothing
-                    , mSessions = aiSessions info
-                    , mSecurityUsername =
-                        if T.null (T.strip ((mSecurityUsername m)))
-                            then (aiUsername info)
-                            else mSecurityUsername m
-                    , mSecurity2faWanted = aiRequirePasskey info
-                    , mAdminUsersLoading = null (mAdminUsers m)
+                    { gAccount =
+                        (gAccount m)
+                            { acAccount = Just info
+                            , acAccountLoading = False
+                            , acAccountError = Nothing
+                            , acSessions = aiSessions info
+                            , acSecurityUsername =
+                                if T.null (T.strip ((mSecurityUsername m)))
+                                    then (aiUsername info)
+                                    else mSecurityUsername m
+                            , acSecurity2faWanted = aiRequirePasskey info
+                            , acAdminUsersLoading = null (mAdminUsers m)
+                            }
                     }
             )
         m0 <- get
         when (mAdminUsersLoading m0) (fetchAdminUsers AdminUsersLoaded AdminUsersFailed)
     AccountFailed err -> do
-        putModel (\m -> m{mAccountLoading = False, mAccountError = Just ((aeMessage err))})
+        putModel (\m -> m{gAccount = (gAccount m){acAccountLoading = False, acAccountError = Just ((aeMessage err))}})
         handleApiError err
     RecoveryRegenerate -> regenerateRecovery RecoveryLoaded AccountFailed
     RecoveryLoaded codes -> do
-        putModel (\m -> m{mRecoveryCodes = codes})
+        putModel (\m -> m{gAccount = (gAccount m){acRecoveryCodes = codes}})
         notify "New recovery codes. Store them now." ToastOk
     CredentialRenamed credentialId nickname -> do
         renameCredential credentialId nickname (ToastAdd "Passkey renamed" ToastOk) CredentialOpFailed
@@ -79,22 +82,22 @@ handle = \case
         notify "Passkey deleted" ToastOk
         fetchAccount AccountLoaded AccountFailed
     CredentialOpFailed err -> handleApiError err
-    CredentialEditStart credentialId -> putModel (\m -> m{mCredEdit = Just (credentialId, "")})
-    CredentialNameInput nickname -> putModel (\m -> m{mCredEdit = fmap (\(cid, _) -> (cid, nickname)) (mCredEdit m)})
+    CredentialEditStart credentialId -> putModel (\m -> m{gAccount = (gAccount m){acCredEdit = Just (credentialId, "")}})
+    CredentialNameInput nickname -> putModel (\m -> m{gAccount = (gAccount m){acCredEdit = fmap (\(cid, _) -> (cid, nickname)) (mCredEdit m)}})
     CredentialEditSave -> do
         m <- get
         case mCredEdit m of
             Nothing -> pure ()
             Just (credentialId, nickname) -> do
-                putModel (\x -> x{mCredEdit = Nothing})
+                putModel (\x -> x{gAccount = (gAccount x){acCredEdit = Nothing}})
                 renameCredential credentialId nickname AccountReload CredentialOpFailed
-    CredentialEditCancel -> putModel (\m -> m{mCredEdit = Nothing})
-    SecurityUsernameInput value -> putModel (\m -> m{mSecurityUsername = value, mSecurityError = Nothing})
-    SecurityCurrentPasswordInput value -> putModel (\m -> m{mSecurityCurrent = value, mSecurityError = Nothing})
-    SecurityNewPasswordInput value -> putModel (\m -> m{mSecurityNew = value, mSecurityError = Nothing})
-    SecurityConfirmPasswordInput value -> putModel (\m -> m{mSecurityConfirm = value, mSecurityError = Nothing})
+    CredentialEditCancel -> putModel (\m -> m{gAccount = (gAccount m){acCredEdit = Nothing}})
+    SecurityUsernameInput value -> putModel (\m -> m{gAccount = (gAccount m){acSecurityUsername = value, acSecurityError = Nothing}})
+    SecurityCurrentPasswordInput value -> putModel (\m -> m{gAccount = (gAccount m){acSecurityCurrent = value, acSecurityError = Nothing}})
+    SecurityNewPasswordInput value -> putModel (\m -> m{gAccount = (gAccount m){acSecurityNew = value, acSecurityError = Nothing}})
+    SecurityConfirmPasswordInput value -> putModel (\m -> m{gAccount = (gAccount m){acSecurityConfirm = value, acSecurityError = Nothing}})
     Security2faWantedToggled wanted ->
-        putModel (\m -> m{mSecurity2faWanted = wanted, mSecurityError = Nothing})
+        putModel (\m -> m{gAccount = (gAccount m){acSecurity2faWanted = wanted, acSecurityError = Nothing}})
     SecurityUsernameSave -> do
         m <- get
         case mAccount m of
@@ -108,7 +111,7 @@ handle = \case
                             if aiHasPassword account && T.null (T.strip current)
                                 then setSecurityError "Enter the current password to rename the account."
                                 else do
-                                    putModel (\x -> x{mSecurityBusy = True, mSecurityError = Nothing})
+                                    putModel (\x -> x{gAccount = (gAccount x){acSecurityBusy = True, acSecurityError = Nothing}})
                                     patchUsername
                                         (if aiHasPassword account then Just current else Nothing)
                                         wanted
@@ -131,7 +134,7 @@ handle = \case
                                     if aiHasPassword account && T.null current
                                         then setSecurityError "Enter the current password."
                                         else do
-                                            putModel (\x -> x{mSecurityBusy = True, mSecurityError = Nothing})
+                                            putModel (\x -> x{gAccount = (gAccount x){acSecurityBusy = True, acSecurityError = Nothing}})
                                             changePassword
                                                 (if aiHasPassword account then Just current else Nothing)
                                                 wanted
@@ -151,7 +154,7 @@ handle = \case
                 , T.null (T.strip ((mSecurityCurrent m))) ->
                     setSecurityError "Enter the current password."
                 | otherwise -> do
-                    putModel (\x -> x{mSecurityBusy = True, mSecurityError = Nothing})
+                    putModel (\x -> x{gAccount = (gAccount x){acSecurityBusy = True, acSecurityError = Nothing}})
                     setPasskeyRequirement
                         (mSecurity2faWanted m)
                         ( if aiHasPassword account
@@ -163,25 +166,18 @@ handle = \case
     SecuritySaved message -> do
         putModel
             ( \m ->
-                m
-                    { mSecurityBusy = False
-                    , mSecurityCurrent = ""
-                    , mSecurityNew = ""
-                    , mSecurityConfirm = ""
-                    , mSecurityUsername = ""
-                    , mSecurityError = Nothing
-                    }
+                m{gAccount = (gAccount m){acSecurityBusy = False, acSecurityCurrent = "", acSecurityNew = "", acSecurityConfirm = "", acSecurityUsername = "", acSecurityError = Nothing}}
             )
         notify message ToastOk
         fetchAccount AccountLoaded AccountFailed
     SecurityFailed err -> do
-        putModel (\m -> m{mSecurityBusy = False, mSecurityError = Just ((aeMessage err))})
+        putModel (\m -> m{gAccount = (gAccount m){acSecurityBusy = False, acSecurityError = Just ((aeMessage err))}})
         when (aeStatus err == Just 401) (handleApiError err)
     SessionsRevokeOthers -> do
-        putModel (\m -> m{mAccountLoading = True})
+        putModel (\m -> m{gAccount = (gAccount m){acAccountLoading = True}})
         revokeOtherSessions SessionsRevoked SessionsRevokeFailed
     SessionsRevoked revoked -> do
-        putModel (\m -> m{mAccountLoading = False})
+        putModel (\m -> m{gAccount = (gAccount m){acAccountLoading = False}})
         notify
             ( T.pack
                 ( "Revoked "
@@ -192,7 +188,7 @@ handle = \case
             ToastOk
         fetchAccount AccountLoaded AccountFailed
     SessionsRevokeFailed err -> do
-        putModel (\m -> m{mAccountLoading = False})
+        putModel (\m -> m{gAccount = (gAccount m){acAccountLoading = False}})
         handleApiError err
     AccountReload -> fetchAccount AccountLoaded AccountFailed
     -- Signing out is a write, but an unsaved note would be lost silently, so
@@ -200,26 +196,29 @@ handle = \case
     LogoutRequest -> do
         m <- get
         if hasUnsaved m
-            then putModel (\x -> x{mConfirmLogout = True})
+            then putModel (\x -> x{gShell = (gShell x){sfConfirmLogout = True}})
             else dispatch Logout
-    LogoutCancel -> putModel (\m -> m{mConfirmLogout = False})
+    LogoutCancel -> putModel (\m -> m{gShell = (gShell m){sfConfirmLogout = False}})
     Logout -> logout LoggedOut (\err -> ApiErrorRaised err)
     LoggedOut -> redirect "/login"
     -- selection / bulk -----------------------------------------------------
     TokensLoaded tokens ->
-        putModel (\m -> m{mTokens = tokens, mTokensLoading = False, mTokensError = Nothing})
+        putModel (\m -> m{gAccount = (gAccount m){acTokens = tokens, acTokensLoading = False, acTokensError = Nothing}})
     TokensFailed err -> do
-        putModel (\m -> m{mTokensLoading = False, mTokensError = Just ((aeMessage err))})
+        putModel (\m -> m{gAccount = (gAccount m){acTokensLoading = False, acTokensError = Just ((aeMessage err))}})
         handleApiError err
-    TokenNameInput value -> putModel (\m -> m{mTokenName = value})
+    TokenNameInput value -> putModel (\m -> m{gAccount = (gAccount m){acTokenName = value}})
     TokenScopeToggled scope ->
         putModel
             ( \m ->
                 m
-                    { mTokenScopes =
-                        if scope `elem` mTokenScopes m
-                            then filter (/= scope) (mTokenScopes m)
-                            else mTokenScopes m ++ [scope]
+                    { gAccount =
+                        (gAccount m)
+                            { acTokenScopes =
+                                if scope `elem` mTokenScopes m
+                                    then filter (/= scope) (mTokenScopes m)
+                                    else mTokenScopes m ++ [scope]
+                            }
                     }
             )
     TokenCreate -> do
@@ -231,52 +230,38 @@ handle = \case
                 if null (mTokenScopes m)
                     then notify "Pick at least one scope" ToastInfo
                     else do
-                        putModel (\x -> x{mTokenBusy = True})
+                        putModel (\x -> x{gAccount = (gAccount x){acTokenBusy = True}})
                         createApiToken name (mTokenScopes m) TokenCreated TokenCreateFailed
     TokenCreated raw info -> do
         putModel
             ( \m ->
-                m
-                    { mTokens = info : filter ((/= tvId info) . tvId) (mTokens m)
-                    , mTokenName = ""
-                    , mTokenBusy = False
-                    , mTokenSecret = Just (raw, info)
-                    }
+                m{gAccount = (gAccount m){acTokens = info : filter ((/= tvId info) . tvId) (mTokens m), acTokenName = "", acTokenBusy = False, acTokenSecret = Just (raw, info)}}
             )
         notify "Token created. Copy it now; it is shown once." ToastOk
     TokenCreateFailed err -> do
-        putModel (\m -> m{mTokenBusy = False})
+        putModel (\m -> m{gAccount = (gAccount m){acTokenBusy = False}})
         handleApiError err
     TokenRevoke tokenId -> revokeApiToken tokenId TokenRevoked TokenCreateFailed
     TokenRevoked -> do
         notify "Token revoked" ToastOk
         fetchTokens TokensLoaded TokensFailed
-    TokenRevealDismiss -> putModel (\m -> m{mTokenSecret = Nothing})
+    TokenRevealDismiss -> putModel (\m -> m{gAccount = (gAccount m){acTokenSecret = Nothing}})
     TokenCopied raw -> copyText raw "Token copied" "Copy failed. Select the text instead"
     -- admin users ----------------------------------------------------------
     AdminUsersLoaded users ->
         putModel
             ( \m ->
-                m
-                    { mAdminUsers = users
-                    , mAdminUsersAllowed = True
-                    , mAdminUsersLoading = False
-                    , mAdminUsersError = Nothing
-                    }
+                m{gAccount = (gAccount m){acAdminUsers = users, acAdminUsersAllowed = True, acAdminUsersLoading = False, acAdminUsersError = Nothing}}
             )
     AdminUsersFailed err -> do
         putModel
             ( \m ->
-                m
-                    { mAdminUsersLoading = False
-                    , mAdminUsersAllowed = False
-                    , mAdminUsersError = if mAccountTab m == AccountUsers then Just ((aeMessage err)) else Nothing
-                    }
+                m{gAccount = (gAccount m){acAdminUsersLoading = False, acAdminUsersAllowed = False, acAdminUsersError = if mAccountTab m == AccountUsers then Just ((aeMessage err)) else Nothing}}
             )
         when (aeStatus err == Just 401) (handleApiError err)
-    UserNameInput value -> putModel (\m -> m{mUserName = value, mUserFormError = Nothing})
-    UserPasswordInput value -> putModel (\m -> m{mUserPassword = value, mUserFormError = Nothing})
-    UserRoleSelected role -> putModel (\m -> m{mUserRole = role})
+    UserNameInput value -> putModel (\m -> m{gAccount = (gAccount m){acUserName = value, acUserFormError = Nothing}})
+    UserPasswordInput value -> putModel (\m -> m{gAccount = (gAccount m){acUserPassword = value, acUserFormError = Nothing}})
+    UserRoleSelected role -> putModel (\m -> m{gAccount = (gAccount m){acUserRole = role}})
     UserCreate -> do
         m <- get
         let input =
@@ -285,26 +270,16 @@ handle = \case
                     , uciPassword = (mUserPassword m)
                     , uciRole = mUserRole m
                     }
-        putModel (\x -> x{mUserBusy = True, mUserFormError = Nothing})
+        putModel (\x -> x{gAccount = (gAccount x){acUserBusy = True, acUserFormError = Nothing}})
         createAdminUser input UserCreated UserCreateFailed
     UserCreated result -> do
         notify "User created. Copy the recovery codes now." ToastOk
         putModel
             ( \m ->
-                m
-                    { mAdminUsers = upsertUser (ucrUser result) (mAdminUsers m)
-                    , mAdminUsersLoading = False
-                    , mAdminUsersError = Nothing
-                    , mUserBusy = False
-                    , mUserFormError = Nothing
-                    , mUserName = ""
-                    , mUserPassword = ""
-                    , mUserRole = RoleMember
-                    , mUserRecovery = Just (uvUsername (ucrUser result), ucrRecoveryCodes result)
-                    }
+                m{gAccount = (gAccount m){acAdminUsers = upsertUser (ucrUser result) (mAdminUsers m), acAdminUsersLoading = False, acAdminUsersError = Nothing, acUserBusy = False, acUserFormError = Nothing, acUserName = "", acUserPassword = "", acUserRole = RoleMember, acUserRecovery = Just (uvUsername (ucrUser result), ucrRecoveryCodes result)}}
             )
     UserCreateFailed err -> do
-        putModel (\m -> m{mUserBusy = False, mUserFormError = Just ((aeMessage err))})
+        putModel (\m -> m{gAccount = (gAccount m){acUserBusy = False, acUserFormError = Just ((aeMessage err))}})
         when (aeStatus err == Just 401) (handleApiError err)
     UserToggleEnabled user ->
         patchAdminUser
@@ -324,16 +299,13 @@ handle = \case
         notify "User updated" ToastOk
         putModel
             ( \m ->
-                m
-                    { mAdminUsers = upsertUser user (mAdminUsers m)
-                    , mUserActionError = Nothing
-                    }
+                m{gAccount = (gAccount m){acAdminUsers = upsertUser user (mAdminUsers m), acUserActionError = Nothing}}
             )
     UserUpdateFailed err ->
-        putModel (\m -> m{mUserActionError = Just ((aeMessage err))})
+        putModel (\m -> m{gAccount = (gAccount m){acUserActionError = Just ((aeMessage err))}})
     UserResetOpen userId ->
-        putModel (\m -> m{mUserReset = Just userId, mUserResetPassword = "", mUserActionError = Nothing})
-    UserResetPasswordInput value -> putModel (\m -> m{mUserResetPassword = value})
+        putModel (\m -> m{gAccount = (gAccount m){acUserReset = Just userId, acUserResetPassword = "", acUserActionError = Nothing}})
+    UserResetPasswordInput value -> putModel (\m -> m{gAccount = (gAccount m){acUserResetPassword = value}})
     UserResetSubmit -> do
         m <- get
         case mUserReset m of
@@ -341,7 +313,7 @@ handle = \case
             Just userId ->
                 let password = (mUserResetPassword m)
                  in if T.null (T.strip password)
-                        then putModel (\x -> x{mUserActionError = Just "a temporary password is required"})
+                        then putModel (\x -> x{gAccount = (gAccount x){acUserActionError = Just "a temporary password is required"}})
                         else resetAdminPassword userId password (UserResetDone userId password) UserResetFailed
     UserResetDone userId password -> do
         notify "Temporary password set. The user's sessions were revoked." ToastOk
@@ -350,88 +322,68 @@ handle = \case
                 let username = case [uvUsername user | user <- mAdminUsers m, uvId user == userId] of
                         (name : _) -> name
                         [] -> T.pack (show userId)
-                 in m
-                        { mUserReset = Nothing
-                        , mUserResetPassword = ""
-                        , mUserResetShown = Just (username, password)
-                        , mUserActionError = Nothing
-                        }
+                 in m{gAccount = (gAccount m){acUserReset = Nothing, acUserResetPassword = "", acUserResetShown = Just (username, password), acUserActionError = Nothing}}
             )
-    UserResetCancel -> putModel (\m -> m{mUserReset = Nothing, mUserResetPassword = "", mUserActionError = Nothing})
+    UserResetCancel -> putModel (\m -> m{gAccount = (gAccount m){acUserReset = Nothing, acUserResetPassword = "", acUserActionError = Nothing}})
     UserResetFailed err ->
-        putModel (\m -> m{mUserActionError = Just ((aeMessage err))})
+        putModel (\m -> m{gAccount = (gAccount m){acUserActionError = Just ((aeMessage err))}})
     UserRecoveryCopied raw -> copyText raw "Recovery codes copied" "Copy failed. Select the text instead"
-    UserRecoveryDismiss -> putModel (\m -> m{mUserRecovery = Nothing})
-    UserResetShownDismiss -> putModel (\m -> m{mUserResetShown = Nothing})
+    UserRecoveryDismiss -> putModel (\m -> m{gAccount = (gAccount m){acUserRecovery = Nothing}})
+    UserResetShownDismiss -> putModel (\m -> m{gAccount = (gAccount m){acUserResetShown = Nothing}})
     UserDeleteOpen user ->
         putModel
             ( \m ->
-                m
-                    { mUserDelete = Just user
-                    , mUserDeleteName = ""
-                    , mUserDeleteLibrary = False
-                    , mUserDeleteBusy = False
-                    , mUserActionError = Nothing
-                    }
+                m{gAccount = (gAccount m){acUserDelete = Just user, acUserDeleteName = "", acUserDeleteLibrary = False, acUserDeleteBusy = False, acUserActionError = Nothing}}
             )
     UserDeleteCancel ->
         putModel
             ( \m ->
-                m
-                    { mUserDelete = Nothing
-                    , mUserDeleteName = ""
-                    , mUserDeleteLibrary = False
-                    , mUserDeleteBusy = False
-                    }
+                m{gAccount = (gAccount m){acUserDelete = Nothing, acUserDeleteName = "", acUserDeleteLibrary = False, acUserDeleteBusy = False}}
             )
-    UserDeleteNameInput value -> putModel (\m -> m{mUserDeleteName = value})
-    UserDeleteLibraryToggled -> putModel (\m -> m{mUserDeleteLibrary = not (mUserDeleteLibrary m)})
+    UserDeleteNameInput value -> putModel (\m -> m{gAccount = (gAccount m){acUserDeleteName = value}})
+    UserDeleteLibraryToggled -> putModel (\m -> m{gAccount = (gAccount m){acUserDeleteLibrary = not (mUserDeleteLibrary m)}})
     UserDeleteSubmit -> do
         m <- get
         case mUserDelete m of
             Just user
                 | T.strip ((mUserDeleteName m)) == uvUsername user -> do
-                    putModel (\x -> x{mUserDeleteBusy = True, mUserActionError = Nothing})
+                    putModel (\x -> x{gAccount = (gAccount x){acUserDeleteBusy = True, acUserActionError = Nothing}})
                     deleteAdminUser (uvId user) (mUserDeleteLibrary m) (UserDeleted (uvId user)) UserDeleteFailed
                 | otherwise ->
-                    putModel (\x -> x{mUserActionError = Just "type the account name to confirm"})
+                    putModel (\x -> x{gAccount = (gAccount x){acUserActionError = Just "type the account name to confirm"}})
             Nothing -> pure ()
     UserDeleted userId -> do
         notify "Account deleted" ToastOk
         putModel
             ( \m ->
-                m
-                    { mUserDelete = Nothing
-                    , mUserDeleteName = ""
-                    , mUserDeleteLibrary = False
-                    , mUserDeleteBusy = False
-                    , mUserActionError = Nothing
-                    , mAdminUsers = [user | user <- mAdminUsers m, uvId user /= userId]
-                    }
+                m{gAccount = (gAccount m){acUserDelete = Nothing, acUserDeleteName = "", acUserDeleteLibrary = False, acUserDeleteBusy = False, acUserActionError = Nothing, acAdminUsers = [user | user <- mAdminUsers m, uvId user /= userId]}}
             )
         fetchAdminUsers AdminUsersLoaded AdminUsersFailed
     UserDeleteFailed err ->
-        putModel (\m -> m{mUserDeleteBusy = False, mUserActionError = Just ((aeMessage err))})
+        putModel (\m -> m{gAccount = (gAccount m){acUserDeleteBusy = False, acUserActionError = Just ((aeMessage err))}})
     -- webhooks -------------------------------------------------------------
     WebhooksLoaded webhooks ->
-        putModel (\m -> m{mWebhooks = webhooks, mWebhooksLoading = False, mWebhooksError = Nothing})
+        putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhooks = webhooks, wkWebhooksLoading = False, wkWebhooksError = Nothing}})
     WebhooksFailed err -> do
-        putModel (\m -> m{mWebhooksLoading = False, mWebhooksError = Just ((aeMessage err))})
+        putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhooksLoading = False, wkWebhooksError = Just ((aeMessage err))}})
         handleApiError err
-    WebhookNameInput value -> putModel (\m -> m{mWebhookName = value})
-    WebhookUrlInput value -> putModel (\m -> m{mWebhookUrl = value})
+    WebhookNameInput value -> putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookName = value}})
+    WebhookUrlInput value -> putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookUrl = value}})
     WebhookEventToggled eventType ->
         putModel
             ( \m ->
                 m
-                    { mWebhookEvents =
-                        if eventType `elem` mWebhookEvents m
-                            then filter (/= eventType) (mWebhookEvents m)
-                            else mWebhookEvents m ++ [eventType]
-                    , mWebhookFormError = Nothing
+                    { gWebhooks =
+                        (gWebhooks m)
+                            { wkWebhookEvents =
+                                if eventType `elem` mWebhookEvents m
+                                    then filter (/= eventType) (mWebhookEvents m)
+                                    else mWebhookEvents m ++ [eventType]
+                            , wkWebhookFormError = Nothing
+                            }
                     }
             )
-    WebhookEnabledToggled -> putModel (\m -> m{mWebhookEnabled = not (mWebhookEnabled m)})
+    WebhookEnabledToggled -> putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookEnabled = not (mWebhookEnabled m)}})
     WebhookCreate -> do
         m <- get
         let input =
@@ -441,32 +393,18 @@ handle = \case
                     , wiEvents = mWebhookEvents m
                     , wiEnabled = mWebhookEnabled m
                     }
-        putModel (\x -> x{mWebhookBusy = True, mWebhookFormError = Nothing})
+        putModel (\x -> x{gWebhooks = (gWebhooks x){wkWebhookBusy = True, wkWebhookFormError = Nothing}})
         createWebhook input (\(webhook, secret) -> WebhookCreated webhook secret) WebhookCreateFailed
     WebhookCreated webhook secret -> do
         notify "Webhook created. Copy the signing secret now." ToastOk
         putModel
             ( \m ->
-                m
-                    { mWebhooks = upsertWebhook webhook (mWebhooks m)
-                    , mWebhooksLoading = False
-                    , mWebhooksError = Nothing
-                    , mWebhookBusy = False
-                    , mWebhookFormError = Nothing
-                    , mWebhookSecret = Just secret
-                    , mWebhookName = ""
-                    , mWebhookUrl = ""
-                    , mWebhookEvents = []
-                    , mWebhookEnabled = True
-                    }
+                m{gWebhooks = (gWebhooks m){wkWebhooks = upsertWebhook webhook (mWebhooks m), wkWebhooksLoading = False, wkWebhooksError = Nothing, wkWebhookBusy = False, wkWebhookFormError = Nothing, wkWebhookSecret = Just secret, wkWebhookName = "", wkWebhookUrl = "", wkWebhookEvents = [], wkWebhookEnabled = True}}
             )
     WebhookCreateFailed err -> do
         putModel
             ( \m ->
-                m
-                    { mWebhookBusy = False
-                    , mWebhookFormError = Just ((aeMessage err))
-                    }
+                m{gWebhooks = (gWebhooks m){wkWebhookBusy = False, wkWebhookFormError = Just ((aeMessage err))}}
             )
         when (aeStatus err == Just 401) (handleApiError err)
     WebhookToggle webhook ->
@@ -482,16 +420,12 @@ handle = \case
             WebhookToggleFailed
     WebhookToggled webhook -> do
         notify "Webhook updated" ToastOk
-        putModel (\m -> m{mWebhooks = upsertWebhook webhook (mWebhooks m)})
+        putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhooks = upsertWebhook webhook (mWebhooks m)}})
     WebhookToggleFailed err -> handleApiError err
     WebhookTestRequest webhookId -> do
         putModel
             ( \m ->
-                m
-                    { mWebhookTest = Nothing
-                    , mWebhookTestError = Nothing
-                    , mWebhookTestBusy = True
-                    }
+                m{gWebhooks = (gWebhooks m){wkWebhookTest = Nothing, wkWebhookTestError = Nothing, wkWebhookTestBusy = True}}
             )
         createWebhookTestJob
             webhookId
@@ -499,38 +433,37 @@ handle = \case
             (\err -> WebhookTestJobFailed webhookId (Just (aeMessage err)))
     WebhookTestJobQueued webhookId jobId -> dispatch (JobStarted (WebhookTestJob webhookId) jobId)
     WebhookTestJobDone webhookId result -> do
-        putModel (\m -> m{mWebhookTestBusy = False})
+        putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookTestBusy = False}})
         case result of
             Nothing ->
-                putModel (\m -> m{mWebhookTestError = Just "The webhook test returned no result."})
+                putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookTestError = Just "The webhook test returned no result."}})
             Just value -> case decodeWebhookTestJobResult value of
-                Left err -> putModel (\m -> m{mWebhookTestError = Just (aeMessage err)})
+                Left err -> putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookTestError = Just (aeMessage err)}})
                 Right report ->
                     putModel
                         ( \m ->
                             m
-                                { mWebhookTest =
-                                    Just
-                                        ( webhookId
-                                        , WebhookTest
-                                            (wtjrOk report)
-                                            (Just (wtjrStatus report))
-                                            (fromMaybe "" (wtjrError report))
-                                        )
-                                , mWebhookTestError = Nothing
+                                { gWebhooks =
+                                    (gWebhooks m)
+                                        { wkWebhookTest =
+                                            Just
+                                                ( webhookId
+                                                , WebhookTest
+                                                    (wtjrOk report)
+                                                    (Just (wtjrStatus report))
+                                                    (fromMaybe "" (wtjrError report))
+                                                )
+                                        , wkWebhookTestError = Nothing
+                                        }
                                 }
                         )
     WebhookTestJobFailed _ message ->
         putModel
             ( \m ->
-                m
-                    { mWebhookTestBusy = False
-                    , mWebhookTest = Nothing
-                    , mWebhookTestError = Just (fromMaybe "The webhook test failed." message)
-                    }
+                m{gWebhooks = (gWebhooks m){wkWebhookTestBusy = False, wkWebhookTest = Nothing, wkWebhookTestError = Just (fromMaybe "The webhook test failed." message)}}
             )
     WebhookTestJobAbandoned _ ->
-        putModel (\m -> m{mWebhookTestBusy = False, mWebhookTestError = Nothing})
+        putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookTestBusy = False, wkWebhookTestError = Nothing}})
     WebhookDelete webhookId ->
         deleteWebhook webhookId (WebhookDeleted webhookId) WebhookDeleteFailed
     WebhookDeleted webhookId -> do
@@ -538,36 +471,39 @@ handle = \case
         putModel
             ( \m ->
                 m
-                    { mWebhooks = filter ((/= webhookId) . whId) (mWebhooks m)
-                    , mWebhookDeliveries = case mWebhookDeliveries m of
-                        Just (showId, _) | showId == webhookId -> Nothing
-                        other -> other
-                    , mWebhookTest = case mWebhookTest m of
-                        Just (showId, _) | showId == webhookId -> Nothing
-                        other -> other
+                    { gWebhooks =
+                        (gWebhooks m)
+                            { wkWebhooks = filter ((/= webhookId) . whId) (mWebhooks m)
+                            , wkWebhookDeliveries = case mWebhookDeliveries m of
+                                Just (showId, _) | showId == webhookId -> Nothing
+                                other -> other
+                            , wkWebhookTest = case mWebhookTest m of
+                                Just (showId, _) | showId == webhookId -> Nothing
+                                other -> other
+                            }
                     }
             )
     WebhookDeleteFailed err -> handleApiError err
-    WebhookSecretDismiss -> putModel (\m -> m{mWebhookSecret = Nothing})
+    WebhookSecretDismiss -> putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookSecret = Nothing}})
     WebhookSecretCopied raw -> copyText raw "Webhook secret copied" "Copy failed. Select the text instead"
     WebhookDeliveriesOpen webhookId -> do
-        putModel (\m -> m{mWebhookDeliveriesError = Nothing})
+        putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookDeliveriesError = Nothing}})
         fetchWebhookDeliveries webhookId (WebhookDeliveriesLoaded webhookId) (WebhookDeliveriesFailed webhookId)
     WebhookDeliveriesLoaded webhookId deliveries ->
-        putModel (\m -> m{mWebhookDeliveries = Just (webhookId, deliveries), mWebhookDeliveriesError = Nothing})
+        putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookDeliveries = Just (webhookId, deliveries), wkWebhookDeliveriesError = Nothing}})
     WebhookDeliveriesFailed _webhookId err ->
-        putModel (\m -> m{mWebhookDeliveries = Nothing, mWebhookDeliveriesError = Just ((aeMessage err))})
+        putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookDeliveries = Nothing, wkWebhookDeliveriesError = Just ((aeMessage err))}})
     -- highlights -----------------------------------------------------------
     RulesLoaded rules ->
-        putModel (\m -> m{mRules = rules, mRulesLoading = False, mRulesError = Nothing})
+        putModel (\m -> m{gRules = (gRules m){ruRules = rules, ruRulesLoading = False, ruRulesError = Nothing}})
     RulesFailed err -> do
-        putModel (\m -> m{mRulesLoading = False, mRulesError = Just ((aeMessage err))})
+        putModel (\m -> m{gRules = (gRules m){ruRulesLoading = False, ruRulesError = Just ((aeMessage err))}})
         handleApiError err
-    RuleNameInput value -> putModel (\m -> m{mRuleName = value})
-    RuleFieldSelected field -> putModel (\m -> m{mRuleField = field})
-    RulePatternInput value -> putModel (\m -> m{mRulePattern = value})
-    RuleTagsInput value -> putModel (\m -> m{mRuleTags = value})
-    RuleMarkReadToggled -> putModel (\m -> m{mRuleMarkRead = not (mRuleMarkRead m)})
+    RuleNameInput value -> putModel (\m -> m{gRules = (gRules m){ruRuleName = value}})
+    RuleFieldSelected field -> putModel (\m -> m{gRules = (gRules m){ruRuleField = field}})
+    RulePatternInput value -> putModel (\m -> m{gRules = (gRules m){ruRulePattern = value}})
+    RuleTagsInput value -> putModel (\m -> m{gRules = (gRules m){ruRuleTags = value}})
+    RuleMarkReadToggled -> putModel (\m -> m{gRules = (gRules m){ruRuleMarkRead = not (mRuleMarkRead m)}})
     RuleCreate -> do
         m <- get
         let name = T.strip ((mRuleName m))
@@ -575,7 +511,7 @@ handle = \case
         if T.null name || T.null patternText
             then notify "Rule name and pattern are required" ToastInfo
             else do
-                putModel (\x -> x{mRuleBusy = True})
+                putModel (\x -> x{gRules = (gRules x){ruRuleBusy = True}})
                 createRule
                     name
                     True
@@ -588,31 +524,21 @@ handle = \case
     RuleCreated rule -> do
         putModel
             ( \m ->
-                m
-                    { mRules = mRules m ++ [rule]
-                    , mRuleName = ""
-                    , mRulePattern = ""
-                    , mRuleTags = ""
-                    , mRuleMarkRead = False
-                    , mRuleBusy = False
-                    , mRuleDryRun = Nothing
-                    }
+                m{gRules = (gRules m){ruRules = mRules m ++ [rule], ruRuleName = "", ruRulePattern = "", ruRuleTags = "", ruRuleMarkRead = False, ruRuleBusy = False, ruRuleDryRun = Nothing}}
             )
         notify (("Rule “" <> ruleName rule <> "” created")) ToastOk
     RuleCreateFailed err -> do
-        putModel (\m -> m{mRuleBusy = False})
+        putModel (\m -> m{gRules = (gRules m){ruRuleBusy = False}})
         handleApiError err
     RuleToggleEnabled rule -> patchRule (ruleId rule) rule{ruleEnabled = not (ruleEnabled rule)} (RuleToggled rule{ruleEnabled = not (ruleEnabled rule)}) RuleFailed
     RuleToggled updated ->
         putModel
             ( \m ->
-                m
-                    { mRules = map (\rule -> if ruleId rule == ruleId updated then updated else rule) (mRules m)
-                    }
+                m{gRules = (gRules m){ruRules = map (\rule -> if ruleId rule == ruleId updated then updated else rule) (mRules m)}}
             )
     RuleDelete ruleIdToDelete -> deleteRule ruleIdToDelete (RuleDeleted ruleIdToDelete) RuleFailed
     RuleDeleted ruleIdToDelete -> do
-        putModel (\m -> m{mRules = filter (\rule -> ruleId rule /= ruleIdToDelete) (mRules m)})
+        putModel (\m -> m{gRules = (gRules m){ruRules = filter (\rule -> ruleId rule /= ruleIdToDelete) (mRules m)}})
         notify "Rule deleted" ToastOk
     RuleFailed err -> handleApiError err
     RuleDryRun -> do
@@ -621,13 +547,13 @@ handle = \case
         if T.null patternText
             then notify "Enter a pattern to dry-run" ToastInfo
             else do
-                putModel (\x -> x{mRuleBusy = True, mRuleDryRun = Nothing})
+                putModel (\x -> x{gRules = (gRules x){ruRuleBusy = True, ruRuleDryRun = Nothing}})
                 testRule (mRuleField m) patternText RuleDryRunResult RuleDryRunFailed
     RuleDryRunResult matches ids -> do
-        putModel (\m -> m{mRuleBusy = False, mRuleDryRun = Just (matches, ids)})
+        putModel (\m -> m{gRules = (gRules m){ruRuleBusy = False, ruRuleDryRun = Just (matches, ids)}})
         notify (T.pack (show matches <> " bookmark(s) would match")) ToastOk
     RuleDryRunFailed err -> do
-        putModel (\m -> m{mRuleBusy = False})
+        putModel (\m -> m{gRules = (gRules m){ruRuleBusy = False}})
         handleApiError err
     -- toasts ---------------------------------------------------------------
     _ -> pure ()

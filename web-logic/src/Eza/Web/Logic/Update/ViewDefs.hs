@@ -52,21 +52,7 @@ from the graph data by 'recomputeGraphColors'.
 applyGraphView :: EV.View -> Model -> Model
 applyGraphView view m = case EV.vDefinition view of
     EV.GraphDefinition definition ->
-        m
-            { mGraphViewId = Just (EV.vId view)
-            , mGraphViewRev = EV.vUpdatedAt view
-            , mGraphFilter = EV.gvdQuery definition
-            , mGraphTagsShown = EV.gvdTagsShown definition
-            , mGraphLabelMode = EV.gvdLabelMode definition
-            , mGraphPreset = EV.gvdLayoutPreset definition
-            , mGraphLocal = isJust (EV.gvdLocalDepth definition)
-            , mGraphLocalDepth = fromMaybe 1 (EV.gvdLocalDepth definition)
-            , mGraphLocalRoot = Nothing
-            , mGraphColorGroups = EV.gvdColorGroups definition
-            , mGraphGroupDrafts = EV.gvdColorGroups definition
-            , mGraphGroupDirty = False
-            , mGraphGroupEditor = False
-            }
+        m{gGraph = (gGraph m){grGraphViewId = Just (EV.vId view), grGraphViewRev = EV.vUpdatedAt view, grGraphFilter = EV.gvdQuery definition, grGraphTagsShown = EV.gvdTagsShown definition, grGraphLabelMode = EV.gvdLabelMode definition, grGraphPreset = EV.gvdLayoutPreset definition, grGraphLocal = isJust (EV.gvdLocalDepth definition), grGraphLocalDepth = fromMaybe 1 (EV.gvdLocalDepth definition), grGraphLocalRoot = Nothing, grGraphColorGroups = EV.gvdColorGroups definition, grGraphGroupDrafts = EV.gvdColorGroups definition, grGraphGroupDirty = False, grGraphGroupEditor = False}}
     _ -> m
 
 -- | The current graph state as a view definition, ready to PATCH or POST.
@@ -97,7 +83,7 @@ currentLedgerDefinition m =
 recomputeGraphColors :: Model -> Model
 recomputeGraphColors m =
     case mGraph m of
-        Nothing -> m{mGraphColors = Nothing, mGraphGroupCounts = []}
+        Nothing -> m{gGraph = (gGraph m){grGraphColors = Nothing, grGraphGroupCounts = []}}
         Just graph ->
             let groups = mGraphGroupDrafts m
                 assignment = GM.assignGroupColors groups graph
@@ -109,10 +95,7 @@ recomputeGraphColors m =
                             | record <- gdRecords graph
                             , GM.matchesQueryRecord (parseSearchQuery (EV.cgQuery group)) graph record
                             ]
-             in m
-                    { mGraphColors = Just assignment
-                    , mGraphGroupCounts = map countFor groups
-                    }
+             in m{gGraph = (gGraph m){grGraphColors = Just assignment, grGraphGroupCounts = map countFor groups}}
 
 upsertView :: EV.View -> [EV.View] -> [EV.View]
 upsertView view views =

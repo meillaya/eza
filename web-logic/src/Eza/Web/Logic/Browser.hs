@@ -54,7 +54,7 @@ import Data.Text (Text)
 
 import Eza.Web.Logic.Effect (Effect (..), RequestId, requestIsCurrent)
 import Eza.Web.Logic.Error (ApiError (..))
-import Eza.Web.Logic.Model (Action (..), Model (..), Toast (..), ToastKind (..))
+import Eza.Web.Logic.Model
 import Eza.Web.Logic.Route (Route (..), routeTitle)
 import Eza.Web.Logic.Update.Monad (Update, emit, get, putModel)
 
@@ -69,7 +69,7 @@ notify message kind = do
     let nextToastId = mToastNext model
         toast = Toast nextToastId message kind
         keep = drop (max 0 (length (mToasts model) - 3)) (mToasts model <> [toast])
-    putModel (\m -> m{mToasts = keep, mToastNext = nextToastId + 1})
+    putModel (\m -> m{gShell = (gShell m){sfToasts = keep, sfToastNext = nextToastId + 1}})
     emit (OpScheduleAction 4800 (ToastDismiss nextToastId))
 
 {- | The one error-to-interface policy: an expired session blocks the page and
@@ -79,10 +79,10 @@ notice; anything else is a toast.
 handleApiError :: ApiError -> Update ()
 handleApiError err = case aeStatus err of
     Just 401 -> do
-        putModel (\m -> m{mSignedOut = True})
+        putModel (\m -> m{gShell = (gShell m){sfSignedOut = True}})
         notify "Session expired. Sign in again." ToastError
     Just 404 -> do
-        putModel (\m -> m{mNotice = Just (aeMessage err)})
+        putModel (\m -> m{gLedger = (gLedger m){lfNotice = Just (aeMessage err)}})
         notify (aeMessage err) ToastInfo
     _ -> notify (aeMessage err) ToastError
 

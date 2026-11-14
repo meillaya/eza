@@ -161,7 +161,7 @@ cancelTimer = do
     case mDebounce model of
         Nothing -> pure ()
         Just handle -> do
-            put model{mDebounce = Nothing}
+            put model{gLedger = (gLedger model){lfDebounce = Nothing}}
             withSink $ \_ -> void $ jsgf "clearTimeout" (handle :: Int)
 
 -- --------------------------------------------------------------- helpers ---

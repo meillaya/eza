@@ -42,7 +42,7 @@ updateSpec = describe "native per-group update" $ do
             map toastId (mToasts model) `shouldBe` [mToastNext initialModel]
             effectShows effects `shouldSatisfy` any (isInfixOf "OpScheduleAction 4800")
         it "starts the dirty guard instead of navigating away from an edit" $ do
-            let dirty = initialModel{mDirty = True, mRoute = Bookmark 1}
+            let dirty = initialModel{gDetail = (gDetail initialModel){dtDirty = True}, gShell = (gShell initialModel){sfRoute = Bookmark 1}}
                 (model, effects) = update dirty (Navigate Index)
             mGuardOpen model `shouldBe` True
             mPendingRoute model `shouldBe` Just Index
@@ -55,7 +55,7 @@ updateSpec = describe "native per-group update" $ do
                 [Schedule delay (TimerId 1)] -> delay `shouldBe` searchDebounceDelayMs
                 other -> expectationFailure ("unexpected effects: " <> show other)
         it "a late timer does not reload the list" $ do
-            let stale = initialModel{mDebounceTimer = Nothing}
+            let stale = initialModel{gLedger = (gLedger initialModel){lfDebounceTimer = Nothing}}
                 (_, effects) = update stale (TimerFired (TimerId 42))
             effects `shouldBe` []
         it "committing the search reloads the first page" $ do
@@ -66,7 +66,7 @@ updateSpec = describe "native per-group update" $ do
                     (blqQ query, blqOffset query) `shouldBe` ("", 0)
                 other -> expectationFailure ("unexpected effects: " <> show other)
         it "clears the selection when the query changes" $ do
-            let selected = initialModel{mSelection = mempty, mSelectAnchor = Just 2}
+            let selected = initialModel{gLedger = (gLedger initialModel){lfSelection = mempty, lfSelectAnchor = Just 2}}
                 (model, _) = update selected (SearchInput "x")
             mSelectAnchor model `shouldBe` Nothing
     describe "detail and reader" $ do
@@ -76,7 +76,7 @@ updateSpec = describe "native per-group update" $ do
             mDirty model `shouldBe` True
             effects `shouldBe` [OpReadNoteCursor]
         it "drops a stale detail response without touching the record" $ do
-            let stale = initialModel{mDetailEpoch = RequestId 4}
+            let stale = initialModel{gDetail = (gDetail initialModel){dtDetailEpoch = RequestId 4}}
                 (model, effects) = update stale (DetailLoaded (RequestId 3) undefined)
             mDetail model `shouldBe` Nothing
             effects `shouldBe` []
@@ -104,7 +104,7 @@ updateSpec = describe "native per-group update" $ do
             vuSaveOpen (mViewUi model) `shouldBe` True
     describe "maintenance" $ do
         it "cancels a prune confirmation" $ do
-            let armed = initialModel{mConfirmPrune = True}
+            let armed = initialModel{gMaint = (gMaint initialModel){mnConfirmPrune = True}}
                 (model, _) = update armed PruneCancel
             mConfirmPrune model `shouldBe` False
         it "starts the dead-link sweep with a write request" $ do
@@ -130,7 +130,7 @@ updateSpec = describe "native per-group update" $ do
             mWebhookSecret model `shouldBe` Nothing
     describe "duplicates" $ do
         it "closes the merge confirmation" $ do
-            let armed = initialModel{mDedupConfirm = Just "ab-1"}
+            let armed = initialModel{gDedup = (gDedup initialModel){ddDedupConfirm = Just "ab-1"}}
                 (model, _) = update armed DedupMergeCancel
             mDedupConfirm model `shouldBe` Nothing
         it "refreshes both duplicate sections" $ do
@@ -158,7 +158,7 @@ updateSpec = describe "native per-group update" $ do
                 (model2, _) = update model1 (ToastAdd "two" ToastInfo)
             map toastId (mToasts model2) `shouldBe` [mToastNext initialModel, mToastNext initialModel + 1]
         it "drops a stale stats answer" $ do
-            let stale = initialModel{mStatsEpoch = RequestId 9}
+            let stale = initialModel{gLedger = (gLedger initialModel){lfStatsEpoch = RequestId 9}}
                 (model, effects) = update stale (StatsLoaded (RequestId 8) undefined)
             mStats model `shouldBe` Nothing
             effects `shouldBe` []

@@ -700,598 +700,1769 @@ data Action
     | JobTimedOut JobKind Int
 
 -- | Everything the UI needs to render itself.
-data Model = Model
-    { -- routing / shell
-      mRoute :: Route
-    , mTheme :: Theme
-    , mBooted :: Bool
+data ShellFields = ShellFields
+    -- routing / shell
+    { sfRoute :: Route
+    , sfTheme :: Theme
+    , sfBooted :: Bool
     , -- boot payload reuse: the boot page seeds the default ledger, so a list
       -- route that arrives before /boot answers waits for it instead of
       -- fetching the same page a second time.
-      mBootReady :: Bool
-    , mBootSeeded :: Bool
-    , mRouted :: Bool
-    , mListDeferred :: Bool
-    , -- list fetch request id: a response for an older query is dropped
-      mListEpoch :: RequestId
-    , mVersion :: Text
-    , mOrigin :: Text
-    , mWindowOrigin :: Text
-    , mOnline :: Bool
-    , mSignedOut :: Bool
+      sfBootReady :: Bool
+    , sfBootSeeded :: Bool
+    , sfRouted :: Bool
+    , sfVersion :: Text
+    , sfOrigin :: Text
+    , sfWindowOrigin :: Text
+    , sfOnline :: Bool
+    , sfSignedOut :: Bool
     , -- a blocking screen message: the page may not paint stale state. Set
       -- when the boot document's wire version does not match this build.
-      mBlockingError :: Maybe Text
+      sfBlockingError :: Maybe Text
     , -- layout / virtualization
-      mWidth :: Int
-    , mHeight :: Int
-    , mScrollY :: Int
-    , mScrollRestore :: Maybe Int
-    , mGridTop :: Int
-    , -- library query state
-      mQ :: Text
-    , mTagsFilter :: [Text]
-    , mSort :: Text
-    , mUnreadOnly :: Bool
-    , mItems :: [BookmarkSummary]
-    , mTotal :: Int
-    , mHasMore :: Bool
-    , mOffset :: Int
-    , mLoading :: Bool
-    , mLoadingMore :: Bool
-    , mError :: Maybe Text
-    , mNotice :: Maybe Text
-    , -- the browser timeout handle of the pending search debounce
-
-      mDebounce :: Maybe Int
-    {- ^ Browser timeout handle for the search debounce. Owned by the shell
-    interpreter (it is what @clearTimeout@ needs); the native reducer owns
-    the logical TimerId in @mDebounceTimer@.
-    -}
-    , -- the native ledger's debounce TimerId and the last allocated timer id
-      mDebounceTimer :: Maybe TimerId
-    , mTimerSeq :: TimerId
-    -- ^ Next logical timer id, owned by the native ledger reducer.
-    , mTags :: [TagStat]
-    , mStats :: Maybe LibraryStats
-    , mStatsError :: Maybe Text
-    , -- the current stats request id: an answer for an older refresh is dropped
-      mStatsEpoch :: RequestId
-    , mYearHere :: [(Int, Int)]
-    , mLedgerCursor :: Maybe Int
-    , mDrawer :: Maybe Int
-    , mAccountTab :: AccountTab
-    , mSessions :: [SessionInfo]
-    , mSecurityUsername :: Text
-    , mSecurityCurrent :: Text
-    , mSecurityNew :: Text
-    , mSecurityConfirm :: Text
-    , mSecurity2faWanted :: Bool
-    , mSecurityBusy :: Bool
-    , mSecurityError :: Maybe Text
-    , mSaved :: [SavedSearch]
-    , mSavedName :: Text
-    , mSavedShare :: Maybe SavedSearch
-    , -- selection / bulk
-      mSelection :: IS.IntSet
-    , mSelectAnchor :: Maybe Int
-    , mSelectingAll :: Bool
-    , mSelectFetched :: Int
-    , -- token for the "select all matching" paging chain; every start, clear,
-      -- search change, reload or route load bumps it so a response for an
-      -- abandoned chain cannot repopulate the selection
-      mSelectEpoch :: RequestId
-    , -- the list epoch captured when the chain started; a newer result set
-      -- stops the chain even when a reload only bumps the list epoch
-      mSelectListEpoch :: RequestId
-    , -- the stable query/filter/sort the chain pages through
-      mSelectParams :: Maybe ListParams
-    , mBulkBusy :: Bool
-    , mTagPrompt :: Maybe Bool
-    , mTagPromptValue :: Text
-    , mConfirmDelete :: Maybe Int
-    , mConfirmBulkDelete :: Bool
-    , mConfirmMarkAll :: Bool
-    , -- add modal
-      mAddOpen :: Bool
-    , mAddUrl :: Text
-    , mAddTitle :: Text
-    , mAddTags :: Text
-    , mAddNote :: Text
-    , mAddBusy :: Bool
-    , mAddError :: Maybe Text
+      sfWidth :: Int
+    , sfHeight :: Int
+    , sfScrollY :: Int
+    , sfScrollRestore :: Maybe Int
+    , sfGridTop :: Int
     , -- palette
-      mPaletteOpen :: Bool
-    , mPaletteQ :: Text
-    , mPaletteSel :: Int
-    , -- detail
-      mDetail :: Maybe BookmarkDetail
-    , mDetailLoading :: Bool
-    , mDetailError :: Maybe Text
-    , -- detail fetch request id: a response for an older record is dropped
-      mDetailEpoch :: RequestId
-    , -- monotonically increasing id for read-state PATCHes; a response older
-      -- than the latest toggle is dropped
-      mReadRequest :: RequestId
-    , -- a read PATCH is in flight, so a note save must not echo a possibly
-      -- stale is_read flag back to the server
-      mReadPending :: Bool
-    , mEditTitle :: Text
-    , mEditNote :: Text
-    , mEditTags :: [Text]
-    , mNewTag :: Text
-    , mNoteMode :: NoteMode
-    , mNoteCursor :: Int
-    , mLinkQuery :: Maybe Text
-    , mLinkResults :: [BookmarkSummary]
-    , mLinkSel :: Int
-    , mBacklinks :: [Backlink]
-    , mHighlights :: [Highlight]
-    , mHighlightsLoading :: Bool
-    , mReaderSel :: Maybe ReaderSelection
-    , mHighlightNoteOpen :: Bool
-    , mHighlightNote :: Text
-    , mHighlightEdit :: Maybe Int
-    , mHighlightEditNote :: Text
-    , mHighlightEditColor :: Text
-    , mSnapshotOpen :: Bool
-    , mShares :: [ShareView]
-    , mSharesLoading :: Bool
-    , mSharesError :: Maybe Text
-    , mShareDialogOpen :: Bool
-    , mShareIncludeNote :: Bool
-    , mShareExpiryDays :: Int
-    , mShareBusy :: Bool
-    , mShareUrl :: Maybe Text
-    , mAiStatus :: Maybe AiStatus
-    , mRules :: [Rule]
-    , mRulesLoading :: Bool
-    , mRulesError :: Maybe Text
-    , mRuleName :: Text
-    , mRuleField :: Text
-    , mRulePattern :: Text
-    , mRuleTags :: Text
-    , mRuleMarkRead :: Bool
-    , mRuleBusy :: Bool
-    , mRuleDryRun :: Maybe (Int, [Int])
-    , mSaving :: Bool
-    , mDirty :: Bool
-    , mGuardOpen :: Bool
-    , mPendingRoute :: Maybe Route
+      sfPaletteOpen :: Bool
+    , sfPaletteQ :: Text
+    , sfPaletteSel :: Int
+    , sfGuardOpen :: Bool
+    , sfPendingRoute :: Maybe Route
     , -- the guard was opened by a history navigation (Back/Forward): the
       -- address already moved, so cancelling restores it and discarding does
       -- not push a second entry
-      mGuardFromHistory :: Bool
-    , mConfirmLogout :: Bool
-    , -- graph: the fields a drag, hover, zoom or keystroke changes come
-      -- first, so the derived Eq for Model short-circuits here instead of
-      -- walking the heavy layout and payload at the end of the record
-      mGraphView :: GraphView
-    , mGraphViewReady :: Bool
-    , mGraphHover :: Maybe Int
-    , mGraphSelected :: Maybe Int
-    , mGraphFocus :: Maybe Int
-    , mGraphDrag :: Maybe GraphDrag
-    , mGraphMatches :: GraphMatches
-    , mGraphFilter :: Text
-    , mGraphFilterTimer :: Maybe Int
-    , mGraphLabelMode :: LabelMode
-    {- ^ The reader's last label-mode choice. While a saved view is active,
-    its definition supplies the rendered mode (see
-    'effectiveGraphLabelMode'); this field is the fallback.
+      sfGuardFromHistory :: Bool
+    , sfConfirmLogout :: Bool
+    , -- toasts
+      sfToasts :: [Toast]
+    , sfToastNext :: Int
+    }
+    deriving (Eq)
+
+data LedgerFields = LedgerFields
+    { lfListDeferred :: Bool
+    , -- list fetch request id: a response for an older query is dropped
+      lfListEpoch :: RequestId
+    , -- library query state
+      lfQ :: Text
+    , lfTagsFilter :: [Text]
+    , lfSort :: Text
+    , lfUnreadOnly :: Bool
+    , lfItems :: [BookmarkSummary]
+    , lfTotal :: Int
+    , lfHasMore :: Bool
+    , lfOffset :: Int
+    , lfLoading :: Bool
+    , lfLoadingMore :: Bool
+    , lfError :: Maybe Text
+    , lfNotice :: Maybe Text
+    {- ^ Browser timeout handle for the search debounce. Owned by the shell
+        interpreter (it is what @clearTimeout@ needs); the native reducer owns
+        the logical TimerId in @mDebounceTimer@.
     -}
-    , mGraphPreset :: LayoutPreset
-    , mGraphLayoutWire :: Maybe (LayoutPreset, GraphLayoutWire)
-    , mGraphLayoutSource :: Text
-    , mViews :: [View]
-    , mViewsLoading :: Bool
-    , mViewsError :: Maybe Text
-    , mViewUi :: ViewUi
-    , mGraphViewId :: Maybe Int
-    , mGraphViewRev :: Int
-    , mGraphColorGroups :: [ColorGroup]
-    , mGraphGroupDrafts :: [ColorGroup]
-    , mGraphGroupDirty :: Bool
-    , mGraphGroupEditor :: Bool
-    , mGraphLocal :: Bool
-    , mGraphLocalDepth :: Int
-    , mGraphLocalRoot :: Maybe Int
-    , mGraphLocalCapped :: Bool
-    , mGraphSettled :: Bool
+    , -- the browser timeout handle of the pending search debounce
+
+      lfDebounce :: Maybe Int
+    , -- the native ledger's debounce TimerId and the last allocated timer id
+      lfDebounceTimer :: Maybe TimerId
+    -- ^ Next logical timer id, owned by the native ledger reducer.
+    , lfTimerSeq :: TimerId
+    , lfTags :: [TagStat]
+    , lfStats :: Maybe LibraryStats
+    , lfStatsError :: Maybe Text
+    , -- the current stats request id: an answer for an older refresh is dropped
+      lfStatsEpoch :: RequestId
+    , lfYearHere :: [(Int, Int)]
+    , lfLedgerCursor :: Maybe Int
+    , lfDrawer :: Maybe Int
+    , lfSaved :: [SavedSearch]
+    , lfSavedName :: Text
+    , lfSavedShare :: Maybe SavedSearch
+    , -- selection / bulk
+      lfSelection :: IS.IntSet
+    , lfSelectAnchor :: Maybe Int
+    , lfSelectingAll :: Bool
+    , lfSelectFetched :: Int
+    , -- token for the "select all matching" paging chain; every start, clear,
+      -- search change, reload or route load bumps it so a response for an
+      -- abandoned chain cannot repopulate the selection
+      lfSelectEpoch :: RequestId
+    , -- the list epoch captured when the chain started; a newer result set
+      -- stops the chain even when a reload only bumps the list epoch
+      lfSelectListEpoch :: RequestId
+    , -- the stable query/filter/sort the chain pages through
+      lfSelectParams :: Maybe ListParams
+    , lfBulkBusy :: Bool
+    , lfTagPrompt :: Maybe Bool
+    , lfTagPromptValue :: Text
+    , lfConfirmDelete :: Maybe Int
+    , lfConfirmBulkDelete :: Bool
+    , lfConfirmMarkAll :: Bool
+    }
+    deriving (Eq)
+
+data DetailFields = DetailFields
+    -- detail
+    { dtDetail :: Maybe BookmarkDetail
+    , dtDetailLoading :: Bool
+    , dtDetailError :: Maybe Text
+    , -- detail fetch request id: a response for an older record is dropped
+      dtDetailEpoch :: RequestId
+    , -- monotonically increasing id for read-state PATCHes; a response older
+      -- than the latest toggle is dropped
+      dtReadRequest :: RequestId
+    , -- a read PATCH is in flight, so a note save must not echo a possibly
+      -- stale is_read flag back to the server
+      dtReadPending :: Bool
+    , dtEditTitle :: Text
+    , dtEditNote :: Text
+    , dtEditTags :: [Text]
+    , dtNewTag :: Text
+    , dtNoteMode :: NoteMode
+    , dtNoteCursor :: Int
+    , dtLinkQuery :: Maybe Text
+    , dtLinkResults :: [BookmarkSummary]
+    , dtLinkSel :: Int
+    , dtBacklinks :: [Backlink]
+    , dtHighlights :: [Highlight]
+    , dtHighlightsLoading :: Bool
+    , dtReaderSel :: Maybe ReaderSelection
+    , dtHighlightNoteOpen :: Bool
+    , dtHighlightNote :: Text
+    , dtHighlightEdit :: Maybe Int
+    , dtHighlightEditNote :: Text
+    , dtHighlightEditColor :: Text
+    , dtSnapshotOpen :: Bool
+    , dtSaving :: Bool
+    , dtDirty :: Bool
+    , -- extracted text editor
+      dtExtractEditing :: Bool
+    , dtExtractDraft :: Text
+    , dtExtractDirty :: Bool
+    , dtExtractSaving :: Bool
+    , -- snapshot capture in flight: busy while the enqueue/poll runs, and the
+      -- job id once the server accepted it
+      dtSnapshotBusy :: Bool
+    , dtSnapshotJob :: Maybe Int
+    }
+    deriving (Eq)
+
+data GraphFields = GraphFields
+    -- graph: the fields a drag, hover, zoom or keystroke changes come
+    -- first, so the derived Eq for Model short-circuits here instead of
+    -- walking the heavy layout and payload at the end of the record
+    { grGraphView :: GraphView
+    , grGraphViewReady :: Bool
+    , grGraphHover :: Maybe Int
+    , grGraphSelected :: Maybe Int
+    , grGraphFocus :: Maybe Int
+    , grGraphDrag :: Maybe GraphDrag
+    , grGraphMatches :: GraphMatches
+    , grGraphFilter :: Text
+    , grGraphFilterTimer :: Maybe Int
+    {- ^ The reader's last label-mode choice. While a saved view is active,
+        its definition supplies the rendered mode (see
+        'effectiveGraphLabelMode'); this field is the fallback.
+    -}
+    , grGraphLabelMode :: LabelMode
+    , grGraphPreset :: LayoutPreset
+    , grGraphLayoutWire :: Maybe (LayoutPreset, GraphLayoutWire)
+    , grGraphLayoutSource :: Text
+    , grGraphViewId :: Maybe Int
+    , grGraphViewRev :: Int
+    , grGraphColorGroups :: [ColorGroup]
+    , grGraphGroupDrafts :: [ColorGroup]
+    , grGraphGroupDirty :: Bool
+    , grGraphGroupEditor :: Bool
+    , grGraphLocal :: Bool
+    , grGraphLocalDepth :: Int
+    , grGraphLocalRoot :: Maybe Int
+    , grGraphLocalCapped :: Bool
+    , grGraphSettled :: Bool
     , -- settle/settle-plate request id: a timer armed for an older gesture is
       -- dropped; mGraphDetailPhase and mGraphDetailChunks are the frame
       -- progress counters of the accepted settle, not staleness ids
-      mGraphSettleEpoch :: RequestId
-    , mGraphDetailPhase :: Int
-    , mGraphDetailChunks :: Int
-    , mGraphTagsShown :: Bool
-    , mGraphLoading :: Bool
-    , mGraphError :: Maybe Text
-    , mGraphGen :: Int
-    , mGraphLayout :: Maybe GraphLayout
-    , mGraphLocalLayout :: Maybe GraphLayout
-    , mGraphColors :: Maybe ColorAssignment
-    , mGraphGroupCounts :: [Int]
-    , mGraph :: Maybe GraphData
-    , -- dedup: exact counts plus two independently paged sections
-      mDedupCounts :: Maybe DedupCounts
-    , mDedupUrlGroups :: [DedupGroup]
-    , mDedupTitleGroups :: [DedupGroup]
-    , mDedupLoading :: Bool
-    , mDedupError :: Maybe Text
-    , mDedupChoice :: M.Map Text Int
-    , mDedupConfirm :: Maybe Text
-    , mDedupLast :: Maybe (Int, Int)
-    , mDedupLastSnapshot :: Maybe Int
-    , mDedupMoreBusy :: Bool
-    , mDedupBusy :: Bool
-    , mDedupMergeAllOpen :: Bool
-    , mDedupMergeAllReport :: Maybe DedupMergeAllReport
+      grGraphSettleEpoch :: RequestId
+    , grGraphDetailPhase :: Int
+    , grGraphDetailChunks :: Int
+    , grGraphTagsShown :: Bool
+    , grGraphLoading :: Bool
+    , grGraphError :: Maybe Text
+    , grGraphGen :: Int
+    , grGraphLayout :: Maybe GraphLayout
+    , grGraphLocalLayout :: Maybe GraphLayout
+    , grGraphColors :: Maybe ColorAssignment
+    , grGraphGroupCounts :: [Int]
+    , grGraph :: Maybe GraphData
+    }
+    deriving (Eq)
+
+data ViewFields = ViewFields
+    { vwViews :: [View]
+    , vwViewsLoading :: Bool
+    , vwViewsError :: Maybe Text
+    , vwViewUi :: ViewUi
+    }
+    deriving (Eq)
+
+data TagsFields = TagsFields
+    { tgAiStatus :: Maybe AiStatus
     , -- tags / ai tags
-      mConsol :: [ConsolidationGroup]
-    , mConsolLoading :: Bool
-    , mConsolError :: Maybe Text
-    , mTagDialog :: Maybe TagDialog
-    , mTagDialogInput :: Text
-    , mTagDialogBusy :: Bool
-    , mTagDialogError :: Maybe Text
-    , mAiTag :: Maybe Text
-    , mSuggestions :: [TagSuggestion]
-    , mSuggestionsLoading :: Bool
-    , mSuggestionNotice :: Maybe Text
-    , mSuggestionError :: Maybe Text
-    , -- extracted text editor
-      mExtractEditing :: Bool
-    , mExtractDraft :: Text
-    , mExtractDirty :: Bool
-    , mExtractSaving :: Bool
-    , -- maintenance
-      mPrune :: [BookmarkSummary]
-    , mPruneSel :: [Int]
-    , mDeadCount :: Maybe Int
-    , mCheckedCount :: Maybe Int
-    , mMaintBusy :: Bool
-    , mConfirmPrune :: Bool
-    , mPruneError :: Maybe Text
-    , mUndoEntries :: [UndoEntry]
-    , mUndoLoading :: Bool
-    , mUndoError :: Maybe Text
-    , mUndoPreview :: Maybe UndoPreview
-    , mUndoPreviewLoading :: Bool
-    , mUndoPreviewError :: Maybe Text
-    , mUndoBusy :: Bool
+      tgConsol :: [ConsolidationGroup]
+    , tgConsolLoading :: Bool
+    , tgConsolError :: Maybe Text
+    , tgTagDialog :: Maybe TagDialog
+    , tgTagDialogInput :: Text
+    , tgTagDialogBusy :: Bool
+    , tgTagDialogError :: Maybe Text
+    , tgAiTag :: Maybe Text
+    , tgSuggestions :: [TagSuggestion]
+    , tgSuggestionsLoading :: Bool
+    , tgSuggestionNotice :: Maybe Text
+    , tgSuggestionError :: Maybe Text
+    }
+    deriving (Eq)
+
+data DedupFields = DedupFields
+    -- dedup: exact counts plus two independently paged sections
+    { ddDedupCounts :: Maybe DedupCounts
+    , ddDedupUrlGroups :: [DedupGroup]
+    , ddDedupTitleGroups :: [DedupGroup]
+    , ddDedupLoading :: Bool
+    , ddDedupError :: Maybe Text
+    , ddDedupChoice :: M.Map Text Int
+    , ddDedupConfirm :: Maybe Text
+    , ddDedupLast :: Maybe (Int, Int)
+    , ddDedupLastSnapshot :: Maybe Int
+    , ddDedupMoreBusy :: Bool
+    , ddDedupBusy :: Bool
+    , ddDedupMergeAllOpen :: Bool
+    , ddDedupMergeAllReport :: Maybe DedupMergeAllReport
+    }
+    deriving (Eq)
+
+data MaintFields = MaintFields
+    -- maintenance
+    { mnPrune :: [BookmarkSummary]
+    , mnPruneSel :: [Int]
+    , mnDeadCount :: Maybe Int
+    , mnCheckedCount :: Maybe Int
+    , mnMaintBusy :: Bool
+    , mnConfirmPrune :: Bool
+    , mnPruneError :: Maybe Text
+    , mnUndoEntries :: [UndoEntry]
+    , mnUndoLoading :: Bool
+    , mnUndoError :: Maybe Text
+    , mnUndoPreview :: Maybe UndoPreview
+    , mnUndoPreviewLoading :: Bool
+    , mnUndoPreviewError :: Maybe Text
+    , mnUndoBusy :: Bool
+    }
+    deriving (Eq)
+
+data AccountFields = AccountFields
+    { acAccountTab :: AccountTab
+    , acSessions :: [SessionInfo]
+    , acSecurityUsername :: Text
+    , acSecurityCurrent :: Text
+    , acSecurityNew :: Text
+    , acSecurityConfirm :: Text
+    , acSecurity2faWanted :: Bool
+    , acSecurityBusy :: Bool
+    , acSecurityError :: Maybe Text
     , -- account
-      mAccount :: Maybe AccountInfo
-    , mAccountLoading :: Bool
-    , mAccountError :: Maybe Text
-    , mRecoveryCodes :: [Text]
-    , mCredEdit :: Maybe (Text, Text)
-    , mTokens :: [TokenView]
-    , mTokensLoading :: Bool
-    , mTokensError :: Maybe Text
-    , mWebhooks :: [Webhook]
-    , mWebhooksLoading :: Bool
-    , mWebhooksError :: Maybe Text
-    , mWebhookName :: Text
-    , mWebhookUrl :: Text
-    , mWebhookEvents :: [EventType]
-    , mWebhookEnabled :: Bool
-    , mWebhookSecret :: Maybe Text
-    , mWebhookFormError :: Maybe Text
-    , mWebhookBusy :: Bool
-    , mWebhookTest :: Maybe (Int, WebhookTest)
-    , mWebhookTestError :: Maybe Text
-    , mWebhookDeliveries :: Maybe (Int, [DeliveryView])
-    , mWebhookDeliveriesError :: Maybe Text
-    , mAdminUsers :: [UserView]
-    , mAdminUsersAllowed :: Bool
-    , mAdminUsersLoading :: Bool
-    , mAdminUsersError :: Maybe Text
-    , mUserName :: Text
-    , mUserPassword :: Text
-    , mUserRole :: UserRole
-    , mUserFormError :: Maybe Text
-    , mUserBusy :: Bool
-    , mUserRecovery :: Maybe (Text, [Text])
-    , mUserReset :: Maybe Int
-    , mUserResetPassword :: Text
-    , mUserResetShown :: Maybe (Text, Text)
-    , mUserActionError :: Maybe Text
-    , mUserDelete :: Maybe UserView
-    , mUserDeleteName :: Text
-    , mUserDeleteLibrary :: Bool
-    , mUserDeleteBusy :: Bool
-    , mTokenName :: Text
-    , mTokenScopes :: [Text]
-    , mTokenSecret :: Maybe (Text, TokenView)
-    , mTokenBusy :: Bool
-    , -- import / export
-      mImporting :: Bool
-    , mImportReport :: Maybe ImportReport
-    , -- toasts
-      mToasts :: [Toast]
-    , mToastNext :: Int
-    , -- async job polling (M4-D)
-      mJobPolls :: IM.IntMap JobPoll
-    , mJobTimerNext :: TimerId
-    , mJobRequestNext :: RequestId
-    , -- snapshot capture in flight: busy while the enqueue/poll runs, and the
-      -- job id once the server accepted it
-      mSnapshotBusy :: Bool
-    , mSnapshotJob :: Maybe Int
-    , mWebhookTestBusy :: Bool
+      acAccount :: Maybe AccountInfo
+    , acAccountLoading :: Bool
+    , acAccountError :: Maybe Text
+    , acRecoveryCodes :: [Text]
+    , acCredEdit :: Maybe (Text, Text)
+    , acTokens :: [TokenView]
+    , acTokensLoading :: Bool
+    , acTokensError :: Maybe Text
+    , acAdminUsers :: [UserView]
+    , acAdminUsersAllowed :: Bool
+    , acAdminUsersLoading :: Bool
+    , acAdminUsersError :: Maybe Text
+    , acUserName :: Text
+    , acUserPassword :: Text
+    , acUserRole :: UserRole
+    , acUserFormError :: Maybe Text
+    , acUserBusy :: Bool
+    , acUserRecovery :: Maybe (Text, [Text])
+    , acUserReset :: Maybe Int
+    , acUserResetPassword :: Text
+    , acUserResetShown :: Maybe (Text, Text)
+    , acUserActionError :: Maybe Text
+    , acUserDelete :: Maybe UserView
+    , acUserDeleteName :: Text
+    , acUserDeleteLibrary :: Bool
+    , acUserDeleteBusy :: Bool
+    , acTokenName :: Text
+    , acTokenScopes :: [Text]
+    , acTokenSecret :: Maybe (Text, TokenView)
+    , acTokenBusy :: Bool
+    }
+    deriving (Eq)
+
+data SharesFields = SharesFields
+    { srShares :: [ShareView]
+    , srSharesLoading :: Bool
+    , srSharesError :: Maybe Text
+    , srShareDialogOpen :: Bool
+    , srShareIncludeNote :: Bool
+    , srShareExpiryDays :: Int
+    , srShareBusy :: Bool
+    , srShareUrl :: Maybe Text
+    }
+    deriving (Eq)
+
+data RuleFields = RuleFields
+    { ruRules :: [Rule]
+    , ruRulesLoading :: Bool
+    , ruRulesError :: Maybe Text
+    , ruRuleName :: Text
+    , ruRuleField :: Text
+    , ruRulePattern :: Text
+    , ruRuleTags :: Text
+    , ruRuleMarkRead :: Bool
+    , ruRuleBusy :: Bool
+    , ruRuleDryRun :: Maybe (Int, [Int])
+    }
+    deriving (Eq)
+
+data WebhookFields = WebhookFields
+    { wkWebhooks :: [Webhook]
+    , wkWebhooksLoading :: Bool
+    , wkWebhooksError :: Maybe Text
+    , wkWebhookName :: Text
+    , wkWebhookUrl :: Text
+    , wkWebhookEvents :: [EventType]
+    , wkWebhookEnabled :: Bool
+    , wkWebhookSecret :: Maybe Text
+    , wkWebhookFormError :: Maybe Text
+    , wkWebhookBusy :: Bool
+    , wkWebhookTest :: Maybe (Int, WebhookTest)
+    , wkWebhookTestError :: Maybe Text
+    , wkWebhookDeliveries :: Maybe (Int, [DeliveryView])
+    , wkWebhookDeliveriesError :: Maybe Text
+    , wkWebhookTestBusy :: Bool
+    }
+    deriving (Eq)
+
+data AddFields = AddFields
+    -- add modal
+    { adAddOpen :: Bool
+    , adAddUrl :: Text
+    , adAddTitle :: Text
+    , adAddTags :: Text
+    , adAddNote :: Text
+    , adAddBusy :: Bool
+    , adAddError :: Maybe Text
+    }
+    deriving (Eq)
+
+data ImportFields = ImportFields
+    -- import / export
+    { ipImporting :: Bool
+    , ipImportReport :: Maybe ImportReport
+    }
+    deriving (Eq)
+
+data JobFields = JobFields
+    -- async job polling (M4-D)
+    { jbJobPolls :: IM.IntMap JobPoll
+    , jbJobTimerNext :: TimerId
+    , jbJobRequestNext :: RequestId
+    }
+    deriving (Eq)
+
+data Model = Model
+    { gShell :: ShellFields
+    , gLedger :: LedgerFields
+    , gDetail :: DetailFields
+    , gGraph :: GraphFields
+    , gViews :: ViewFields
+    , gTags :: TagsFields
+    , gDedup :: DedupFields
+    , gMaint :: MaintFields
+    , gAccount :: AccountFields
+    , gShares :: SharesFields
+    , gRules :: RuleFields
+    , gWebhooks :: WebhookFields
+    , gAdd :: AddFields
+    , gImport :: ImportFields
+    , gJobs :: JobFields
     }
     deriving (Eq)
 
 initialModel :: Model
 initialModel =
     Model
-        { mRoute = Index
-        , mTheme = ThemeLight
-        , mBooted = False
-        , mBootReady = False
-        , mBootSeeded = False
-        , mRouted = False
-        , mListDeferred = False
-        , mListEpoch = RequestId 0
-        , mVersion = "0.1.0"
-        , mOrigin = ""
-        , mWindowOrigin = ""
-        , mOnline = True
-        , mSignedOut = False
-        , mBlockingError = Nothing
-        , mWidth = 1200
-        , mHeight = 900
-        , mScrollY = 0
-        , mScrollRestore = Nothing
-        , mGridTop = 240
-        , mQ = ""
-        , mTagsFilter = []
-        , mSort = "created"
-        , mUnreadOnly = False
-        , mItems = []
-        , mTotal = 0
-        , mHasMore = False
-        , mOffset = 0
-        , -- the first paint is a skeleton: the boot payload or the deferred
-          -- list fetch fills the ledger
-          mLoading = True
-        , mLoadingMore = False
-        , mError = Nothing
-        , mNotice = Nothing
-        , mDebounce = Nothing
-        , mDebounceTimer = Nothing
-        , mTimerSeq = TimerId 0
-        , mTags = []
-        , mStats = Nothing
-        , mStatsError = Nothing
-        , mStatsEpoch = RequestId 0
-        , mYearHere = []
-        , mLedgerCursor = Nothing
-        , mDrawer = Nothing
-        , mAccountTab = AccountSecurity
-        , mSessions = []
-        , mSecurityUsername = ""
-        , mSecurityCurrent = ""
-        , mSecurityNew = ""
-        , mSecurityConfirm = ""
-        , mSecurity2faWanted = False
-        , mSecurityBusy = False
-        , mSecurityError = Nothing
-        , mSaved = []
-        , mSavedName = ""
-        , mSavedShare = Nothing
-        , mSelection = IS.empty
-        , mSelectAnchor = Nothing
-        , mSelectingAll = False
-        , mSelectFetched = 0
-        , mSelectEpoch = RequestId 0
-        , mSelectListEpoch = RequestId 0
-        , mSelectParams = Nothing
-        , mBulkBusy = False
-        , mTagPrompt = Nothing
-        , mTagPromptValue = ""
-        , mConfirmDelete = Nothing
-        , mConfirmBulkDelete = False
-        , mConfirmMarkAll = False
-        , mAddOpen = False
-        , mAddUrl = ""
-        , mAddTitle = ""
-        , mAddTags = ""
-        , mAddNote = ""
-        , mAddBusy = False
-        , mAddError = Nothing
-        , mPaletteOpen = False
-        , mPaletteQ = ""
-        , mPaletteSel = 0
-        , mDetail = Nothing
-        , mDetailLoading = False
-        , mDetailError = Nothing
-        , mDetailEpoch = RequestId 0
-        , mReadRequest = RequestId 0
-        , mReadPending = False
-        , mEditTitle = ""
-        , mEditNote = ""
-        , mEditTags = []
-        , mNewTag = ""
-        , mNoteMode = NoteWrite
-        , mNoteCursor = 0
-        , mLinkQuery = Nothing
-        , mLinkResults = []
-        , mLinkSel = 0
-        , mBacklinks = []
-        , mHighlights = []
-        , mHighlightsLoading = False
-        , mReaderSel = Nothing
-        , mHighlightNoteOpen = False
-        , mHighlightNote = ""
-        , mHighlightEdit = Nothing
-        , mHighlightEditNote = ""
-        , mHighlightEditColor = "yellow"
-        , mSnapshotOpen = False
-        , mShares = []
-        , mSharesLoading = False
-        , mSharesError = Nothing
-        , mShareDialogOpen = False
-        , mShareIncludeNote = False
-        , mShareExpiryDays = 30
-        , mShareBusy = False
-        , mShareUrl = Nothing
-        , mAiStatus = Nothing
-        , mRules = []
-        , mRulesLoading = False
-        , mRulesError = Nothing
-        , mRuleName = ""
-        , mRuleField = "url"
-        , mRulePattern = ""
-        , mRuleTags = ""
-        , mRuleMarkRead = False
-        , mRuleBusy = False
-        , mRuleDryRun = Nothing
-        , mSaving = False
-        , mDirty = False
-        , mGuardOpen = False
-        , mPendingRoute = Nothing
-        , mGuardFromHistory = False
-        , mConfirmLogout = False
-        , mGraphView = initialGraphView
-        , mGraphViewReady = False
-        , mGraphHover = Nothing
-        , mGraphSelected = Nothing
-        , mGraphFocus = Nothing
-        , mGraphDrag = Nothing
-        , mGraphMatches = emptyMatches
-        , mGraphFilter = ""
-        , mGraphFilterTimer = Nothing
-        , mGraphLabelMode = LabelAuto
-        , mGraphPreset = Standard
-        , mGraphLayoutWire = Nothing
-        , mGraphLayoutSource = ""
-        , mViews = []
-        , mViewsLoading = False
-        , mViewsError = Nothing
-        , mViewUi = ViewUi False "" GraphKind False "" Nothing Nothing Nothing False
-        , mGraphViewId = Nothing
-        , mGraphViewRev = 0
-        , mGraphColorGroups = []
-        , mGraphGroupDrafts = []
-        , mGraphGroupDirty = False
-        , mGraphGroupEditor = False
-        , mGraphLocal = False
-        , mGraphLocalDepth = 1
-        , mGraphLocalRoot = Nothing
-        , mGraphLocalCapped = False
-        , mGraphSettled = False
-        , mGraphSettleEpoch = RequestId 0
-        , mGraphDetailPhase = 0
-        , mGraphDetailChunks = 0
-        , mGraphTagsShown = True
-        , mGraphLoading = False
-        , mGraphError = Nothing
-        , mGraphGen = 0
-        , mGraphLayout = Nothing
-        , mGraphLocalLayout = Nothing
-        , mGraphColors = Nothing
-        , mGraphGroupCounts = []
-        , mGraph = Nothing
-        , mDedupCounts = Nothing
-        , mDedupUrlGroups = []
-        , mDedupTitleGroups = []
-        , mDedupLoading = False
-        , mDedupError = Nothing
-        , mDedupChoice = M.empty
-        , mDedupConfirm = Nothing
-        , mDedupLast = Nothing
-        , mDedupLastSnapshot = Nothing
-        , mDedupMoreBusy = False
-        , mDedupBusy = False
-        , mDedupMergeAllOpen = False
-        , mDedupMergeAllReport = Nothing
-        , mConsol = []
-        , mConsolLoading = False
-        , mConsolError = Nothing
-        , mTagDialog = Nothing
-        , mTagDialogInput = ""
-        , mTagDialogBusy = False
-        , mTagDialogError = Nothing
-        , mAiTag = Nothing
-        , mSuggestions = []
-        , mSuggestionsLoading = False
-        , mSuggestionNotice = Nothing
-        , mSuggestionError = Nothing
-        , mExtractEditing = False
-        , mExtractDraft = ""
-        , mExtractDirty = False
-        , mExtractSaving = False
-        , mPrune = []
-        , mPruneSel = []
-        , mDeadCount = Nothing
-        , mCheckedCount = Nothing
-        , mMaintBusy = False
-        , mConfirmPrune = False
-        , mPruneError = Nothing
-        , mUndoEntries = []
-        , mUndoLoading = False
-        , mUndoError = Nothing
-        , mUndoPreview = Nothing
-        , mUndoPreviewLoading = False
-        , mUndoPreviewError = Nothing
-        , mUndoBusy = False
-        , mAccount = Nothing
-        , mAccountLoading = False
-        , mAccountError = Nothing
-        , mRecoveryCodes = []
-        , mCredEdit = Nothing
-        , mTokens = []
-        , mTokensLoading = False
-        , mTokensError = Nothing
-        , mWebhooks = []
-        , mWebhooksLoading = False
-        , mWebhooksError = Nothing
-        , mWebhookName = ""
-        , mWebhookUrl = ""
-        , mWebhookEvents = []
-        , mWebhookEnabled = True
-        , mWebhookSecret = Nothing
-        , mWebhookFormError = Nothing
-        , mWebhookBusy = False
-        , mWebhookTest = Nothing
-        , mWebhookTestError = Nothing
-        , mWebhookDeliveries = Nothing
-        , mWebhookDeliveriesError = Nothing
-        , mAdminUsers = []
-        , mAdminUsersAllowed = False
-        , mAdminUsersLoading = False
-        , mAdminUsersError = Nothing
-        , mUserName = ""
-        , mUserPassword = ""
-        , mUserRole = RoleMember
-        , mUserFormError = Nothing
-        , mUserBusy = False
-        , mUserRecovery = Nothing
-        , mUserReset = Nothing
-        , mUserResetPassword = ""
-        , mUserResetShown = Nothing
-        , mUserActionError = Nothing
-        , mUserDelete = Nothing
-        , mUserDeleteName = ""
-        , mUserDeleteLibrary = False
-        , mUserDeleteBusy = False
-        , mTokenName = ""
-        , mTokenScopes = ["read", "write"]
-        , mTokenSecret = Nothing
-        , mTokenBusy = False
-        , mImporting = False
-        , mImportReport = Nothing
-        , mToasts = []
-        , mToastNext = 0
-        , mJobPolls = IM.empty
-        , mJobTimerNext = TimerId 0
-        , mJobRequestNext = RequestId 0
-        , mSnapshotBusy = False
-        , mSnapshotJob = Nothing
-        , mWebhookTestBusy = False
+        { gShell =
+            ShellFields
+                { sfRoute = Index
+                , sfTheme = ThemeLight
+                , sfBooted = False
+                , sfBootReady = False
+                , sfBootSeeded = False
+                , sfRouted = False
+                , sfVersion = "0.1.0"
+                , sfOrigin = ""
+                , sfWindowOrigin = ""
+                , sfOnline = True
+                , sfSignedOut = False
+                , sfBlockingError = Nothing
+                , sfWidth = 1200
+                , sfHeight = 900
+                , sfScrollY = 0
+                , sfScrollRestore = Nothing
+                , sfGridTop = 240
+                , sfPaletteOpen = False
+                , sfPaletteQ = ""
+                , sfPaletteSel = 0
+                , sfGuardOpen = False
+                , sfPendingRoute = Nothing
+                , sfGuardFromHistory = False
+                , sfConfirmLogout = False
+                , sfToasts = []
+                , sfToastNext = 0
+                }
+        , gLedger =
+            LedgerFields
+                { lfListDeferred = False
+                , lfListEpoch = RequestId 0
+                , lfQ = ""
+                , lfTagsFilter = []
+                , lfSort = "created"
+                , lfUnreadOnly = False
+                , lfItems = []
+                , lfTotal = 0
+                , lfHasMore = False
+                , lfOffset = 0
+                , -- the first paint is a skeleton: the boot payload or the deferred
+                  -- list fetch fills the ledger
+                  lfLoading = True
+                , lfLoadingMore = False
+                , lfError = Nothing
+                , lfNotice = Nothing
+                , lfDebounce = Nothing
+                , lfDebounceTimer = Nothing
+                , lfTimerSeq = TimerId 0
+                , lfTags = []
+                , lfStats = Nothing
+                , lfStatsError = Nothing
+                , lfStatsEpoch = RequestId 0
+                , lfYearHere = []
+                , lfLedgerCursor = Nothing
+                , lfDrawer = Nothing
+                , lfSaved = []
+                , lfSavedName = ""
+                , lfSavedShare = Nothing
+                , lfSelection = IS.empty
+                , lfSelectAnchor = Nothing
+                , lfSelectingAll = False
+                , lfSelectFetched = 0
+                , lfSelectEpoch = RequestId 0
+                , lfSelectListEpoch = RequestId 0
+                , lfSelectParams = Nothing
+                , lfBulkBusy = False
+                , lfTagPrompt = Nothing
+                , lfTagPromptValue = ""
+                , lfConfirmDelete = Nothing
+                , lfConfirmBulkDelete = False
+                , lfConfirmMarkAll = False
+                }
+        , gDetail =
+            DetailFields
+                { dtDetail = Nothing
+                , dtDetailLoading = False
+                , dtDetailError = Nothing
+                , dtDetailEpoch = RequestId 0
+                , dtReadRequest = RequestId 0
+                , dtReadPending = False
+                , dtEditTitle = ""
+                , dtEditNote = ""
+                , dtEditTags = []
+                , dtNewTag = ""
+                , dtNoteMode = NoteWrite
+                , dtNoteCursor = 0
+                , dtLinkQuery = Nothing
+                , dtLinkResults = []
+                , dtLinkSel = 0
+                , dtBacklinks = []
+                , dtHighlights = []
+                , dtHighlightsLoading = False
+                , dtReaderSel = Nothing
+                , dtHighlightNoteOpen = False
+                , dtHighlightNote = ""
+                , dtHighlightEdit = Nothing
+                , dtHighlightEditNote = ""
+                , dtHighlightEditColor = "yellow"
+                , dtSnapshotOpen = False
+                , dtSaving = False
+                , dtDirty = False
+                , dtExtractEditing = False
+                , dtExtractDraft = ""
+                , dtExtractDirty = False
+                , dtExtractSaving = False
+                , dtSnapshotBusy = False
+                , dtSnapshotJob = Nothing
+                }
+        , gGraph =
+            GraphFields
+                { grGraphView = initialGraphView
+                , grGraphViewReady = False
+                , grGraphHover = Nothing
+                , grGraphSelected = Nothing
+                , grGraphFocus = Nothing
+                , grGraphDrag = Nothing
+                , grGraphMatches = emptyMatches
+                , grGraphFilter = ""
+                , grGraphFilterTimer = Nothing
+                , grGraphLabelMode = LabelAuto
+                , grGraphPreset = Standard
+                , grGraphLayoutWire = Nothing
+                , grGraphLayoutSource = ""
+                , grGraphViewId = Nothing
+                , grGraphViewRev = 0
+                , grGraphColorGroups = []
+                , grGraphGroupDrafts = []
+                , grGraphGroupDirty = False
+                , grGraphGroupEditor = False
+                , grGraphLocal = False
+                , grGraphLocalDepth = 1
+                , grGraphLocalRoot = Nothing
+                , grGraphLocalCapped = False
+                , grGraphSettled = False
+                , grGraphSettleEpoch = RequestId 0
+                , grGraphDetailPhase = 0
+                , grGraphDetailChunks = 0
+                , grGraphTagsShown = True
+                , grGraphLoading = False
+                , grGraphError = Nothing
+                , grGraphGen = 0
+                , grGraphLayout = Nothing
+                , grGraphLocalLayout = Nothing
+                , grGraphColors = Nothing
+                , grGraphGroupCounts = []
+                , grGraph = Nothing
+                }
+        , gViews =
+            ViewFields
+                { vwViews = []
+                , vwViewsLoading = False
+                , vwViewsError = Nothing
+                , vwViewUi = ViewUi False "" GraphKind False "" Nothing Nothing Nothing False
+                }
+        , gTags =
+            TagsFields
+                { tgAiStatus = Nothing
+                , tgConsol = []
+                , tgConsolLoading = False
+                , tgConsolError = Nothing
+                , tgTagDialog = Nothing
+                , tgTagDialogInput = ""
+                , tgTagDialogBusy = False
+                , tgTagDialogError = Nothing
+                , tgAiTag = Nothing
+                , tgSuggestions = []
+                , tgSuggestionsLoading = False
+                , tgSuggestionNotice = Nothing
+                , tgSuggestionError = Nothing
+                }
+        , gDedup =
+            DedupFields
+                { ddDedupCounts = Nothing
+                , ddDedupUrlGroups = []
+                , ddDedupTitleGroups = []
+                , ddDedupLoading = False
+                , ddDedupError = Nothing
+                , ddDedupChoice = M.empty
+                , ddDedupConfirm = Nothing
+                , ddDedupLast = Nothing
+                , ddDedupLastSnapshot = Nothing
+                , ddDedupMoreBusy = False
+                , ddDedupBusy = False
+                , ddDedupMergeAllOpen = False
+                , ddDedupMergeAllReport = Nothing
+                }
+        , gMaint =
+            MaintFields
+                { mnPrune = []
+                , mnPruneSel = []
+                , mnDeadCount = Nothing
+                , mnCheckedCount = Nothing
+                , mnMaintBusy = False
+                , mnConfirmPrune = False
+                , mnPruneError = Nothing
+                , mnUndoEntries = []
+                , mnUndoLoading = False
+                , mnUndoError = Nothing
+                , mnUndoPreview = Nothing
+                , mnUndoPreviewLoading = False
+                , mnUndoPreviewError = Nothing
+                , mnUndoBusy = False
+                }
+        , gAccount =
+            AccountFields
+                { acAccountTab = AccountSecurity
+                , acSessions = []
+                , acSecurityUsername = ""
+                , acSecurityCurrent = ""
+                , acSecurityNew = ""
+                , acSecurityConfirm = ""
+                , acSecurity2faWanted = False
+                , acSecurityBusy = False
+                , acSecurityError = Nothing
+                , acAccount = Nothing
+                , acAccountLoading = False
+                , acAccountError = Nothing
+                , acRecoveryCodes = []
+                , acCredEdit = Nothing
+                , acTokens = []
+                , acTokensLoading = False
+                , acTokensError = Nothing
+                , acAdminUsers = []
+                , acAdminUsersAllowed = False
+                , acAdminUsersLoading = False
+                , acAdminUsersError = Nothing
+                , acUserName = ""
+                , acUserPassword = ""
+                , acUserRole = RoleMember
+                , acUserFormError = Nothing
+                , acUserBusy = False
+                , acUserRecovery = Nothing
+                , acUserReset = Nothing
+                , acUserResetPassword = ""
+                , acUserResetShown = Nothing
+                , acUserActionError = Nothing
+                , acUserDelete = Nothing
+                , acUserDeleteName = ""
+                , acUserDeleteLibrary = False
+                , acUserDeleteBusy = False
+                , acTokenName = ""
+                , acTokenScopes = ["read", "write"]
+                , acTokenSecret = Nothing
+                , acTokenBusy = False
+                }
+        , gShares =
+            SharesFields
+                { srShares = []
+                , srSharesLoading = False
+                , srSharesError = Nothing
+                , srShareDialogOpen = False
+                , srShareIncludeNote = False
+                , srShareExpiryDays = 30
+                , srShareBusy = False
+                , srShareUrl = Nothing
+                }
+        , gRules =
+            RuleFields
+                { ruRules = []
+                , ruRulesLoading = False
+                , ruRulesError = Nothing
+                , ruRuleName = ""
+                , ruRuleField = "url"
+                , ruRulePattern = ""
+                , ruRuleTags = ""
+                , ruRuleMarkRead = False
+                , ruRuleBusy = False
+                , ruRuleDryRun = Nothing
+                }
+        , gWebhooks =
+            WebhookFields
+                { wkWebhooks = []
+                , wkWebhooksLoading = False
+                , wkWebhooksError = Nothing
+                , wkWebhookName = ""
+                , wkWebhookUrl = ""
+                , wkWebhookEvents = []
+                , wkWebhookEnabled = True
+                , wkWebhookSecret = Nothing
+                , wkWebhookFormError = Nothing
+                , wkWebhookBusy = False
+                , wkWebhookTest = Nothing
+                , wkWebhookTestError = Nothing
+                , wkWebhookDeliveries = Nothing
+                , wkWebhookDeliveriesError = Nothing
+                , wkWebhookTestBusy = False
+                }
+        , gAdd =
+            AddFields
+                { adAddOpen = False
+                , adAddUrl = ""
+                , adAddTitle = ""
+                , adAddTags = ""
+                , adAddNote = ""
+                , adAddBusy = False
+                , adAddError = Nothing
+                }
+        , gImport =
+            ImportFields
+                { ipImporting = False
+                , ipImportReport = Nothing
+                }
+        , gJobs =
+            JobFields
+                { jbJobPolls = IM.empty
+                , jbJobTimerNext = TimerId 0
+                , jbJobRequestNext = RequestId 0
+                }
         }
+{-# INLINE mRoute #-}
+mRoute :: Model -> Route
+mRoute model = sfRoute (gShell model)
+
+{-# INLINE mTheme #-}
+mTheme :: Model -> Theme
+mTheme model = sfTheme (gShell model)
+
+{-# INLINE mBooted #-}
+mBooted :: Model -> Bool
+mBooted model = sfBooted (gShell model)
+
+{-# INLINE mBootReady #-}
+mBootReady :: Model -> Bool
+mBootReady model = sfBootReady (gShell model)
+
+{-# INLINE mBootSeeded #-}
+mBootSeeded :: Model -> Bool
+mBootSeeded model = sfBootSeeded (gShell model)
+
+{-# INLINE mRouted #-}
+mRouted :: Model -> Bool
+mRouted model = sfRouted (gShell model)
+
+{-# INLINE mListDeferred #-}
+mListDeferred :: Model -> Bool
+mListDeferred model = lfListDeferred (gLedger model)
+
+{-# INLINE mListEpoch #-}
+mListEpoch :: Model -> RequestId
+mListEpoch model = lfListEpoch (gLedger model)
+
+{-# INLINE mVersion #-}
+mVersion :: Model -> Text
+mVersion model = sfVersion (gShell model)
+
+{-# INLINE mOrigin #-}
+mOrigin :: Model -> Text
+mOrigin model = sfOrigin (gShell model)
+
+{-# INLINE mWindowOrigin #-}
+mWindowOrigin :: Model -> Text
+mWindowOrigin model = sfWindowOrigin (gShell model)
+
+{-# INLINE mOnline #-}
+mOnline :: Model -> Bool
+mOnline model = sfOnline (gShell model)
+
+{-# INLINE mSignedOut #-}
+mSignedOut :: Model -> Bool
+mSignedOut model = sfSignedOut (gShell model)
+
+{-# INLINE mBlockingError #-}
+mBlockingError :: Model -> Maybe Text
+mBlockingError model = sfBlockingError (gShell model)
+
+{-# INLINE mWidth #-}
+mWidth :: Model -> Int
+mWidth model = sfWidth (gShell model)
+
+{-# INLINE mHeight #-}
+mHeight :: Model -> Int
+mHeight model = sfHeight (gShell model)
+
+{-# INLINE mScrollY #-}
+mScrollY :: Model -> Int
+mScrollY model = sfScrollY (gShell model)
+
+{-# INLINE mScrollRestore #-}
+mScrollRestore :: Model -> Maybe Int
+mScrollRestore model = sfScrollRestore (gShell model)
+
+{-# INLINE mGridTop #-}
+mGridTop :: Model -> Int
+mGridTop model = sfGridTop (gShell model)
+
+{-# INLINE mQ #-}
+mQ :: Model -> Text
+mQ model = lfQ (gLedger model)
+
+{-# INLINE mTagsFilter #-}
+mTagsFilter :: Model -> [Text]
+mTagsFilter model = lfTagsFilter (gLedger model)
+
+{-# INLINE mSort #-}
+mSort :: Model -> Text
+mSort model = lfSort (gLedger model)
+
+{-# INLINE mUnreadOnly #-}
+mUnreadOnly :: Model -> Bool
+mUnreadOnly model = lfUnreadOnly (gLedger model)
+
+{-# INLINE mItems #-}
+mItems :: Model -> [BookmarkSummary]
+mItems model = lfItems (gLedger model)
+
+{-# INLINE mTotal #-}
+mTotal :: Model -> Int
+mTotal model = lfTotal (gLedger model)
+
+{-# INLINE mHasMore #-}
+mHasMore :: Model -> Bool
+mHasMore model = lfHasMore (gLedger model)
+
+{-# INLINE mOffset #-}
+mOffset :: Model -> Int
+mOffset model = lfOffset (gLedger model)
+
+{-# INLINE mLoading #-}
+mLoading :: Model -> Bool
+mLoading model = lfLoading (gLedger model)
+
+{-# INLINE mLoadingMore #-}
+mLoadingMore :: Model -> Bool
+mLoadingMore model = lfLoadingMore (gLedger model)
+
+{-# INLINE mError #-}
+mError :: Model -> Maybe Text
+mError model = lfError (gLedger model)
+
+{-# INLINE mNotice #-}
+mNotice :: Model -> Maybe Text
+mNotice model = lfNotice (gLedger model)
+
+{-# INLINE mDebounce #-}
+mDebounce :: Model -> Maybe Int
+mDebounce model = lfDebounce (gLedger model)
+
+{-# INLINE mDebounceTimer #-}
+mDebounceTimer :: Model -> Maybe TimerId
+mDebounceTimer model = lfDebounceTimer (gLedger model)
+
+{-# INLINE mTimerSeq #-}
+mTimerSeq :: Model -> TimerId
+mTimerSeq model = lfTimerSeq (gLedger model)
+
+{-# INLINE mTags #-}
+mTags :: Model -> [TagStat]
+mTags model = lfTags (gLedger model)
+
+{-# INLINE mStats #-}
+mStats :: Model -> Maybe LibraryStats
+mStats model = lfStats (gLedger model)
+
+{-# INLINE mStatsError #-}
+mStatsError :: Model -> Maybe Text
+mStatsError model = lfStatsError (gLedger model)
+
+{-# INLINE mStatsEpoch #-}
+mStatsEpoch :: Model -> RequestId
+mStatsEpoch model = lfStatsEpoch (gLedger model)
+
+{-# INLINE mYearHere #-}
+mYearHere :: Model -> [(Int, Int)]
+mYearHere model = lfYearHere (gLedger model)
+
+{-# INLINE mLedgerCursor #-}
+mLedgerCursor :: Model -> Maybe Int
+mLedgerCursor model = lfLedgerCursor (gLedger model)
+
+{-# INLINE mDrawer #-}
+mDrawer :: Model -> Maybe Int
+mDrawer model = lfDrawer (gLedger model)
+
+{-# INLINE mAccountTab #-}
+mAccountTab :: Model -> AccountTab
+mAccountTab model = acAccountTab (gAccount model)
+
+{-# INLINE mSessions #-}
+mSessions :: Model -> [SessionInfo]
+mSessions model = acSessions (gAccount model)
+
+{-# INLINE mSecurityUsername #-}
+mSecurityUsername :: Model -> Text
+mSecurityUsername model = acSecurityUsername (gAccount model)
+
+{-# INLINE mSecurityCurrent #-}
+mSecurityCurrent :: Model -> Text
+mSecurityCurrent model = acSecurityCurrent (gAccount model)
+
+{-# INLINE mSecurityNew #-}
+mSecurityNew :: Model -> Text
+mSecurityNew model = acSecurityNew (gAccount model)
+
+{-# INLINE mSecurityConfirm #-}
+mSecurityConfirm :: Model -> Text
+mSecurityConfirm model = acSecurityConfirm (gAccount model)
+
+{-# INLINE mSecurity2faWanted #-}
+mSecurity2faWanted :: Model -> Bool
+mSecurity2faWanted model = acSecurity2faWanted (gAccount model)
+
+{-# INLINE mSecurityBusy #-}
+mSecurityBusy :: Model -> Bool
+mSecurityBusy model = acSecurityBusy (gAccount model)
+
+{-# INLINE mSecurityError #-}
+mSecurityError :: Model -> Maybe Text
+mSecurityError model = acSecurityError (gAccount model)
+
+{-# INLINE mSaved #-}
+mSaved :: Model -> [SavedSearch]
+mSaved model = lfSaved (gLedger model)
+
+{-# INLINE mSavedName #-}
+mSavedName :: Model -> Text
+mSavedName model = lfSavedName (gLedger model)
+
+{-# INLINE mSavedShare #-}
+mSavedShare :: Model -> Maybe SavedSearch
+mSavedShare model = lfSavedShare (gLedger model)
+
+{-# INLINE mSelection #-}
+mSelection :: Model -> IS.IntSet
+mSelection model = lfSelection (gLedger model)
+
+{-# INLINE mSelectAnchor #-}
+mSelectAnchor :: Model -> Maybe Int
+mSelectAnchor model = lfSelectAnchor (gLedger model)
+
+{-# INLINE mSelectingAll #-}
+mSelectingAll :: Model -> Bool
+mSelectingAll model = lfSelectingAll (gLedger model)
+
+{-# INLINE mSelectFetched #-}
+mSelectFetched :: Model -> Int
+mSelectFetched model = lfSelectFetched (gLedger model)
+
+{-# INLINE mSelectEpoch #-}
+mSelectEpoch :: Model -> RequestId
+mSelectEpoch model = lfSelectEpoch (gLedger model)
+
+{-# INLINE mSelectListEpoch #-}
+mSelectListEpoch :: Model -> RequestId
+mSelectListEpoch model = lfSelectListEpoch (gLedger model)
+
+{-# INLINE mSelectParams #-}
+mSelectParams :: Model -> Maybe ListParams
+mSelectParams model = lfSelectParams (gLedger model)
+
+{-# INLINE mBulkBusy #-}
+mBulkBusy :: Model -> Bool
+mBulkBusy model = lfBulkBusy (gLedger model)
+
+{-# INLINE mTagPrompt #-}
+mTagPrompt :: Model -> Maybe Bool
+mTagPrompt model = lfTagPrompt (gLedger model)
+
+{-# INLINE mTagPromptValue #-}
+mTagPromptValue :: Model -> Text
+mTagPromptValue model = lfTagPromptValue (gLedger model)
+
+{-# INLINE mConfirmDelete #-}
+mConfirmDelete :: Model -> Maybe Int
+mConfirmDelete model = lfConfirmDelete (gLedger model)
+
+{-# INLINE mConfirmBulkDelete #-}
+mConfirmBulkDelete :: Model -> Bool
+mConfirmBulkDelete model = lfConfirmBulkDelete (gLedger model)
+
+{-# INLINE mConfirmMarkAll #-}
+mConfirmMarkAll :: Model -> Bool
+mConfirmMarkAll model = lfConfirmMarkAll (gLedger model)
+
+{-# INLINE mAddOpen #-}
+mAddOpen :: Model -> Bool
+mAddOpen model = adAddOpen (gAdd model)
+
+{-# INLINE mAddUrl #-}
+mAddUrl :: Model -> Text
+mAddUrl model = adAddUrl (gAdd model)
+
+{-# INLINE mAddTitle #-}
+mAddTitle :: Model -> Text
+mAddTitle model = adAddTitle (gAdd model)
+
+{-# INLINE mAddTags #-}
+mAddTags :: Model -> Text
+mAddTags model = adAddTags (gAdd model)
+
+{-# INLINE mAddNote #-}
+mAddNote :: Model -> Text
+mAddNote model = adAddNote (gAdd model)
+
+{-# INLINE mAddBusy #-}
+mAddBusy :: Model -> Bool
+mAddBusy model = adAddBusy (gAdd model)
+
+{-# INLINE mAddError #-}
+mAddError :: Model -> Maybe Text
+mAddError model = adAddError (gAdd model)
+
+{-# INLINE mPaletteOpen #-}
+mPaletteOpen :: Model -> Bool
+mPaletteOpen model = sfPaletteOpen (gShell model)
+
+{-# INLINE mPaletteQ #-}
+mPaletteQ :: Model -> Text
+mPaletteQ model = sfPaletteQ (gShell model)
+
+{-# INLINE mPaletteSel #-}
+mPaletteSel :: Model -> Int
+mPaletteSel model = sfPaletteSel (gShell model)
+
+{-# INLINE mDetail #-}
+mDetail :: Model -> Maybe BookmarkDetail
+mDetail model = dtDetail (gDetail model)
+
+{-# INLINE mDetailLoading #-}
+mDetailLoading :: Model -> Bool
+mDetailLoading model = dtDetailLoading (gDetail model)
+
+{-# INLINE mDetailError #-}
+mDetailError :: Model -> Maybe Text
+mDetailError model = dtDetailError (gDetail model)
+
+{-# INLINE mDetailEpoch #-}
+mDetailEpoch :: Model -> RequestId
+mDetailEpoch model = dtDetailEpoch (gDetail model)
+
+{-# INLINE mReadRequest #-}
+mReadRequest :: Model -> RequestId
+mReadRequest model = dtReadRequest (gDetail model)
+
+{-# INLINE mReadPending #-}
+mReadPending :: Model -> Bool
+mReadPending model = dtReadPending (gDetail model)
+
+{-# INLINE mEditTitle #-}
+mEditTitle :: Model -> Text
+mEditTitle model = dtEditTitle (gDetail model)
+
+{-# INLINE mEditNote #-}
+mEditNote :: Model -> Text
+mEditNote model = dtEditNote (gDetail model)
+
+{-# INLINE mEditTags #-}
+mEditTags :: Model -> [Text]
+mEditTags model = dtEditTags (gDetail model)
+
+{-# INLINE mNewTag #-}
+mNewTag :: Model -> Text
+mNewTag model = dtNewTag (gDetail model)
+
+{-# INLINE mNoteMode #-}
+mNoteMode :: Model -> NoteMode
+mNoteMode model = dtNoteMode (gDetail model)
+
+{-# INLINE mNoteCursor #-}
+mNoteCursor :: Model -> Int
+mNoteCursor model = dtNoteCursor (gDetail model)
+
+{-# INLINE mLinkQuery #-}
+mLinkQuery :: Model -> Maybe Text
+mLinkQuery model = dtLinkQuery (gDetail model)
+
+{-# INLINE mLinkResults #-}
+mLinkResults :: Model -> [BookmarkSummary]
+mLinkResults model = dtLinkResults (gDetail model)
+
+{-# INLINE mLinkSel #-}
+mLinkSel :: Model -> Int
+mLinkSel model = dtLinkSel (gDetail model)
+
+{-# INLINE mBacklinks #-}
+mBacklinks :: Model -> [Backlink]
+mBacklinks model = dtBacklinks (gDetail model)
+
+{-# INLINE mHighlights #-}
+mHighlights :: Model -> [Highlight]
+mHighlights model = dtHighlights (gDetail model)
+
+{-# INLINE mHighlightsLoading #-}
+mHighlightsLoading :: Model -> Bool
+mHighlightsLoading model = dtHighlightsLoading (gDetail model)
+
+{-# INLINE mReaderSel #-}
+mReaderSel :: Model -> Maybe ReaderSelection
+mReaderSel model = dtReaderSel (gDetail model)
+
+{-# INLINE mHighlightNoteOpen #-}
+mHighlightNoteOpen :: Model -> Bool
+mHighlightNoteOpen model = dtHighlightNoteOpen (gDetail model)
+
+{-# INLINE mHighlightNote #-}
+mHighlightNote :: Model -> Text
+mHighlightNote model = dtHighlightNote (gDetail model)
+
+{-# INLINE mHighlightEdit #-}
+mHighlightEdit :: Model -> Maybe Int
+mHighlightEdit model = dtHighlightEdit (gDetail model)
+
+{-# INLINE mHighlightEditNote #-}
+mHighlightEditNote :: Model -> Text
+mHighlightEditNote model = dtHighlightEditNote (gDetail model)
+
+{-# INLINE mHighlightEditColor #-}
+mHighlightEditColor :: Model -> Text
+mHighlightEditColor model = dtHighlightEditColor (gDetail model)
+
+{-# INLINE mSnapshotOpen #-}
+mSnapshotOpen :: Model -> Bool
+mSnapshotOpen model = dtSnapshotOpen (gDetail model)
+
+{-# INLINE mShares #-}
+mShares :: Model -> [ShareView]
+mShares model = srShares (gShares model)
+
+{-# INLINE mSharesLoading #-}
+mSharesLoading :: Model -> Bool
+mSharesLoading model = srSharesLoading (gShares model)
+
+{-# INLINE mSharesError #-}
+mSharesError :: Model -> Maybe Text
+mSharesError model = srSharesError (gShares model)
+
+{-# INLINE mShareDialogOpen #-}
+mShareDialogOpen :: Model -> Bool
+mShareDialogOpen model = srShareDialogOpen (gShares model)
+
+{-# INLINE mShareIncludeNote #-}
+mShareIncludeNote :: Model -> Bool
+mShareIncludeNote model = srShareIncludeNote (gShares model)
+
+{-# INLINE mShareExpiryDays #-}
+mShareExpiryDays :: Model -> Int
+mShareExpiryDays model = srShareExpiryDays (gShares model)
+
+{-# INLINE mShareBusy #-}
+mShareBusy :: Model -> Bool
+mShareBusy model = srShareBusy (gShares model)
+
+{-# INLINE mShareUrl #-}
+mShareUrl :: Model -> Maybe Text
+mShareUrl model = srShareUrl (gShares model)
+
+{-# INLINE mAiStatus #-}
+mAiStatus :: Model -> Maybe AiStatus
+mAiStatus model = tgAiStatus (gTags model)
+
+{-# INLINE mRules #-}
+mRules :: Model -> [Rule]
+mRules model = ruRules (gRules model)
+
+{-# INLINE mRulesLoading #-}
+mRulesLoading :: Model -> Bool
+mRulesLoading model = ruRulesLoading (gRules model)
+
+{-# INLINE mRulesError #-}
+mRulesError :: Model -> Maybe Text
+mRulesError model = ruRulesError (gRules model)
+
+{-# INLINE mRuleName #-}
+mRuleName :: Model -> Text
+mRuleName model = ruRuleName (gRules model)
+
+{-# INLINE mRuleField #-}
+mRuleField :: Model -> Text
+mRuleField model = ruRuleField (gRules model)
+
+{-# INLINE mRulePattern #-}
+mRulePattern :: Model -> Text
+mRulePattern model = ruRulePattern (gRules model)
+
+{-# INLINE mRuleTags #-}
+mRuleTags :: Model -> Text
+mRuleTags model = ruRuleTags (gRules model)
+
+{-# INLINE mRuleMarkRead #-}
+mRuleMarkRead :: Model -> Bool
+mRuleMarkRead model = ruRuleMarkRead (gRules model)
+
+{-# INLINE mRuleBusy #-}
+mRuleBusy :: Model -> Bool
+mRuleBusy model = ruRuleBusy (gRules model)
+
+{-# INLINE mRuleDryRun #-}
+mRuleDryRun :: Model -> Maybe (Int, [Int])
+mRuleDryRun model = ruRuleDryRun (gRules model)
+
+{-# INLINE mSaving #-}
+mSaving :: Model -> Bool
+mSaving model = dtSaving (gDetail model)
+
+{-# INLINE mDirty #-}
+mDirty :: Model -> Bool
+mDirty model = dtDirty (gDetail model)
+
+{-# INLINE mGuardOpen #-}
+mGuardOpen :: Model -> Bool
+mGuardOpen model = sfGuardOpen (gShell model)
+
+{-# INLINE mPendingRoute #-}
+mPendingRoute :: Model -> Maybe Route
+mPendingRoute model = sfPendingRoute (gShell model)
+
+{-# INLINE mGuardFromHistory #-}
+mGuardFromHistory :: Model -> Bool
+mGuardFromHistory model = sfGuardFromHistory (gShell model)
+
+{-# INLINE mConfirmLogout #-}
+mConfirmLogout :: Model -> Bool
+mConfirmLogout model = sfConfirmLogout (gShell model)
+
+{-# INLINE mGraphView #-}
+mGraphView :: Model -> GraphView
+mGraphView model = grGraphView (gGraph model)
+
+{-# INLINE mGraphViewReady #-}
+mGraphViewReady :: Model -> Bool
+mGraphViewReady model = grGraphViewReady (gGraph model)
+
+{-# INLINE mGraphHover #-}
+mGraphHover :: Model -> Maybe Int
+mGraphHover model = grGraphHover (gGraph model)
+
+{-# INLINE mGraphSelected #-}
+mGraphSelected :: Model -> Maybe Int
+mGraphSelected model = grGraphSelected (gGraph model)
+
+{-# INLINE mGraphFocus #-}
+mGraphFocus :: Model -> Maybe Int
+mGraphFocus model = grGraphFocus (gGraph model)
+
+{-# INLINE mGraphDrag #-}
+mGraphDrag :: Model -> Maybe GraphDrag
+mGraphDrag model = grGraphDrag (gGraph model)
+
+{-# INLINE mGraphMatches #-}
+mGraphMatches :: Model -> GraphMatches
+mGraphMatches model = grGraphMatches (gGraph model)
+
+{-# INLINE mGraphFilter #-}
+mGraphFilter :: Model -> Text
+mGraphFilter model = grGraphFilter (gGraph model)
+
+{-# INLINE mGraphFilterTimer #-}
+mGraphFilterTimer :: Model -> Maybe Int
+mGraphFilterTimer model = grGraphFilterTimer (gGraph model)
+
+{-# INLINE mGraphLabelMode #-}
+mGraphLabelMode :: Model -> LabelMode
+mGraphLabelMode model = grGraphLabelMode (gGraph model)
+
+{-# INLINE mGraphPreset #-}
+mGraphPreset :: Model -> LayoutPreset
+mGraphPreset model = grGraphPreset (gGraph model)
+
+{-# INLINE mGraphLayoutWire #-}
+mGraphLayoutWire :: Model -> Maybe (LayoutPreset, GraphLayoutWire)
+mGraphLayoutWire model = grGraphLayoutWire (gGraph model)
+
+{-# INLINE mGraphLayoutSource #-}
+mGraphLayoutSource :: Model -> Text
+mGraphLayoutSource model = grGraphLayoutSource (gGraph model)
+
+{-# INLINE mViews #-}
+mViews :: Model -> [View]
+mViews model = vwViews (gViews model)
+
+{-# INLINE mViewsLoading #-}
+mViewsLoading :: Model -> Bool
+mViewsLoading model = vwViewsLoading (gViews model)
+
+{-# INLINE mViewsError #-}
+mViewsError :: Model -> Maybe Text
+mViewsError model = vwViewsError (gViews model)
+
+{-# INLINE mViewUi #-}
+mViewUi :: Model -> ViewUi
+mViewUi model = vwViewUi (gViews model)
+
+{-# INLINE mGraphViewId #-}
+mGraphViewId :: Model -> Maybe Int
+mGraphViewId model = grGraphViewId (gGraph model)
+
+{-# INLINE mGraphViewRev #-}
+mGraphViewRev :: Model -> Int
+mGraphViewRev model = grGraphViewRev (gGraph model)
+
+{-# INLINE mGraphColorGroups #-}
+mGraphColorGroups :: Model -> [ColorGroup]
+mGraphColorGroups model = grGraphColorGroups (gGraph model)
+
+{-# INLINE mGraphGroupDrafts #-}
+mGraphGroupDrafts :: Model -> [ColorGroup]
+mGraphGroupDrafts model = grGraphGroupDrafts (gGraph model)
+
+{-# INLINE mGraphGroupDirty #-}
+mGraphGroupDirty :: Model -> Bool
+mGraphGroupDirty model = grGraphGroupDirty (gGraph model)
+
+{-# INLINE mGraphGroupEditor #-}
+mGraphGroupEditor :: Model -> Bool
+mGraphGroupEditor model = grGraphGroupEditor (gGraph model)
+
+{-# INLINE mGraphLocal #-}
+mGraphLocal :: Model -> Bool
+mGraphLocal model = grGraphLocal (gGraph model)
+
+{-# INLINE mGraphLocalDepth #-}
+mGraphLocalDepth :: Model -> Int
+mGraphLocalDepth model = grGraphLocalDepth (gGraph model)
+
+{-# INLINE mGraphLocalRoot #-}
+mGraphLocalRoot :: Model -> Maybe Int
+mGraphLocalRoot model = grGraphLocalRoot (gGraph model)
+
+{-# INLINE mGraphLocalCapped #-}
+mGraphLocalCapped :: Model -> Bool
+mGraphLocalCapped model = grGraphLocalCapped (gGraph model)
+
+{-# INLINE mGraphSettled #-}
+mGraphSettled :: Model -> Bool
+mGraphSettled model = grGraphSettled (gGraph model)
+
+{-# INLINE mGraphSettleEpoch #-}
+mGraphSettleEpoch :: Model -> RequestId
+mGraphSettleEpoch model = grGraphSettleEpoch (gGraph model)
+
+{-# INLINE mGraphDetailPhase #-}
+mGraphDetailPhase :: Model -> Int
+mGraphDetailPhase model = grGraphDetailPhase (gGraph model)
+
+{-# INLINE mGraphDetailChunks #-}
+mGraphDetailChunks :: Model -> Int
+mGraphDetailChunks model = grGraphDetailChunks (gGraph model)
+
+{-# INLINE mGraphTagsShown #-}
+mGraphTagsShown :: Model -> Bool
+mGraphTagsShown model = grGraphTagsShown (gGraph model)
+
+{-# INLINE mGraphLoading #-}
+mGraphLoading :: Model -> Bool
+mGraphLoading model = grGraphLoading (gGraph model)
+
+{-# INLINE mGraphError #-}
+mGraphError :: Model -> Maybe Text
+mGraphError model = grGraphError (gGraph model)
+
+{-# INLINE mGraphGen #-}
+mGraphGen :: Model -> Int
+mGraphGen model = grGraphGen (gGraph model)
+
+{-# INLINE mGraphLayout #-}
+mGraphLayout :: Model -> Maybe GraphLayout
+mGraphLayout model = grGraphLayout (gGraph model)
+
+{-# INLINE mGraphLocalLayout #-}
+mGraphLocalLayout :: Model -> Maybe GraphLayout
+mGraphLocalLayout model = grGraphLocalLayout (gGraph model)
+
+{-# INLINE mGraphColors #-}
+mGraphColors :: Model -> Maybe ColorAssignment
+mGraphColors model = grGraphColors (gGraph model)
+
+{-# INLINE mGraphGroupCounts #-}
+mGraphGroupCounts :: Model -> [Int]
+mGraphGroupCounts model = grGraphGroupCounts (gGraph model)
+
+{-# INLINE mGraph #-}
+mGraph :: Model -> Maybe GraphData
+mGraph model = grGraph (gGraph model)
+
+{-# INLINE mDedupCounts #-}
+mDedupCounts :: Model -> Maybe DedupCounts
+mDedupCounts model = ddDedupCounts (gDedup model)
+
+{-# INLINE mDedupUrlGroups #-}
+mDedupUrlGroups :: Model -> [DedupGroup]
+mDedupUrlGroups model = ddDedupUrlGroups (gDedup model)
+
+{-# INLINE mDedupTitleGroups #-}
+mDedupTitleGroups :: Model -> [DedupGroup]
+mDedupTitleGroups model = ddDedupTitleGroups (gDedup model)
+
+{-# INLINE mDedupLoading #-}
+mDedupLoading :: Model -> Bool
+mDedupLoading model = ddDedupLoading (gDedup model)
+
+{-# INLINE mDedupError #-}
+mDedupError :: Model -> Maybe Text
+mDedupError model = ddDedupError (gDedup model)
+
+{-# INLINE mDedupChoice #-}
+mDedupChoice :: Model -> M.Map Text Int
+mDedupChoice model = ddDedupChoice (gDedup model)
+
+{-# INLINE mDedupConfirm #-}
+mDedupConfirm :: Model -> Maybe Text
+mDedupConfirm model = ddDedupConfirm (gDedup model)
+
+{-# INLINE mDedupLast #-}
+mDedupLast :: Model -> Maybe (Int, Int)
+mDedupLast model = ddDedupLast (gDedup model)
+
+{-# INLINE mDedupLastSnapshot #-}
+mDedupLastSnapshot :: Model -> Maybe Int
+mDedupLastSnapshot model = ddDedupLastSnapshot (gDedup model)
+
+{-# INLINE mDedupMoreBusy #-}
+mDedupMoreBusy :: Model -> Bool
+mDedupMoreBusy model = ddDedupMoreBusy (gDedup model)
+
+{-# INLINE mDedupBusy #-}
+mDedupBusy :: Model -> Bool
+mDedupBusy model = ddDedupBusy (gDedup model)
+
+{-# INLINE mDedupMergeAllOpen #-}
+mDedupMergeAllOpen :: Model -> Bool
+mDedupMergeAllOpen model = ddDedupMergeAllOpen (gDedup model)
+
+{-# INLINE mDedupMergeAllReport #-}
+mDedupMergeAllReport :: Model -> Maybe DedupMergeAllReport
+mDedupMergeAllReport model = ddDedupMergeAllReport (gDedup model)
+
+{-# INLINE mConsol #-}
+mConsol :: Model -> [ConsolidationGroup]
+mConsol model = tgConsol (gTags model)
+
+{-# INLINE mConsolLoading #-}
+mConsolLoading :: Model -> Bool
+mConsolLoading model = tgConsolLoading (gTags model)
+
+{-# INLINE mConsolError #-}
+mConsolError :: Model -> Maybe Text
+mConsolError model = tgConsolError (gTags model)
+
+{-# INLINE mTagDialog #-}
+mTagDialog :: Model -> Maybe TagDialog
+mTagDialog model = tgTagDialog (gTags model)
+
+{-# INLINE mTagDialogInput #-}
+mTagDialogInput :: Model -> Text
+mTagDialogInput model = tgTagDialogInput (gTags model)
+
+{-# INLINE mTagDialogBusy #-}
+mTagDialogBusy :: Model -> Bool
+mTagDialogBusy model = tgTagDialogBusy (gTags model)
+
+{-# INLINE mTagDialogError #-}
+mTagDialogError :: Model -> Maybe Text
+mTagDialogError model = tgTagDialogError (gTags model)
+
+{-# INLINE mAiTag #-}
+mAiTag :: Model -> Maybe Text
+mAiTag model = tgAiTag (gTags model)
+
+{-# INLINE mSuggestions #-}
+mSuggestions :: Model -> [TagSuggestion]
+mSuggestions model = tgSuggestions (gTags model)
+
+{-# INLINE mSuggestionsLoading #-}
+mSuggestionsLoading :: Model -> Bool
+mSuggestionsLoading model = tgSuggestionsLoading (gTags model)
+
+{-# INLINE mSuggestionNotice #-}
+mSuggestionNotice :: Model -> Maybe Text
+mSuggestionNotice model = tgSuggestionNotice (gTags model)
+
+{-# INLINE mSuggestionError #-}
+mSuggestionError :: Model -> Maybe Text
+mSuggestionError model = tgSuggestionError (gTags model)
+
+{-# INLINE mExtractEditing #-}
+mExtractEditing :: Model -> Bool
+mExtractEditing model = dtExtractEditing (gDetail model)
+
+{-# INLINE mExtractDraft #-}
+mExtractDraft :: Model -> Text
+mExtractDraft model = dtExtractDraft (gDetail model)
+
+{-# INLINE mExtractDirty #-}
+mExtractDirty :: Model -> Bool
+mExtractDirty model = dtExtractDirty (gDetail model)
+
+{-# INLINE mExtractSaving #-}
+mExtractSaving :: Model -> Bool
+mExtractSaving model = dtExtractSaving (gDetail model)
+
+{-# INLINE mPrune #-}
+mPrune :: Model -> [BookmarkSummary]
+mPrune model = mnPrune (gMaint model)
+
+{-# INLINE mPruneSel #-}
+mPruneSel :: Model -> [Int]
+mPruneSel model = mnPruneSel (gMaint model)
+
+{-# INLINE mDeadCount #-}
+mDeadCount :: Model -> Maybe Int
+mDeadCount model = mnDeadCount (gMaint model)
+
+{-# INLINE mCheckedCount #-}
+mCheckedCount :: Model -> Maybe Int
+mCheckedCount model = mnCheckedCount (gMaint model)
+
+{-# INLINE mMaintBusy #-}
+mMaintBusy :: Model -> Bool
+mMaintBusy model = mnMaintBusy (gMaint model)
+
+{-# INLINE mConfirmPrune #-}
+mConfirmPrune :: Model -> Bool
+mConfirmPrune model = mnConfirmPrune (gMaint model)
+
+{-# INLINE mPruneError #-}
+mPruneError :: Model -> Maybe Text
+mPruneError model = mnPruneError (gMaint model)
+
+{-# INLINE mUndoEntries #-}
+mUndoEntries :: Model -> [UndoEntry]
+mUndoEntries model = mnUndoEntries (gMaint model)
+
+{-# INLINE mUndoLoading #-}
+mUndoLoading :: Model -> Bool
+mUndoLoading model = mnUndoLoading (gMaint model)
+
+{-# INLINE mUndoError #-}
+mUndoError :: Model -> Maybe Text
+mUndoError model = mnUndoError (gMaint model)
+
+{-# INLINE mUndoPreview #-}
+mUndoPreview :: Model -> Maybe UndoPreview
+mUndoPreview model = mnUndoPreview (gMaint model)
+
+{-# INLINE mUndoPreviewLoading #-}
+mUndoPreviewLoading :: Model -> Bool
+mUndoPreviewLoading model = mnUndoPreviewLoading (gMaint model)
+
+{-# INLINE mUndoPreviewError #-}
+mUndoPreviewError :: Model -> Maybe Text
+mUndoPreviewError model = mnUndoPreviewError (gMaint model)
+
+{-# INLINE mUndoBusy #-}
+mUndoBusy :: Model -> Bool
+mUndoBusy model = mnUndoBusy (gMaint model)
+
+{-# INLINE mAccount #-}
+mAccount :: Model -> Maybe AccountInfo
+mAccount model = acAccount (gAccount model)
+
+{-# INLINE mAccountLoading #-}
+mAccountLoading :: Model -> Bool
+mAccountLoading model = acAccountLoading (gAccount model)
+
+{-# INLINE mAccountError #-}
+mAccountError :: Model -> Maybe Text
+mAccountError model = acAccountError (gAccount model)
+
+{-# INLINE mRecoveryCodes #-}
+mRecoveryCodes :: Model -> [Text]
+mRecoveryCodes model = acRecoveryCodes (gAccount model)
+
+{-# INLINE mCredEdit #-}
+mCredEdit :: Model -> Maybe (Text, Text)
+mCredEdit model = acCredEdit (gAccount model)
+
+{-# INLINE mTokens #-}
+mTokens :: Model -> [TokenView]
+mTokens model = acTokens (gAccount model)
+
+{-# INLINE mTokensLoading #-}
+mTokensLoading :: Model -> Bool
+mTokensLoading model = acTokensLoading (gAccount model)
+
+{-# INLINE mTokensError #-}
+mTokensError :: Model -> Maybe Text
+mTokensError model = acTokensError (gAccount model)
+
+{-# INLINE mWebhooks #-}
+mWebhooks :: Model -> [Webhook]
+mWebhooks model = wkWebhooks (gWebhooks model)
+
+{-# INLINE mWebhooksLoading #-}
+mWebhooksLoading :: Model -> Bool
+mWebhooksLoading model = wkWebhooksLoading (gWebhooks model)
+
+{-# INLINE mWebhooksError #-}
+mWebhooksError :: Model -> Maybe Text
+mWebhooksError model = wkWebhooksError (gWebhooks model)
+
+{-# INLINE mWebhookName #-}
+mWebhookName :: Model -> Text
+mWebhookName model = wkWebhookName (gWebhooks model)
+
+{-# INLINE mWebhookUrl #-}
+mWebhookUrl :: Model -> Text
+mWebhookUrl model = wkWebhookUrl (gWebhooks model)
+
+{-# INLINE mWebhookEvents #-}
+mWebhookEvents :: Model -> [EventType]
+mWebhookEvents model = wkWebhookEvents (gWebhooks model)
+
+{-# INLINE mWebhookEnabled #-}
+mWebhookEnabled :: Model -> Bool
+mWebhookEnabled model = wkWebhookEnabled (gWebhooks model)
+
+{-# INLINE mWebhookSecret #-}
+mWebhookSecret :: Model -> Maybe Text
+mWebhookSecret model = wkWebhookSecret (gWebhooks model)
+
+{-# INLINE mWebhookFormError #-}
+mWebhookFormError :: Model -> Maybe Text
+mWebhookFormError model = wkWebhookFormError (gWebhooks model)
+
+{-# INLINE mWebhookBusy #-}
+mWebhookBusy :: Model -> Bool
+mWebhookBusy model = wkWebhookBusy (gWebhooks model)
+
+{-# INLINE mWebhookTest #-}
+mWebhookTest :: Model -> Maybe (Int, WebhookTest)
+mWebhookTest model = wkWebhookTest (gWebhooks model)
+
+{-# INLINE mWebhookTestError #-}
+mWebhookTestError :: Model -> Maybe Text
+mWebhookTestError model = wkWebhookTestError (gWebhooks model)
+
+{-# INLINE mWebhookDeliveries #-}
+mWebhookDeliveries :: Model -> Maybe (Int, [DeliveryView])
+mWebhookDeliveries model = wkWebhookDeliveries (gWebhooks model)
+
+{-# INLINE mWebhookDeliveriesError #-}
+mWebhookDeliveriesError :: Model -> Maybe Text
+mWebhookDeliveriesError model = wkWebhookDeliveriesError (gWebhooks model)
+
+{-# INLINE mAdminUsers #-}
+mAdminUsers :: Model -> [UserView]
+mAdminUsers model = acAdminUsers (gAccount model)
+
+{-# INLINE mAdminUsersAllowed #-}
+mAdminUsersAllowed :: Model -> Bool
+mAdminUsersAllowed model = acAdminUsersAllowed (gAccount model)
+
+{-# INLINE mAdminUsersLoading #-}
+mAdminUsersLoading :: Model -> Bool
+mAdminUsersLoading model = acAdminUsersLoading (gAccount model)
+
+{-# INLINE mAdminUsersError #-}
+mAdminUsersError :: Model -> Maybe Text
+mAdminUsersError model = acAdminUsersError (gAccount model)
+
+{-# INLINE mUserName #-}
+mUserName :: Model -> Text
+mUserName model = acUserName (gAccount model)
+
+{-# INLINE mUserPassword #-}
+mUserPassword :: Model -> Text
+mUserPassword model = acUserPassword (gAccount model)
+
+{-# INLINE mUserRole #-}
+mUserRole :: Model -> UserRole
+mUserRole model = acUserRole (gAccount model)
+
+{-# INLINE mUserFormError #-}
+mUserFormError :: Model -> Maybe Text
+mUserFormError model = acUserFormError (gAccount model)
+
+{-# INLINE mUserBusy #-}
+mUserBusy :: Model -> Bool
+mUserBusy model = acUserBusy (gAccount model)
+
+{-# INLINE mUserRecovery #-}
+mUserRecovery :: Model -> Maybe (Text, [Text])
+mUserRecovery model = acUserRecovery (gAccount model)
+
+{-# INLINE mUserReset #-}
+mUserReset :: Model -> Maybe Int
+mUserReset model = acUserReset (gAccount model)
+
+{-# INLINE mUserResetPassword #-}
+mUserResetPassword :: Model -> Text
+mUserResetPassword model = acUserResetPassword (gAccount model)
+
+{-# INLINE mUserResetShown #-}
+mUserResetShown :: Model -> Maybe (Text, Text)
+mUserResetShown model = acUserResetShown (gAccount model)
+
+{-# INLINE mUserActionError #-}
+mUserActionError :: Model -> Maybe Text
+mUserActionError model = acUserActionError (gAccount model)
+
+{-# INLINE mUserDelete #-}
+mUserDelete :: Model -> Maybe UserView
+mUserDelete model = acUserDelete (gAccount model)
+
+{-# INLINE mUserDeleteName #-}
+mUserDeleteName :: Model -> Text
+mUserDeleteName model = acUserDeleteName (gAccount model)
+
+{-# INLINE mUserDeleteLibrary #-}
+mUserDeleteLibrary :: Model -> Bool
+mUserDeleteLibrary model = acUserDeleteLibrary (gAccount model)
+
+{-# INLINE mUserDeleteBusy #-}
+mUserDeleteBusy :: Model -> Bool
+mUserDeleteBusy model = acUserDeleteBusy (gAccount model)
+
+{-# INLINE mTokenName #-}
+mTokenName :: Model -> Text
+mTokenName model = acTokenName (gAccount model)
+
+{-# INLINE mTokenScopes #-}
+mTokenScopes :: Model -> [Text]
+mTokenScopes model = acTokenScopes (gAccount model)
+
+{-# INLINE mTokenSecret #-}
+mTokenSecret :: Model -> Maybe (Text, TokenView)
+mTokenSecret model = acTokenSecret (gAccount model)
+
+{-# INLINE mTokenBusy #-}
+mTokenBusy :: Model -> Bool
+mTokenBusy model = acTokenBusy (gAccount model)
+
+{-# INLINE mImporting #-}
+mImporting :: Model -> Bool
+mImporting model = ipImporting (gImport model)
+
+{-# INLINE mImportReport #-}
+mImportReport :: Model -> Maybe ImportReport
+mImportReport model = ipImportReport (gImport model)
+
+{-# INLINE mToasts #-}
+mToasts :: Model -> [Toast]
+mToasts model = sfToasts (gShell model)
+
+{-# INLINE mToastNext #-}
+mToastNext :: Model -> Int
+mToastNext model = sfToastNext (gShell model)
+
+{-# INLINE mJobPolls #-}
+mJobPolls :: Model -> IM.IntMap JobPoll
+mJobPolls model = jbJobPolls (gJobs model)
+
+{-# INLINE mJobTimerNext #-}
+mJobTimerNext :: Model -> TimerId
+mJobTimerNext model = jbJobTimerNext (gJobs model)
+
+{-# INLINE mJobRequestNext #-}
+mJobRequestNext :: Model -> RequestId
+mJobRequestNext model = jbJobRequestNext (gJobs model)
+
+{-# INLINE mSnapshotBusy #-}
+mSnapshotBusy :: Model -> Bool
+mSnapshotBusy model = dtSnapshotBusy (gDetail model)
+
+{-# INLINE mSnapshotJob #-}
+mSnapshotJob :: Model -> Maybe Int
+mSnapshotJob model = dtSnapshotJob (gDetail model)
+
+{-# INLINE mWebhookTestBusy #-}
+mWebhookTestBusy :: Model -> Bool
+mWebhookTestBusy model = wkWebhookTestBusy (gWebhooks model)
 
 {- | Virtualized grid metrics.  Card height follows the design brief:
 124px desktop, 140px mobile; rows include the 12px gap.

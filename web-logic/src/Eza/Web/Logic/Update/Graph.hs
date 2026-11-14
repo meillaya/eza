@@ -52,12 +52,7 @@ graphZoom factor = do
             let view = zoomViewCenter layout (mGraphView m) factor
             putModel
                 ( \model ->
-                    model
-                        { mGraphView = view
-                        , mGraphSettled = False
-                        , mGraphSettleEpoch = nextRequestId (mGraphSettleEpoch model)
-                        , mGraphDetailPhase = 0
-                        }
+                    model{gGraph = (gGraph model){grGraphView = view, grGraphSettled = False, grGraphSettleEpoch = nextRequestId (mGraphSettleEpoch model), grGraphDetailPhase = 0}}
                 )
             scheduleGraphSettle
 
@@ -70,7 +65,7 @@ graphClick m x y =
         Nothing -> pure ()
         Just layout -> case visibleHit m (nodeAt layout (mGraphView m) (x, y)) of
             Nothing ->
-                putModel (\model -> model{mGraphSelected = Nothing, mGraphFocus = Nothing})
+                putModel (\model -> model{gGraph = (gGraph model){grGraphSelected = Nothing, grGraphFocus = Nothing}})
             Just key
                 | isTagKey key -> case IM.lookup key (glTags layout) of
                     Just (name, _) -> dispatch (FilterByQuery ("tag:" <> name))
@@ -167,18 +162,20 @@ enterGraphRoute localMode root depth = do
     putModel
         ( \x ->
             x
-                { mGraphLoading =
-                    case mGraphLayoutWire x of
-                        Just (wirePreset, _) | wirePreset == mGraphPreset x && isJust (mGraphLayout x) -> False
-                        _ -> isNothing (mGraphLayout x)
-                , mGraphError = Nothing
-                , mGraphLocal = effectiveLocal
-                , mGraphLocalDepth = effectiveDepth
-                , mGraphLocalRoot = root
-                , mGraphDetailPhase = 0
-                , mGraphSettled = False
-                , mGraphSettleEpoch = nextRequestId (mGraphSettleEpoch x)
-                , mGraphHover = Nothing
+                { gGraph =
+                    (gGraph x)
+                        { grGraphLoading = case mGraphLayoutWire x of
+                            Just (wirePreset, _) | wirePreset == mGraphPreset x && isJust (mGraphLayout x) -> False
+                            _ -> isNothing (mGraphLayout x)
+                        , grGraphError = Nothing
+                        , grGraphLocal = effectiveLocal
+                        , grGraphLocalDepth = effectiveDepth
+                        , grGraphLocalRoot = root
+                        , grGraphDetailPhase = 0
+                        , grGraphSettled = False
+                        , grGraphSettleEpoch = nextRequestId (mGraphSettleEpoch x)
+                        , grGraphHover = Nothing
+                        }
                 }
         )
     putModel (\x -> if effectiveLocal then fitActiveView (applyGraphScope x) else applyGraphScope x)
@@ -218,32 +215,19 @@ applyGraphScope m =
         Nothing -> m
         Just whole
             | not (mGraphLocal m) ->
-                m
-                    { mGraphLocalLayout = Nothing
-                    , mGraphLocalCapped = False
-                    , mGraphMatches = matchOn whole
-                    }
+                m{gGraph = (gGraph m){grGraphLocalLayout = Nothing, grGraphLocalCapped = False, grGraphMatches = matchOn whole}}
             | otherwise ->
                 case resolveLocalRoot m whole of
                     Just root ->
                         case localLayout whole root (mGraphLocalDepth m) of
                             Just (local, capped) ->
-                                m
-                                    { mGraphLocalRoot = Just root
-                                    , mGraphLocalLayout = Just local
-                                    , mGraphLocalCapped = capped
-                                    , mGraphMatches = matchOn local
-                                    }
+                                m{gGraph = (gGraph m){grGraphLocalRoot = Just root, grGraphLocalLayout = Just local, grGraphLocalCapped = capped, grGraphMatches = matchOn local}}
                             Nothing -> emptyScope m
                     Nothing -> emptyScope m
   where
     matchOn layout = matchGraph (T.strip ((mGraphFilter m))) layout
     emptyScope model =
-        model
-            { mGraphLocalLayout = Nothing
-            , mGraphLocalCapped = False
-            , mGraphMatches = emptyMatches
-            }
+        model{gGraph = (gGraph model){grGraphLocalLayout = Nothing, grGraphLocalCapped = False, grGraphMatches = emptyMatches}}
 
 {- | Fit the plate to the active layout. Used when the scope, root, depth or
 preset changes; not on interaction frames.
@@ -254,13 +238,7 @@ fitActiveView m =
         Nothing -> m
         Just layout ->
             let old = mGraphView m
-             in m
-                    { mGraphView = fitView layout (gvWidth old) (gvHeight old) (gvDpr old)
-                    , mGraphHover = Nothing
-                    , mGraphSettled = False
-                    , mGraphSettleEpoch = nextRequestId (mGraphSettleEpoch m)
-                    , mGraphDetailPhase = 0
-                    }
+             in m{gGraph = (gGraph m){grGraphView = fitView layout (gvWidth old) (gvHeight old) (gvDpr old), grGraphHover = Nothing, grGraphSettled = False, grGraphSettleEpoch = nextRequestId (mGraphSettleEpoch m), grGraphDetailPhase = 0}}
 
 {- | The view is moving: the plate keeps blitting the world bitmap, and the
 screen-resolution detail plate is stale until the gesture stops.
@@ -269,11 +247,7 @@ markGraphMoving :: Update ()
 markGraphMoving =
     putModel
         ( \m ->
-            m
-                { mGraphSettled = False
-                , mGraphSettleEpoch = nextRequestId (mGraphSettleEpoch m)
-                , mGraphDetailPhase = 0
-                }
+            m{gGraph = (gGraph m){grGraphSettled = False, grGraphSettleEpoch = nextRequestId (mGraphSettleEpoch m), grGraphDetailPhase = 0}}
         )
 
 {- | Arm a settle check for the current view epoch. Timers are never cancelled:
@@ -300,12 +274,7 @@ graphPan deltaX deltaY accelerated = do
             let step = if accelerated then 160 else 48
             putModel
                 ( \model ->
-                    model
-                        { mGraphView = panView (deltaX * step, deltaY * step) (mGraphView model)
-                        , mGraphSettled = False
-                        , mGraphSettleEpoch = nextRequestId (mGraphSettleEpoch model)
-                        , mGraphDetailPhase = 0
-                        }
+                    model{gGraph = (gGraph model){grGraphView = panView (deltaX * step, deltaY * step) (mGraphView model), grGraphSettled = False, grGraphSettleEpoch = nextRequestId (mGraphSettleEpoch model), grGraphDetailPhase = 0}}
                 )
             scheduleGraphSettle
 
@@ -335,15 +304,8 @@ handle = \case
                         _ -> old
                 putModel
                     ( \x ->
-                        let scopedNow = applyGraphScope (recomputeGraphColors x{mGraph = Just graph})
-                         in scopedNow
-                                { mGraphView = view
-                                , mGraphMatches = mGraphMatches scopedNow
-                                , mGraphLoading = False
-                                , mGraphError = Nothing
-                                , mGraphHover = Nothing
-                                , mGraphFocus = if mGraphViewReady x then Nothing else mGraphFocus x
-                                }
+                        let scopedNow = applyGraphScope (recomputeGraphColors x{gGraph = (gGraph x){grGraph = Just graph}})
+                         in scopedNow{gGraph = (gGraph scopedNow){grGraphView = view, grGraphMatches = mGraphMatches scopedNow, grGraphLoading = False, grGraphError = Nothing, grGraphHover = Nothing, grGraphFocus = if mGraphViewReady x then Nothing else mGraphFocus x}}
                     )
                 when (view /= old) (markGraphMoving >> scheduleGraphSettle)
                 unless (mGraphViewReady m) (measureGraphCanvas)
@@ -367,28 +329,12 @@ handle = \case
                         Nothing ->
                             putModel
                                 ( \x ->
-                                    x
-                                        { mGraph = Just graph
-                                        , mGraphLayout = Nothing
-                                        , mGraphLoading = False
-                                        , mGraphError = Just layoutMissingMessage
-                                        }
+                                    x{gGraph = (gGraph x){grGraph = Just graph, grGraphLayout = Nothing, grGraphLoading = False, grGraphError = Just layoutMissingMessage}}
                                 )
                         Just hydratedLayout -> do
                             let whole = hydratedLayout{glGen = generation}
                                 seeded =
-                                    m
-                                        { mGraph = Just graph
-                                        , mGraphLayout = Just whole
-                                        , mGraphLayoutSource = "server"
-                                        , mGraphGen = generation
-                                        , mGraphLoading = False
-                                        , mGraphError = Nothing
-                                        , mGraphHover = Nothing
-                                        , mGraphSettled = False
-                                        , mGraphSettleEpoch = nextRequestId (mGraphSettleEpoch m)
-                                        , mGraphDetailPhase = 0
-                                        }
+                                    m{gGraph = (gGraph m){grGraph = Just graph, grGraphLayout = Just whole, grGraphLayoutSource = "server", grGraphGen = generation, grGraphLoading = False, grGraphError = Nothing, grGraphHover = Nothing, grGraphSettled = False, grGraphSettleEpoch = nextRequestId (mGraphSettleEpoch m), grGraphDetailPhase = 0}}
                                 scoped = applyGraphScope seeded
                                 old = mGraphView m
                                 view =
@@ -404,23 +350,9 @@ handle = \case
                             putModel
                                 ( \x ->
                                     let seededNow =
-                                            x
-                                                { mGraph = Just graph
-                                                , mGraphLayout = Just whole
-                                                , mGraphLayoutSource = "server"
-                                                , mGraphGen = generation
-                                                , mGraphLoading = False
-                                                , mGraphError = Nothing
-                                                , mGraphHover = Nothing
-                                                , mGraphSettled = False
-                                                , mGraphSettleEpoch = nextRequestId (mGraphSettleEpoch x)
-                                                , mGraphDetailPhase = 0
-                                                }
+                                            x{gGraph = (gGraph x){grGraph = Just graph, grGraphLayout = Just whole, grGraphLayoutSource = "server", grGraphGen = generation, grGraphLoading = False, grGraphError = Nothing, grGraphHover = Nothing, grGraphSettled = False, grGraphSettleEpoch = nextRequestId (mGraphSettleEpoch x), grGraphDetailPhase = 0}}
                                         scopedNow = applyGraphScope (recomputeGraphColors seededNow)
-                                     in scopedNow
-                                            { mGraphView = view
-                                            , mGraphSelected = mGraphFocus x
-                                            }
+                                     in scopedNow{gGraph = (gGraph scopedNow){grGraphView = view, grGraphSelected = mGraphFocus x}}
                                 )
                             scheduleGraphSettle
                             when (wireMismatch || wirePresetDiffers m preset) $
@@ -428,7 +360,7 @@ handle = \case
                             unless (mGraphViewReady m) (measureGraphCanvas)
                             focusGraphPlate m
     GraphFailed err -> do
-        putModel (\x -> x{mGraphLoading = False, mGraphError = Just ((aeMessage err))})
+        putModel (\x -> x{gGraph = (gGraph x){grGraphLoading = False, grGraphError = Just ((aeMessage err))}})
         -- The error panel is only rendered while the plate has no layout to
         -- fall back on; without this toast a failed refresh of an already
         -- painted graph looked like a successful one.
@@ -439,29 +371,23 @@ handle = \case
         -- when the revision still matches, the graph payload and plate are
         -- already current and no repaint is needed; a changed revision makes
         -- GraphLayoutLoaded fetch the graph before hydrating.
-        putModel (\x -> x{mGraphLoading = True, mGraphError = Nothing})
+        putModel (\x -> x{gGraph = (gGraph x){grGraphLoading = True, grGraphError = Nothing}})
         fetchGraphLayout (mGraphPreset m) (GraphLayoutLoaded (mGraphPreset m)) GraphLayoutFailed
     OpenGraphAt bookmarkId -> do
         m <- get
-        putModel (\x -> x{mGraphFocus = Just bookmarkId, mGraphSelected = Just bookmarkId, mGraphError = Nothing})
+        putModel (\x -> x{gGraph = (gGraph x){grGraphFocus = Just bookmarkId, grGraphSelected = Just bookmarkId, grGraphError = Nothing}})
         case (mGraphLayout m, mGraphViewReady m) of
             (Just layout, True) -> do
                 let old = mGraphView m
                     view = focusView layout bookmarkId (gvWidth old) (gvHeight old) (gvDpr old)
                 putModel
                     ( \x ->
-                        x
-                            { mGraphView = view
-                            , mGraphFocus = Nothing
-                            , mGraphSettled = False
-                            , mGraphSettleEpoch = nextRequestId (mGraphSettleEpoch x)
-                            , mGraphDetailPhase = 0
-                            }
+                        x{gGraph = (gGraph x){grGraphView = view, grGraphFocus = Nothing, grGraphSettled = False, grGraphSettleEpoch = nextRequestId (mGraphSettleEpoch x), grGraphDetailPhase = 0}}
                     )
                 scheduleGraphSettle
                 when (not (isGraphRoute (mRoute m))) (dispatch (Navigate Graph))
             _ -> do
-                putModel (\x -> x{mGraphLoading = True})
+                putModel (\x -> x{gGraph = (gGraph x){grGraphLoading = True}})
                 when (not (isGraphRoute (mRoute m))) (dispatch (Navigate Graph))
     GraphMeasured width height dpr -> do
         m <- get
@@ -475,14 +401,7 @@ handle = \case
                             Nothing -> fitView layout width height dpr
                     putModel
                         ( \x ->
-                            x
-                                { mGraphView = view
-                                , mGraphViewReady = True
-                                , mGraphFocus = Nothing
-                                , mGraphSettled = False
-                                , mGraphSettleEpoch = nextRequestId (mGraphSettleEpoch x)
-                                , mGraphDetailPhase = 0
-                                }
+                            x{gGraph = (gGraph x){grGraphView = view, grGraphViewReady = True, grGraphFocus = Nothing, grGraphSettled = False, grGraphSettleEpoch = nextRequestId (mGraphSettleEpoch x), grGraphDetailPhase = 0}}
                         )
                     scheduleGraphSettle
                 | gvWidth (mGraphView m) /= width
@@ -491,17 +410,12 @@ handle = \case
                     let view = resizeView layout width height dpr (mGraphView m)
                     putModel
                         ( \x ->
-                            x
-                                { mGraphView = view
-                                , mGraphSettled = False
-                                , mGraphSettleEpoch = nextRequestId (mGraphSettleEpoch x)
-                                , mGraphDetailPhase = 0
-                                }
+                            x{gGraph = (gGraph x){grGraphView = view, grGraphSettled = False, grGraphSettleEpoch = nextRequestId (mGraphSettleEpoch x), grGraphDetailPhase = 0}}
                         )
                     scheduleGraphSettle
                 | otherwise -> pure ()
     GraphPointerDown x y ->
-        putModel (\m -> m{mGraphDrag = Just (GraphDrag (x, y) (x, y) False), mGraphHover = Nothing})
+        putModel (\m -> m{gGraph = (gGraph m){grGraphDrag = Just (GraphDrag (x, y) (x, y) False), grGraphHover = Nothing}})
     GraphPointerMove x y -> do
         m <- get
         case mGraphDrag m of
@@ -514,32 +428,25 @@ handle = \case
                             || abs (y - snd (gdStart drag)) > 3
                 putModel
                     ( \model ->
-                        model
-                            { mGraphDrag = Just drag{gdLast = (x, y), gdMoved = moved}
-                            , mGraphView = view
-                            , mGraphHover = Nothing
-                            , mGraphSettled = False
-                            , mGraphSettleEpoch = nextRequestId (mGraphSettleEpoch model)
-                            , mGraphDetailPhase = 0
-                            }
+                        model{gGraph = (gGraph model){grGraphDrag = Just drag{gdLast = (x, y), gdMoved = moved}, grGraphView = view, grGraphHover = Nothing, grGraphSettled = False, grGraphSettleEpoch = nextRequestId (mGraphSettleEpoch model), grGraphDetailPhase = 0}}
                     )
             Nothing -> case activeGraphLayout m of
                 Nothing -> pure ()
                 Just layout ->
                     let hovered = visibleHit m (nodeAt layout (mGraphView m) (x, y))
                      in unless (hovered == mGraphHover m) $
-                            putModel (\model -> model{mGraphHover = hovered})
+                            putModel (\model -> model{gGraph = (gGraph model){grGraphHover = hovered}})
     GraphPointerUp x y -> do
         m <- get
         case mGraphDrag m of
             Nothing -> pure ()
             Just drag -> do
-                putModel (\model -> model{mGraphDrag = Nothing})
+                putModel (\model -> model{gGraph = (gGraph model){grGraphDrag = Nothing}})
                 when (gdMoved drag) scheduleGraphSettle
                 unless (gdMoved drag) (graphClick m x y)
     GraphPointerLeave -> do
         m <- get
-        putModel (\x -> x{mGraphDrag = Nothing, mGraphHover = Nothing})
+        putModel (\x -> x{gGraph = (gGraph x){grGraphDrag = Nothing, grGraphHover = Nothing}})
         when (isJust (mGraphDrag m)) scheduleGraphSettle
     GraphWheel x y delta -> do
         m <- get
@@ -550,13 +457,7 @@ handle = \case
                     view = zoomViewAt layout (mGraphView m) (x, y) factor
                 putModel
                     ( \model ->
-                        model
-                            { mGraphView = view
-                            , mGraphHover = Nothing
-                            , mGraphSettled = False
-                            , mGraphSettleEpoch = nextRequestId (mGraphSettleEpoch model)
-                            , mGraphDetailPhase = 0
-                            }
+                        model{gGraph = (gGraph model){grGraphView = view, grGraphHover = Nothing, grGraphSettled = False, grGraphSettleEpoch = nextRequestId (mGraphSettleEpoch model), grGraphDetailPhase = 0}}
                     )
                 scheduleGraphSettle
     GraphZoomIn -> graphZoom 1.25
@@ -570,30 +471,21 @@ handle = \case
                     view = fitView layout (gvWidth old) (gvHeight old) (gvDpr old)
                 putModel
                     ( \model ->
-                        model
-                            { mGraphView = view
-                            , mGraphHover = Nothing
-                            , mGraphSettled = False
-                            , mGraphSettleEpoch = nextRequestId (mGraphSettleEpoch model)
-                            , mGraphDetailPhase = 0
-                            }
+                        model{gGraph = (gGraph model){grGraphView = view, grGraphHover = Nothing, grGraphSettled = False, grGraphSettleEpoch = nextRequestId (mGraphSettleEpoch model), grGraphDetailPhase = 0}}
                     )
                 scheduleGraphSettle
     GraphFilterChanged query -> do
         graphFilterSettle
-        putModel (\x -> x{mGraphFilter = query, mGraphMatches = emptyMatches, mGraphFilterTimer = Nothing})
-    GraphFilterArmed timer -> putModel (\x -> x{mGraphFilterTimer = Just timer})
+        putModel (\x -> x{gGraph = (gGraph x){grGraphFilter = query, grGraphMatches = emptyMatches, grGraphFilterTimer = Nothing}})
+    GraphFilterArmed timer -> putModel (\x -> x{gGraph = (gGraph x){grGraphFilterTimer = Just timer}})
     GraphFilterSettled -> do
         m <- get
         case activeGraphLayout m of
-            Nothing -> putModel (\x -> x{mGraphFilterTimer = Nothing})
+            Nothing -> putModel (\x -> x{gGraph = (gGraph x){grGraphFilterTimer = Nothing}})
             Just layout ->
                 putModel
                     ( \x ->
-                        x
-                            { mGraphMatches = matchGraph (T.strip ((mGraphFilter x))) layout
-                            , mGraphFilterTimer = Nothing
-                            }
+                        x{gGraph = (gGraph x){grGraphMatches = matchGraph (T.strip ((mGraphFilter x))) layout, grGraphFilterTimer = Nothing}}
                     )
     GraphSettled epoch -> do
         m <- get
@@ -607,15 +499,11 @@ handle = \case
                         atFit = gvScale view <= 1.1 * gvFit view
                         chunks = detailChunkCount layout
                      in if mGraphLocal m || atFit || chunks <= 0
-                            then putModel (\x -> x{mGraphSettled = True})
+                            then putModel (\x -> x{gGraph = (gGraph x){grGraphSettled = True}})
                             else do
                                 putModel
                                     ( \x ->
-                                        x
-                                            { mGraphSettled = False
-                                            , mGraphDetailPhase = 1
-                                            , mGraphDetailChunks = chunks
-                                            }
+                                        x{gGraph = (gGraph x){grGraphSettled = False, grGraphDetailPhase = 1, grGraphDetailChunks = chunks}}
                                     )
                                 scheduleGraphDetailStep epoch 1
             _ -> pure ()
@@ -629,24 +517,19 @@ handle = \case
                 && mGraphDetailPhase m == expected
             )
             ( if expected >= mGraphDetailChunks m
-                then putModel (\x -> x{mGraphSettled = True, mGraphDetailPhase = 0})
+                then putModel (\x -> x{gGraph = (gGraph x){grGraphSettled = True, grGraphDetailPhase = 0}})
                 else do
-                    putModel (\x -> x{mGraphDetailPhase = expected + 1})
+                    putModel (\x -> x{gGraph = (gGraph x){grGraphDetailPhase = expected + 1}})
                     scheduleGraphDetailStep epoch (expected + 1)
             )
     GraphTagsToggled -> do
         putModel
             ( \m ->
-                m
-                    { mGraphTagsShown = not (mGraphTagsShown m)
-                    , mGraphSettled = False
-                    , mGraphSettleEpoch = nextRequestId (mGraphSettleEpoch m)
-                    , mGraphDetailPhase = 0
-                    }
+                m{gGraph = (gGraph m){grGraphTagsShown = not (mGraphTagsShown m), grGraphSettled = False, grGraphSettleEpoch = nextRequestId (mGraphSettleEpoch m), grGraphDetailPhase = 0}}
             )
         scheduleGraphSettle
     GraphLayoutLoaded preset wire -> do
-        putModel (\x -> x{mGraphLayoutWire = Just (preset, wire)})
+        putModel (\x -> x{gGraph = (gGraph x){grGraphLayoutWire = Just (preset, wire)}})
         m <- get
         when (preset /= mGraphPreset m && isNothing (mGraph m)) $
             -- A default view or a preset change landed while this request was
@@ -659,13 +542,13 @@ handle = \case
                 -- known revision, so the first plate is hydrated rather than
                 -- built locally and then thrown away.
                 Nothing -> do
-                    putModel (\x -> x{mGraphLoading = True})
+                    putModel (\x -> x{gGraph = (gGraph x){grGraphLoading = True}})
                     fetchGraph GraphLoaded GraphFailed
                 Just graph
                     | gdRevision graph /= glwRevision wire -> do
                         -- The layout is for a newer library than the graph we
                         -- hold; fetch the records before hydrating.
-                        putModel (\x -> x{mGraphLoading = True})
+                        putModel (\x -> x{gGraph = (gGraph x){grGraphLoading = True}})
                         fetchGraph GraphLoaded GraphFailed
                     | Just hydrated <- hydrateWire graph wire -> do
                         let same =
@@ -683,17 +566,7 @@ handle = \case
                         putModel
                             ( \x ->
                                 let seeded =
-                                        x
-                                            { mGraphLayout = Just layout
-                                            , mGraphGen = generation
-                                            , mGraphLayoutSource = "server"
-                                            , mGraphView = view
-                                            , mGraphHover = if same then mGraphHover x else Nothing
-                                            , mGraphSettled = if same then mGraphSettled x else False
-                                            , mGraphSettleEpoch = if same then mGraphSettleEpoch x else nextRequestId (mGraphSettleEpoch x)
-                                            , mGraphDetailPhase = if same then mGraphDetailPhase x else 0
-                                            , mGraphLoading = False
-                                            }
+                                        x{gGraph = (gGraph x){grGraphLayout = Just layout, grGraphGen = generation, grGraphLayoutSource = "server", grGraphView = view, grGraphHover = if same then mGraphHover x else Nothing, grGraphSettled = if same then mGraphSettled x else False, grGraphSettleEpoch = if same then mGraphSettleEpoch x else nextRequestId (mGraphSettleEpoch x), grGraphDetailPhase = if same then mGraphDetailPhase x else 0, grGraphLoading = False}}
                                  in applyGraphScope (recomputeGraphColors seeded)
                             )
                         when (not same || view /= old) scheduleGraphSettle
@@ -703,12 +576,7 @@ handle = \case
                 Just _ ->
                     putModel
                         ( \x ->
-                            x
-                                { mGraphLayout = Nothing
-                                , mGraphLayoutSource = ""
-                                , mGraphLoading = False
-                                , mGraphError = Just layoutMissingMessage
-                                }
+                            x{gGraph = (gGraph x){grGraphLayout = Nothing, grGraphLayoutSource = "", grGraphLoading = False, grGraphError = Just layoutMissingMessage}}
                         )
     GraphLayoutFailed err -> do
         -- A failed refresh of an already-painted graph keeps the current plate
@@ -720,11 +588,13 @@ handle = \case
         putModel
             ( \x ->
                 x
-                    { mGraphLoading = False
-                    , mGraphError =
-                        case mGraphLayout x of
-                            Just _ -> mGraphError x
-                            Nothing -> Just ((aeMessage err))
+                    { gGraph =
+                        (gGraph x)
+                            { grGraphLoading = False
+                            , grGraphError = case mGraphLayout x of
+                                Just _ -> mGraphError x
+                                Nothing -> Just ((aeMessage err))
+                            }
                     }
             )
         when (isNothing (mGraph m)) (fetchGraph GraphLoaded GraphFailed)

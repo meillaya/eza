@@ -95,15 +95,7 @@ finalizeAdd bookmarkId = do
     m <- get
     putModel
         ( \x ->
-            x
-                { mAddOpen = False
-                , mAddBusy = False
-                , mAddUrl = ""
-                , mAddTitle = ""
-                , mAddTags = ""
-                , mAddNote = ""
-                , mAddError = Nothing
-                }
+            x{gAdd = (gAdd x){adAddOpen = False, adAddBusy = False, adAddUrl = "", adAddTitle = "", adAddTags = "", adAddNote = "", adAddError = Nothing}}
         )
     notify (T.pack ("Saved bookmark #" <> show bookmarkId)) ToastOk
     refreshTags
@@ -120,37 +112,7 @@ reloadDetail bookmarkId = do
     m <- get
     let epoch = nextRequestId (mDetailEpoch m)
     put
-        m
-            { mDetail = Nothing
-            , mDetailLoading = True
-            , mDetailError = Nothing
-            , mDetailEpoch = epoch
-            , mReadRequest = nextRequestId (mReadRequest m)
-            , mReadPending = False
-            , mEditTitle = ""
-            , mEditNote = ""
-            , mEditTags = []
-            , mNewTag = ""
-            , mDirty = False
-            , mExtractEditing = False
-            , mExtractDraft = ""
-            , mExtractDirty = False
-            , mExtractSaving = False
-            , mNoteMode = NoteWrite
-            , mLinkQuery = Nothing
-            , mLinkResults = []
-            , mBacklinks = []
-            , mHighlights = []
-            , mHighlightsLoading = True
-            , mReaderSel = Nothing
-            , mHighlightNoteOpen = False
-            , mHighlightNote = ""
-            , mHighlightEdit = Nothing
-            , mSnapshotOpen = False
-            , mShareDialogOpen = False
-            , mShareUrl = Nothing
-            , mConfirmDelete = Nothing
-            }
+        m{gDetail = (gDetail m){dtDetail = Nothing, dtDetailLoading = True, dtDetailError = Nothing, dtDetailEpoch = epoch, dtReadRequest = nextRequestId (mReadRequest m), dtReadPending = False, dtEditTitle = "", dtEditNote = "", dtEditTags = [], dtNewTag = "", dtDirty = False, dtExtractEditing = False, dtExtractDraft = "", dtExtractDirty = False, dtExtractSaving = False, dtNoteMode = NoteWrite, dtLinkQuery = Nothing, dtLinkResults = [], dtBacklinks = [], dtHighlights = [], dtHighlightsLoading = True, dtReaderSel = Nothing, dtHighlightNoteOpen = False, dtHighlightNote = "", dtHighlightEdit = Nothing, dtSnapshotOpen = False}, gShares = (gShares m){srShareDialogOpen = False, srShareUrl = Nothing}, gLedger = (gLedger m){lfConfirmDelete = Nothing}}
     fetchDetail bookmarkId (DetailLoaded epoch) (DetailFailed epoch)
     fetchBacklinks bookmarkId (BacklinksLoaded epoch) (BacklinksFailed epoch)
     fetchHighlights bookmarkId (HighlightsLoaded epoch) (HighlightsFailed epoch)
@@ -169,22 +131,22 @@ refreshShares = do
 handle :: Action -> Update ()
 handle = \case
     AddOpen -> do
-        putModel (\m -> m{mAddOpen = True, mAddError = Nothing})
+        putModel (\m -> m{gAdd = (gAdd m){adAddOpen = True, adAddError = Nothing}})
         focusElementDelayed "add-url"
-    AddClose -> putModel (\m -> m{mAddOpen = False, mAddError = Nothing})
-    AddUrlInput url -> putModel (\m -> m{mAddUrl = url})
-    AddTitleInput title -> putModel (\m -> m{mAddTitle = title})
-    AddTagsInput tags -> putModel (\m -> m{mAddTags = tags})
-    AddNoteInput note -> putModel (\m -> m{mAddNote = note})
+    AddClose -> putModel (\m -> m{gAdd = (gAdd m){adAddOpen = False, adAddError = Nothing}})
+    AddUrlInput url -> putModel (\m -> m{gAdd = (gAdd m){adAddUrl = url}})
+    AddTitleInput title -> putModel (\m -> m{gAdd = (gAdd m){adAddTitle = title}})
+    AddTagsInput tags -> putModel (\m -> m{gAdd = (gAdd m){adAddTags = tags}})
+    AddNoteInput note -> putModel (\m -> m{gAdd = (gAdd m){adAddNote = note}})
     AddSubmit -> do
         m <- get
         if mAddBusy m
             then pure ()
             else
                 if not (isHttpUrlText (mAddUrl m))
-                    then putModel (\x -> x{mAddError = Just "Enter a valid http(s) URL."})
+                    then putModel (\x -> x{gAdd = (gAdd x){adAddError = Just "Enter a valid http(s) URL."}})
                     else do
-                        putModel (\x -> x{mAddBusy = True, mAddError = Nothing})
+                        putModel (\x -> x{gAdd = (gAdd x){adAddBusy = True, adAddError = Nothing}})
                         createBookmark
                             (mAddUrl m)
                             (mAddTitle m)
@@ -210,7 +172,7 @@ handle = \case
             ToastError
         finalizeAdd bookmarkId
     AddFailed err -> do
-        putModel (\m -> m{mAddBusy = False, mAddError = Just ((aeMessage err))})
+        putModel (\m -> m{gAdd = (gAdd m){adAddBusy = False, adAddError = Just ((aeMessage err))}})
         handleApiError err
     -- command palette -------------------------------------------------------
     DetailLoaded epoch detail -> sameEpoch epoch $ do
@@ -220,45 +182,30 @@ handle = \case
             Bookmark _ ->
                 putModel
                     ( \x ->
-                        x
-                            { mDetail = Just detail
-                            , mDetailLoading = False
-                            , mDetailError = Nothing
-                            , mEditTitle = (bdTitle detail)
-                            , mEditNote = (bdNoteBody detail)
-                            , mEditTags = bdTags detail
-                            , mDirty = False
-                            , mExtractEditing = False
-                            , mExtractDraft = (bdExtractedText detail)
-                            , mExtractDirty = False
-                            , mExtractSaving = False
-                            , mNoteMode = NoteWrite
-                            , mLinkQuery = Nothing
-                            , mLinkResults = []
-                            }
+                        x{gDetail = (gDetail x){dtDetail = Just detail, dtDetailLoading = False, dtDetailError = Nothing, dtEditTitle = (bdTitle detail), dtEditNote = (bdNoteBody detail), dtEditTags = bdTags detail, dtDirty = False, dtExtractEditing = False, dtExtractDraft = (bdExtractedText detail), dtExtractDirty = False, dtExtractSaving = False, dtNoteMode = NoteWrite, dtLinkQuery = Nothing, dtLinkResults = []}}
                     )
             _ -> pure ()
     DetailFailed epoch err -> sameEpoch epoch $ do
-        putModel (\m -> m{mDetailLoading = False, mDetail = Nothing, mDetailError = Just ((aeMessage err))})
+        putModel (\m -> m{gDetail = (gDetail m){dtDetailLoading = False, dtDetail = Nothing, dtDetailError = Just ((aeMessage err))}})
         handleApiError err
-    TitleInput title -> putModel (\m -> m{mEditTitle = title, mDirty = True})
+    TitleInput title -> putModel (\m -> m{gDetail = (gDetail m){dtEditTitle = title, dtDirty = True}})
     NoteChanged noteText -> do
-        putModel (\m -> m{mEditNote = noteText, mDirty = True})
+        putModel (\m -> m{gDetail = (gDetail m){dtEditNote = noteText, dtDirty = True}})
         readNoteCursor
     NoteCursorRead cursor -> do
         m <- get
         dispatch (NoteMeta cursor (wikilinkQueryAt (mEditNote m) cursor))
     NoteMeta cursor query -> do
         m <- get
-        putModel (\x -> x{mNoteCursor = cursor, mLinkQuery = query})
+        putModel (\x -> x{gDetail = (gDetail x){dtNoteCursor = cursor, dtLinkQuery = query}})
         case query of
-            Nothing -> putModel (\x -> x{mLinkResults = []})
+            Nothing -> putModel (\x -> x{gDetail = (gDetail x){dtLinkResults = []}})
             Just rawQuery ->
                 if T.null rawQuery
-                    then putModel (\x -> x{mLinkResults = take 6 (mItems m)})
+                    then putModel (\x -> x{gDetail = (gDetail x){dtLinkResults = take 6 (mItems m)}})
                     else fetchAutocomplete rawQuery LinkSuggestions (\_ -> Noop)
-    NoteModeChanged mode -> putModel (\m -> m{mNoteMode = mode})
-    TagDraftInput draft -> putModel (\m -> m{mNewTag = draft})
+    NoteModeChanged mode -> putModel (\m -> m{gDetail = (gDetail m){dtNoteMode = mode}})
+    TagDraftInput draft -> putModel (\m -> m{gDetail = (gDetail m){dtNewTag = draft}})
     TagAdd -> do
         m <- get
         case parseTagInput (mNewTag m) of
@@ -266,19 +213,15 @@ handle = \case
             Just tag ->
                 putModel
                     ( \x ->
-                        x
-                            { mEditTags = if tag `elem` mEditTags x then mEditTags x else mEditTags x ++ [tag]
-                            , mNewTag = ""
-                            , mDirty = True
-                            }
+                        x{gDetail = (gDetail x){dtEditTags = if tag `elem` mEditTags x then mEditTags x else mEditTags x ++ [tag], dtNewTag = "", dtDirty = True}}
                     )
-    TagRemove tag -> putModel (\m -> m{mEditTags = filter (/= tag) (mEditTags m), mDirty = True})
+    TagRemove tag -> putModel (\m -> m{gDetail = (gDetail m){dtEditTags = filter (/= tag) (mEditTags m), dtDirty = True}})
     SaveBookmark -> do
         m <- get
         case currentDetail m of
             Nothing -> pure ()
             Just detail -> do
-                putModel (\x -> x{mSaving = True, mExtractSaving = mExtractEditing m})
+                putModel (\x -> x{gDetail = (gDetail x){dtSaving = True, dtExtractSaving = mExtractEditing m}})
                 let fields =
                         [ "title" .= mEditTitle m
                         , "note_body" .= mEditNote m
@@ -303,22 +246,13 @@ handle = \case
         m <- get
         putModel
             ( \x ->
-                x
-                    { mSaving = False
-                    , mExtractSaving = False
-                    , mDirty = False
-                    , mExtractDirty = False
-                    }
+                x{gDetail = (gDetail x){dtSaving = False, dtExtractSaving = False, dtDirty = False, dtExtractDirty = False}}
             )
         case (mDetail m, mExtractEditing m) of
             (Just detail, True) ->
                 putModel
                     ( \x ->
-                        x
-                            { mDetail = Just (textEditedDetail detail (mExtractDraft m))
-                            , mExtractEditing = False
-                            , mExtractDraft = mExtractDraft m
-                            }
+                        x{gDetail = (gDetail x){dtDetail = Just (textEditedDetail detail (mExtractDraft m)), dtExtractEditing = False, dtExtractDraft = mExtractDraft m}}
                     )
             _ -> pure ()
         notify
@@ -333,7 +267,7 @@ handle = \case
                 Nothing -> pure ()
         refreshStats
     SaveFailed err -> do
-        putModel (\m -> m{mSaving = False, mExtractSaving = False})
+        putModel (\m -> m{gDetail = (gDetail m){dtSaving = False, dtExtractSaving = False}})
         handleApiError err
     ExtractEditStart -> do
         m <- get
@@ -342,27 +276,19 @@ handle = \case
             Just detail ->
                 putModel
                     ( \x ->
-                        x
-                            { mExtractEditing = True
-                            , mExtractDraft = (bdExtractedText detail)
-                            , mExtractDirty = False
-                            }
+                        x{gDetail = (gDetail x){dtExtractEditing = True, dtExtractDraft = (bdExtractedText detail), dtExtractDirty = False}}
                     )
                     >> focusElementDelayed "extract-text-editor"
     ExtractEditChanged draft ->
-        putModel (\m -> m{mExtractDraft = draft, mExtractDirty = True})
+        putModel (\m -> m{gDetail = (gDetail m){dtExtractDraft = draft, dtExtractDirty = True}})
     ExtractEditCancel -> do
         m <- get
         case currentDetail m of
-            Nothing -> putModel (\x -> x{mExtractEditing = False, mExtractDirty = False})
+            Nothing -> putModel (\x -> x{gDetail = (gDetail x){dtExtractEditing = False, dtExtractDirty = False}})
             Just detail ->
                 putModel
                     ( \x ->
-                        x
-                            { mExtractEditing = False
-                            , mExtractDraft = (bdExtractedText detail)
-                            , mExtractDirty = False
-                            }
+                        x{gDetail = (gDetail x){dtExtractEditing = False, dtExtractDraft = (bdExtractedText detail), dtExtractDirty = False}}
                     )
     ExtractSaved _ -> pure ()
     MarkLinkAlive -> do
@@ -373,10 +299,7 @@ handle = \case
     LinkMarkedAlive -> do
         putModel
             ( \m ->
-                m
-                    { mDetail =
-                        fmap (\detail -> detail{bdIsDead = False, bdManualAlive = True}) (mDetail m)
-                    }
+                m{gDetail = (gDetail m){dtDetail = fmap (\detail -> detail{bdIsDead = False, bdManualAlive = True}) (mDetail m)}}
             )
         notify "Kept alive; automatic checks will skip it" ToastOk
         refreshStats
@@ -388,10 +311,7 @@ handle = \case
     LinkRechecked -> do
         putModel
             ( \m ->
-                m
-                    { mDetail =
-                        fmap (\detail -> detail{bdManualAlive = False}) (mDetail m)
-                    }
+                m{gDetail = (gDetail m){dtDetail = fmap (\detail -> detail{bdManualAlive = False}) (mDetail m)}}
             )
         notify "Automatic checks will run on the next sweep" ToastInfo
     -- A read toggle is its own patch: it must not clear the unsaved note and
@@ -405,11 +325,7 @@ handle = \case
                     requestId = nextRequestId (mReadRequest m)
                 putModel
                     ( \x ->
-                        x
-                            { mDetail = Just detail{bdIsRead = nextRead}
-                            , mReadRequest = requestId
-                            , mReadPending = True
-                            }
+                        x{gDetail = (gDetail x){dtDetail = Just detail{bdIsRead = nextRead}, dtReadRequest = requestId, dtReadPending = True}}
                     )
                 patchBookmark
                     (bdId detail)
@@ -421,10 +337,10 @@ handle = \case
     ReadPatched requestId readFlag -> do
         m <- get
         when (requestIsCurrent (mReadRequest m) requestId) $ do
-            putModel (\x -> x{mReadPending = False})
+            putModel (\x -> x{gDetail = (gDetail x){dtReadPending = False}})
             case currentDetail m of
                 Nothing -> pure ()
-                Just detail -> putModel (\x -> x{mDetail = Just detail{bdIsRead = readFlag}})
+                Just detail -> putModel (\x -> x{gDetail = (gDetail x){dtDetail = Just detail{bdIsRead = readFlag}}})
             refreshStats
     -- On failure, read the record back from the server rather than guessing
     -- the inverse; an unsaved note keeps its edits and only the flag rolls
@@ -432,11 +348,11 @@ handle = \case
     ReadPatchFailed requestId readFlag err -> do
         m <- get
         when (requestIsCurrent (mReadRequest m) requestId) $ do
-            putModel (\x -> x{mReadPending = False})
+            putModel (\x -> x{gDetail = (gDetail x){dtReadPending = False}})
             case currentDetail m of
                 Just detail
                     | hasUnsaved m ->
-                        putModel (\x -> x{mDetail = Just detail{bdIsRead = not readFlag}})
+                        putModel (\x -> x{gDetail = (gDetail x){dtDetail = Just detail{bdIsRead = not readFlag}}})
                     | otherwise -> dispatch (DetailReload (bdId detail))
                 Nothing -> pure ()
             handleApiError err
@@ -444,14 +360,14 @@ handle = \case
     BacklinksLoaded epoch links -> sameEpoch epoch $ do
         m <- get
         case mRoute m of
-            Bookmark _ -> putModel (\x -> x{mBacklinks = links})
+            Bookmark _ -> putModel (\x -> x{gDetail = (gDetail x){dtBacklinks = links}})
             _ -> pure ()
     BacklinksFailed epoch err -> sameEpoch epoch (handleApiError err)
-    LinkPrev -> putModel (\m -> m{mLinkSel = max 0 (mLinkSel m - 1)})
+    LinkPrev -> putModel (\m -> m{gDetail = (gDetail m){dtLinkSel = max 0 (mLinkSel m - 1)}})
     LinkNext -> do
         m <- get
         let count = length (mLinkResults m)
-        putModel (\x -> x{mLinkSel = if count == 0 then 0 else min (count - 1) (mLinkSel x + 1)})
+        putModel (\x -> x{gDetail = (gDetail x){dtLinkSel = if count == 0 then 0 else min (count - 1) (mLinkSel x + 1)}})
     LinkChoose index -> do
         m <- get
         case drop index (mLinkResults m) of
@@ -460,18 +376,12 @@ handle = \case
                 let (newNote, newCursor) = completeWikilink ((mEditNote m)) (mNoteCursor m) (bsTitle bookmark)
                 putModel
                     ( \x ->
-                        x
-                            { mEditNote = newNote
-                            , mNoteCursor = newCursor
-                            , mLinkQuery = Nothing
-                            , mLinkResults = []
-                            , mDirty = True
-                            }
+                        x{gDetail = (gDetail x){dtEditNote = newNote, dtNoteCursor = newCursor, dtLinkQuery = Nothing, dtLinkResults = [], dtDirty = True}}
                     )
                 setNoteCursor newCursor
-    LinkSuggestions suggestions -> putModel (\m -> m{mLinkResults = suggestions, mLinkSel = 0})
+    LinkSuggestions suggestions -> putModel (\m -> m{gDetail = (gDetail m){dtLinkResults = suggestions, dtLinkSel = 0}})
     RunBookmarkAction bookmarkId "snapshot" -> do
-        putModel (\m -> m{mSnapshotBusy = True})
+        putModel (\m -> m{gDetail = (gDetail m){dtSnapshotBusy = True}})
         notify "Capturing a snapshot…" ToastInfo
         createSnapshotJob
             bookmarkId
@@ -479,10 +389,10 @@ handle = \case
             (\err -> SnapshotJobFailed bookmarkId (Just (aeMessage err)))
     RunBookmarkAction bookmarkId verb -> bookmarkAction bookmarkId verb (ToastAdd ((T.toTitle verb <> " queued")) ToastOk) (\err -> ApiErrorRaised err)
     SnapshotJobQueued bookmarkId jobId -> do
-        putModel (\m -> m{mSnapshotJob = Just jobId})
+        putModel (\m -> m{gDetail = (gDetail m){dtSnapshotJob = Just jobId}})
         dispatch (JobStarted (SnapshotJob bookmarkId) jobId)
     SnapshotJobDone bookmarkId result -> do
-        putModel (\m -> m{mSnapshotBusy = False, mSnapshotJob = Nothing})
+        putModel (\m -> m{gDetail = (gDetail m){dtSnapshotBusy = False, dtSnapshotJob = Nothing}})
         case result of
             Nothing -> notify "The snapshot job returned no result." ToastError
             Just value -> case decodeSnapshotJobResult value of
@@ -491,19 +401,19 @@ handle = \case
                     notify "Snapshot captured" ToastOk
                     dispatch (DetailReload bookmarkId)
     SnapshotJobFailed _ message -> do
-        putModel (\m -> m{mSnapshotBusy = False, mSnapshotJob = Nothing})
+        putModel (\m -> m{gDetail = (gDetail m){dtSnapshotBusy = False, dtSnapshotJob = Nothing}})
         notify (fromMaybe "The snapshot capture failed." message) ToastError
     SnapshotJobAbandoned _ ->
-        putModel (\m -> m{mSnapshotBusy = False, mSnapshotJob = Nothing})
+        putModel (\m -> m{gDetail = (gDetail m){dtSnapshotBusy = False, dtSnapshotJob = Nothing}})
     DeleteBookmarkRequest bookmarkId -> do
         m <- get
         case currentDetail m of
-            Just detail | bdId detail == bookmarkId -> putModel (\x -> x{mConfirmDelete = Just bookmarkId})
+            Just detail | bdId detail == bookmarkId -> putModel (\x -> x{gLedger = (gLedger x){lfConfirmDelete = Just bookmarkId}})
             _ -> pure ()
-    DeleteBookmarkCancel -> putModel (\m -> m{mConfirmDelete = Nothing})
+    DeleteBookmarkCancel -> putModel (\m -> m{gLedger = (gLedger m){lfConfirmDelete = Nothing}})
     DeleteBookmarkConfirm -> do
         m <- get
-        putModel (\x -> x{mConfirmDelete = Nothing})
+        putModel (\x -> x{gLedger = (gLedger x){lfConfirmDelete = Nothing}})
         case (mConfirmDelete m, currentDetail m) of
             -- The record stays painted while the write is in flight. Clearing
             -- it here used to make a failed delete look like a successful one:
@@ -527,17 +437,17 @@ handle = \case
             Bookmark currentId | currentId == bookmarkId -> navigateTo Index
             _ -> reloadList
     DeleteFailed err -> handleApiError err
-    DirtyGuardOpen route -> putModel (\m -> m{mGuardOpen = True, mPendingRoute = Just route, mGuardFromHistory = False})
+    DirtyGuardOpen route -> putModel (\m -> m{gShell = (gShell m){sfGuardOpen = True, sfPendingRoute = Just route, sfGuardFromHistory = False}})
     -- Keep editing. When the guard came from a history navigation the address
     -- has already moved to the pending route; put it back without adding a
     -- history entry so the URL matches the record still on screen.
     DirtyGuardClose -> do
         m <- get
-        putModel (\x -> x{mGuardOpen = False, mPendingRoute = Nothing, mGuardFromHistory = False})
+        putModel (\x -> x{gShell = (gShell x){sfGuardOpen = False, sfPendingRoute = Nothing, sfGuardFromHistory = False}})
         when (mGuardFromHistory m) $ replaceBrowserRoute (mRoute m)
     DirtyGuardDiscard -> do
         m <- get
-        putModel (\x -> x{mGuardOpen = False, mPendingRoute = Nothing, mGuardFromHistory = False, mDirty = False, mExtractDirty = False, mExtractEditing = False})
+        putModel (\x -> x{gShell = (gShell x){sfGuardOpen = False, sfPendingRoute = Nothing, sfGuardFromHistory = False}, gDetail = (gDetail x){dtDirty = False, dtExtractDirty = False, dtExtractEditing = False}})
         case mPendingRoute m of
             Nothing -> pure ()
             -- The address already points at the pending route after a history
@@ -549,14 +459,14 @@ handle = \case
     HighlightsLoaded epoch highlights -> sameEpoch epoch $ do
         m <- get
         case mRoute m of
-            Bookmark _ -> putModel (\x -> x{mHighlights = highlights, mHighlightsLoading = False})
+            Bookmark _ -> putModel (\x -> x{gDetail = (gDetail x){dtHighlights = highlights, dtHighlightsLoading = False}})
             _ -> pure ()
     HighlightsFailed epoch err -> sameEpoch epoch $ do
-        putModel (\m -> m{mHighlightsLoading = False})
+        putModel (\m -> m{gDetail = (gDetail m){dtHighlightsLoading = False}})
         handleApiError err
     ReaderMouseUp -> readReaderSelection
-    ReaderSelectionFound selection -> putModel (\m -> m{mReaderSel = selection})
-    ReaderSelectionClear -> putModel (\m -> m{mReaderSel = Nothing})
+    ReaderSelectionFound selection -> putModel (\m -> m{gDetail = (gDetail m){dtReaderSel = selection}})
+    ReaderSelectionClear -> putModel (\m -> m{gDetail = (gDetail m){dtReaderSel = Nothing}})
     HighlightCreateQuick -> do
         m <- get
         case (currentDetail m, mReaderSel m) of
@@ -573,14 +483,14 @@ handle = \case
                     HighlightAdded
                     HighlightFailed
             _ -> notify "Select some reader text first" ToastInfo
-    HighlightNoteOpen -> putModel (\m -> m{mHighlightNoteOpen = True, mHighlightNote = ""})
-    HighlightNoteInput value -> putModel (\m -> m{mHighlightNote = value})
-    HighlightNoteCancel -> putModel (\m -> m{mHighlightNoteOpen = False, mHighlightNote = ""})
+    HighlightNoteOpen -> putModel (\m -> m{gDetail = (gDetail m){dtHighlightNoteOpen = True, dtHighlightNote = ""}})
+    HighlightNoteInput value -> putModel (\m -> m{gDetail = (gDetail m){dtHighlightNote = value}})
+    HighlightNoteCancel -> putModel (\m -> m{gDetail = (gDetail m){dtHighlightNoteOpen = False, dtHighlightNote = ""}})
     HighlightNoteSubmit -> do
         m <- get
         case (currentDetail m, mReaderSel m) of
             (Just detail, Just selection) -> do
-                putModel (\x -> x{mHighlightNoteOpen = False})
+                putModel (\x -> x{gDetail = (gDetail x){dtHighlightNoteOpen = False}})
                 createHighlight
                     (bdId detail)
                     (rsQuote selection)
@@ -592,16 +502,11 @@ handle = \case
                     "yellow"
                     HighlightAdded
                     HighlightFailed
-            _ -> putModel (\x -> x{mHighlightNoteOpen = False})
+            _ -> putModel (\x -> x{gDetail = (gDetail x){dtHighlightNoteOpen = False}})
     HighlightAdded highlight -> do
         putModel
             ( \m ->
-                m
-                    { mHighlights = insertHighlight highlight (mHighlights m)
-                    , mReaderSel = Nothing
-                    , mHighlightNoteOpen = False
-                    , mHighlightNote = ""
-                    }
+                m{gDetail = (gDetail m){dtHighlights = insertHighlight highlight (mHighlights m), dtReaderSel = Nothing, dtHighlightNoteOpen = False, dtHighlightNote = ""}}
             )
         notify "Highlight saved" ToastOk
         refreshStats
@@ -611,21 +516,17 @@ handle = \case
             (highlight : _) ->
                 putModel
                     ( \x ->
-                        x
-                            { mHighlightEdit = Just highlightId
-                            , mHighlightEditNote = (hNote highlight)
-                            , mHighlightEditColor = hColor highlight
-                            }
+                        x{gDetail = (gDetail x){dtHighlightEdit = Just highlightId, dtHighlightEditNote = (hNote highlight), dtHighlightEditColor = hColor highlight}}
                     )
             [] -> pure ()
-    HighlightEditInput value -> putModel (\m -> m{mHighlightEditNote = value})
-    HighlightEditColor color -> putModel (\m -> m{mHighlightEditColor = color})
-    HighlightEditCancel -> putModel (\m -> m{mHighlightEdit = Nothing, mHighlightEditNote = ""})
+    HighlightEditInput value -> putModel (\m -> m{gDetail = (gDetail m){dtHighlightEditNote = value}})
+    HighlightEditColor color -> putModel (\m -> m{gDetail = (gDetail m){dtHighlightEditColor = color}})
+    HighlightEditCancel -> putModel (\m -> m{gDetail = (gDetail m){dtHighlightEdit = Nothing, dtHighlightEditNote = ""}})
     HighlightEditSave -> do
         m <- get
         case (currentDetail m, mHighlightEdit m) of
             (Just detail, Just highlightId) -> do
-                putModel (\x -> x{mHighlightEdit = Nothing})
+                putModel (\x -> x{gDetail = (gDetail x){dtHighlightEdit = Nothing}})
                 patchHighlight
                     (bdId detail)
                     highlightId
@@ -633,7 +534,7 @@ handle = \case
                     (Just (mHighlightEditColor m))
                     HighlightPatched
                     HighlightFailed
-            _ -> putModel (\x -> x{mHighlightEdit = Nothing})
+            _ -> putModel (\x -> x{gDetail = (gDetail x){dtHighlightEdit = Nothing}})
     HighlightDelete highlightId -> do
         m <- get
         case currentDetail m of
@@ -651,14 +552,10 @@ handle = \case
     SharesLoaded epoch shares -> sameEpoch epoch $ do
         putModel
             ( \m ->
-                m
-                    { mShares = shares
-                    , mSharesLoading = False
-                    , mSharesError = Nothing
-                    }
+                m{gShares = (gShares m){srShares = shares, srSharesLoading = False, srSharesError = Nothing}}
             )
     SharesFailed epoch err -> sameEpoch epoch $ do
-        putModel (\m -> m{mSharesLoading = False, mSharesError = Just ((aeMessage err))})
+        putModel (\m -> m{gShares = (gShares m){srSharesLoading = False, srSharesError = Just ((aeMessage err))}})
         handleApiError err
     ShareDialogOpen -> do
         m <- get
@@ -667,26 +564,18 @@ handle = \case
                 let epoch = mDetailEpoch m
                 putModel
                     ( \x ->
-                        x
-                            { mShareDialogOpen = True
-                            , mShareIncludeNote = False
-                            , mShareExpiryDays = 30
-                            , mShareUrl = Nothing
-                            , mShareBusy = False
-                            , mSharesLoading = True
-                            , mSharesError = Nothing
-                            }
+                        x{gShares = (gShares x){srShareDialogOpen = True, srShareIncludeNote = False, srShareExpiryDays = 30, srShareUrl = Nothing, srShareBusy = False, srSharesLoading = True, srSharesError = Nothing}}
                     )
                 fetchShares (\shares -> SharesLoaded epoch shares) (SharesFailed epoch)
             Nothing -> pure ()
-    ShareDialogClose -> putModel (\m -> m{mShareDialogOpen = False, mShareUrl = Nothing})
-    ShareIncludeNoteToggle -> putModel (\m -> m{mShareIncludeNote = not (mShareIncludeNote m)})
-    ShareExpirySelected days -> putModel (\m -> m{mShareExpiryDays = days})
+    ShareDialogClose -> putModel (\m -> m{gShares = (gShares m){srShareDialogOpen = False, srShareUrl = Nothing}})
+    ShareIncludeNoteToggle -> putModel (\m -> m{gShares = (gShares m){srShareIncludeNote = not (mShareIncludeNote m)}})
+    ShareExpirySelected days -> putModel (\m -> m{gShares = (gShares m){srShareExpiryDays = days}})
     ShareCreate -> do
         m <- get
         case currentDetail m of
             Just detail -> do
-                putModel (\x -> x{mShareBusy = True})
+                putModel (\x -> x{gShares = (gShares x){srShareBusy = True}})
                 createShareLink
                     "bookmark"
                     (bdId detail)
@@ -696,12 +585,12 @@ handle = \case
                     ShareCreateFailed
             Nothing -> pure ()
     ShareCreated shareId url -> do
-        putModel (\m -> m{mShareBusy = False, mShareUrl = Just url})
+        putModel (\m -> m{gShares = (gShares m){srShareBusy = False, srShareUrl = Just url}})
         notify (T.pack ("Share link created (#" <> show shareId <> ")")) ToastOk
         refreshShares
         refreshStats
     ShareCreateFailed err -> do
-        putModel (\m -> m{mShareBusy = False})
+        putModel (\m -> m{gShares = (gShares m){srShareBusy = False}})
         handleApiError err
     ShareCopy url -> copyText ((url :: Text)) "Share link copied" "Copy failed. Select the text instead"
     ShareRevoke shareId -> revokeShareLink shareId ShareRevoked ShareCreateFailed
@@ -710,7 +599,7 @@ handle = \case
         refreshShares
         refreshStats
     -- snapshot -------------------------------------------------------------
-    SnapshotOpen -> putModel (\m -> m{mSnapshotOpen = True})
-    SnapshotClose -> putModel (\m -> m{mSnapshotOpen = False})
+    SnapshotOpen -> putModel (\m -> m{gDetail = (gDetail m){dtSnapshotOpen = True}})
+    SnapshotClose -> putModel (\m -> m{gDetail = (gDetail m){dtSnapshotOpen = False}})
     -- ai status ------------------------------------------------------------
     _ -> pure ()
