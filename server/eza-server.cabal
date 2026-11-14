@@ -63,6 +63,7 @@ library
                     Eza.JsonExport
                     Eza.Jobs
                     Eza.Library
+                    Eza.Migrate
                     Eza.Links
                     Eza.Pages
                     Eza.Password
@@ -145,6 +146,7 @@ test-suite eza-test
                     IsolationSpec
                     LedgerSpec
                     LibrarySpec
+                    MigrationSpec
                     OriginGuardSpec
                     TestHarness
                     WorkerSpec
@@ -155,6 +157,7 @@ test-suite eza-test
                     DispatchSpec
                     GraphLayoutSpec
                     PerfSpec
+                    ProblemSpec
                     RoutesSpec
                     SecuritySpec
                     ViewContractSpec

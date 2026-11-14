@@ -1,7 +1,7 @@
 -- | Public pages, the health endpoint, and public share pages.
 module Eza.Api.Public where
 
-import Control.Exception (IOException, SomeException, bracket, bracket_, onException, throwIO, try)
+import Control.Exception (SomeException, try)
 
 import Data.Aeson
 
@@ -11,7 +11,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
-import Database.SQLite.Simple (Connection, Only (..), query)
+import Database.SQLite.Simple (Connection)
 
 import Network.HTTP.Types
 import Network.Wai
@@ -20,12 +20,12 @@ import Eza.Bookmarks
 
 import qualified Eza.Db as Db
 
-import Eza.Pages (addPasskeyPage, loginPage, passkeyLoginPage, recoverPage, recoverySetupPage, setupPage)
+import Eza.Pages (addPasskeyPage)
 
 import Eza.Routes (Route (..))
 
-import Eza.SavedSearches (createSavedSearch, deleteSavedSearch, listSavedSearches)
-import Eza.Shares (ShareRecord (..), ShareState (..), ShareUnavailable (..), createShare, listShares, resolveShareState, revokeShare, shareBookmarkPage, shareSearchFeed, shareSearchPage, shareUnavailablePage)
+import Eza.SavedSearches (listSavedSearches)
+import Eza.Shares (ShareRecord (..), ShareState (..), ShareUnavailable (..), resolveShareState, shareBookmarkPage, shareSearchFeed, shareSearchPage, shareUnavailablePage)
 import Eza.Shell (pageAssets)
 
 import Eza.Types
@@ -40,7 +40,7 @@ health state respond = do
     result <- try (withControl state Db.ping) :: IO (Either SomeException Bool)
     case result of
         Right True -> respond (jsonResponse status200 (object ["status" .= ("ok" :: Text), "version" .= ("0.1.0" :: Text)]))
-        _ -> respond (jsonError status503 "unavailable" "database is unavailable")
+        _ -> respond (jsonProblem status503 "unavailable" "database is unavailable")
 
 {- | A share link is public but still resolves to one account: the token prefix
 names the database to read. A revoked, expired, or wrong-database token gets
@@ -59,7 +59,7 @@ publicShareHandler state token respond = do
             case shareState of
                 ShareGone reason ->
                     if isFeed
-                        then respond (shareHeaders (jsonError (unavailableStatus reason) "not_found" "share link is not readable"))
+                        then respond (shareHeaders (jsonProblem (unavailableStatus reason) "not_found" "share link is not readable"))
                         else respond (shareHeaders (htmlResponseAt (unavailableStatus reason) (shareUnavailablePage reason)))
                 ShareReadable record
                     | srScope record == "bookmark" -> do
@@ -67,7 +67,7 @@ publicShareHandler state token respond = do
                         case bookmark of
                             Nothing -> respond (shareHeaders (htmlResponseAt status404 (shareUnavailablePage ShareInvalid)))
                             Just detail
-                                | isFeed -> respond (shareHeaders (jsonError status404 "not_found" "feeds are only available for saved searches"))
+                                | isFeed -> respond (shareHeaders (jsonProblem status404 "not_found" "feeds are only available for saved searches"))
                                 | otherwise -> respond (shareHeaders (htmlResponseAt status200 (shareBookmarkPage record detail)))
                     | srScope record == "saved_search" -> do
                         searches <- listSavedSearches conn
@@ -92,7 +92,7 @@ dispatch rctx _conn route req respond = case route of
     RouteAddPasskeyPage -> respond (htmlResponse (addPasskeyPage (pageAssets (asAssets state))))
     RouteSpaPage ->
         indexResponse state req respond
-    _ -> respond (jsonError status500 "internal_error" "route has no handler")
+    _ -> respond (jsonProblem status500 "internal_error" "route has no handler")
   where
     state = rcState rctx
 

@@ -4,8 +4,8 @@ module Eza.Api.Context where
 import Control.Concurrent (threadDelay)
 
 import Control.Concurrent.MVar
-import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
-import Control.Exception (IOException, SomeException, bracket, bracket_, onException, throwIO, try)
+import Control.Concurrent.QSem (QSem, newQSem)
+import Control.Exception (SomeException, bracket, try)
 import Control.Monad (forM, forM_, unless, when)
 
 import qualified Data.ByteString as BS
@@ -21,20 +21,20 @@ import qualified Data.Text as T
 
 import Data.Time.Clock.POSIX (getPOSIXTime)
 
-import Database.SQLite.Simple (Connection, Only (..), query)
+import Database.SQLite.Simple (Connection, Only (..))
 import qualified Database.SQLite.Simple as Sqlite
 import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types
 import Network.Wai
 
-import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist, getFileSize, getModificationTime)
+import System.Directory (doesFileExist)
 
 import System.IO (hPutStrLn, stderr)
 
 import qualified Eza.Admin as Admin
 
-import Eza.Assets (Assets, assetPath, assetRelativePath, assetsAvailable, assetsBuildId, assetsServiceWorker, isImmutableAsset, loadAssetsForStartup)
+import Eza.Assets (Assets, loadAssetsForStartup)
 import qualified Eza.Auth as Auth
 
 import Eza.Config
@@ -45,9 +45,9 @@ import Eza.Library (LibraryWorkerConfig (..))
 import qualified Eza.Library as Library
 
 import qualified Eza.TokenPrefix as TokenPrefix
-import Eza.Tokens (Token (..), createToken, listTokens, revokeToken, tokenActivityDue, touchToken, validateToken)
+import Eza.Tokens (Token (..), tokenActivityDue, touchToken)
 
-import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..))
+import Eza.User (UserRole (..))
 
 import Eza.Api.Common
 
@@ -376,7 +376,7 @@ withSlot ::
 withSlot state user respond action = do
     result <- userSlotFor state user
     case result of
-        Left message -> respond (jsonError status503 "user_limit" message)
+        Left message -> respond (jsonProblem status503 "user_limit" message)
         Right slot -> action slot
 
 enabledUserById :: AppState -> Int -> IO (Maybe Control.ControlUser)

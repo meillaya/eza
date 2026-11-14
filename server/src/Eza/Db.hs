@@ -31,6 +31,9 @@ module Eza.Db (
     schemaV13,
     schemaV14,
     schemaV15,
+    schemaV16,
+    dbMigrationPlan,
+    checkSchema,
     maxStoredTimestamp,
     normaliseTimestamp,
     databaseClaimed,
@@ -40,7 +43,7 @@ module Eza.Db (
 
 import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
 import Control.Exception (Exception, SomeException, bracket, onException, throwIO, try)
-import Control.Monad (forM_, when)
+import Control.Monad (when)
 import Crypto.Random (getRandomBytes)
 import qualified Data.ByteString as BS
 import Data.Char (isAlphaNum)
@@ -56,6 +59,7 @@ import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO.Unsafe (unsafePerformIO)
 
 import Eza.Clip (clipSchema)
+import qualified Eza.Migrate as Migrate
 import Eza.Views (seedDefaultViews)
 
 newtype DbError = DbError Text
@@ -64,7 +68,7 @@ newtype DbError = DbError Text
 instance Exception DbError
 
 targetSchemaVersion :: Int
-targetSchemaVersion = 15
+targetSchemaVersion = 16
 
 {- | The last POSIX second SQLite can render as a calendar date: 9999-12-31
 23:59:59 UTC. A stored @created_at@ above this makes @strftime@ and @date@
@@ -158,12 +162,22 @@ initDb path = openDb path >> pure ()
 
 migrate :: FilePath -> Sqlite.Connection -> IO ()
 migrate dbPath conn = do
-    version <- schemaVersion conn
-    when (version > targetSchemaVersion) $
-        throwIO (DbError ("database schema is newer than this binary: " <> T.pack (show version)))
-    ensureCompatible conn version
-    when (version > 0 && version < targetSchemaVersion) (preMigrationBackup dbPath conn version)
-    applyFrom conn version
+    start <- Migrate.currentVersion conn
+    ensureCompatible conn start
+    case Migrate.latestVersion dbMigrationPlan of
+        Left message -> throwIO (DbError (T.pack dbPath <> ": " <> message))
+        Right target -> do
+            when (start > 0 && start < target) (preMigrationBackup dbPath conn start)
+            result <- Migrate.applyMigrations conn dbMigrationPlan
+            case result of
+                Left message -> throwIO (DbError (T.pack dbPath <> ": " <> message))
+                Right _ -> pure ()
+
+{- | The schema state for the @verify@ command; unlike 'migrate' this never
+applies anything.
+-}
+checkSchema :: Sqlite.Connection -> IO (Either Text Migrate.SchemaStatus)
+checkSchema conn = Migrate.verifySchema conn dbMigrationPlan
 
 -- A v1-v6 database without app_state belongs to the old Python application.
 -- So does a never-stamped (user_version 0) Python database: its bookmarks
@@ -177,25 +191,6 @@ ensureCompatible conn version = do
         unstampedPython = version == 0 && hasBookmarks && not hasAddedAt
     when (versionedPython || unstampedPython) $
         throwIO (DbError "legacy Python eza DB detected; the new app expects a fresh database (data/eza.db). Import the HTML export instead.")
-
-applyFrom :: Sqlite.Connection -> Int -> IO ()
-applyFrom conn start = forM_ (filter ((> start) . fst) migrations) $ \(version, statements) -> do
-    Sqlite.execute_ conn "BEGIN IMMEDIATE"
-    result <- runStatements statements
-    case result of
-        Left err -> do
-            Sqlite.execute_ conn "ROLLBACK"
-            throwIO (DbError ("migration to schema v" <> T.pack (show version) <> " failed: " <> err))
-        Right () -> do
-            Sqlite.execute_ conn (Query ("PRAGMA user_version = " <> T.pack (show version)))
-            Sqlite.execute_ conn "COMMIT"
-  where
-    runStatements [] = pure (Right ())
-    runStatements (statement : rest) = do
-        outcome <- try (Sqlite.execute_ conn statement) :: IO (Either SomeException ())
-        case outcome of
-            Left err -> pure (Left (T.pack (show err)))
-            Right () -> runStatements rest
 
 {- | Copy the database before a migration with @VACUUM INTO@ and verify the
 copy. The name carries the database file name and random bytes: every user
@@ -342,24 +337,40 @@ pragmas =
     , "PRAGMA cache_size = -65536"
     ]
 
-migrations :: [(Int, [Query])]
-migrations =
-    [ (1, schemaV1)
-    , (2, schemaV2)
-    , (3, schemaV3)
-    , (4, schemaV4)
-    , (5, schemaV5)
-    , (6, schemaV6)
-    , (7, schemaV7)
-    , (8, schemaV8)
-    , (9, schemaV9)
-    , (10, schemaV10)
-    , (11, schemaV11)
-    , (12, schemaV12)
-    , (13, schemaV13)
-    , (14, schemaV14)
-    , (15, schemaV15)
+{- | The full user-library schema history. The plan is append-only: M5-A owns
+v16 (schema_meta), M4-D takes v17 (jobs), M5-B takes v18 (journal).
+-}
+dbMigrationPlan :: Migrate.MigrationPlan
+dbMigrationPlan =
+    Migrate.MigrationPlan
+        { Migrate.planName = "user database"
+        , Migrate.planLegacyVersion = 15
+        , Migrate.planMigrations = dbMigrations
+        }
+
+dbMigrations :: [Migrate.Migration]
+dbMigrations =
+    [ Migrate.Migration 1 "initial schema" schemaV1
+    , Migrate.Migration 2 "enrichment and favicons" schemaV2
+    , Migrate.Migration 3 "api tokens and undo rows" schemaV3
+    , Migrate.Migration 4 "highlights and share links" schemaV4
+    , Migrate.Migration 5 "views" schemaV5
+    , Migrate.Migration 6 "owner password" schemaV6
+    , Migrate.Migration 7 "undo side tables" schemaV7
+    , Migrate.Migration 8 "captures and clip templates" schemaV8
+    , Migrate.Migration 9 "saved search and rule columns" schemaV9
+    , Migrate.Migration 10 "views" schemaV10
+    , Migrate.Migration 11 "events and webhooks" schemaV11
+    , Migrate.Migration 12 "capture undo rows" schemaV12
+    , Migrate.Migration 13 "source domain facet" schemaV13
+    , Migrate.Migration 14 "delivery event kind" schemaV14
+    , Migrate.Migration 15 "bookmark dead overrides" schemaV15
+    , Migrate.Migration 16 "schema metadata" schemaV16
     ]
+
+-- | Migration v16: the shared @schema_meta@ checksum table.
+schemaV16 :: [Query]
+schemaV16 = [Migrate.schemaMetaStatement]
 
 schemaV1 :: [Query]
 schemaV1 =

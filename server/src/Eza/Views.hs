@@ -17,9 +17,7 @@ Default rules:
 -}
 module Eza.Views (
     ViewError (..),
-    viewErrorStatus,
-    viewErrorCode,
-    viewErrorMessage,
+    toProblem,
     ViewPatch (..),
     seedDefaultViews,
     listViews,
@@ -34,10 +32,12 @@ import Data.Aeson (FromJSON (..), Value, withObject, (.:?))
 import qualified Data.Aeson as Aeson
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
+
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
+import Eza.Problem (Problem (..))
 
 import Eza.View
 
@@ -49,23 +49,24 @@ data ViewError
     | ViewLimit
     deriving (Show, Eq)
 
-viewErrorStatus :: ViewError -> Int
-viewErrorStatus err = case err of
-    ViewInvalid _ -> 400
-    ViewNotFound -> 404
-    ViewLimit -> 409
+-- | The one HTTP representation of a view error.
+toProblem :: ViewError -> Problem
+toProblem err = Problem (statusFor err) (codeFor err) (messageFor err)
+  where
+    statusFor e = case e of
+        ViewInvalid _ -> 400
+        ViewNotFound -> 404
+        ViewLimit -> 409
 
-viewErrorCode :: ViewError -> Text
-viewErrorCode err = case err of
-    ViewInvalid _ -> "bad_request"
-    ViewNotFound -> "not_found"
-    ViewLimit -> "view_limit"
+    codeFor e = case e of
+        ViewInvalid _ -> "bad_request"
+        ViewNotFound -> "not_found"
+        ViewLimit -> "view_limit"
 
-viewErrorMessage :: ViewError -> Text
-viewErrorMessage err = case err of
-    ViewInvalid messages -> T.intercalate "; " messages
-    ViewNotFound -> "view not found"
-    ViewLimit -> "at most " <> T.pack (show maxViewsPerUser) <> " views are allowed"
+    messageFor e = case e of
+        ViewInvalid messages -> T.intercalate "; " messages
+        ViewNotFound -> "view not found"
+        ViewLimit -> "at most " <> T.pack (show maxViewsPerUser) <> " views are allowed"
 
 -- ---------------------------------------------------------------- patches ---
 

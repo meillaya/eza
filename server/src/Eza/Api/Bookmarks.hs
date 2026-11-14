@@ -40,13 +40,12 @@ import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateH
 import Eza.Routes (Route (..))
 
 import Eza.SavedSearches (listSavedSearches)
-import Eza.Shares (ShareRecord (..), ShareState (..), ShareUnavailable (..), createShare, listShares, resolveShareState, revokeShare, shareBookmarkPage, shareSearchFeed, shareSearchPage, shareUnavailablePage)
+import Eza.Shares (createShare, listShares, revokeShare)
 
 import Eza.Snapshot (captureSnapshot)
 
 import Eza.Types
-
-import Eza.Views (ViewError, ViewPatch (..), createView, deleteView, getView, listViews, updateView, viewErrorCode, viewErrorMessage, viewErrorStatus)
+import Eza.Views (listViews)
 
 import Eza.Api.Common
 import Eza.Api.Context
@@ -119,11 +118,11 @@ addBookmark cfg conn req respond = do
         Left response -> respond response
         Right (AddBody url title tags) ->
             if not (isHttpUrl url)
-                then respond (jsonError status400 "bad_request" "url must be http(s)")
+                then respond (jsonProblem status400 "bad_request" "url must be http(s)")
                 else do
                     result <- insertBookmark conn url (fromMaybe "" title) (fromMaybe [] tags)
                     case result of
-                        Left msg -> respond (jsonError status409 "conflict" msg)
+                        Left msg -> respond (jsonProblem status409 "conflict" msg)
                         Right bid -> do
                             enqueueEnrichment conn bid
                             respond (jsonResponse status201 (object ["id" .= bid]))
@@ -149,7 +148,7 @@ highlightCreateHandler cfg conn bid req respond = do
         Right (HighlightCreateBody quote prefix suffix start end note color) -> do
             result <- createHighlight conn bid quote (fromMaybe "" prefix) (fromMaybe "" suffix) start end (fromMaybe "" note) (fromMaybe "yellow" color)
             case result of
-                Left err -> respond (jsonError status400 "bad_request" err)
+                Left err -> respond (jsonProblem status400 "bad_request" err)
                 Right highlight -> respond (jsonResponse status201 highlight)
 
 data HighlightPatchBody = HighlightPatchBody (Maybe Text) (Maybe Text)
@@ -165,7 +164,7 @@ highlightUpdateHandler cfg conn bid hid req respond = do
         Left response -> respond response
         Right (HighlightPatchBody note color) -> do
             ok <- updateHighlight conn bid hid note color
-            if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status404 "not_found" "highlight not found")
+            if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonProblem status404 "not_found" "highlight not found")
 
 data ShareCreateBody = ShareCreateBody Text Int (Maybe Bool) (Maybe Int)
 
@@ -182,7 +181,7 @@ shareCreateHandler cfg user conn req respond = do
             let days = fromMaybe (cfgShareTtlDays cfg) expires
             result <- createShare conn scope targetId (fromMaybe False includeNote) days
             case result of
-                Left err -> respond (jsonError status400 "bad_request" err)
+                Left err -> respond (jsonProblem status400 "bad_request" err)
                 Right (shareId, raw) ->
                     respond (jsonResponse status201 (object ["id" .= shareId, "url" .= (cfgPublicOrigin cfg <> "/s/" <> wireShareToken user raw)]))
 
@@ -196,7 +195,7 @@ snapshotHandler cfg slot conn bid respond = do
     case bookmark of
         Just detail
             | bdSnapshotKind detail /= "file" || T.null (bdSnapshotPath detail) ->
-                respond (jsonError status404 "not_found" "no local snapshot for this bookmark")
+                respond (jsonProblem status404 "not_found" "no local snapshot for this bookmark")
             | otherwise -> do
                 let rawPath = T.unpack (bdSnapshotPath detail)
                 resolvedResult <- try (canonicalizePath rawPath) :: IO (Either SomeException FilePath)
@@ -215,8 +214,8 @@ snapshotHandler cfg slot conn bid respond = do
                                 resolved
                                 Nothing
                             )
-                    else respond (jsonError status404 "not_found" "snapshot file not found")
-        Nothing -> respond (jsonError status404 "not_found" "bookmark not found")
+                    else respond (jsonProblem status404 "not_found" "snapshot file not found")
+        Nothing -> respond (jsonProblem status404 "not_found" "bookmark not found")
   where
     canonicalRoot root = do
         exists <- doesDirectoryExist root
@@ -248,11 +247,11 @@ bulkHandler cfg conn req respond = do
                     "delete" -> Left "delete requires confirm: true"
                     _ -> Left "unknown bulk action"
             case parsed of
-                Left err -> respond (jsonError status400 "bad_request" err)
+                Left err -> respond (jsonProblem status400 "bad_request" err)
                 Right bulkAction -> do
                     result <- bulkUpdate conn bulkAction ids
                     case result of
-                        Left err -> respond (jsonError status400 "bad_request" err)
+                        Left err -> respond (jsonProblem status400 "bad_request" err)
                         Right (updated, snapshotId) ->
                             respond (jsonResponse status200 (object ["updated" .= updated, "snapshot_id" .= snapshotId]))
 
@@ -268,11 +267,11 @@ quickSaveHandler cfg conn req respond = do
     case body of
         Left response -> respond response
         Right (QuickBody url title tags)
-            | not (isHttpUrl url) -> respond (jsonError status400 "bad_request" "url must be http(s)")
+            | not (isHttpUrl url) -> respond (jsonProblem status400 "bad_request" "url must be http(s)")
             | otherwise -> do
                 result <- quickSave conn url (fromMaybe "" title) (fromMaybe [] tags)
                 case result of
-                    Left message -> respond (jsonError status409 "conflict" message)
+                    Left message -> respond (jsonProblem status409 "conflict" message)
                     Right (bid, existing) -> do
                         if existing
                             then pure ()
@@ -305,15 +304,15 @@ patchBookmark cfg conn bid req respond = do
     case body of
         Left response -> respond response
         Right (PatchBody mTitle mNote mRead mTags mExtracted)
-            | maybe False (T.null . T.strip) mTitle -> respond (jsonError status400 "bad_request" "title must not be empty")
-            | maybe False ((> 2000000) . T.length) mExtracted -> respond (jsonError status400 "bad_request" "extracted text is too long")
+            | maybe False (T.null . T.strip) mTitle -> respond (jsonProblem status400 "bad_request" "title must not be empty")
+            | maybe False ((> 2000000) . T.length) mExtracted -> respond (jsonProblem status400 "bad_request" "extracted text is too long")
             | all (== Nothing) [fmap (const ()) mTitle, fmap (const ()) mNote, fmap (const ()) mRead, fmap (const ()) mTags, fmap (const ()) mExtracted] ->
-                respond (jsonError status400 "bad_request" "empty patch")
+                respond (jsonProblem status400 "bad_request" "empty patch")
             | otherwise -> do
                 (ok, removedHighlights) <- updateBookmarkDetailed conn bid mTitle mNote mRead mTags mExtracted
                 if ok
                     then respond (jsonResponse status200 (object ["ok" .= True, "highlights_removed" .= removedHighlights]))
-                    else respond (jsonError status404 "not_found" "bookmark not found")
+                    else respond (jsonProblem status404 "not_found" "bookmark not found")
 
 {- | The six bookmark actions share one body; the route constructor picks the
 action literal, so the guard/dispatch answers each endpoint directly.
@@ -329,7 +328,7 @@ bookmarkAction ::
 bookmarkAction cfg slot conn respond bookmarkId action = do
     exists <- query conn "SELECT 1 FROM bookmarks WHERE id = ?" (Only bookmarkId) :: IO [Only Int]
     if null exists
-        then respond (jsonError status404 "not_found" "bookmark not found")
+        then respond (jsonProblem status404 "not_found" "bookmark not found")
         else case action of
             "open" -> recordOpen conn bookmarkId >> respond (jsonResponse status200 (object ["ok" .= True]))
             "enrich" -> do
@@ -340,16 +339,16 @@ bookmarkAction cfg slot conn respond bookmarkId action = do
                 respond (jsonResponse status200 (object ["ok" .= True, "queued" .= True]))
             "mark-alive" -> do
                 ok <- markLinkAlive conn bookmarkId
-                if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status404 "not_found" "bookmark not found")
+                if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonProblem status404 "not_found" "bookmark not found")
             "recheck-link" -> do
                 ok <- recheckLink conn bookmarkId
-                if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status404 "not_found" "bookmark not found")
+                if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonProblem status404 "not_found" "bookmark not found")
             "snapshot" -> do
                 m <- captureSnapshot cfg (usSnapshotDir slot) conn bookmarkId
                 case m of
-                    Nothing -> respond (jsonError status502 "snapshot_failed" "the snapshot could not be captured")
+                    Nothing -> respond (jsonProblem status502 "snapshot_failed" "the snapshot could not be captured")
                     Just (kind, value) -> respond (jsonResponse status200 (object ["ok" .= True, "kind" .= kind, "value" .= value]))
-            _ -> respond (jsonError status404 "not_found" "No such action")
+            _ -> respond (jsonProblem status404 "not_found" "No such action")
 
 -- | Dispatch the handlers this family owns from their "Eza.Routes" constructors.
 dispatch :: RequestContext -> Connection -> Route -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
@@ -365,11 +364,11 @@ dispatch rctx conn route req respond = case route of
     RouteBookmarkRead bookmarkId -> do
         m <- getBookmark conn bookmarkId
         case m of
-            Nothing -> respond (jsonError status404 "not_found" "bookmark not found")
+            Nothing -> respond (jsonProblem status404 "not_found" "bookmark not found")
             Just b -> respond (jsonResponse status200 b)
     RouteBookmarkDelete bookmarkId -> do
         ok <- deleteBookmark conn bookmarkId
-        if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "bookmark not found")
+        if ok then respond (emptyResponse status204) else respond (jsonProblem status404 "not_found" "bookmark not found")
     RouteFaviconRead domain ->
         faviconHandler (assetPath (asAssets state) "favicon-fallback.svg") conn req domain respond
     RouteQuickSave ->
@@ -381,20 +380,20 @@ dispatch rctx conn route req respond = case route of
     RouteHighlightUpdate bookmarkId highlightId ->
         case (readInt (T.pack (show bookmarkId)), readInt (T.pack (show highlightId))) of
             (Just bid, Just hid) -> highlightUpdateHandler cfg conn bid hid req respond
-            _ -> respond (jsonError status400 "bad_request" "invalid highlight id")
+            _ -> respond (jsonProblem status400 "bad_request" "invalid highlight id")
     RouteHighlightDelete bookmarkId highlightId ->
         case (readInt (T.pack (show bookmarkId)), readInt (T.pack (show highlightId))) of
             (Just bid, Just hid) -> do
                 ok <- deleteHighlight conn bid hid
-                if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "highlight not found")
-            _ -> respond (jsonError status400 "bad_request" "invalid highlight id")
+                if ok then respond (emptyResponse status204) else respond (jsonProblem status404 "not_found" "highlight not found")
+            _ -> respond (jsonProblem status400 "bad_request" "invalid highlight id")
     RouteShareLinkList -> do
         shares <- listShares conn
         respond (jsonResponse status200 (object ["shares" .= shares]))
     RouteShareLinkCreate -> shareCreateHandler cfg user conn req respond
     RouteShareLinkRevoke shareId -> do
         ok <- revokeShare conn shareId
-        if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "share not found")
+        if ok then respond (emptyResponse status204) else respond (jsonProblem status404 "not_found" "share not found")
     RouteBookmarkSnapshotRead bookmarkId -> snapshotHandler cfg slot conn bookmarkId respond
     RouteInboxMarkAbove -> markAbove cfg conn req respond
     RouteBookmarkUpdate bookmarkId -> patchBookmark cfg conn bookmarkId req respond
@@ -411,7 +410,7 @@ dispatch rctx conn route req respond = case route of
         let q = fromMaybe "" (param "q" req)
         items <- autocomplete conn q 10
         respond (jsonResponse status200 (object ["items" .= items]))
-    _ -> respond (jsonError status500 "internal_error" "route has no handler")
+    _ -> respond (jsonProblem status500 "internal_error" "route has no handler")
   where
     cfg = rcConfig rctx
     state = rcState rctx

@@ -11,9 +11,7 @@ only then opened.
 -}
 module Eza.Admin (
     AdminError (..),
-    adminErrorStatus,
-    adminErrorCode,
-    adminErrorMessage,
+    toProblem,
     UserSummary (..),
     controlUserView,
     listUserSummaries,
@@ -38,10 +36,12 @@ import Crypto.Random (getRandomBytes)
 import qualified Data.ByteString.Base64.URL as B64
 import Data.Maybe (isNothing)
 import Data.Text (Text)
+
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Database.SQLite.Simple (Connection)
 import qualified Database.SQLite.Simple as Sqlite
+import Eza.Problem (Problem (..))
 import System.Directory (doesDirectoryExist, doesFileExist, getFileSize, listDirectory, removeDirectoryRecursive, removeFile)
 import System.FilePath (takeDirectory, (</>))
 import System.IO (hPutStrLn, stderr)
@@ -67,38 +67,41 @@ data AdminError
     | AdminInternal Text
     deriving (Show, Eq)
 
-adminErrorStatus :: AdminError -> Int
-adminErrorStatus err = case err of
-    AdminInvalidUsername _ -> 400
-    AdminWeakPassword _ -> 400
-    AdminUsernameTaken -> 409
-    AdminNotFound -> 404
-    AdminLastAdmin -> 409
-    AdminSelfDisable -> 409
-    AdminUserLimit -> 409
-    AdminInternal _ -> 500
+{- | The one HTTP representation of an admin error. The wire shape is the
+core 'Problem' body.
+-}
+toProblem :: AdminError -> Problem
+toProblem err = Problem (statusFor err) (codeFor err) (messageFor err)
+  where
+    statusFor e = case e of
+        AdminInvalidUsername _ -> 400
+        AdminWeakPassword _ -> 400
+        AdminUsernameTaken -> 409
+        AdminNotFound -> 404
+        AdminLastAdmin -> 409
+        AdminSelfDisable -> 409
+        AdminUserLimit -> 409
+        AdminInternal _ -> 500
 
-adminErrorCode :: AdminError -> Text
-adminErrorCode err = case err of
-    AdminInvalidUsername _ -> "invalid_username"
-    AdminWeakPassword _ -> "weak_password"
-    AdminUsernameTaken -> "username_taken"
-    AdminNotFound -> "user_not_found"
-    AdminLastAdmin -> "last_admin"
-    AdminSelfDisable -> "self_disable"
-    AdminUserLimit -> "user_limit"
-    AdminInternal _ -> "internal"
+    codeFor e = case e of
+        AdminInvalidUsername _ -> "invalid_username"
+        AdminWeakPassword _ -> "weak_password"
+        AdminUsernameTaken -> "username_taken"
+        AdminNotFound -> "user_not_found"
+        AdminLastAdmin -> "last_admin"
+        AdminSelfDisable -> "self_disable"
+        AdminUserLimit -> "user_limit"
+        AdminInternal _ -> "internal"
 
-adminErrorMessage :: AdminError -> Text
-adminErrorMessage err = case err of
-    AdminInvalidUsername message -> message
-    AdminWeakPassword message -> message
-    AdminUsernameTaken -> "that username is already in use"
-    AdminNotFound -> "no such account"
-    AdminLastAdmin -> "the last enabled admin cannot be disabled, demoted, or deleted"
-    AdminSelfDisable -> "an admin cannot disable their own account"
-    AdminUserLimit -> "the account limit (EZA_MAX_USERS) has been reached"
-    AdminInternal message -> message
+    messageFor e = case e of
+        AdminInvalidUsername message -> message
+        AdminWeakPassword message -> message
+        AdminUsernameTaken -> "that username is already in use"
+        AdminNotFound -> "no such account"
+        AdminLastAdmin -> "the last enabled admin cannot be disabled, demoted, or deleted"
+        AdminSelfDisable -> "an admin cannot disable their own account"
+        AdminUserLimit -> "the account limit (EZA_MAX_USERS) has been reached"
+        AdminInternal message -> message
 
 -- --------------------------------------------------------------- summaries ---
 

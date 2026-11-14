@@ -49,8 +49,10 @@ import qualified GraphLayoutSpec
 import qualified IsolationSpec
 import qualified LedgerSpec
 import qualified LibrarySpec
+import qualified MigrationSpec
 import qualified OriginGuardSpec
 import qualified PerfSpec
+import qualified ProblemSpec
 import qualified RoutesSpec
 import qualified SecuritySpec
 import qualified ViewContractSpec
@@ -1132,6 +1134,7 @@ main = hspec $ do
     DispatchSpec.spec
     LedgerSpec.spec
     LibrarySpec.spec
+    MigrationSpec.spec
     GraphLayoutSpec.spec
     AuthzSpec.authzSpec
     ContractSpec.contractSpec
@@ -1140,6 +1143,7 @@ main = hspec $ do
     ControlSpec.controlSpec
     ViewContractSpec.viewContractSpec
     PerfSpec.spec
+    ProblemSpec.spec
     ClipSpec.spec
     ViewServerSpec.spec
     IsolationSpec.spec

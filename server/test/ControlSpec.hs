@@ -20,7 +20,7 @@ controlSpec = describe "Eza.Control" $ do
         withSystemTempDirectory "eza-control" $ \dir -> do
             let path = dir </> "control.db"
             bracket (openControlDb path) close $ \conn -> do
-                controlSchemaVersion `shouldBe` 1
+                controlSchemaVersion `shouldBe` 2
                 users <- listUsers conn
                 users `shouldBe` []
                 usersCount <- countUsers conn

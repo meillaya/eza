@@ -1,13 +1,14 @@
 -- | Shared HTTP helpers: response constructors, JSON bodies, query parameters, cookies.
 module Eza.Api.Common where
 
+import Control.Exception (AsyncException, SomeException, catch, fromException, throwIO)
 import Data.Aeson
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
 
-import Data.Maybe (catMaybes, fromMaybe, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe)
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -15,22 +16,28 @@ import qualified Data.Text.Encoding as TE
 
 import Data.Word (Word64)
 
+import Database.SQLite.Simple (Error (..), SQLError (..))
+
 import Network.HTTP.Types
 import Network.Wai
+
+import System.IO (hPutStrLn, stderr)
 
 import qualified Web.Cookie as Cookie
 
 import qualified Eza.Auth as Auth
+import Eza.Problem (Problem (..), problemBody)
+import qualified Eza.Routes as Routes
 
 import Eza.Bookmarks
 
 import Eza.Config
 
-import Eza.Dedup (DedupQuery (..), dedupCandidates, mergeBookmarksWithSnapshot, mergeUrlDuplicatesAll)
+import Eza.Dedup (DedupQuery (..))
 
 requestTooLargeResponse :: Word64 -> Response
 requestTooLargeResponse limit =
-    jsonError
+    jsonProblem
         status413
         "payload_too_large"
         ("request body must be at most " <> T.pack (show limit) <> " bytes")
@@ -70,7 +77,7 @@ cookieValue req name =
 
 unauthorized :: Request -> Response
 unauthorized req
-    | "api" `elem` pathInfo req = jsonError status401 "unauthenticated" "sign in required"
+    | "api" `elem` pathInfo req = jsonProblem status401 "unauthenticated" "sign in required"
     | otherwise = redirectTo "/login"
 
 redirectTo :: Text -> Response
@@ -189,7 +196,7 @@ jsonBodyTo limit req = do
     pure $ case body of
         Left response -> Left response
         Right raw -> case eitherDecode raw of
-            Left err -> Left (jsonError status400 "bad_request" (T.pack err))
+            Left err -> Left (jsonProblem status400 "bad_request" (T.pack err))
             Right value -> Right value
 
 -- | Decode a bounded JSON body as one typed value.
@@ -199,19 +206,23 @@ jsonValue cfg req = do
     pure $ case body of
         Left response -> Left response
         Right value -> case fromJSON value of
-            Error err -> Left (jsonError status400 "bad_request" (T.pack err))
+            Error err -> Left (jsonProblem status400 "bad_request" (T.pack err))
             Success parsed -> Right parsed
 
 parseMaybeObj :: Value -> Maybe Object
 parseMaybeObj (Object o) = Just o
 parseMaybeObj _ = Nothing
 
+{- | An auth error as the one problem shape, keeping the @Retry-After@ header
+for login lockouts.
+-}
 authErrResponse :: Auth.AuthError -> Response
-authErrResponse e =
-    let base = jsonError (mkStatus (Auth.aeStatus e) "") (Auth.aeCode e) (Auth.aeMessage e)
-     in case Auth.aeRetryAfter e of
-            Nothing -> base
-            Just seconds -> mapResponseHeaders (<> [("Retry-After", BSC.pack (show seconds))]) base
+authErrResponse err =
+    problemResponseWith retryHeaders (Auth.toProblem err)
+  where
+    retryHeaders = case Auth.aeRetryAfter err of
+        Nothing -> []
+        Just seconds -> [("Retry-After", BSC.pack (show seconds))]
 
 -- ---------------------------------------------------------------------------
 -- Admin API
@@ -274,9 +285,81 @@ jsonResponse :: (ToJSON a) => Status -> a -> Response
 jsonResponse status value =
     responseLBS status [(hContentType, "application/json; charset=utf-8"), (hCacheControl, "no-store")] (encode value)
 
-jsonError :: Status -> Text -> Text -> Response
-jsonError status code message =
-    jsonResponse status (object ["error" .= object ["code" .= code, "message" .= message]])
+-- | The one error response shape: the core 'Problem' body, encoded once.
+problemResponse :: Problem -> Response
+problemResponse problem =
+    jsonResponse (mkStatus (pStatus problem) "") (problemBody problem)
+
+-- | The same response with extra headers (for example @Retry-After@).
+problemResponseWith :: ResponseHeaders -> Problem -> Response
+problemResponseWith headers problem =
+    mapResponseHeaders (<> headers) (problemResponse problem)
+
+-- | Build a problem response from a status and the stable code/message pair.
+jsonProblem :: Status -> Text -> Text -> Response
+jsonProblem status code message =
+    problemResponse (Problem (statusCode status) code message)
+
+{- | Answer a request with a 'Problem'. Feature error ADTs convert with their
+module's @toProblem@ first, so the wire body is produced in one place.
+-}
+respondProblem :: (Response -> IO ResponseReceived) -> Problem -> IO ResponseReceived
+respondProblem respond = respond . problemResponse
+
+-- | 'respondProblem' plus response metadata such as @Retry-After@.
+respondProblemWith :: (Response -> IO ResponseReceived) -> ResponseHeaders -> Problem -> IO ResponseReceived
+respondProblemWith respond headers = respond . problemResponseWith headers
+
+{- | The least surprising problem for an exception no handler caught. SQLite
+busy/locked is transient, so the client is told to retry; everything else is
+an internal error and the detail stays in the server log.
+-}
+problemForException :: SomeException -> Problem
+problemForException err
+    | Just sqliteErr <- fromException err
+    , isBusyOrLocked sqliteErr =
+        Problem 503 "database_busy" "the database is busy; retry the request"
+    | otherwise = Problem 500 "internal_error" "internal server error"
+  where
+    isBusyOrLocked sqliteErr = case sqlError sqliteErr of
+        ErrorBusy -> True
+        ErrorLocked -> True
+        _ -> False
+
+{- | The last line of defence around the router. An exception a handler did not
+catch becomes a JSON 'Problem' instead of Warp's text/plain 500; the log line
+names the request by its "Eza.Routes" template (never a token in the URL) plus
+the exception text, and never a header, cookie, or body. Async exceptions are
+rethrown so server shutdown and worker cancellation keep working.
+-}
+catchAllMiddleware :: Middleware
+catchAllMiddleware inner req sendResponse =
+    inner req sendResponse `catch` handle
+  where
+    handle :: SomeException -> IO ResponseReceived
+    handle err = case fromException err :: Maybe AsyncException of
+        Just async -> throwIO async
+        Nothing -> do
+            let problem = problemForException err
+            hPutStrLn
+                stderr
+                ( T.unpack
+                    ( "eza: unhandled exception for "
+                        <> requestLabel req
+                        <> ": "
+                        <> T.take 300 (T.pack (show err))
+                    )
+                )
+            sendResponse (problemResponse problem)
+
+{- | A log-safe request label: the route template when the request matches a
+known route, otherwise just the method.
+-}
+requestLabel :: Request -> Text
+requestLabel req =
+    case Routes.matchRoute (TE.decodeUtf8 (requestMethod req)) (pathInfo req) of
+        Just route -> Routes.routeMethod route <> " " <> Routes.routePath route
+        Nothing -> TE.decodeUtf8 (requestMethod req) <> " unmatched request"
 
 emptyResponse :: Status -> Response
 emptyResponse status = responseLBS status [(hContentType, "application/json; charset=utf-8"), (hCacheControl, "no-store")] "{}"

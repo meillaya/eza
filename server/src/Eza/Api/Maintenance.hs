@@ -1,7 +1,7 @@
 -- | Saved searches, dedup, dead-link/prune maintenance, undo, import, export, stats, and AI status.
 module Eza.Api.Maintenance where
 
-import Control.Exception (IOException, SomeException, bracket, bracket_, onException, throwIO, try)
+import Control.Exception (SomeException, try)
 
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -12,13 +12,13 @@ import qualified Data.ByteString.Lazy as LBS
 
 import Data.Int (Int64)
 
-import Data.Maybe (catMaybes, fromMaybe, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe)
 
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
-import Database.SQLite.Simple (Connection, Only (..), query)
+import Database.SQLite.Simple (Connection)
 
 import Network.HTTP.Types
 import Network.Wai
@@ -34,7 +34,7 @@ import Eza.Config
 
 import qualified Eza.Db as Db
 import Eza.DeadLinks (checkDead)
-import Eza.Dedup (DedupQuery (..), dedupCandidates, mergeBookmarksWithSnapshot, mergeUrlDuplicatesAll)
+import Eza.Dedup (dedupCandidates, mergeBookmarksWithSnapshot, mergeUrlDuplicatesAll)
 
 import Eza.Export (exportBookmarks)
 
@@ -78,7 +78,7 @@ importHandler cfg conn req respond =
             Right value -> do
                 result <- importJson conn value
                 case result of
-                    Left message -> respond (jsonError status400 "bad_request" message)
+                    Left message -> respond (jsonProblem status400 "bad_request" message)
                     Right report ->
                         respond
                             ( jsonResponse
@@ -108,7 +108,7 @@ importHandler cfg conn req respond =
                 -- size middleware uses rather than a 500.
                 respond (requestTooLargeResponse (fromIntegral (cfgImportMaxBytes cfg)))
             Right (_, files) -> case lookup "file" files of
-                Nothing -> respond (jsonError status400 "bad_request" "multipart field \"file\" is required")
+                Nothing -> respond (jsonProblem status400 "bad_request" "multipart field \"file\" is required")
                 Just fileInfo -> do
                     let raw = LBS.toStrict (fileContent fileInfo)
                         -- The account panel uploads .html and .json files under
@@ -119,7 +119,7 @@ importHandler cfg conn req respond =
                         Right value | isEzaJsonExport value -> do
                             result <- importJson conn value
                             case result of
-                                Left message -> respond (jsonError status400 "bad_request" message)
+                                Left message -> respond (jsonProblem status400 "bad_request" message)
                                 Right report ->
                                     respond
                                         ( jsonResponse
@@ -162,15 +162,15 @@ dispatch rctx conn route req respond = case route of
         case body of
             Left response -> respond response
             Right v -> case parseMaybeObj v of
-                Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+                Nothing -> respond (jsonProblem status400 "bad_request" "invalid body")
                 Just o -> case (parseMaybe (.: "name") o, parseMaybe (.: "q") o, parseMaybe (.: "tags") o) of
                     (Just name, q, tags) -> do
                         sid <- createSavedSearch conn name (fromMaybe "" q) (fromMaybe [] tags)
                         respond (jsonResponse status201 (object ["id" .= sid]))
-                    _ -> respond (jsonError status400 "bad_request" "name is required")
+                    _ -> respond (jsonProblem status400 "bad_request" "name is required")
     RouteSavedSearchDelete savedSearchId -> do
         ok <- deleteSavedSearch conn savedSearchId
-        if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "saved search not found")
+        if ok then respond (emptyResponse status204) else respond (jsonProblem status404 "not_found" "saved search not found")
     RouteDedupCandidates -> do
         report <- dedupCandidates conn (dedupQueryFrom req)
         respond (jsonResponse status200 report)
@@ -183,18 +183,18 @@ dispatch rctx conn route req respond = case route of
                     | (parseMaybe (.: "confirm") o :: Maybe Bool) == Just True -> do
                         report <- mergeUrlDuplicatesAll conn
                         respond (jsonResponse status200 report)
-                _ -> respond (jsonError status400 "bad_request" "confirm is required")
+                _ -> respond (jsonProblem status400 "bad_request" "confirm is required")
     RouteDedupMerge -> do
         body <- jsonBody cfg req
         case body of
             Left response -> respond response
             Right v -> case parseMaybeObj v of
-                Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+                Nothing -> respond (jsonProblem status400 "bad_request" "invalid body")
                 Just o -> case (parseMaybe (.: "keep_id") o, parseMaybe (.: "merge_ids") o) of
                     (Just keep, Just ms) -> do
                         (n, snapshotId) <- mergeBookmarksWithSnapshot conn keep ms
                         respond (jsonResponse status200 (object ["merged" .= n, "snapshot_id" .= snapshotId]))
-                    _ -> respond (jsonError status400 "bad_request" "keep_id and merge_ids are required")
+                    _ -> respond (jsonProblem status400 "bad_request" "keep_id and merge_ids are required")
     RouteMaintenanceCheckDead -> do
         body <- jsonBody cfg req
         case body of
@@ -214,9 +214,9 @@ dispatch rctx conn route req respond = case route of
         case body of
             Left response -> respond response
             Right v -> case parseMaybeObj v of
-                Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+                Nothing -> respond (jsonProblem status400 "bad_request" "invalid body")
                 Just o -> case parseMaybe (.: "ids") o :: Maybe [Int] of
-                    Nothing -> respond (jsonError status400 "bad_request" "ids is required")
+                    Nothing -> respond (jsonProblem status400 "bad_request" "ids is required")
                     Just ids -> do
                         n <- pruneApply conn ids
                         respond (jsonResponse status200 (object ["pruned" .= n]))
@@ -227,7 +227,7 @@ dispatch rctx conn route req respond = case route of
     RouteUndoPreview snapshotId -> do
         preview <- undoPreview conn snapshotId
         case preview of
-            Nothing -> respond (jsonError status404 "not_found" "undo snapshot not found")
+            Nothing -> respond (jsonProblem status404 "not_found" "undo snapshot not found")
             Just value -> respond (jsonResponse status200 value)
     RouteUndoApply -> do
         raw <- readBodyBoundedTo (cfgMaxBodyBytes cfg) req
@@ -238,7 +238,7 @@ dispatch rctx conn route req respond = case route of
                     n <- undoLast conn
                     respond (jsonResponse status200 (object ["restored" .= n]))
                 | otherwise -> case eitherDecode body of
-                    Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+                    Left err -> respond (jsonProblem status400 "bad_request" (T.pack err))
                     Right value -> case (parseMaybe (.: "snapshot_id") value :: Maybe Int) of
                         Nothing -> do
                             n <- undoLast conn
@@ -246,8 +246,8 @@ dispatch rctx conn route req respond = case route of
                         Just snapshotId -> do
                             result <- undoById conn snapshotId
                             case result of
-                                Left UndoNotFound -> respond (jsonError status404 "not_found" "undo snapshot not found")
-                                Left UndoNotNewest -> respond (jsonError status409 "undo_out_of_order" "Undo the newer actions first")
+                                Left UndoNotFound -> respond (jsonProblem status404 "not_found" "undo snapshot not found")
+                                Left UndoNotNewest -> respond (jsonProblem status409 "undo_out_of_order" "Undo the newer actions first")
                                 Right undoResult -> respond (jsonResponse status200 undoResult)
     RouteImport -> importHandler cfg conn req respond
     RouteImportJson -> do
@@ -257,7 +257,7 @@ dispatch rctx conn route req respond = case route of
             Right value -> do
                 result <- importJson conn value
                 case result of
-                    Left err -> respond (jsonError status400 "bad_request" err)
+                    Left err -> respond (jsonProblem status400 "bad_request" err)
                     Right report -> respond (jsonResponse status200 report)
     RouteExport ->
         if param "format" req == Just "json"
@@ -282,7 +282,7 @@ dispatch rctx conn route req respond = case route of
                         (LBS.fromStrict (TE.encodeUtf8 content))
                     )
     RouteExportNotes ->
-        respond (jsonError status501 "not_implemented" "Markdown note export is coming in a later milestone")
+        respond (jsonProblem status501 "not_implemented" "Markdown note export is coming in a later milestone")
     RouteStats -> do
         stats <- libraryStats conn
         links <- Db.queryScalar conn "SELECT COUNT(*) FROM links"
@@ -331,7 +331,7 @@ dispatch rctx conn route req respond = case route of
                     , asConfigured = configured
                     }
             )
-    _ -> respond (jsonError status500 "internal_error" "route has no handler")
+    _ -> respond (jsonProblem status500 "internal_error" "route has no handler")
   where
     cfg = rcConfig rctx
 

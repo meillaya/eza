@@ -28,7 +28,7 @@ module Eza.Cli (
     readHidden,
 ) where
 
-import Control.Exception (IOException, SomeException, bracket, onException, try)
+import Control.Exception (IOException, SomeException, bracket, fromException, onException, try)
 import Control.Monad (forM, unless, when)
 import Data.Aeson (eitherDecodeStrict', encode, object, (.=))
 import qualified Data.ByteString as BS
@@ -42,8 +42,10 @@ import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types.Status (statusCode)
 import Options.Applicative
 import qualified Options.Applicative as OA
+import System.Directory (doesFileExist)
 import System.Exit (ExitCode (..), exitFailure, exitSuccess)
 import System.IO (hFlush, hGetEcho, hPutStr, hPutStrLn, hSetEcho, stderr, stdin)
+import System.IO.Error (ioeGetErrorString)
 
 import qualified Eza.Admin as Admin
 import qualified Eza.Auth as Auth
@@ -52,6 +54,7 @@ import Eza.Bench (runBench)
 import Eza.Bookmarks
 import Eza.Config
 import qualified Eza.Control as Control
+import Eza.Db (DbError (..))
 import qualified Eza.Db as Db
 import Eza.DeadLinks (checkDead)
 import Eza.Dedup (DedupQuery (..), dedupCandidates, defaultDedupQuery, mergeUrlDuplicatesAll)
@@ -59,7 +62,9 @@ import Eza.Enrich (enrichBookmark)
 import Eza.Export (exportBookmarks)
 import Eza.Import
 import Eza.JsonExport (exportJson, importJson)
+import Eza.Migrate (SchemaStatus (..))
 import qualified Eza.Password as Password
+import Eza.Problem (pMessage)
 import qualified Eza.Routes as Routes
 import Eza.Server (runServer)
 import Eza.Types (DedupReport (..), ImportReport (..), TagStat (..))
@@ -377,23 +382,7 @@ runCli cfg passwords cmd = case cmd of
             putStrLn ("db: " <> path)
             mapM_ (\(k, n) -> putStrLn (T.unpack k <> ": " <> show n)) counts
             putStrLn ("top tags: " <> T.unpack (T.intercalate ", " [tsName t <> " (" <> T.pack (show (tsCount t)) <> ")" | t <- take 12 tags]))
-    Verify userSelector ->
-        withLibrary cfg userSelector $ \path conn -> do
-            counts <- bookmarkStats conn
-            ftsCount <- Db.queryScalar conn "SELECT COUNT(*) FROM bookmarks_fts"
-            putStrLn ("db: " <> path)
-            mapM_ (\(k, n) -> putStrLn (T.unpack k <> ": " <> show n)) counts
-            putStrLn ("fts_rows: " <> show ftsCount)
-            integrity <- Db.ftsIntegrityCheck conn
-            case integrity of
-                Left message -> do
-                    hPutStrLn stderr ("verify: the FTS index is corrupt: " <> T.unpack message)
-                    exitFailure
-                Right () -> pure ()
-            let bookmarks = maybe 0 id (lookup "bookmarks" counts)
-            if ftsCount == bookmarks
-                then putStrLn "verify: ok" >> exitSuccess
-                else hPutStrLn stderr "verify: FTS row count does not match bookmarks" >> exitFailure
+    Verify userSelector -> runVerifyCommand cfg userSelector
     Backup userSelector -> runBackupCommand cfg userSelector
     RestoreCmd opts -> runRestoreCommand cfg opts
     CheckDead opts ->
@@ -530,6 +519,113 @@ probeHealth cfg = do
     request <- parseRequest url
     response <- httpLbs request manager
     pure (statusCode (responseStatus response) == 200)
+
+{- | Check the control schema and the library schema of every account against
+the shared migration plans, then keep the existing per-library FTS and count
+checks. A database that is newer than the binary or whose migration checksums
+do not match prints the actionable reason from "Eza.Migrate" (never a stack
+trace) and makes the command fail.
+-}
+runVerifyCommand :: Config -> Maybe Text -> IO ()
+runVerifyCommand cfg userSelector = do
+    controlOk <- verifyControlDatabase cfg
+    librariesOk <-
+        if not controlOk
+            then pure False
+            else verifyLibraries userSelector
+    if controlOk && librariesOk
+        then putStrLn "verify: ok" >> exitSuccess
+        else exitFailure
+  where
+    verifyLibraries selector = case selector of
+        Just chosen -> do
+            resolved <- Admin.resolveLibraryPath cfg (Just chosen)
+            case resolved of
+                Left message -> reportFailure message
+                Right path -> verifyLibrary cfg path
+        Nothing -> withControl cfg $ \control -> do
+            users <- Control.listUsers control
+            if null users
+                then verifyResolvedLibrary cfg
+                else and <$> mapM (verifyLibrary cfg . Control.cuDbPath) users
+
+    -- Kept out of the closure above so the EmptyControl fallback still goes
+    -- through the same resolution rules as the other per-library commands.
+    verifyResolvedLibrary config = do
+        resolved <- Admin.resolveLibraryPath config Nothing
+        case resolved of
+            Left message -> reportFailure message
+            Right path -> verifyLibrary config path
+
+verifyControlDatabase :: Config -> IO Bool
+verifyControlDatabase cfg = do
+    let path = cfgControlDbPath cfg
+    opened <- try (Control.openControlDb path) :: IO (Either SomeException Connection)
+    case opened of
+        Left err -> reportFailure ("control database " <> T.pack path <> ": " <> firstLineText err)
+        Right control -> bracket (pure control) close $ \conn -> do
+            result <- Control.checkControlSchema conn
+            case result of
+                Left message -> reportFailure ("control database " <> T.pack path <> ": " <> message)
+                Right status -> do
+                    putStrLn ("control: " <> path)
+                    TIO.putStrLn ("schema: " <> renderSchemaStatus status)
+                    pure True
+
+verifyLibrary :: Config -> FilePath -> IO Bool
+verifyLibrary _cfg path = do
+    exists <- doesFileExist path
+    if not exists
+        then reportFailure ("library " <> T.pack path <> ": database file does not exist")
+        else do
+            opened <- try (Db.openDb path) :: IO (Either SomeException Connection)
+            case opened of
+                Left err -> reportFailure ("library " <> T.pack path <> ": " <> firstLineText err)
+                Right conn -> bracket (pure conn) close $ \library -> verifyLibraryConnection _cfg path library
+
+verifyLibraryConnection :: Config -> FilePath -> Connection -> IO Bool
+verifyLibraryConnection _cfg path conn = do
+    schemaResult <- Db.checkSchema conn
+    case schemaResult of
+        Left message -> reportFailure ("library " <> T.pack path <> ": " <> message)
+        Right status -> do
+            counts <- bookmarkStats conn
+            ftsCount <- Db.queryScalar conn "SELECT COUNT(*) FROM bookmarks_fts"
+            putStrLn ("db: " <> path)
+            TIO.putStrLn ("schema: " <> renderSchemaStatus status)
+            mapM_ (\(k, n) -> putStrLn (T.unpack k <> ": " <> show n)) counts
+            putStrLn ("fts_rows: " <> show ftsCount)
+            integrity <- Db.ftsIntegrityCheck conn
+            case integrity of
+                Left message -> reportFailure ("library " <> T.pack path <> ": the FTS index is corrupt: " <> message)
+                Right () -> do
+                    let bookmarks = maybe 0 id (lookup "bookmarks" counts)
+                    if ftsCount == bookmarks
+                        then pure True
+                        else reportFailure ("library " <> T.pack path <> ": FTS row count does not match bookmarks")
+
+reportFailure :: Text -> IO Bool
+reportFailure message = do
+    hPutStrLn stderr ("verify: " <> T.unpack message)
+    pure False
+
+renderSchemaStatus :: SchemaStatus -> Text
+renderSchemaStatus status =
+    "ok (v"
+        <> T.pack (show (ssVersion status))
+        <> "/v"
+        <> T.pack (show (ssExpectedVersion status))
+        <> if ssLegacy status then ", legacy, schema_meta pending)" else ")"
+
+{- | The actionable message carried by a database error, without a GHC show
+wrapper; anything else keeps the first line of its display form.
+-}
+firstLineText :: SomeException -> Text
+firstLineText err = case fromException err :: Maybe DbError of
+    Just (DbError message) -> message
+    Nothing -> case fromException err :: Maybe IOException of
+        Just ioErrorValue -> T.pack (ioeGetErrorString ioErrorValue)
+        Nothing -> T.takeWhile (/= '\n') (T.pack (show err))
 
 runSetPassword :: Config -> PasswordSource -> SetPasswordOpts -> IO ()
 runSetPassword cfg passwords opts = do
@@ -726,7 +822,7 @@ runUsersCommand cfg passwords cmd = withControl cfg $ \control -> case cmd of
         password <- psReadStdinLine passwords
         created <- Admin.createUserAccount cfg control username role password
         case created of
-            Left err -> die (Admin.adminErrorMessage err)
+            Left err -> die (pMessage (Admin.toProblem err))
             Right (user, codes) -> do
                 putStrLn
                     ( "created user "
@@ -742,12 +838,12 @@ runUsersCommand cfg passwords cmd = withControl cfg $ \control -> case cmd of
     UsersEnable selector -> withSelectedUser control selector $ \user -> do
         changed <- Admin.setUserEnabled cfg control (Control.cuId user) True
         case changed of
-            Left err -> die (Admin.adminErrorMessage err)
+            Left err -> die (pMessage (Admin.toProblem err))
             Right _ -> putStrLn ("enabled " <> T.unpack (Control.cuUsername user))
     UsersDisable selector -> withSelectedUser control selector $ \user -> do
         changed <- Admin.setUserEnabled cfg control (Control.cuId user) False
         case changed of
-            Left err -> die (Admin.adminErrorMessage err)
+            Left err -> die (pMessage (Admin.toProblem err))
             Right _ -> putStrLn ("disabled " <> T.unpack (Control.cuUsername user) <> " and revoked its sessions")
     UsersResetPassword selector passwordStdin -> withSelectedUser control selector $ \user -> do
         unless passwordStdin $
@@ -755,14 +851,14 @@ runUsersCommand cfg passwords cmd = withControl cfg $ \control -> case cmd of
         password <- psReadStdinLine passwords
         result <- Admin.resetUserPassword cfg control (Control.cuId user) password
         case result of
-            Left err -> die (Admin.adminErrorMessage err)
+            Left err -> die (pMessage (Admin.toProblem err))
             Right () -> putStrLn ("temporary password set for " <> T.unpack (Control.cuUsername user) <> "; sessions revoked")
     UsersDelete selector deleteDb -> withSelectedUser control selector $ \user -> do
         unless deleteDb $
             die "users delete: pass --delete-db to remove the account's database and snapshots as well"
         result <- Admin.deleteUserAccount cfg control (Control.cuId user) True
         case result of
-            Left err -> die (Admin.adminErrorMessage err)
+            Left err -> die (pMessage (Admin.toProblem err))
             Right () -> putStrLn ("deleted " <> T.unpack (Control.cuUsername user) <> " and its database")
 
 withSelectedUser :: Connection -> Text -> (Control.ControlUser -> IO ()) -> IO ()

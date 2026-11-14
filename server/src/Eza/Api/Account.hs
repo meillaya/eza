@@ -1,17 +1,17 @@
 -- | Account, token, and passkey handlers.
 module Eza.Api.Account where
 
-import Control.Monad (forM, forM_, unless, void, when)
+import Control.Monad (void)
 import Data.Aeson
 
 import Data.Aeson.Types (parseMaybe)
 
-import Data.Maybe (catMaybes, fromMaybe, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe)
 
 import Data.Text (Text)
 import qualified Data.Text as T
 
-import Database.SQLite.Simple (Connection, Only (..), query)
+import Database.SQLite.Simple (Connection)
 
 import Network.HTTP.Types
 import Network.Wai
@@ -28,7 +28,7 @@ import Eza.Password (validatePassword, validateUsername)
 import qualified Eza.Password as Password
 import Eza.Routes (Route (..))
 
-import Eza.Tokens (Token (..), createToken, listTokens, revokeToken, tokenActivityDue, touchToken, validateToken)
+import Eza.Tokens (createToken, listTokens, revokeToken)
 
 import Eza.Api.Common
 import Eza.Api.Context
@@ -73,9 +73,9 @@ accountTwoFactorHandler cfg conn ctx role req respond = do
     case body of
         Left response -> respond response
         Right value -> case parseMaybeObj value of
-            Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+            Nothing -> respond (jsonProblem status400 "bad_request" "invalid body")
             Just o -> case parseMaybe (.: "required") o :: Maybe Bool of
-                Nothing -> respond (jsonError status400 "bad_request" "required is required")
+                Nothing -> respond (jsonProblem status400 "bad_request" "required is required")
                 Just required -> do
                     let current = fromMaybe "" (parseMaybe (.: "current_password") o :: Maybe Text)
                     result <- Auth.setTwoFactorRequirement conn (authConfig cfg) required current
@@ -96,7 +96,7 @@ accountPasswordHandler cfg conn ctx req respond = do
     case body of
         Left response -> respond response
         Right value -> case parseMaybeObj value of
-            Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+            Nothing -> respond (jsonProblem status400 "bad_request" "invalid body")
             Just o -> do
                 let current = parseMaybe (.: "current_password") o :: Maybe Text
                     newPassword = parseMaybe (.: "new_password") o :: Maybe Text
@@ -104,19 +104,19 @@ accountPasswordHandler cfg conn ctx req respond = do
                 case (newPassword, confirm) of
                     (Just wanted, Just repeated)
                         | wanted /= repeated ->
-                            respond (jsonError status400 "password_mismatch" "the new passwords do not match")
+                            respond (jsonProblem status400 "password_mismatch" "the new passwords do not match")
                         | otherwise -> case validatePassword wanted of
-                            Left message -> respond (jsonError status400 "weak_password" message)
+                            Left message -> respond (jsonProblem status400 "weak_password" message)
                             Right () -> do
                                 account <- Auth.loadAccount conn
                                 authorized <- case current of
                                     Just currentPassword -> Auth.verifyCurrentPassword conn (authConfig cfg) currentPassword
                                     Nothing -> pure (not (Auth.accountHasPassword account))
                                 if not authorized
-                                    then respond (jsonError status403 "invalid_password" "the current password is incorrect")
+                                    then respond (jsonProblem status403 "invalid_password" "the current password is incorrect")
                                     else
                                         if T.null (Auth.acctUsername account)
-                                            then respond (jsonError status409 "username_required" "set a username before setting a password")
+                                            then respond (jsonProblem status409 "username_required" "set a username before setting a password")
                                             else do
                                                 passwordHash <- Password.hashPassword (cfgArgon2 cfg) wanted
                                                 Auth.setAccountPassword conn (Auth.acctUsername account) passwordHash
@@ -124,7 +124,7 @@ accountPasswordHandler cfg conn ctx req respond = do
                                                     CookieSession sess -> void (Auth.deleteOtherSessions conn sess)
                                                     BearerToken _ -> pure ()
                                                 respond (jsonResponse status200 (object ["ok" .= True]))
-                    _ -> respond (jsonError status400 "bad_request" "new_password and confirm are required")
+                    _ -> respond (jsonProblem status400 "bad_request" "new_password and confirm are required")
 
 -- | Rename the single account. A password, when set, must be confirmed.
 
@@ -137,27 +137,27 @@ accountUsernameHandler cfg state user conn req respond = do
     case body of
         Left response -> respond response
         Right value -> case parseMaybeObj value of
-            Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+            Nothing -> respond (jsonProblem status400 "bad_request" "invalid body")
             Just o -> do
                 let current = parseMaybe (.: "current_password") o :: Maybe Text
                     wanted = parseMaybe (.: "username") o :: Maybe Text
                 case wanted of
-                    Nothing -> respond (jsonError status400 "bad_request" "username is required")
+                    Nothing -> respond (jsonProblem status400 "bad_request" "username is required")
                     Just rawUsername -> do
                         account <- Auth.loadAccount conn
                         authorized <- case current of
                             Just currentPassword -> Auth.verifyCurrentPassword conn (authConfig cfg) currentPassword
                             Nothing -> pure (not (Auth.accountHasPassword account))
                         if not authorized
-                            then respond (jsonError status403 "invalid_password" "the current password is incorrect")
+                            then respond (jsonProblem status403 "invalid_password" "the current password is incorrect")
                             else case validateUsername rawUsername of
-                                Left message -> respond (jsonError status400 "invalid_username" message)
+                                Left message -> respond (jsonProblem status400 "invalid_username" message)
                                 Right username -> do
                                     renamed <- withControl state $ \control -> Control.setUsername control (cuId user) username
                                     case renamed of
                                         Left Control.ControlDuplicateUsername ->
-                                            respond (jsonError status409 "username_taken" "that username is already in use")
-                                        Left err -> respond (jsonError status500 "control" (T.pack (show err)))
+                                            respond (jsonProblem status409 "username_taken" "that username is already in use")
+                                        Left err -> respond (jsonProblem status500 "control" (T.pack (show err)))
                                         Right () -> do
                                             Auth.setAccountUsername conn username
                                             respond (jsonResponse status200 (object ["ok" .= True]))
@@ -181,7 +181,7 @@ dispatch rctx conn route req respond = case route of
                 respond (jsonResponse status201 (object ["token" .= wireApiToken user raw, "token_info" .= view]))
     RouteTokenRevoke tokenId -> do
         ok <- revokeToken conn tokenId
-        if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "token not found")
+        if ok then respond (emptyResponse status204) else respond (jsonProblem status404 "not_found" "token not found")
     RouteAccountRead -> do
         payload <- accountPayload conn ctx (Control.cuRole user)
         respond (jsonResponse status200 payload)
@@ -194,7 +194,7 @@ dispatch rctx conn route req respond = case route of
         CookieSession sess -> do
             revoked <- Auth.deleteOtherSessions conn sess
             respond (jsonResponse status200 (object ["revoked" .= revoked]))
-        BearerToken _ -> respond (jsonError status403 "session_required" "a bearer token cannot revoke browser sessions")
+        BearerToken _ -> respond (jsonProblem status403 "session_required" "a bearer token cannot revoke browser sessions")
     RouteAccountPasskeyOptions -> do
         handle <- passkeyHandle state user
         r <- Auth.addPasskeyOptions conn (authConfig cfg) handle
@@ -211,28 +211,28 @@ dispatch rctx conn route req respond = case route of
                     Right () -> respond (jsonResponse status200 (object ["ok" .= True]))
     RouteAccountPasskeyRename cidTxt ->
         case Auth.decodeCredentialId cidTxt of
-            Nothing -> respond (jsonError status400 "bad_request" "invalid credential id")
+            Nothing -> respond (jsonProblem status400 "bad_request" "invalid credential id")
             Just cid -> do
                 body <- jsonBody cfg req
                 case body of
                     Left response -> respond response
                     Right v -> case parseMaybeObj v of
-                        Nothing -> respond (jsonError status400 "bad_request" "nickname is required")
+                        Nothing -> respond (jsonProblem status400 "bad_request" "nickname is required")
                         Just o -> case parseMaybe (.: "nickname") o of
-                            Nothing -> respond (jsonError status400 "bad_request" "nickname is required")
+                            Nothing -> respond (jsonProblem status400 "bad_request" "nickname is required")
                             Just nick -> do
                                 ok <- Auth.renameCredential conn cid nick
-                                if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status404 "not_found" "passkey not found")
+                                if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonProblem status404 "not_found" "passkey not found")
     RouteAccountPasskeyDelete cidTxt ->
         case Auth.decodeCredentialId cidTxt of
-            Nothing -> respond (jsonError status400 "bad_request" "invalid credential id")
+            Nothing -> respond (jsonProblem status400 "bad_request" "invalid credential id")
             Just cid -> do
                 r <- Auth.deleteCredential conn cid
                 either (respond . authErrResponse) (const (respond (emptyResponse status204))) r
     RouteAccountRecoveryRegenerate -> do
         codes <- Auth.regenerateRecoveryCodes conn
         respond (jsonResponse status200 (object ["codes" .= codes]))
-    _ -> respond (jsonError status500 "internal_error" "route has no handler")
+    _ -> respond (jsonProblem status500 "internal_error" "route has no handler")
   where
     cfg = rcConfig rctx
     state = rcState rctx

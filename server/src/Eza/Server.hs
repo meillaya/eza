@@ -193,7 +193,8 @@ bodyLimitFor cfg req
     | otherwise = Just (fromIntegral (cfgMaxBodyBytes cfg))
 
 app :: Config -> AppState -> Application
-app cfg state = requestBodyLimitMiddleware cfg (dispatchApp cfg state)
+app cfg state =
+    catchAllMiddleware (requestBodyLimitMiddleware cfg (dispatchApp cfg state))
 
 {- | The routed application, behind the request-body limit.
 
@@ -233,11 +234,11 @@ dispatchApp cfg state req respond =
         Routes.SessionClass -> authed route
         Routes.TokenClass -> authed route
         Routes.AdminClass -> authed route
-        Routes.DeniedClass -> respond (jsonError status404 "not_found" "No such route")
+        Routes.DeniedClass -> respond (jsonProblem status404 "not_found" "No such route")
 
     dispatchUnmatched
         | isApiPath path = case knownMethods path of
-            [] -> respond (jsonError status404 "not_found" "No such route")
+            [] -> respond (jsonProblem status404 "not_found" "No such route")
             allowed -> respond (methodNotAllowed allowed)
         | otherwise = authedSpa
       where
@@ -245,7 +246,7 @@ dispatchApp cfg state req respond =
         -- keep the old authenticated fallthrough (which the guard denies).
         authedSpa = case Routes.matchRoute "GET" path of
             Just route -> authed route
-            Nothing -> respond (jsonError status404 "not_found" "No such route")
+            Nothing -> respond (jsonProblem status404 "not_found" "No such route")
 
     optionsDispatch
         | isClipPreflightPath path = clipPreflight cfg req respond
@@ -253,7 +254,7 @@ dispatchApp cfg state req respond =
             Just allow -> respond (responseLBS status204 [(hAllow, allow)] "")
             Nothing -> case effectiveRoute of
                 Just route -> authed route
-                Nothing -> respond (jsonError status404 "not_found" "No such route")
+                Nothing -> respond (jsonProblem status404 "not_found" "No such route")
 
     publicRoute route = case route of
         RouteHealth -> health state respond
@@ -283,7 +284,7 @@ dispatchApp cfg state req respond =
         RoutePasskeySetupVerifyRetired -> respond passkeySetupRetired
         RouteRecoveryRedeem -> recoveryRedeemHandler state req respond
         -- These match before the guard; an authenticated method is a bug.
-        _ -> respond (jsonError status405 "method_not_allowed" "method not allowed for this route")
+        _ -> respond (jsonProblem status405 "method_not_allowed" "method not allowed for this route")
 
 {- | The methods the public surface answers for a path, for an OPTIONS
 answer. A HEAD response always comes from the GET route, so it is added
@@ -324,7 +325,7 @@ methodNotAllowed :: [Text] -> Response
 methodNotAllowed allowed =
     mapResponseHeaders
         (<> [(hAllow, BSC.pack (T.unpack (T.intercalate ", " (allowed <> ["OPTIONS"]))))])
-        (jsonError status405 "method_not_allowed" "method not allowed for this path")
+        (jsonProblem status405 "method_not_allowed" "method not allowed for this path")
 
 isApiPath :: [Text] -> Bool
 isApiPath path = case path of
@@ -355,7 +356,7 @@ authedRoute rctx conn route req respond
     | Admin.owns route = Admin.dispatch rctx conn route req respond
     | Auth.owns route = Auth.dispatch rctx conn route req respond
     | Public.owns route = Public.dispatch rctx conn route req respond
-    | otherwise = respond (jsonError status500 "internal_error" "no route handler")
+    | otherwise = respond (jsonProblem status500 "internal_error" "no route handler")
 
 {- | Resolve the request principal, then run the handler on the right
 connection: reads use the user database's read pool, writes use its one writer.
@@ -400,15 +401,15 @@ authenticateRequest state req =
     path = pathInfo req
     klass = Authz.routeClass method path
     sessionRequired =
-        jsonError status403 "session_required" "this route requires a browser session"
+        jsonProblem status403 "session_required" "this route requires a browser session"
 
     bearerAuth rawToken
         | klass `elem` [Authz.SessionClass, Authz.AdminClass] = pure (Left sessionRequired)
-        | klass == Authz.DeniedClass = pure (Left (jsonError status404 "not_found" "No such route"))
+        | klass == Authz.DeniedClass = pure (Left (jsonProblem status404 "not_found" "No such route"))
         | otherwise = do
             resolved <- resolveApiToken state rawToken
             case resolved of
-                Left message -> pure (Left (jsonError status503 "user_limit" message))
+                Left message -> pure (Left (jsonProblem status503 "user_limit" message))
                 Right Nothing -> pure (Left invalidBearerToken)
                 Right (Just (user, slot, bare)) -> do
                     mtoken <- withReadDb slot $ \conn -> validateToken conn bare
@@ -416,9 +417,9 @@ authenticateRequest state req =
                         Nothing -> pure (Left invalidBearerToken)
                         Just token
                             | not (Authz.tokenAllows (mapMaybe Authz.scopeFromText (tokenScopes token)) method path) ->
-                                pure (Left (jsonError status403 "token_scope" "this token does not allow the request"))
+                                pure (Left (jsonProblem status403 "token_scope" "this token does not allow the request"))
                             | not (requestOriginAllowed cfg req) ->
-                                pure (Left (jsonError status403 "origin" "origin is not allowed"))
+                                pure (Left (jsonProblem status403 "origin" "origin is not allowed"))
                             | otherwise -> do
                                 recordTokenActivity slot token
                                 pure (Right (user, slot, BearerToken token))
@@ -429,21 +430,21 @@ authenticateRequest state req =
             Just wire -> do
                 resolved <- resolveSession state wire
                 case resolved of
-                    Left message -> pure (Left (jsonError status503 "user_limit" message))
+                    Left message -> pure (Left (jsonProblem status503 "user_limit" message))
                     Right Nothing -> pure (Left (unauthorized req))
                     Right (Just (user, slot, sess))
                         | not (sessionScopeAllows (cuRole user) (Auth.sessScope sess) method path) ->
-                            pure (Left (jsonError status403 "session_scope" "this session may not use this route"))
+                            pure (Left (jsonProblem status403 "session_scope" "this session may not use this route"))
                         | not (requestOriginAllowed cfg req) ->
-                            pure (Left (jsonError status403 "origin" "origin is not allowed"))
+                            pure (Left (jsonProblem status403 "origin" "origin is not allowed"))
                         | not (csrfOk req sess) ->
-                            pure (Left (jsonError status403 "csrf" "missing or invalid CSRF token"))
+                            pure (Left (jsonProblem status403 "csrf" "missing or invalid CSRF token"))
                         | otherwise -> do
                             recordSessionActivity slot sess
                             pure (Right (user, slot, CookieSession sess))
 
 invalidBearerToken :: Response
-invalidBearerToken = jsonError status401 "unauthenticated" "invalid bearer token"
+invalidBearerToken = jsonProblem status401 "unauthenticated" "invalid bearer token"
 
 {- | A normal session follows the role matrix; a recovery session may only
 finish its own setup; a pending two-factor session may not use the guard at all

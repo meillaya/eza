@@ -9,8 +9,8 @@ selection, the save/preview operations, and the API/schema contract.
 "Eza.Server" reads the JSON body with 'eitherDecode' (the 'FromJSON'
 instance on 'ClipRequest'), reads the @Idempotency-Key@ request header into
 'clIdempotencyKey', and calls 'saveClip' or 'previewClip'. Every operation
-returns 'Either' with a 'ClipError'; the helpers 'clipErrorStatus',
-'clipErrorCode', and 'clipErrorMessage' produce the JSON error shape the
+returns 'Either' with a 'ClipError'; 'toProblem' produces the JSON error
+shape the
 rest of the API uses:
 
 > {"error":{"code":"...","message":"..."}}
@@ -188,9 +188,7 @@ module Eza.Clip (
     ClipPreview (..),
     ClipError (..),
     ClipField (..),
-    clipErrorStatus,
-    clipErrorCode,
-    clipErrorMessage,
+    toProblem,
 
     -- * Validation and fingerprints
     validateClip,
@@ -212,9 +210,6 @@ module Eza.Clip (
     TemplateField (..),
     TemplateVars (..),
     RenderedTemplate (..),
-    templateErrorStatus,
-    templateErrorCode,
-    templateErrorMessage,
     defaultClipTemplate,
     listTemplates,
     getTemplate,
@@ -239,8 +234,10 @@ import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import Database.SQLite.Simple
 import GHC.Generics (Generic)
 
-import Eza.ClipTemplates
+import Eza.ClipTemplates hiding (toProblem)
+import qualified Eza.ClipTemplates as Templates
 import Eza.Events (clipEventData, recordEvent)
+import Eza.Problem (Problem (..))
 import Eza.Rules (applyRules)
 import Eza.Url (dedupeLookupUrls, domainOf, hostOf, isHttpUrl, normalizeUrl)
 import Eza.Webhook (EventType (..))
@@ -458,48 +455,50 @@ data ClipError
     deriving (Show, Eq)
 
 -- | HTTP status the server should answer with.
-clipErrorStatus :: ClipError -> Int
-clipErrorStatus err = case err of
-    ClipInvalidUrl _ -> 400
-    ClipFieldTooLong _ _ -> 400
-    ClipContentTooLarge _ _ -> 413
-    ClipInvalidTag _ -> 400
-    ClipTooManyTags _ -> 400
-    ClipInvalidIdempotencyKey _ -> 400
-    ClipIdempotencyConflict -> 409
-    ClipTemplateDisabled _ -> 409
-    ClipTemplateFailed templateError -> templateErrorStatus templateError
-    ClipSaveFailed _ -> 500
 
--- | Stable machine-readable error code (snake_case).
-clipErrorCode :: ClipError -> Text
-clipErrorCode err = case err of
-    ClipInvalidUrl _ -> "invalid_url"
-    ClipFieldTooLong clipField _ -> "field_too_long_" <> clipFieldName clipField
-    ClipContentTooLarge contentField _ -> "content_too_large_" <> contentField
-    ClipInvalidTag _ -> "invalid_tag"
-    ClipTooManyTags _ -> "too_many_tags"
-    ClipInvalidIdempotencyKey _ -> "invalid_idempotency_key"
-    ClipIdempotencyConflict -> "idempotency_conflict"
-    ClipTemplateDisabled _ -> "template_disabled"
-    ClipTemplateFailed templateError -> templateErrorCode templateError
-    ClipSaveFailed _ -> "save_failed"
+{- | The one HTTP representation of a clip error; the embedded template error
+uses its own conversion.
+-}
+toProblem :: ClipError -> Problem
+toProblem err = Problem (statusFor err) (codeFor err) (messageFor err)
+  where
+    statusFor e = case e of
+        ClipInvalidUrl _ -> 400
+        ClipFieldTooLong _ _ -> 400
+        ClipContentTooLarge _ _ -> 413
+        ClipInvalidTag _ -> 400
+        ClipTooManyTags _ -> 400
+        ClipInvalidIdempotencyKey _ -> 400
+        ClipIdempotencyConflict -> 409
+        ClipTemplateDisabled _ -> 409
+        ClipTemplateFailed templateError -> pStatus (Templates.toProblem templateError)
+        ClipSaveFailed _ -> 500
 
--- | Human-readable message; it names the offending field or limit.
-clipErrorMessage :: ClipError -> Text
-clipErrorMessage err = case err of
-    ClipInvalidUrl message -> "url is invalid: " <> message
-    ClipFieldTooLong clipField maxLength ->
-        clipFieldName clipField <> " must be at most " <> T.pack (show maxLength) <> " characters"
-    ClipContentTooLarge contentField maxLength ->
-        contentField <> " must be at most " <> T.pack (show maxLength) <> " characters"
-    ClipInvalidTag tag -> "invalid tag " <> T.pack (show tag)
-    ClipTooManyTags maxTags -> "at most " <> T.pack (show maxTags) <> " tags are allowed"
-    ClipInvalidIdempotencyKey message -> "invalid Idempotency-Key: " <> message
-    ClipIdempotencyConflict -> "this Idempotency-Key was already used for a different clip"
-    ClipTemplateDisabled templateId -> "template " <> T.pack (show templateId) <> " is disabled"
-    ClipTemplateFailed templateError -> templateErrorMessage templateError
-    ClipSaveFailed message -> "the clip could not be saved: " <> message
+    codeFor e = case e of
+        ClipInvalidUrl _ -> "invalid_url"
+        ClipFieldTooLong clipField _ -> "field_too_long_" <> clipFieldName clipField
+        ClipContentTooLarge contentField _ -> "content_too_large_" <> contentField
+        ClipInvalidTag _ -> "invalid_tag"
+        ClipTooManyTags _ -> "too_many_tags"
+        ClipInvalidIdempotencyKey _ -> "invalid_idempotency_key"
+        ClipIdempotencyConflict -> "idempotency_conflict"
+        ClipTemplateDisabled _ -> "template_disabled"
+        ClipTemplateFailed templateError -> pCode (Templates.toProblem templateError)
+        ClipSaveFailed _ -> "save_failed"
+
+    messageFor e = case e of
+        ClipInvalidUrl message -> "url is invalid: " <> message
+        ClipFieldTooLong clipField maxLength ->
+            clipFieldName clipField <> " must be at most " <> T.pack (show maxLength) <> " characters"
+        ClipContentTooLarge contentField maxLength ->
+            contentField <> " must be at most " <> T.pack (show maxLength) <> " characters"
+        ClipInvalidTag tag -> "invalid tag " <> T.pack (show tag)
+        ClipTooManyTags maxTags -> "at most " <> T.pack (show maxTags) <> " tags are allowed"
+        ClipInvalidIdempotencyKey message -> "invalid Idempotency-Key: " <> message
+        ClipIdempotencyConflict -> "this Idempotency-Key was already used for a different clip"
+        ClipTemplateDisabled templateId -> "template " <> T.pack (show templateId) <> " is disabled"
+        ClipTemplateFailed templateError -> pMessage (Templates.toProblem templateError)
+        ClipSaveFailed message -> "the clip could not be saved: " <> message
 
 clipFieldName :: ClipField -> Text
 clipFieldName clipField = case clipField of

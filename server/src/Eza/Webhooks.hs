@@ -15,9 +15,7 @@ one worker per user database without touching this module.
 -}
 module Eza.Webhooks (
     WebhookError (..),
-    webhookErrorStatus,
-    webhookErrorCode,
-    webhookErrorMessage,
+    toProblem,
     listWebhooks,
     getWebhook,
     createWebhook,
@@ -47,10 +45,12 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.List (nub)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
+
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
+import Eza.Problem (Problem (..))
 import Network.HTTP.Client (Manager)
 
 import Eza.Config (Config (..))
@@ -66,23 +66,24 @@ data WebhookError
     | WebhookLimit
     deriving (Show, Eq)
 
-webhookErrorStatus :: WebhookError -> Int
-webhookErrorStatus err = case err of
-    WebhookInvalid _ -> 400
-    WebhookNotFound -> 404
-    WebhookLimit -> 409
+-- | The one HTTP representation of a webhook error.
+toProblem :: WebhookError -> Problem
+toProblem err = Problem (statusFor err) (codeFor err) (messageFor err)
+  where
+    statusFor e = case e of
+        WebhookInvalid _ -> 400
+        WebhookNotFound -> 404
+        WebhookLimit -> 409
 
-webhookErrorCode :: WebhookError -> Text
-webhookErrorCode err = case err of
-    WebhookInvalid _ -> "bad_request"
-    WebhookNotFound -> "not_found"
-    WebhookLimit -> "webhook_limit"
+    codeFor e = case e of
+        WebhookInvalid _ -> "bad_request"
+        WebhookNotFound -> "not_found"
+        WebhookLimit -> "webhook_limit"
 
-webhookErrorMessage :: WebhookError -> Text
-webhookErrorMessage err = case err of
-    WebhookInvalid messages -> T.intercalate "; " messages
-    WebhookNotFound -> "webhook not found"
-    WebhookLimit -> "at most " <> T.pack (show maxWebhooks) <> " webhooks are allowed"
+    messageFor e = case e of
+        WebhookInvalid messages -> T.intercalate "; " messages
+        WebhookNotFound -> "webhook not found"
+        WebhookLimit -> "at most " <> T.pack (show maxWebhooks) <> " webhooks are allowed"
 
 -- -------------------------------------------------------------------- rows ---
 

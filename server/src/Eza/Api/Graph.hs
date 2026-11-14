@@ -5,12 +5,12 @@ import Control.Concurrent.MVar
 
 import Data.Aeson
 
-import Data.Maybe (catMaybes, fromMaybe, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe)
 
 import Data.Text (Text)
 import qualified Data.Text as T
 
-import Database.SQLite.Simple (Connection, Only (..), query)
+import Database.SQLite.Simple (Connection)
 
 import Network.HTTP.Types
 import Network.Wai
@@ -26,7 +26,8 @@ import Eza.Routes (Route (..))
 import Eza.Types
 
 import Eza.View (ViewInput (..))
-import Eza.Views (ViewError, ViewPatch (..), createView, deleteView, getView, listViews, updateView, viewErrorCode, viewErrorMessage, viewErrorStatus)
+import Eza.Views (ViewPatch (..), createView, updateView)
+import qualified Eza.Views as Views
 
 import Eza.Api.Common
 import Eza.Api.Context
@@ -39,7 +40,7 @@ graphLayoutHandler :: UserSlot -> Connection -> Request -> (Response -> IO Respo
 graphLayoutHandler slot conn req respond =
     case layoutPresetFromText (fromMaybe "standard" (param "preset" req)) of
         Nothing ->
-            respond (jsonError status400 "bad_request" "preset must be compact, standard, or airy")
+            respond (jsonProblem status400 "bad_request" "preset must be compact, standard, or airy")
         Just preset -> do
             revision <- graphRevision conn
             let cacheVar = Library.libraryLayoutCache (usLibrary slot)
@@ -60,11 +61,11 @@ viewsCreateHandler cfg conn req respond = do
     case body of
         Left response -> respond response
         Right value -> case fromJSON value :: Result ViewInput of
-            Error message -> respond (jsonError status400 "bad_request" (T.pack message))
+            Error message -> respond (jsonProblem status400 "bad_request" (T.pack message))
             Success input -> do
                 result <- createView conn input
                 case result of
-                    Left err -> respond (viewErrorResponse err)
+                    Left err -> respondProblem respond (Views.toProblem err)
                     Right view -> respond (jsonResponse status201 view)
 
 viewsUpdateHandler :: Config -> Connection -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
@@ -73,16 +74,12 @@ viewsUpdateHandler cfg conn viewSlug req respond = do
     case body of
         Left response -> respond response
         Right value -> case fromJSON value :: Result ViewPatch of
-            Error message -> respond (jsonError status400 "bad_request" (T.pack message))
+            Error message -> respond (jsonProblem status400 "bad_request" (T.pack message))
             Success patch -> do
                 result <- updateView conn viewSlug patch
                 case result of
-                    Left err -> respond (viewErrorResponse err)
+                    Left err -> respondProblem respond (Views.toProblem err)
                     Right view -> respond (jsonResponse status200 view)
-
-viewErrorResponse :: ViewError -> Response
-viewErrorResponse err =
-    jsonError (mkStatus (viewErrorStatus err) "") (viewErrorCode err) (viewErrorMessage err)
 
 -- ---------------------------------------------------------------------------
 -- Webhooks
@@ -96,7 +93,7 @@ dispatch rctx conn route req respond = case route of
         respond (jsonResponse status200 graph)
     RouteGraphLayout ->
         graphLayoutHandler slot conn req respond
-    _ -> respond (jsonError status500 "internal_error" "route has no handler")
+    _ -> respond (jsonProblem status500 "internal_error" "route has no handler")
   where
     slot = rcSlot rctx
 

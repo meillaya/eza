@@ -23,9 +23,7 @@ module Eza.ClipTemplates (
     defaultClipTemplate,
     TemplateError (..),
     TemplateField (..),
-    templateErrorStatus,
-    templateErrorCode,
-    templateErrorMessage,
+    toProblem,
 
     -- * Variables and rendering
     templateVariables,
@@ -56,6 +54,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isDigit, toLower)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
+
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Calendar (toGregorian)
@@ -63,6 +62,7 @@ import Data.Time.Clock (UTCTime, utctDay)
 import Data.Time.Clock.POSIX (getPOSIXTime, posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import Database.SQLite.Simple
+import Eza.Problem (Problem (..))
 import GHC.Generics (Generic)
 
 import Eza.Url (normalizeUrl)
@@ -275,7 +275,7 @@ data TemplateField
     deriving (Show, Eq)
 
 {- | Every failure a template operation can report. The server maps these with
-'templateErrorStatus', 'templateErrorCode', and 'templateErrorMessage'.
+'toProblem'.
 -}
 data TemplateError
     = TemplateNotFound
@@ -289,42 +289,42 @@ data TemplateError
     deriving (Show, Eq)
 
 -- | HTTP status the server should answer with.
-templateErrorStatus :: TemplateError -> Int
-templateErrorStatus err = case err of
-    TemplateNotFound -> 404
-    TemplateBuiltinReadOnly -> 409
-    TemplateNameRequired -> 400
-    TemplateFieldTooLong _ _ -> 400
-    TemplateUnknownVariable _ -> 400
-    TemplateInvalidFilter _ -> 400
-    TemplateMalformed _ -> 400
-    TemplateInvalidTrigger _ -> 400
 
--- | Stable machine-readable error code (snake_case).
-templateErrorCode :: TemplateError -> Text
-templateErrorCode err = case err of
-    TemplateNotFound -> "template_not_found"
-    TemplateBuiltinReadOnly -> "template_builtin_readonly"
-    TemplateNameRequired -> "template_name_required"
-    TemplateFieldTooLong templateField _ -> "template_field_too_long_" <> fieldName templateField
-    TemplateUnknownVariable _ -> "template_unknown_variable"
-    TemplateInvalidFilter _ -> "template_invalid_filter"
-    TemplateMalformed _ -> "template_malformed"
-    TemplateInvalidTrigger _ -> "template_invalid_trigger"
+-- | The one HTTP representation of a template error.
+toProblem :: TemplateError -> Problem
+toProblem err = Problem (statusFor err) (codeFor err) (messageFor err)
+  where
+    statusFor e = case e of
+        TemplateNotFound -> 404
+        TemplateBuiltinReadOnly -> 409
+        TemplateNameRequired -> 400
+        TemplateFieldTooLong _ _ -> 400
+        TemplateUnknownVariable _ -> 400
+        TemplateInvalidFilter _ -> 400
+        TemplateMalformed _ -> 400
+        TemplateInvalidTrigger _ -> 400
 
--- | Human-readable message. Always says which field is wrong and why.
-templateErrorMessage :: TemplateError -> Text
-templateErrorMessage err = case err of
-    TemplateNotFound -> "template not found"
-    TemplateBuiltinReadOnly -> "built-in templates cannot be edited or deleted"
-    TemplateNameRequired -> "template name is required"
-    TemplateFieldTooLong templateField maxLength ->
-        fieldName templateField <> " must be at most " <> T.pack (show maxLength) <> " characters"
-    TemplateUnknownVariable name ->
-        "unknown template variable {{" <> name <> "}}; allowed variables: " <> T.intercalate ", " templateVariables
-    TemplateInvalidFilter message -> "invalid template filter: " <> message
-    TemplateMalformed message -> "invalid template: " <> message
-    TemplateInvalidTrigger message -> "invalid trigger: " <> message
+    codeFor e = case e of
+        TemplateNotFound -> "template_not_found"
+        TemplateBuiltinReadOnly -> "template_builtin_readonly"
+        TemplateNameRequired -> "template_name_required"
+        TemplateFieldTooLong templateField _ -> "template_field_too_long_" <> fieldName templateField
+        TemplateUnknownVariable _ -> "template_unknown_variable"
+        TemplateInvalidFilter _ -> "template_invalid_filter"
+        TemplateMalformed _ -> "template_malformed"
+        TemplateInvalidTrigger _ -> "template_invalid_trigger"
+
+    messageFor e = case e of
+        TemplateNotFound -> "template not found"
+        TemplateBuiltinReadOnly -> "built-in templates cannot be edited or deleted"
+        TemplateNameRequired -> "template name is required"
+        TemplateFieldTooLong templateField maxLength ->
+            fieldName templateField <> " must be at most " <> T.pack (show maxLength) <> " characters"
+        TemplateUnknownVariable name ->
+            "unknown template variable {{" <> name <> "}}; allowed variables: " <> T.intercalate ", " templateVariables
+        TemplateInvalidFilter message -> "invalid template filter: " <> message
+        TemplateMalformed message -> "invalid template: " <> message
+        TemplateInvalidTrigger message -> "invalid trigger: " <> message
 
 fieldName :: TemplateField -> Text
 fieldName templateField = case templateField of

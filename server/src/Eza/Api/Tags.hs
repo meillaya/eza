@@ -7,7 +7,7 @@ import Data.Aeson.Types (parseMaybe)
 
 import qualified Data.Text as T
 
-import Database.SQLite.Simple (Connection, Only (..), query)
+import Database.SQLite.Simple (Connection)
 
 import Network.HTTP.Types
 import Network.Wai
@@ -39,23 +39,23 @@ dispatch rctx conn route req respond = case route of
         case body of
             Left response -> respond response
             Right v -> case parseMaybeObj v of
-                Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+                Nothing -> respond (jsonProblem status400 "bad_request" "invalid body")
                 Just o -> case (parseMaybe (.: "bookmark_id") o, parseMaybe (.: "tags") o) of
                     (Just bid, Just tags) -> do
                         n <- addTagsToBookmark conn bid tags
                         respond (jsonResponse status200 (object ["updated" .= n]))
-                    _ -> respond (jsonError status400 "bad_request" "bookmark_id and tags are required")
+                    _ -> respond (jsonProblem status400 "bad_request" "bookmark_id and tags are required")
     RouteTagMerge -> do
         body <- jsonBody cfg req
         case body of
             Left response -> respond response
             Right v -> case parseMaybeObj v of
-                Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+                Nothing -> respond (jsonProblem status400 "bad_request" "invalid body")
                 Just o -> case (parseMaybe (.: "from") o, parseMaybe (.: "into") o) of
                     (Just froms, Just into) -> do
                         n <- mergeTags conn froms into
                         respond (jsonResponse status200 (object ["updated" .= n]))
-                    _ -> respond (jsonError status400 "bad_request" "from and into are required")
+                    _ -> respond (jsonProblem status400 "bad_request" "from and into are required")
     RouteTagSuggestions tag -> do
         r <- aiSuggestions (T.pack (cfgAiProvider cfg)) (T.pack (cfgAiModel cfg)) (T.pack (cfgOllamaBaseUrl cfg)) conn tag 20
         case r of
@@ -72,18 +72,18 @@ dispatch rctx conn route req respond = case route of
         case body of
             Left response -> respond response
             Right v -> case parseMaybeObj v of
-                Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+                Nothing -> respond (jsonProblem status400 "bad_request" "invalid body")
                 Just o -> case parseMaybe (.: "name") o of
-                    Nothing -> respond (jsonError status400 "bad_request" "name is required")
+                    Nothing -> respond (jsonProblem status400 "bad_request" "name is required")
                     Just newName -> do
                         ok <- renameTag conn tagName newName
-                        if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status409 "conflict" "tag rename failed")
+                        if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonProblem status409 "conflict" "tag rename failed")
     RouteTagDelete segments -> do
         let tagName = T.intercalate "/" segments
             detach = parseBool =<< param "detach" req
         ok <- if detach == Just True then deleteTagWithLinks conn tagName else deleteTag conn tagName
-        if ok then respond (emptyResponse status204) else respond (jsonError status409 "conflict" "tag is not empty or does not exist")
-    _ -> respond (jsonError status500 "internal_error" "route has no handler")
+        if ok then respond (emptyResponse status204) else respond (jsonProblem status409 "conflict" "tag is not empty or does not exist")
+    _ -> respond (jsonProblem status500 "internal_error" "route has no handler")
   where
     cfg = rcConfig rctx
 

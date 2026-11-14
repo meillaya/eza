@@ -26,6 +26,8 @@ module Eza.Control (
     openControlDb,
     initControlDb,
     controlSchemaVersion,
+    controlMigrationPlan,
+    checkControlSchema,
     userColumns,
     listUsers,
     lookupUserByUsername,
@@ -47,7 +49,7 @@ module Eza.Control (
 ) where
 
 import Control.Exception (SomeException, try)
-import Control.Monad (when)
+
 import Crypto.Random (getRandomBytes)
 import Data.ByteString (ByteString)
 import Data.Maybe (fromMaybe, isNothing)
@@ -58,6 +60,7 @@ import Database.SQLite.Simple
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory)
 
+import qualified Eza.Migrate as Migrate
 import Eza.User (UserRole (..), parseUserRole, userRoleText)
 
 -- -------------------------------------------------------------------- types ---
@@ -109,7 +112,7 @@ initControlDb :: FilePath -> IO ()
 initControlDb path = openControlDb path >> pure ()
 
 controlSchemaVersion :: Int
-controlSchemaVersion = 1
+controlSchemaVersion = 2
 
 pragmas :: [Query]
 pragmas =
@@ -122,20 +125,29 @@ pragmas =
 
 migrate :: Connection -> IO ()
 migrate conn = do
-    rows <- query_ conn "PRAGMA user_version" :: IO [Only Int]
-    let version = case rows of [Only n] -> n; _ -> 0
-    when (version > controlSchemaVersion) $
-        ioError (userError ("control database schema is newer than this binary: " <> show version))
-    when (version < 1) $ do
-        execute_ conn "BEGIN IMMEDIATE"
-        result <- try (mapM_ (execute_ conn) schemaV1)
-        case result of
-            Left (err :: SomeException) -> do
-                execute_ conn "ROLLBACK"
-                ioError (userError ("control database migration failed: " <> show err))
-            Right () -> do
-                execute_ conn "PRAGMA user_version = 1"
-                execute_ conn "COMMIT"
+    result <- Migrate.applyMigrations conn controlMigrationPlan
+    case result of
+        Left message -> ioError (userError (T.unpack message))
+        Right _ -> pure ()
+
+{- | The control schema history, append-only. Existing installs are stamped v1
+without @schema_meta@; v2 creates the shared metadata table and the engine
+backfills v1's checksum without re-running it.
+-}
+controlMigrationPlan :: Migrate.MigrationPlan
+controlMigrationPlan =
+    Migrate.MigrationPlan
+        { Migrate.planName = "control database"
+        , Migrate.planLegacyVersion = 1
+        , Migrate.planMigrations =
+            [ Migrate.Migration 1 "accounts" schemaV1
+            , Migrate.Migration 2 "schema metadata" [Migrate.schemaMetaStatement]
+            ]
+        }
+
+-- | The control schema state for the @verify@ command; never applies anything.
+checkControlSchema :: Connection -> IO (Either Text Migrate.SchemaStatus)
+checkControlSchema conn = Migrate.verifySchema conn controlMigrationPlan
 
 schemaV1 :: [Query]
 schemaV1 =

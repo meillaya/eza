@@ -3,20 +3,22 @@ module Eza.Api.Extensions where
 
 import Data.Aeson
 
-import Data.Maybe (catMaybes, fromMaybe, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe)
 
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
-import Database.SQLite.Simple (Connection, Only (..), query)
+import Database.SQLite.Simple (Connection)
 
 import Network.HTTP.Types
 import Network.Wai
 
 import qualified Eza.Auth as Auth
 
-import Eza.Clip (ClipError, ClipRequest (..), ClipTemplate (..), SaveClipResult (..), TemplateError, clipErrorCode, clipErrorMessage, clipErrorStatus, createTemplate, deleteTemplate, getTemplate, previewClip, saveClip, templateErrorCode, templateErrorMessage, templateErrorStatus, templatesPayload, updateTemplate)
+import Eza.Clip (ClipError, ClipRequest (..), ClipTemplate (..), SaveClipResult (..), TemplateError, createTemplate, deleteTemplate, getTemplate, previewClip, saveClip, templatesPayload, updateTemplate)
+import qualified Eza.Clip as Clip
+import qualified Eza.ClipTemplates as Templates
 import Eza.Config
 
 import Eza.Enrich (enqueueEnrichment)
@@ -25,16 +27,18 @@ import Eza.Routes (Route (..))
 
 import Eza.Rules (Rule (..), createRule, deleteRule, listRules, matchingBookmarks, updateRule)
 
-import Eza.Tokens (Token (..), createToken, listTokens, revokeToken, tokenActivityDue, touchToken, validateToken)
+import Eza.Tokens (Token (..))
 
-import Eza.Views (ViewError, ViewPatch (..), createView, deleteView, getView, listViews, updateView, viewErrorCode, viewErrorMessage, viewErrorStatus)
+import Eza.Views (ViewError, deleteView, getView, listViews)
+import qualified Eza.Views as Views
 import Eza.Webhook (WebhookInput (..))
-import Eza.Webhooks (WebhookError, createWebhook, defaultWebhookWorkerConfig, deleteWebhook, getWebhook, listDeliveries, listWebhooks, testWebhook, updateWebhook, webhookErrorCode, webhookErrorMessage, webhookErrorStatus)
+import Eza.Webhooks (WebhookError, createWebhook, defaultWebhookWorkerConfig, deleteWebhook, getWebhook, listDeliveries, listWebhooks, testWebhook, updateWebhook)
+import qualified Eza.Webhooks as Webhooks
 
 import Eza.Api.Auth (payloadTooLargeResponse)
 import Eza.Api.Common
 import Eza.Api.Context
-import Eza.Api.Graph (viewErrorResponse, viewsCreateHandler, viewsUpdateHandler)
+import Eza.Api.Graph (viewsCreateHandler, viewsUpdateHandler)
 
 isClipPath :: [Text] -> Bool
 isClipPath path = case path of
@@ -91,19 +95,19 @@ clipPreflight cfg req respond
                 (<> corsHeaders cfg req)
                 (responseLBS status204 [] "")
             )
-    | otherwise = respond (jsonError status403 "origin" "origin is not allowed")
+    | otherwise = respond (jsonProblem status403 "origin" "origin is not allowed")
 
 clipErrorResponse :: Config -> Request -> ClipError -> Response
 clipErrorResponse cfg req err =
-    withCors cfg req (jsonError (mkStatus (clipErrorStatus err) "") (clipErrorCode err) (clipErrorMessage err))
+    withCors cfg req (problemResponse (Clip.toProblem err))
 
 clipSaveHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 clipSaveHandler cfg conn req respond = do
     body <- readBodyLimited (8 * 1024 * 1024) req
     case body of
-        Left () -> respond (jsonError status413 "payload_too_large" "clip body must be at most 8 MiB")
+        Left () -> respond (jsonProblem status413 "payload_too_large" "clip body must be at most 8 MiB")
         Right raw -> case eitherDecode raw of
-            Left err -> respond (withCors cfg req (jsonError status400 "bad_request" (T.pack err)))
+            Left err -> respond (withCors cfg req (jsonProblem status400 "bad_request" (T.pack err)))
             Right request -> do
                 let headerKey = fmap TE.decodeUtf8 (lookup "Idempotency-Key" (requestHeaders req))
                     request' = request{clIdempotencyKey = headerKey `orElse` clIdempotencyKey request}
@@ -126,7 +130,7 @@ clipPreviewHandler cfg conn req respond = do
     case body of
         Left () -> respond (payloadTooLargeResponse cfg)
         Right raw -> case eitherDecode raw of
-            Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+            Left err -> respond (jsonProblem status400 "bad_request" (T.pack err))
             Right request -> do
                 result <- previewClip conn request
                 case result of
@@ -173,15 +177,15 @@ templateWriteSession :: (Response -> IO ResponseReceived) -> AuthContext -> IO R
 templateWriteSession respond ctx action =
     case ctx of
         CookieSession _ -> action
-        BearerToken _ -> respond (jsonError status403 "session_required" "template writes require a browser session")
+        BearerToken _ -> respond (jsonProblem status403 "session_required" "template writes require a browser session")
 
 templateCreateHandler :: Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 templateCreateHandler conn req respond = do
     body <- readBodyLimited (2 * 1024 * 1024) req
     case body of
-        Left () -> respond (jsonError status413 "payload_too_large" "template is too large")
+        Left () -> respond (jsonProblem status413 "payload_too_large" "template is too large")
         Right raw -> case eitherDecode raw of
-            Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+            Left err -> respond (jsonProblem status400 "bad_request" (T.pack err))
             Right template -> do
                 result <- createTemplate conn template
                 case result of
@@ -192,9 +196,9 @@ templateUpdateHandler :: Connection -> Int -> Request -> (Response -> IO Respons
 templateUpdateHandler conn templateId req respond = do
     body <- readBodyLimited (2 * 1024 * 1024) req
     case body of
-        Left () -> respond (jsonError status413 "payload_too_large" "template is too large")
+        Left () -> respond (jsonProblem status413 "payload_too_large" "template is too large")
         Right raw -> case eitherDecode raw of
-            Left err -> respond (jsonError status400 "bad_request" (T.pack err))
+            Left err -> respond (jsonProblem status400 "bad_request" (T.pack err))
             Right template -> do
                 result <- updateTemplate conn template{ctId = templateId}
                 case result of
@@ -209,8 +213,7 @@ templateDeleteHandler conn templateId respond = do
         Right () -> respond (emptyResponse status204)
 
 templateErrorResponse :: TemplateError -> Response
-templateErrorResponse err =
-    jsonError (mkStatus (templateErrorStatus err) "") (templateErrorCode err) (templateErrorMessage err)
+templateErrorResponse = problemResponse . Templates.toProblem
 
 -- ---------------------------------------------------------------------------
 -- Graph layout and views
@@ -222,11 +225,11 @@ webhookCreateHandler cfg conn req respond = do
     case body of
         Left response -> respond response
         Right value -> case fromJSON value :: Result WebhookInput of
-            Error message -> respond (jsonError status400 "bad_request" (T.pack message))
+            Error message -> respond (jsonProblem status400 "bad_request" (T.pack message))
             Success input -> do
                 result <- createWebhook conn input
                 case result of
-                    Left err -> respond (webhookErrorResponse err)
+                    Left err -> respond (problemResponse (Webhooks.toProblem err))
                     Right (webhook, secret) ->
                         respond (jsonResponse status201 (object ["webhook" .= webhook, "secret" .= secret]))
 
@@ -236,11 +239,11 @@ webhookUpdateHandler cfg conn webhookId req respond = do
     case body of
         Left response -> respond response
         Right value -> case fromJSON value :: Result WebhookInput of
-            Error message -> respond (jsonError status400 "bad_request" (T.pack message))
+            Error message -> respond (jsonProblem status400 "bad_request" (T.pack message))
             Success input -> do
                 result <- updateWebhook conn webhookId input
                 case result of
-                    Left err -> respond (webhookErrorResponse err)
+                    Left err -> respond (problemResponse (Webhooks.toProblem err))
                     Right webhook -> respond (jsonResponse status200 webhook)
 
 webhookTestHandler ::
@@ -253,17 +256,13 @@ webhookTestHandler ::
 webhookTestHandler cfg state conn webhookId respond = do
     result <- testWebhook (defaultWebhookWorkerConfig cfg (asManager state)) conn webhookId
     case result of
-        Left err -> respond (webhookErrorResponse err)
+        Left err -> respond (problemResponse (Webhooks.toProblem err))
         Right (ok, status, message) ->
             respond
                 ( jsonResponse
                     status200
                     (object ["ok" .= ok, "status" .= status, "error" .= message])
                 )
-
-webhookErrorResponse :: WebhookError -> Response
-webhookErrorResponse err =
-    jsonError (mkStatus (webhookErrorStatus err) "") (webhookErrorCode err) (webhookErrorMessage err)
 
 sanitizeRule :: Rule -> Rule
 sanitizeRule rule =
@@ -273,6 +272,12 @@ sanitizeRule rule =
         , rulePattern = T.strip (rulePattern rule)
         , ruleAddTags = [T.toLower (T.strip tag) | tag <- ruleAddTags rule, not (T.null (T.strip tag))]
         }
+
+webhookErrorResponse :: WebhookError -> Response
+webhookErrorResponse = problemResponse . Webhooks.toProblem
+
+viewErrorResponse :: ViewError -> Response
+viewErrorResponse = problemResponse . Views.toProblem
 
 -- | Dispatch the handlers this family owns from their "Eza.Routes" constructors.
 dispatch :: RequestContext -> Connection -> Route -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
@@ -286,7 +291,7 @@ dispatch rctx conn route req respond = case route of
     RouteClipTemplateRead templateId -> do
         found <- getTemplate conn templateId
         case found of
-            Nothing -> respond (withCors cfg req (jsonError status404 "template_not_found" "template not found"))
+            Nothing -> respond (withCors cfg req (jsonProblem status404 "template_not_found" "template not found"))
             Just template -> respond (withCors cfg req (jsonResponse status200 template))
     RouteClipTemplateCreate -> templateWriteSession respond ctx (templateCreateHandler conn req respond)
     RouteClipTemplateUpdate templateId -> templateWriteSession respond ctx (templateUpdateHandler conn templateId req respond)
@@ -299,7 +304,7 @@ dispatch rctx conn route req respond = case route of
     RouteViewRead viewSlug -> do
         found <- getView conn viewSlug
         case found of
-            Nothing -> respond (jsonError status404 "not_found" "view not found")
+            Nothing -> respond (jsonProblem status404 "not_found" "view not found")
             Just view -> respond (jsonResponse status200 view)
     RouteViewUpdate viewSlug ->
         viewsUpdateHandler cfg conn viewSlug req respond
@@ -316,20 +321,20 @@ dispatch rctx conn route req respond = case route of
     RouteWebhookRead webhookId -> do
         found <- getWebhook conn webhookId
         case found of
-            Nothing -> respond (jsonError status404 "not_found" "webhook not found")
+            Nothing -> respond (jsonProblem status404 "not_found" "webhook not found")
             Just webhook -> respond (jsonResponse status200 webhook)
     RouteWebhookUpdate webhookId -> webhookUpdateHandler cfg conn webhookId req respond
     RouteWebhookDelete webhookId -> do
         removed <- deleteWebhook conn webhookId
         if removed
             then respond (emptyResponse status204)
-            else respond (jsonError status404 "not_found" "webhook not found")
+            else respond (jsonProblem status404 "not_found" "webhook not found")
     RouteWebhookTest webhookId ->
         webhookTestHandler cfg state conn webhookId respond
     RouteWebhookDeliveries webhookId -> do
         exists <- getWebhook conn webhookId
         case exists of
-            Nothing -> respond (jsonError status404 "not_found" "webhook not found")
+            Nothing -> respond (jsonProblem status404 "not_found" "webhook not found")
             Just _ -> do
                 let limit = fromMaybe 20 (readInt =<< param "limit" req)
                 deliveries <- listDeliveries conn webhookId limit
@@ -357,11 +362,11 @@ dispatch rctx conn route req respond = case route of
             Left response -> respond response
             Right rule -> do
                 ok <- updateRule conn (sanitizeRule rule){ruleId = ruleId}
-                if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonError status404 "not_found" "rule not found")
+                if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonProblem status404 "not_found" "rule not found")
     RouteRuleDelete ruleId -> do
         ok <- deleteRule conn ruleId
-        if ok then respond (emptyResponse status204) else respond (jsonError status404 "not_found" "rule not found")
-    _ -> respond (jsonError status500 "internal_error" "route has no handler")
+        if ok then respond (emptyResponse status204) else respond (jsonProblem status404 "not_found" "rule not found")
+    _ -> respond (jsonProblem status500 "internal_error" "route has no handler")
   where
     cfg = rcConfig rctx
     state = rcState rctx

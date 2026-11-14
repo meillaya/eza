@@ -1,8 +1,8 @@
 -- | Public authentication ceremonies and the auth request guards (origin, body size, rate limits).
 module Eza.Api.Auth where
 
-import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
-import Control.Exception (IOException, SomeException, bracket, bracket_, onException, throwIO, try)
+import Control.Concurrent.QSem (signalQSem, waitQSem)
+import Control.Exception (bracket_)
 
 import Data.Aeson
 
@@ -15,7 +15,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Text.Encoding.Error (lenientDecode)
 
-import Database.SQLite.Simple (Connection, Only (..), query)
+import Database.SQLite.Simple (Connection)
 
 import Network.HTTP.Types
 import Network.Wai
@@ -28,19 +28,17 @@ import Eza.Config
 import Eza.Control (ControlUser (..))
 import qualified Eza.Control as Control
 
-import Eza.Pages (addPasskeyPage, loginPage, passkeyLoginPage, recoverPage, recoverySetupPage, setupPage)
+import Eza.Pages (loginPage, passkeyLoginPage, recoverySetupPage, setupPage)
 import Eza.Password (validatePassword, validateUsername)
 import qualified Eza.Password as Password
 import Eza.Routes (Route (..))
 
 import Eza.Shell (pageAssets)
 
-import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..))
+import Eza.User (UserRole (..))
 
 import Eza.Api.Common
 import Eza.Api.Context
-
-import Eza.Api.Admin (adminErrorResponse)
 
 loginHandler :: AppState -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 loginHandler state req respond = do
@@ -91,7 +89,7 @@ setupHandler state req respond = do
 
 passkeySetupRetired :: Response
 passkeySetupRetired =
-    jsonError status410 "passkey_setup_retired" "passkey setup is retired; create a username and password first"
+    jsonProblem status410 "passkey_setup_retired" "passkey setup is retired; create a username and password first"
 
 {- | Password sign-in for one named account. The username selects the control
 row and therefore the database; an unknown or disabled name pays for a dummy
@@ -112,9 +110,9 @@ passwordLoginHandler state req respond =
                     body <- readAuthBody cfg req
                     case body of
                         Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
-                        Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
+                        Left (AuthBodyInvalid message) -> respond (jsonProblem status400 "bad_request" message)
                         Right value -> case parseMaybeObj value of
-                            Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+                            Nothing -> respond (jsonProblem status400 "bad_request" "invalid body")
                             Just o -> case (parseMaybe (.: "username") o, parseMaybe (.: "password") o) of
                                 (Just username, Just password) -> do
                                     let limiterKey = clientKey <> "|" <> T.toLower (T.strip username)
@@ -122,7 +120,7 @@ passwordLoginHandler state req respond =
                                     case attempt of
                                         Left retryAfter -> respond (lockedResponse "login_locked" retryAfter)
                                         Right () -> attemptLogin username password limiterKey
-                                _ -> respond (jsonError status400 "bad_request" "username and password are required")
+                                _ -> respond (jsonProblem status400 "bad_request" "username and password are required")
   where
     cfg = asConfig state
 
@@ -161,13 +159,13 @@ passwordLoginHandler state req respond =
                             )
 
 invalidCredentials :: Response
-invalidCredentials = jsonError status401 "invalid_credentials" "invalid username or password"
+invalidCredentials = jsonProblem status401 "invalid_credentials" "invalid username or password"
 
 lockedResponse :: Text -> Int -> Response
 lockedResponse code retryAfter =
     mapResponseHeaders
         (<> [("Retry-After", BSC.pack (show retryAfter))])
-        (jsonError status429 code "too many failed attempts; try again later")
+        (jsonProblem status429 code "too many failed attempts; try again later")
 
 {- | The client address the limiters key on. Without a trusted proxy that is
 the socket peer, without the ephemeral source port. When the peer is one of the
@@ -242,7 +240,7 @@ passkeySecondFactorVerifyHandler state req respond =
             body <- readAuthBody cfg req
             case body of
                 Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
-                Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
+                Left (AuthBodyInvalid message) -> respond (jsonProblem status400 "bad_request" message)
                 Right value -> do
                     mpending <- pendingSession state req
                     case mpending of
@@ -269,7 +267,7 @@ passkeySecondFactorVerifyHandler state req respond =
     cfg = asConfig state
 
 pendingRequired :: Response
-pendingRequired = jsonError status401 "pending_required" "the password sign-in expired; sign in again"
+pendingRequired = jsonProblem status401 "pending_required" "the password sign-in expired; sign in again"
 
 {- | Legacy passkey sign-in: only while exactly one enabled account exists and
 its database has passkeys but no password, and never during a recovery setup.
@@ -319,7 +317,7 @@ legacyPasskeyVerifyHandler state req respond =
                             body <- readAuthBody cfg req
                             case body of
                                 Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
-                                Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
+                                Left (AuthBodyInvalid message) -> respond (jsonProblem status400 "bad_request" message)
                                 Right value -> do
                                     result <- withDb slot $ \conn -> Auth.verifyLogin conn (authConfig cfg) value
                                     case result of
@@ -336,7 +334,7 @@ legacyPasskeyVerifyHandler state req respond =
 
 passkeysRetired :: Response
 passkeysRetired =
-    jsonError status403 "passkeys_retired" "password sign-in is active; passkeys are legacy credentials"
+    jsonProblem status403 "passkeys_retired" "password sign-in is active; passkeys are legacy credentials"
 
 {- | Finish a password setup. With a recovery session the session's account is
 the target; on an empty control database this claims a new user and creates
@@ -362,21 +360,21 @@ passwordSetupHandler state req respond =
                         Just (_, _, sess)
                             | Auth.sessScope sess == "recovery"
                             , not (csrfOk req sess) ->
-                                respond (jsonError status403 "csrf" "missing or invalid CSRF token")
+                                respond (jsonProblem status403 "csrf" "missing or invalid CSRF token")
                         _ -> do
                             body <- readAuthBody cfg req
                             case body of
                                 Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
-                                Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
+                                Left (AuthBodyInvalid message) -> respond (jsonProblem status400 "bad_request" message)
                                 Right value -> case parseSetupBody value of
-                                    Left message -> respond (jsonError status400 "bad_request" message)
+                                    Left message -> respond (jsonProblem status400 "bad_request" message)
                                     Right (rawUsername, password) ->
                                         case msess of
                                             Just (user, slot, sess)
                                                 | Auth.sessScope sess == "recovery" ->
                                                     finishRecoverySetup user slot rawUsername password
                                             Just _ ->
-                                                respond (jsonError status403 "recovery_session_required" "a recovery session is required to finish recovery setup")
+                                                respond (jsonProblem status403 "recovery_session_required" "a recovery session is required to finish recovery setup")
                                             Nothing -> startFreshSetup rawUsername password
   where
     cfg = asConfig state
@@ -388,8 +386,8 @@ passwordSetupHandler state req respond =
                 renamed <- withControl state $ \control -> Control.setUsername control (cuId user) username
                 case renamed of
                     Left Control.ControlDuplicateUsername ->
-                        respond (jsonError status409 "username_taken" "that username is already in use")
-                    Left err -> respond (jsonError status500 "control" (T.pack (show err)))
+                        respond (jsonProblem status409 "username_taken" "that username is already in use")
+                    Left err -> respond (jsonProblem status500 "control" (T.pack (show err)))
                     Right () -> do
                         passwordHash <- Password.hashPassword (cfgArgon2 cfg) password
                         codes <- withDb slot $ \conn -> Auth.completeSetup conn username passwordHash
@@ -405,7 +403,7 @@ passwordSetupHandler state req respond =
     startFreshSetup rawUsername password = do
         accounts <- withControl state Control.countUsers
         if accounts /= 0
-            then respond (jsonError status403 "setup_unavailable" "setup is not available")
+            then respond (jsonProblem status403 "setup_unavailable" "setup is not available")
             else case validateSetupCredentials rawUsername password of
                 Left response -> respond response
                 Right username -> do
@@ -415,7 +413,7 @@ passwordSetupHandler state req respond =
                         withControl state $ \control ->
                             Admin.createUserAccount cfg control username RoleAdmin password
                     case created of
-                        Left err -> respond (adminErrorResponse err)
+                        Left err -> respondProblem respond (Admin.toProblem err)
                         Right (user, codes) -> withSlot state user respond $ \slot -> do
                             session <- withDb slot $ \conn -> Auth.createSession conn "normal" (cfgSessionTtlSeconds cfg)
                             withControl state $ \control -> Control.setUserLastLogin control (cuId user)
@@ -428,9 +426,9 @@ passwordSetupHandler state req respond =
 
     validateSetupCredentials rawUsername password =
         case validateUsername rawUsername of
-            Left message -> Left (jsonError status400 "invalid_username" message)
+            Left message -> Left (jsonProblem status400 "invalid_username" message)
             Right username -> case validatePassword password of
-                Left message -> Left (jsonError status400 "weak_password" message)
+                Left message -> Left (jsonProblem status400 "weak_password" message)
                 Right () -> Right username
 
 parseSetupBody :: Value -> Either Text (Text, Text)
@@ -455,17 +453,17 @@ recoveryRedeemHandler state req respond =
             body <- readAuthBody cfg req
             case body of
                 Left AuthBodyTooLarge -> respond (payloadTooLargeResponse cfg)
-                Left (AuthBodyInvalid message) -> respond (jsonError status400 "bad_request" message)
+                Left (AuthBodyInvalid message) -> respond (jsonProblem status400 "bad_request" message)
                 Right value -> do
                     let limiterKey = clientKey <> "|recovery"
                     attempt <- Auth.checkRateLimit (asRecoveryLimiter state) limiterKey
                     case attempt of
                         Left retryAfter -> respond (lockedResponse "recovery_locked" retryAfter)
                         Right () -> case parseMaybeObj value of
-                            Nothing -> respond (jsonError status400 "bad_request" "invalid body")
+                            Nothing -> respond (jsonProblem status400 "bad_request" "invalid body")
                             Just o -> case (parseMaybe (.: "username") o, parseMaybe (.: "code") o) of
                                 (Just username, Just code) -> redeem username code limiterKey
-                                _ -> respond (jsonError status400 "bad_request" "username and code are required")
+                                _ -> respond (jsonProblem status400 "bad_request" "username and code are required")
   where
     cfg = asConfig state
 
@@ -487,7 +485,7 @@ recoveryRedeemHandler state req respond =
                                 (jsonResponse status200 (object ["redirect" .= ("/setup" :: Text)]))
                             )
 
-    badCode = jsonError status400 "bad_code" "unknown or already-used recovery code"
+    badCode = jsonProblem status400 "bad_code" "unknown or already-used recovery code"
 
 -- ---------------------------------------------------------------------------
 -- Auth body size and origin checks
@@ -521,7 +519,7 @@ declaredContentLength req = do
 
 payloadTooLargeResponse :: Config -> Response
 payloadTooLargeResponse cfg =
-    jsonError status413 "payload_too_large" ("request body must be at most " <> T.pack (show (cfgAuthBodyLimitBytes cfg)) <> " bytes")
+    jsonProblem status413 "payload_too_large" ("request body must be at most " <> T.pack (show (cfgAuthBodyLimitBytes cfg)) <> " bytes")
 
 {- | Public auth POSTs need a real origin check. A browser request must carry
 an Origin header that matches the public origin or one of the extras; a
@@ -550,8 +548,8 @@ dispatch rctx conn route _req respond = case route of
         CookieSession sess -> do
             Auth.deleteSessionHash conn (Auth.sessId sess)
             respond (clearAuthCookies cfg (emptyResponse status204))
-        BearerToken _ -> respond (jsonError status403 "session_required" "a bearer token cannot end a browser session")
-    _ -> respond (jsonError status500 "internal_error" "route has no handler")
+        BearerToken _ -> respond (jsonProblem status403 "session_required" "a bearer token cannot end a browser session")
+    _ -> respond (jsonProblem status500 "internal_error" "route has no handler")
   where
     cfg = rcConfig rctx
     ctx = rcAuth rctx

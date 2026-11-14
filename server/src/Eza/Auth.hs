@@ -22,6 +22,7 @@ codes.
 module Eza.Auth (
     AuthConfig (..),
     AuthError (..),
+    toProblem,
     authError,
     Session (..),
     NewSession (..),
@@ -108,6 +109,7 @@ import qualified Crypto.WebAuthn as WA
 
 import qualified Eza.Account as Account
 import qualified Eza.Password as Password
+import Eza.Problem (Problem (..))
 
 data AuthConfig = AuthConfig
     { acOrigin :: Text
@@ -127,6 +129,12 @@ data AuthError = AuthError
     , aeRetryAfter :: Maybe Int
     }
     deriving (Show, Eq)
+
+{- | The one HTTP representation of an auth error. The retry delay is response
+metadata, so callers add the @Retry-After@ header from 'aeRetryAfter'.
+-}
+toProblem :: AuthError -> Problem
+toProblem err = Problem (aeStatus err) (aeCode err) (aeMessage err)
 
 data Session = Session
     { sessId :: Text
