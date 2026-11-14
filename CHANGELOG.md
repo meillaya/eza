@@ -3,7 +3,7 @@
 All notable changes to eza are recorded here. The container image and the Nix
 outputs are the installable artifacts; both are built from the same revision.
 
-## 0.4.0.0 (unreleased)
+## 0.4.0.0
 
 The 0.4 line is the architecture program: the same feature set, a typed
 server/client boundary, one error representation, checksummed migrations, a
