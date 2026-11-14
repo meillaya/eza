@@ -3,6 +3,7 @@
 module Eza.AiTag (
     TagSuggestion (..),
     aiSuggestions,
+    aiSuggestionsForScope,
     resolveAiModel,
 ) where
 
@@ -119,6 +120,79 @@ aiSuggestions provider configuredModel ollamaBase conn tagName sampleSize
                                 if null tags
                                     then pure (Right [])
                                     else pure (Right [TagSuggestion s (take 8 tags) "Suggested for this tag bucket" | s <- summaries])
+
+{- | Suggest tags for one bounded bucket. A 'Just' tag uses the historical
+tag-bucket sample; 'Nothing' (the @{}@ body, i.e. \"all\") samples the newest
+bookmarks. Either way at most the requested sample size is read. This is the
+worker entry point for the async suggestion job; the handler only enqueues.
+-}
+aiSuggestionsForScope :: Text -> Text -> Text -> Connection -> Maybe Text -> Int -> IO (Either Text [TagSuggestion])
+aiSuggestionsForScope provider configuredModel ollamaBase conn scope sampleSize =
+    case fmap T.strip scope of
+        Just tag | not (T.null tag) -> aiSuggestions provider configuredModel ollamaBase conn tag sampleSize
+        _ -> aiSuggestionsAll provider configuredModel ollamaBase conn sampleSize
+
+{- | Suggestions across the newest bookmarks (the empty-scope bucket). Uses the
+same provider configuration and suggestion DTO as the tag bucket.
+-}
+aiSuggestionsAll :: Text -> Text -> Text -> Connection -> Int -> IO (Either Text [TagSuggestion])
+aiSuggestionsAll provider configuredModel ollamaBase conn sampleSize
+    | provider == "none" =
+        pure (Left "AI tagging is disabled (set EZA_AI_PROVIDER to ollama, openai, openai-compatible or anthropic)")
+    | otherwise = do
+        rawKey <-
+            case provider of
+                "ollama" -> pure Nothing
+                "openai" -> lookupEnv "OPENAI_API_KEY"
+                "openai-compatible" -> lookupEnv "OPENAI_API_KEY"
+                _ -> lookupEnv "ANTHROPIC_API_KEY"
+        let key = case rawKey of
+                Just k | not (null k) -> Just k
+                _ -> Nothing
+        vocab <- map tsName . take 80 <$> allTags conn
+        rows <-
+            query
+                conn
+                "SELECT id FROM bookmarks ORDER BY created_at DESC LIMIT ?"
+                (Only (max 1 (min 20 sampleSize))) ::
+                IO [Only Int]
+        let ids = [i | Only i <- rows]
+            model = resolveAiModel provider configuredModel
+        if null ids
+            then pure (Left "no bookmarks to suggest from")
+            else
+                if provider /= "ollama" && key == Nothing
+                    then pure (Left "AI key is not configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY, or use EZA_AI_PROVIDER=ollama)")
+                    else do
+                        let apiKey = fromMaybe "" key
+                        summaries <- bookmarksByIds conn ids
+                        let listing =
+                                T.intercalate
+                                    "\n"
+                                    [ "- " <> bsTitle s <> " — " <> bsUrl s
+                                    | s <- summaries
+                                    ]
+                            prompt =
+                                "Suggest 5-10 short topic tags for these bookmarks. "
+                                    <> "Only use tags from this existing vocabulary when possible: "
+                                    <> T.intercalate ", " vocab
+                                    <> ". Return only a JSON array of lowercase strings.\n\n"
+                                    <> listing
+                        result <- callProvider provider model ollamaBase apiKey prompt
+                        case result of
+                            Left e -> pure (Left e)
+                            Right raw -> do
+                                let tags =
+                                        [ T.toLower t
+                                        | t <- parseTagArray raw
+                                        , let l = T.toLower (T.strip t)
+                                        , not (T.null l)
+                                        , not (Set.member l stopwords)
+                                        , l `elem` map T.toLower vocab
+                                        ]
+                                if null tags
+                                    then pure (Right [])
+                                    else pure (Right [TagSuggestion s (take 8 tags) "Suggested from the newest bookmarks" | s <- summaries])
 
 callProvider :: Text -> Text -> Text -> String -> Text -> IO (Either Text Text)
 callProvider provider model ollamaBase apiKey prompt = do

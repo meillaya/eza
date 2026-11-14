@@ -4,7 +4,7 @@
 //
 // Run from the repo root in the dev shell, against a scratch server:
 //   EZA_BASE=http://localhost:8100 node tests/e2e/deeplink-smoke.mjs
-import { BASE, SEL, launchBrowser, launchPage, enterLibrary, makeApi, newChecker } from "./lib/dom.mjs";
+import { BASE, SEL, launchBrowser, launchPage, enterLibrary, makeApi, newChecker, waitForJob } from "./lib/dom.mjs";
 
 const ROUTES = ["/", "/graph", "/inbox", "/bookmark/1", "/tags/ai", "/account", "/history", "/accessions", "/save?title=Deep%20link"];
 
@@ -26,9 +26,17 @@ try {
     check("route " + route + " has no boot error", bootError === false);
   }
 
-  const suggestions = await api("/api/v1/tags/imported/suggestions");
-  check("ai status endpoint answers", [200, 400].includes(suggestions.status), "status " + suggestions.status);
-  console.log("suggestions:", JSON.stringify(suggestions.body || {}).slice(0, 200));
+  const enqueue = await api("/api/v1/ai/suggestions", { method: "POST", body: JSON.stringify({}) });
+  check("ai suggestion job enqueues", enqueue.status === 202 && Number.isInteger(enqueue.body?.job_id), "status " + enqueue.status);
+  if (enqueue.status === 202) {
+    const job = await waitForJob(api, enqueue.body.job_id);
+    check(
+      "ai suggestion job reaches a terminal state",
+      ["done", "failed", "cancelled"].includes(job.body?.state),
+      "status " + job.status + " state " + (job.body?.state ?? "none")
+    );
+    console.log("suggestions job:", JSON.stringify(job.body || {}).slice(0, 200));
+  }
 } catch (error) {
   check("unexpected error", false, String(error && error.stack ? error.stack : error));
 } finally {

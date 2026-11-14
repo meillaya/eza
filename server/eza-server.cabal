@@ -33,6 +33,7 @@ library
                     Eza.Api.Bookmarks
                     Eza.Api.Common
                     Eza.Api.Context
+                    Eza.Api.Jobs
                     Eza.Api.Extensions
                     Eza.Api.Graph
                     Eza.Api.Maintenance
@@ -51,6 +52,7 @@ library
                     Eza.Db
                     Eza.DeadLinks
                     Eza.Dedup
+                    Eza.Egress
                     Eza.Enrich
                     Eza.Events
                     Eza.Export
@@ -148,6 +150,7 @@ test-suite eza-test
                     LedgerSpec
                     LibrarySpec
                     MigrationSpec
+                    JobsSpec
                     JournalSpec
                     OriginGuardSpec
                     TestHarness

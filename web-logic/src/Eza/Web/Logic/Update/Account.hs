@@ -8,6 +8,7 @@ module Eza.Web.Logic.Update.Account (
 ) where
 
 import Control.Monad
+import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 
 import Data.Text (Text)
@@ -16,6 +17,7 @@ import Eza.Rule
 import Eza.User
 import Eza.Web.Logic.Browser
 import Eza.Web.Logic.Error
+import Eza.Web.Logic.Job (JobKind (..))
 import Eza.Web.Logic.Model
 import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Update.Common
@@ -483,13 +485,52 @@ handle = \case
         putModel (\m -> m{mWebhooks = upsertWebhook webhook (mWebhooks m)})
     WebhookToggleFailed err -> handleApiError err
     WebhookTestRequest webhookId -> do
-        putModel (\m -> m{mWebhookTest = Nothing, mWebhookTestError = Nothing})
-        testWebhook webhookId (WebhookTested webhookId) WebhookTestFailed
-    WebhookTested webhookId result ->
-        putModel (\m -> m{mWebhookTest = Just (webhookId, result), mWebhookTestError = Nothing})
-    WebhookTestFailed err -> do
-        putModel (\m -> m{mWebhookTest = Nothing, mWebhookTestError = Just ((aeMessage err))})
-        when (aeStatus err == Just 401) (handleApiError err)
+        putModel
+            ( \m ->
+                m
+                    { mWebhookTest = Nothing
+                    , mWebhookTestError = Nothing
+                    , mWebhookTestBusy = True
+                    }
+            )
+        createWebhookTestJob
+            webhookId
+            (WebhookTestJobQueued webhookId)
+            (\err -> WebhookTestJobFailed webhookId (Just (aeMessage err)))
+    WebhookTestJobQueued webhookId jobId -> dispatch (JobStarted (WebhookTestJob webhookId) jobId)
+    WebhookTestJobDone webhookId result -> do
+        putModel (\m -> m{mWebhookTestBusy = False})
+        case result of
+            Nothing ->
+                putModel (\m -> m{mWebhookTestError = Just "The webhook test returned no result."})
+            Just value -> case decodeWebhookTestJobResult value of
+                Left err -> putModel (\m -> m{mWebhookTestError = Just (aeMessage err)})
+                Right report ->
+                    putModel
+                        ( \m ->
+                            m
+                                { mWebhookTest =
+                                    Just
+                                        ( webhookId
+                                        , WebhookTest
+                                            (wtjrOk report)
+                                            (Just (wtjrStatus report))
+                                            (fromMaybe "" (wtjrError report))
+                                        )
+                                , mWebhookTestError = Nothing
+                                }
+                        )
+    WebhookTestJobFailed _ message ->
+        putModel
+            ( \m ->
+                m
+                    { mWebhookTestBusy = False
+                    , mWebhookTest = Nothing
+                    , mWebhookTestError = Just (fromMaybe "The webhook test failed." message)
+                    }
+            )
+    WebhookTestJobAbandoned _ ->
+        putModel (\m -> m{mWebhookTestBusy = False, mWebhookTestError = Nothing})
     WebhookDelete webhookId ->
         deleteWebhook webhookId (WebhookDeleted webhookId) WebhookDeleteFailed
     WebhookDeleted webhookId -> do

@@ -4,6 +4,7 @@ module Eza.Api.Tags where
 import Data.Aeson
 
 import Data.Aeson.Types (parseMaybe)
+import Data.Maybe (fromMaybe)
 
 import qualified Data.Text as T
 
@@ -12,11 +13,9 @@ import Database.SQLite.Simple (Connection)
 import Network.HTTP.Types
 import Network.Wai
 
-import Eza.AiTag (aiSuggestions)
+import Eza.Jobs (enqueueTrackedJob)
 
 import Eza.Bookmarks
-
-import Eza.Config
 
 import Eza.Routes (Route (..))
 
@@ -56,16 +55,20 @@ dispatch rctx conn route req respond = case route of
                         n <- mergeTags conn froms into
                         respond (jsonResponse status200 (object ["updated" .= n]))
                     _ -> respond (jsonProblem status400 "bad_request" "from and into are required")
-    RouteTagSuggestions tag -> do
-        r <- aiSuggestions (T.pack (cfgAiProvider cfg)) (T.pack (cfgAiModel cfg)) (T.pack (cfgOllamaBaseUrl cfg)) conn tag 20
-        case r of
-            Left notice ->
-                respond
-                    ( jsonResponse
-                        status200
-                        (object ["suggestions" .= ([] :: [Value]), "configured" .= False, "notice" .= notice])
-                    )
-            Right suggestions -> respond (jsonResponse status200 (object ["suggestions" .= suggestions]))
+    RouteAiSuggestions -> do
+        body <- jsonBody cfg req
+        case body of
+            Left response -> respond response
+            Right v -> do
+                let rawTag = parseMaybeObj v >>= \o -> parseMaybe (.: "tag") o :: Maybe T.Text
+                    tag = fromMaybe "" rawTag
+                    scope = if T.null (T.strip tag) then "all" else T.strip tag
+                    payload =
+                        if T.null (T.strip tag)
+                            then object []
+                            else object ["tag" .= T.strip tag]
+                jobId <- enqueueTrackedJob conn "ai_suggestions" scope payload
+                respond (jsonResponse status202 (object ["job_id" .= jobId]))
     RouteTagRename segments -> do
         let tagName = T.intercalate "/" segments
         body <- jsonBody cfg req
@@ -94,7 +97,7 @@ owns route = case route of
     RouteTagConsolidationCandidates -> True
     RouteTagApply -> True
     RouteTagMerge -> True
-    RouteTagSuggestions _ -> True
+    RouteAiSuggestions -> True
     RouteTagRename _ -> True
     RouteTagDelete _ -> True
     _ -> False

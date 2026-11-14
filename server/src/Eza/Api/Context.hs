@@ -511,12 +511,13 @@ resolveShareOwner state wire = resolveOwner state (stripSessionPrefix wire) wire
 that starts workers, so a library opened by a request does no background work
 until the first supervisor tick.
 -}
-libraryWorkerConfig :: AppState -> LibraryWorkerConfig
-libraryWorkerConfig state =
+libraryWorkerConfig :: AppState -> UserSlot -> LibraryWorkerConfig
+libraryWorkerConfig state slot =
     LibraryWorkerConfig
         { lwcConfig = asConfig state
         , lwcManager = asManager state
         , lwcEnrichSem = asEnrichSem state
+        , lwcSnapshotDir = usSnapshotDir slot
         }
 
 -- | How many live worker loops each open account currently has (tests use it).
@@ -530,7 +531,7 @@ userWorkerIds state = do
 -- | Start (or restart) one open account's enrichment, favicon, and webhook loops.
 startUserWorkers :: AppState -> UserSlot -> IO ()
 startUserWorkers state slot =
-    Library.startLibraryWorkers (libraryWorkerConfig state) (usLibrary slot)
+    Library.startLibraryWorkers (libraryWorkerConfig state slot) (usLibrary slot)
 
 -- | Stop one account's workers (disable, shutdown, or tests).
 stopUserWorkers :: UserSlot -> IO ()

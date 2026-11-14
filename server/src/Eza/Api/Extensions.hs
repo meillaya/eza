@@ -29,10 +29,11 @@ import Eza.Rules (Rule (..), createRule, deleteRule, listRules, matchingBookmark
 
 import Eza.Tokens (Token (..))
 
+import Eza.Jobs (enqueueTrackedJob)
 import Eza.Views (ViewError, deleteView, getView, listViews)
 import qualified Eza.Views as Views
 import Eza.Webhook (WebhookInput (..))
-import Eza.Webhooks (WebhookError, createWebhook, defaultWebhookWorkerConfig, deleteWebhook, getWebhook, listDeliveries, listWebhooks, testWebhook, updateWebhook)
+import Eza.Webhooks (WebhookError, createWebhook, deleteWebhook, getWebhook, listDeliveries, listWebhooks, updateWebhook)
 import qualified Eza.Webhooks as Webhooks
 
 import Eza.Api.Auth (payloadTooLargeResponse)
@@ -247,22 +248,22 @@ webhookUpdateHandler cfg conn webhookId req respond = do
                     Right webhook -> respond (jsonResponse status200 webhook)
 
 webhookTestHandler ::
-    Config ->
-    AppState ->
     Connection ->
     Int ->
     (Response -> IO ResponseReceived) ->
     IO ResponseReceived
-webhookTestHandler cfg state conn webhookId respond = do
-    result <- testWebhook (defaultWebhookWorkerConfig cfg (asManager state)) conn webhookId
-    case result of
-        Left err -> respond (problemResponse (Webhooks.toProblem err))
-        Right (ok, status, message) ->
-            respond
-                ( jsonResponse
-                    status200
-                    (object ["ok" .= ok, "status" .= status, "error" .= message])
-                )
+webhookTestHandler conn webhookId respond = do
+    existing <- getWebhook conn webhookId
+    case existing of
+        Nothing -> respond (jsonProblem status404 "not_found" "webhook not found")
+        Just _ -> do
+            jobId <-
+                enqueueTrackedJob
+                    conn
+                    "webhook_test"
+                    ("webhook:" <> T.pack (show webhookId))
+                    (object ["webhook_id" .= webhookId])
+            respond (jsonResponse status202 (object ["job_id" .= jobId]))
 
 sanitizeRule :: Rule -> Rule
 sanitizeRule rule =
@@ -330,7 +331,7 @@ dispatch rctx conn route req respond = case route of
             then respond (emptyResponse status204)
             else respond (jsonProblem status404 "not_found" "webhook not found")
     RouteWebhookTest webhookId ->
-        webhookTestHandler cfg state conn webhookId respond
+        webhookTestHandler conn webhookId respond
     RouteWebhookDeliveries webhookId -> do
         exists <- getWebhook conn webhookId
         case exists of
@@ -369,7 +370,6 @@ dispatch rctx conn route req respond = case route of
     _ -> respond (jsonProblem status500 "internal_error" "route has no handler")
   where
     cfg = rcConfig rctx
-    state = rcState rctx
     ctx = rcAuth rctx
 
 -- | The "Eza.Routes" constructors this family handles.

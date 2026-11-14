@@ -29,9 +29,9 @@ spec = describe "migration engine" $ do
             conn <- Db.openDb path
             version <- Db.schemaVersion conn
             version `shouldBe` Db.targetSchemaVersion
-            Db.targetSchemaVersion `shouldBe` 17
+            Db.targetSchemaVersion `shouldBe` 18
             rows <- metaRows conn
-            map fst rows `shouldBe` [1 .. 17]
+            map fst rows `shouldBe` [1 .. 18]
             map snd rows `shouldBe` map migrationChecksum (planMigrations Db.dbMigrationPlan)
             pendingRows <- metaPending conn
             pendingRows `shouldBe` []
@@ -46,7 +46,7 @@ spec = describe "migration engine" $ do
             second <- Db.openDb path
             appliedSecond <- metaAppliedAt second
             version <- Db.schemaVersion second
-            version `shouldBe` 17
+            version `shouldBe` 18
             appliedSecond `shouldBe` appliedFirst
             backups <- backupsIn dir
             backups `shouldBe` []
@@ -58,11 +58,11 @@ spec = describe "migration engine" $ do
             makeV15Fixture path
             conn <- Db.openDb path
             version <- Db.schemaVersion conn
-            version `shouldBe` 17
+            version `shouldBe` 18
             bookmarks <- countBookmarks conn
             bookmarks `shouldBe` 1
             rows <- metaRows conn
-            map fst rows `shouldBe` [1 .. 17]
+            map fst rows `shouldBe` [1 .. 18]
             map snd rows `shouldBe` map migrationChecksum (planMigrations Db.dbMigrationPlan)
             Sqlite.close conn
             backups <- backupsIn dir
@@ -82,7 +82,7 @@ spec = describe "migration engine" $ do
         withSystemTempDirectory "eza-migrate-newer" $ \dir -> do
             let path = dir </> "newer.db"
             conn <- Db.openDb path
-            Sqlite.execute_ conn "PRAGMA user_version = 18"
+            Sqlite.execute_ conn "PRAGMA user_version = 19"
             verified <- verifySchema conn Db.dbMigrationPlan
             case verified of
                 Left message -> message `shouldSatisfy` T.isInfixOf "newer than this binary"
@@ -117,7 +117,7 @@ spec = describe "migration engine" $ do
                 Left message -> message `shouldSatisfy` T.isInfixOf "checksum does not match"
                 Right _ -> expectationFailure "a tampered migration list must not apply"
             version <- Db.schemaVersion conn
-            version `shouldBe` 17
+            version `shouldBe` 18
             Sqlite.close conn
 
     it "rolls back a failed migration statement and keeps the previous version" $
@@ -215,7 +215,7 @@ metaAppliedAt conn =
 metaPending :: Connection -> IO [Int]
 metaPending conn = do
     rows <- metaRows conn
-    pure ([1 .. 17] \\ map fst rows)
+    pure ([1 .. 18] \\ map fst rows)
   where
     (\\) = foldr (\value seen -> filter (/= value) seen)
 

@@ -733,7 +733,7 @@ recordCard m detail =
                , titleField m
                ]
             ++ seeSection m detail
-            ++ [recordLinks detail]
+            ++ [recordLinks m detail]
         )
     ]
 
@@ -844,8 +844,8 @@ seeRow (name, direction, target) =
             , H.span_ [HP.class_ "see-no"] [text tailText]
             ]
 
-recordLinks :: BookmarkDetail -> View () () Model Action
-recordLinks detail =
+recordLinks :: Model -> BookmarkDetail -> View () () Model Action
+recordLinks m detail =
     H.div_
         [HP.class_ "record-links"]
         ( H.button_
@@ -856,7 +856,7 @@ recordLinks detail =
             ]
             [text "the graph"]
             : extractAgain detail
-            ++ snapshotAction detail
+            ++ snapshotAction m detail
         )
 
 extractAgain :: BookmarkDetail -> [View () () Model Action]
@@ -871,8 +871,8 @@ extractAgain detail
         ]
     | otherwise = []
 
-snapshotAction :: BookmarkDetail -> [View () () Model Action]
-snapshotAction detail
+snapshotAction :: Model -> BookmarkDetail -> [View () () Model Action]
+snapshotAction m detail
     | hasSnapshot detail = []
     | stringEq (bdSnapshotKind detail) "wayback"
     , not (T.null (T.strip (bdSnapshotPath detail))) =
@@ -886,11 +886,18 @@ snapshotAction detail
         ]
     | otherwise =
         [ H.button_
-            [ HP.class_ "action"
-            , HP.type_ "button"
-            , HE.onClick (RunBookmarkAction (bdId detail) "snapshot")
+            ( [ HP.class_ "action"
+              , HP.type_ "button"
+              , HE.onClick (RunBookmarkAction (bdId detail) "snapshot")
+              ]
+                ++ disabledAttr (mSnapshotBusy m)
+            )
+            [ text
+                ( if mSnapshotBusy m
+                    then "capturing a snapshot…"
+                    else "capture a snapshot"
+                )
             ]
-            [text "capture a snapshot"]
         ]
 
 snapshotCard :: BookmarkDetail -> [View () () Model Action]

@@ -42,6 +42,7 @@ token. See [architecture.md](architecture.md) for the data layout.
 |---|---|
 | 200 | Request completed |
 | 201 | Row created |
+| 202 | Accepted; an asynchronous job was queued. Poll `GET /api/v1/jobs/{id}` |
 | 204 | Request completed with no body |
 | 400 | Validation error |
 | 401 | No session, a failed username/password login, or an expired pending two-factor sign-in |
@@ -237,11 +238,47 @@ time, marks the extraction as manual (`enrich_state = "manual"`) so background
 enrichment does not replace it, and re-anchors highlights against the new text;
 highlights whose quote no longer appears are removed and counted.
 
+## Asynchronous jobs
+
+Network and subprocess work does not run inside a request. These routes
+validate their input, enqueue one durable job in the account's library, and
+return 202 `{"job_id":N}`; the account's egress worker runs the job:
+
+```
+POST   /api/v1/bookmarks/{id}/snapshot
+POST   /api/v1/maintenance/check-dead
+POST   /api/v1/ai/suggestions
+POST   /api/v1/webhooks/{id}/test
+GET    /api/v1/jobs/{id}
+```
+
+`GET /api/v1/jobs/{id}` returns one own-library job:
+
+```
+{"id":N,"kind":Text,"state":"queued"|"running"|"done"|"failed"|"cancelled",
+ "attempts":N,"result":Object|null,"error":Text|null}
+```
+
+An unknown id, and an id belonging to another account's library, return 404.
+While a job is `queued` or `running`, posting the same action for the same
+target returns the existing id instead of a second job. Job kinds and their
+`result` documents:
+
+- `snapshot` — `{"snapshot":{"path":Text,"bytes":N}}`; `path` is the absolute
+  file under the account's snapshots directory. The public-address and size
+  guards apply exactly as they did for the old synchronous route.
+- `check_dead` — `{"checked":N,"dead":N}`.
+- `ai_suggestions` — `{"suggestions":[TagSuggestion]}`. `POST
+  /api/v1/ai/suggestions` takes `{"tag":Text}` or `{}` for the whole library;
+  the same bounded 20-bookmark sample as before is sent to the provider, and
+  with no provider configured the job fails with the disabled notice in
+  `error`.
+- `webhook_test` — `{"ok":Bool,"status":Maybe Int,"error":Maybe Text}`.
+
 ## Tags, searches, and navigation
 
 ```
 GET    /api/v1/tags
-GET    /api/v1/tags/{tag}/suggestions
 GET    /api/v1/tags/consolidation-candidates
 POST   /api/v1/tags/apply
 POST   /api/v1/tags/merge
@@ -265,9 +302,6 @@ DELETE /api/v1/saved-searches/{id}
 `POST /api/v1/tags/{tag}` with `{"name":Text}`; the delete route requires an
 empty tag.
 
-`GET /api/v1/tags/{tag}/suggestions` returns AI tag suggestions. When no
-provider key is configured it returns 200 with `configured: false`, an empty
-list, and a notice.
 
 `GET /api/v1/autocomplete?q=` returns `{"items":[BookmarkSummary]}`.
 `GET /api/v1/bookmarks/{id}/backlinks` returns linked and unlinked mentions.
@@ -368,12 +402,12 @@ GET    /api/v1/export
 
 `POST /api/v1/maintenance/prune` takes `{"ids":[N]}` and writes an undo
 snapshot before deleting. `POST /api/v1/maintenance/check-dead` accepts
-`{"limit","older_than","include_dead"}` and returns
-`{"checked","dead","alive","total_dead"}`; `dead` is the number newly marked in
-this run, `total_dead` is the library total, and `include_dead:true` rechecks
-records already marked dead before the unchecked tail, so an explicit sweep can
-repair a 403 false positive. Only a GET-confirmed 404 or 410 marks a link dead;
-401/403/405/407/429/451, 5xx, and network/timeout answers leave the flag alone.
+`{"limit","older_than","include_dead"}` and returns 202 `{"job_id":N}`; the
+worker performs the sweep and reports `{"checked","dead"}` in the job result.
+Only a GET-confirmed 404 or 410 marks a link dead; 401/403/405/407/429/451,
+5xx, and network/timeout answers leave the flag alone. `include_dead:true`
+rechecks records already marked dead before the unchecked tail, so an explicit
+sweep can repair a 403 false positive.
 
 Undo is a stack. `GET /api/v1/undo?limit=5` returns the newest usable
 snapshots as `{"entries":[UndoEntry]}`, newest first; only the first entry has
@@ -473,8 +507,10 @@ and `Cache-Control: private, no-store`. A readable link returns 200 with the
 shared record, the keeper's note when the link includes it, and the expiry
 date. A token that matches no row returns 404. A revoked or expired link
 returns 410 with a page that says so. A saved-search share also exposes
-`/s/{token}.xml` as an Atom feed. The snapshot route returns the local
-monolith file inside a sandboxed CSP.
+`/s/{token}.xml` as an Atom feed. `GET /api/v1/bookmarks/{id}/snapshot`
+returns the local monolith file inside a sandboxed CSP;
+`POST /api/v1/bookmarks/{id}/snapshot` queues a capture and returns 202
+`{"job_id":N}` (see [Asynchronous jobs](#asynchronous-jobs)).
 
 Rules take `name`, `enabled`, `field` (`url`, `domain`, or `title`),
 `pattern`, `add_tags`, and `mark_read`. They run inside the save
@@ -601,8 +637,9 @@ database. `GET /api/v1/webhooks` returns `{"webhooks":[Webhook]}`;
 and is shown only on create. `GET`, `PATCH`, and `DELETE
 /api/v1/webhooks/{id}` read, update, and remove one subscription; `PATCH`
 takes a `WebhookInput` and returns the updated `Webhook`. `POST
-/api/v1/webhooks/{id}/test` posts one synthetic `bookmark.updated` event to
-that subscription and returns `{"ok":Bool,"status":Maybe Int,"error":Text}`.
+/api/v1/webhooks/{id}/test` queues one synthetic `bookmark.updated` delivery
+and returns 202 `{"job_id":N}`; the job result is
+`{"ok":Bool,"status":Maybe Int,"error":Maybe Text}`.
 `GET /api/v1/webhooks/{id}/deliveries` returns the most recent deliveries as
 `{"deliveries":[DeliveryView]}`, newest first; `limit` defaults to 20 and is
 clamped to 1-100.

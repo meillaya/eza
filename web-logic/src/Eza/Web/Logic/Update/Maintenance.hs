@@ -4,15 +4,17 @@
 -- | Part of the client update function; see "Eza.Web.Update".
 module Eza.Web.Logic.Update.Maintenance (handle) where
 
+import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 
 import Eza.Types
 import Eza.Web.Logic.Browser
 import Eza.Web.Logic.Error
+import Eza.Web.Logic.Job (JobKind (..))
 import Eza.Web.Logic.Model
 import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Update.Common
-import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
+import Eza.Web.Logic.Update.Monad (Update, dispatch, get)
 
 handle :: Action -> Update ()
 handle = \case
@@ -55,16 +57,38 @@ handle = \case
         refreshStats
     DeadCheckRun -> do
         putModel (\m -> m{mMaintBusy = True})
-        checkDead
-            (\(checked, newlyDead, totalDead) -> DeadCheckDone checked newlyDead totalDead)
-            MaintFailed
-    DeadCheckDone checked newlyDead totalDead -> do
-        putModel (\m -> m{mMaintBusy = False, mCheckedCount = Just checked, mDeadCount = Just totalDead})
-        notify
-            (T.pack ("Checked " <> show checked <> " links, " <> show newlyDead <> " newly dead, " <> show totalDead <> " marked dead"))
-            ToastOk
-        reloadList
-        refreshStats
+        createDeadCheckJob DeadCheckJobQueued MaintFailed
+    DeadCheckJobQueued jobId -> dispatch (JobStarted DeadCheckJob jobId)
+    DeadCheckJobDone result -> do
+        putModel (\m -> m{mMaintBusy = False})
+        case result of
+            Nothing -> notify "The dead-link check returned no result." ToastError
+            Just value -> case decodeDeadCheckJobResult value of
+                Left err -> notify (aeMessage err) ToastError
+                Right report -> do
+                    putModel
+                        ( \m ->
+                            m
+                                { mCheckedCount = Just (dcjrChecked report)
+                                , mDeadCount = Just (dcjrDead report)
+                                }
+                        )
+                    notify
+                        ( T.pack
+                            ( "Checked "
+                                <> show (dcjrChecked report)
+                                <> " links, "
+                                <> show (dcjrDead report)
+                                <> " dead"
+                            )
+                        )
+                        ToastOk
+                    reloadList
+                    refreshStats
+    DeadCheckJobFailed message -> do
+        putModel (\m -> m{mMaintBusy = False})
+        notify (fromMaybe "The dead-link check failed." message) ToastError
+    DeadCheckJobAbandoned -> putModel (\m -> m{mMaintBusy = False})
     UndoRefresh -> do
         putModel (\m -> m{mUndoLoading = True, mUndoError = Nothing})
         fetchUndoEntries UndoEntriesLoaded UndoEntriesFailed

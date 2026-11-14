@@ -18,13 +18,11 @@ import Eza.Web.Logic.Effect (RequestId (..))
 import Eza.Web.Logic.Graph (GraphView (..), initialGraphView)
 import Eza.Web.Logic.Model (
     AccountTab (..),
-    Action (..),
     KeyEvent (..),
     Model (..),
     NoteMode (..),
     ReaderSelection (..),
     Theme (..),
-    ToastKind (..),
     accountTabFromSlug,
     accountTabSlug,
     activeGraphLayout,

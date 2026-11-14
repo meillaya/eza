@@ -37,11 +37,9 @@ module Eza.Web.Logic.Requests (
     QuickSaveResponse (..),
     BookmarkPatchResponse (..),
     MergeResponse (..),
-    CheckDeadResponse (..),
     RuleTestResponse (..),
     TokenCreatedResponse (..),
     ShareCreatedResponse (..),
-    SuggestionsResponse (..),
     WebhookCreatedResponse (..),
     ViewPatch (..),
     BulkAction (..),
@@ -60,11 +58,23 @@ module Eza.Web.Logic.Requests (
     fetchWebhooks,
     fetchWebhook,
     fetchWebhookDeliveries,
+    fetchJobStatus,
+    createSnapshotJob,
+    createDeadCheckJob,
+    createAiSuggestionsJob,
+    createWebhookTestJob,
+    SnapshotJobResult (..),
+    DeadCheckJobResult (..),
+    AiSuggestionsJobResult (..),
+    WebhookTestJobResult (..),
+    decodeSnapshotJobResult,
+    decodeDeadCheckJobResult,
+    decodeAiSuggestionsJobResult,
+    decodeWebhookTestJobResult,
     fetchAdminUsers,
     fetchSavedSearches,
     fetchDedupReport,
     fetchConsolidation,
-    fetchSuggestions,
     fetchPruneCandidates,
     fetchAccount,
     fetchTags,
@@ -108,7 +118,6 @@ module Eza.Web.Logic.Requests (
     detachTag,
     applyTagSuggestion,
     runPrune,
-    checkDead,
     runUndo,
     markLinkAlive,
     recheckLink,
@@ -124,7 +133,6 @@ module Eza.Web.Logic.Requests (
     createWebhook,
     updateWebhook,
     deleteWebhook,
-    testWebhook,
     createAdminUser,
     patchAdminUser,
     resetAdminPassword,
@@ -178,6 +186,7 @@ import Eza.Webhook (DeliveryView, Webhook, WebhookInput (..))
 import Eza.Web.Logic.Api (BookmarkListQuery (..), ClientRequest (..), DedupCandidateQuery (..), requestPath)
 import Eza.Web.Logic.Effect (Effect (..))
 import Eza.Web.Logic.Error (ApiError (..), mkApiError)
+import Eza.Web.Logic.Job (JobStatus)
 import Eza.Web.Logic.Model (Action)
 import qualified Eza.Web.Logic.Route as ClientRoute
 import Eza.Web.Logic.Update.Monad (Update, emit)
@@ -359,20 +368,6 @@ instance FromJSON MergeResponse where
             <$> o .: "merged"
             <*> o .: "snapshot_id"
 
--- | @POST /api/v1/maintenance/check-dead@.
-data CheckDeadResponse = CheckDeadResponse
-    { cdrChecked :: Int
-    , cdrDead :: Int
-    , cdrTotalDead :: Int
-    }
-
-instance FromJSON CheckDeadResponse where
-    parseJSON = withObject "check-dead" $ \o ->
-        CheckDeadResponse
-            <$> o .: "checked"
-            <*> o .: "dead"
-            <*> o .: "total_dead"
-
 -- | @POST /api/v1/rules/test@: the dry-run match count and its ids.
 data RuleTestResponse = RuleTestResponse
     { rtrMatches :: Int
@@ -410,21 +405,6 @@ instance FromJSON ShareCreatedResponse where
         ShareCreatedResponse
             <$> o .: "id"
             <*> o .: "url"
-
-{- | @GET /api/v1/tags/{tag}/suggestions@. The server includes @notice@ only
-when it has something to say (for example that no AI provider is configured);
-@suggestions@ is always present.
--}
-data SuggestionsResponse = SuggestionsResponse
-    { sgrSuggestions :: [TagSuggestion]
-    , sgrNotice :: Maybe Text
-    }
-
-instance FromJSON SuggestionsResponse where
-    parseJSON = withObject "suggestions" $ \o ->
-        SuggestionsResponse
-            <$> o .: "suggestions"
-            <*> o .:? "notice"
 
 -- | @POST /api/v1/webhooks@: the stored webhook and its one-time secret.
 data WebhookCreatedResponse = WebhookCreatedResponse
@@ -619,15 +599,6 @@ updateWebhook webhookId input onOk onErr =
 deleteWebhook :: Int -> Action -> (ApiError -> Action) -> Update ()
 deleteWebhook webhookId = requestDeleteNone (ApiDeleteWebhook webhookId)
 
-testWebhook :: Int -> (WebhookTest -> Action) -> (ApiError -> Action) -> Update ()
-testWebhook webhookId onOk onErr =
-    requestWriteValue
-        (ApiTestWebhook webhookId)
-        (Nothing :: Maybe Value)
-        decodeResponseAt
-        onOk
-        onErr
-
 fetchWebhookDeliveries :: Int -> ([DeliveryView] -> Action) -> (ApiError -> Action) -> Update ()
 fetchWebhookDeliveries webhookId onOk onErr =
     requestGet (ApiWebhookDeliveries webhookId) (\endpoint value -> decodeListFieldAt endpoint "deliveries" value) onOk onErr
@@ -716,23 +687,6 @@ fetchConsolidation ::
     Update ()
 fetchConsolidation onOk onErr =
     requestGet ApiTagConsolidationCandidates (\endpoint value -> decodeListFieldAt endpoint "groups" value) onOk onErr
-
-{- | @GET /api/v1/tags/{tag}/suggestions@. The server answers an unconfigured
-provider with 200, an empty list and a notice; hand the suggestions and the
-notice to the caller so the page can say what happened instead of showing an
-empty result that looks like a clean scan.
--}
-fetchSuggestions ::
-    Text ->
-    ([TagSuggestion] -> Maybe Text -> Action) ->
-    (ApiError -> Action) ->
-    Update ()
-fetchSuggestions tag onOk onErr =
-    requestGet (ApiTagSuggestions tag) decode onOk' onErr
-  where
-    decode endpoint value =
-        fmap (\response -> (sgrSuggestions response, sgrNotice response)) (decodeResponseAt endpoint value)
-    onOk' (suggestions, notice) = onOk suggestions notice
 
 fetchPruneCandidates ::
     ([BookmarkSummary] -> Action) ->
@@ -922,19 +876,6 @@ runPrune ids onOk onErr =
         (Just (object ["ids" .= ids]))
         (\endpoint value -> decodeIntFieldAt endpoint "pruned" value)
         onOk
-        onErr
-
-checkDead :: ((Int, Int, Int) -> Action) -> (ApiError -> Action) -> Update ()
-checkDead onOk onErr =
-    requestWriteValue
-        ApiCheckDead
-        -- The handler parses a JSON object; include_dead makes the explicit
-        -- maintenance recheck revisit records that are already marked dead.
-        (Just (object ["include_dead" .= True]))
-        decodeResponseAt
-        ( \response ->
-            onOk (cdrChecked response, cdrDead response, cdrTotalDead response)
-        )
         onErr
 
 fetchUndoEntries :: ([UndoEntry] -> Action) -> (ApiError -> Action) -> Update ()
@@ -1283,6 +1224,129 @@ testRule field patternText onOk onErr =
         decodeResponseAt
         (\response -> onOk (rtrMatches response) (rtrBookmarkIds response))
         onErr
+
+-- ------------------------------------------------------------- async jobs ---
+
+-- | The 202 body every enqueue endpoint answers: @{"job_id": n}@.
+newtype JobIdResponse = JobIdResponse {jirJobId :: Int}
+
+instance FromJSON JobIdResponse where
+    parseJSON = withObject "job id" $ \o -> JobIdResponse <$> o .: "job_id"
+
+decodeJobId :: Text -> Value -> Either ApiError Int
+decodeJobId endpoint value = jirJobId <$> decodeResponseAt endpoint value
+
+-- | Snapshot capture result: @{"snapshot": {"path": ..., "bytes": ...}}@.
+data SnapshotJobResult = SnapshotJobResult
+    { sjrPath :: Text
+    , sjrBytes :: Int
+    }
+    deriving (Eq, Show)
+
+instance FromJSON SnapshotJobResult where
+    parseJSON = withObject "snapshot result" $ \o -> do
+        snapshot <- o .: "snapshot"
+        SnapshotJobResult <$> snapshot .: "path" <*> snapshot .: "bytes"
+
+-- | Dead-link sweep result: @{"checked": n, "dead": n}@.
+data DeadCheckJobResult = DeadCheckJobResult
+    { dcjrChecked :: Int
+    , dcjrDead :: Int
+    }
+    deriving (Eq, Show)
+
+instance FromJSON DeadCheckJobResult where
+    parseJSON = withObject "dead-check result" $ \o ->
+        DeadCheckJobResult <$> o .: "checked" <*> o .: "dead"
+
+-- | AI tag suggestion result: @{"suggestions": [...]}@.
+newtype AiSuggestionsJobResult = AiSuggestionsJobResult
+    { asjrSuggestions :: [TagSuggestion]
+    }
+    deriving (Eq, Show)
+
+instance FromJSON AiSuggestionsJobResult where
+    parseJSON = withObject "suggestions result" $ \o ->
+        AiSuggestionsJobResult <$> o .: "suggestions"
+
+-- | Webhook test delivery result: @{"ok": bool, "status": int}@.
+data WebhookTestJobResult = WebhookTestJobResult
+    { wtjrOk :: Bool
+    , wtjrStatus :: Int
+    , wtjrError :: Maybe Text
+    }
+    deriving (Eq, Show)
+
+instance FromJSON WebhookTestJobResult where
+    parseJSON = withObject "webhook test result" $ \o ->
+        WebhookTestJobResult <$> o .: "ok" <*> o .: "status" <*> o .:? "error"
+
+decodeSnapshotJobResult :: Value -> Either ApiError SnapshotJobResult
+decodeSnapshotJobResult = decodeResponseAt "the snapshot job result"
+
+decodeDeadCheckJobResult :: Value -> Either ApiError DeadCheckJobResult
+decodeDeadCheckJobResult = decodeResponseAt "the dead-check job result"
+
+decodeAiSuggestionsJobResult :: Value -> Either ApiError AiSuggestionsJobResult
+decodeAiSuggestionsJobResult = decodeResponseAt "the AI suggestion job result"
+
+decodeWebhookTestJobResult :: Value -> Either ApiError WebhookTestJobResult
+decodeWebhookTestJobResult = decodeResponseAt "the webhook test job result"
+
+-- | Enqueue the snapshot capture job (@POST /api/v1/bookmarks/{id}/snapshot@).
+createSnapshotJob :: Int -> (Int -> Action) -> (ApiError -> Action) -> Update ()
+createSnapshotJob bookmarkId onOk onErr =
+    requestWriteValue
+        (ApiBookmarkAction bookmarkId "snapshot")
+        (Nothing :: Maybe Value)
+        decodeJobId
+        onOk
+        onErr
+
+-- | Enqueue the dead-link sweep job.
+createDeadCheckJob :: (Int -> Action) -> (ApiError -> Action) -> Update ()
+createDeadCheckJob onOk onErr =
+    requestWriteValue
+        ApiCheckDead
+        (Just (object ["include_dead" .= True]))
+        decodeJobId
+        onOk
+        onErr
+
+{- | Enqueue the AI tag suggestion job for one tag bucket. 'Nothing' asks for
+the unfiltered bucket (@{}@); the server dedupes on the tag word or "all".
+-}
+createAiSuggestionsJob ::
+    Maybe Text ->
+    (Int -> Action) ->
+    (ApiError -> Action) ->
+    Update ()
+createAiSuggestionsJob scope onOk onErr =
+    requestWriteValue
+        ApiAiSuggestionsJob
+        (Just body)
+        decodeJobId
+        onOk
+        onErr
+  where
+    body = case scope of
+        Nothing -> object []
+        Just tag -> object ["tag" .= tag]
+
+-- | Enqueue the webhook test delivery job.
+createWebhookTestJob :: Int -> (Int -> Action) -> (ApiError -> Action) -> Update ()
+createWebhookTestJob webhookId onOk onErr =
+    requestWriteValue
+        (ApiTestWebhook webhookId)
+        (Nothing :: Maybe Value)
+        decodeJobId
+        onOk
+        onErr
+
+-- | Poll one job's status.
+fetchJobStatus :: Int -> (JobStatus -> Action) -> (ApiError -> Action) -> Update ()
+fetchJobStatus jobId onOk onErr =
+    requestGetJson (ApiJobStatus jobId) onOk onErr
 
 exportUrl :: Text
 exportUrl = requestUrl ApiExport

@@ -38,7 +38,7 @@ GET
   \/api\/v1\/saved-searches                    RouteSavedSearchList
   \/api\/v1\/dedup\/candidates?...              RouteDedupCandidates
   \/api\/v1\/tags\/consolidation-candidates    RouteTagConsolidationCandidates
-  \/api\/v1\/tags\/{tag}\/suggestions          RouteTagSuggestions
+  \/api\/v1\/ai\/suggestions                  RouteAiSuggestions
   \/api\/v1\/maintenance\/prune-candidates     RouteMaintenancePruneCandidates
   \/api\/v1\/account                           RouteAccountRead
   \/api\/v1\/tags                              RouteTags
@@ -49,6 +49,7 @@ GET
   \/api\/v1\/bookmarks\/{id}\/highlights       RouteHighlightList
   \/api\/v1\/share-links                       RouteShareLinkList
   \/api\/v1\/ai\/status                        RouteAiStatus
+  \/api\/v1\/jobs\/{id}                         RouteJobStatus
   \/api\/v1\/rules                             RouteRuleList
   \/api\/v1\/export                            RouteExport
   \/api\/v1\/export\/notes                     RouteExportNotes
@@ -57,6 +58,7 @@ POST
   \/api\/v1\/views                             RouteViewCreate
   \/api\/v1\/webhooks                          RouteWebhookCreate
   \/api\/v1\/webhooks\/{id}\/test              RouteWebhookTest
+  \/api\/v1\/ai\/suggestions                    RouteAiSuggestions (async job)
   \/api\/v1\/admin\/users                      RouteAdminUserCreate
   \/api\/v1\/admin\/users\/{id}\/password      RouteAdminUserPassword
   \/api\/v1\/bookmarks                         RouteBookmarkCreate
@@ -284,7 +286,7 @@ data Route
     | RouteShareLinkCreate
     | RouteShareLinkRevoke Int
     | RouteTags
-    | RouteTagSuggestions Text
+    | RouteAiSuggestions
     | RouteTagConsolidationCandidates
     | RouteTagApply
     | RouteTagMerge
@@ -316,6 +318,7 @@ data Route
     | RouteExportNotes
     | RouteStats
     | RouteAiStatus
+    | RouteJobStatus Int
     | -- admin user management
       RouteAdminUserList
     | RouteAdminUserCreate
@@ -423,7 +426,7 @@ routeInfo = \case
     RouteShareLinkCreate -> row "POST" "/api/v1/share-links" TokenClass (Just CapWrite)
     RouteShareLinkRevoke _ -> row "DELETE" "/api/v1/share-links/{id}" TokenClass (Just CapWrite)
     RouteTags -> row "GET" "/api/v1/tags" TokenClass (Just CapRead)
-    RouteTagSuggestions _ -> row "GET" "/api/v1/tags/{tag}/suggestions" TokenClass (Just CapRead)
+    RouteAiSuggestions -> row "POST" "/api/v1/ai/suggestions" TokenClass (Just CapWrite)
     RouteTagConsolidationCandidates -> row "GET" "/api/v1/tags/consolidation-candidates" TokenClass (Just CapRead)
     RouteTagApply -> row "POST" "/api/v1/tags/apply" TokenClass (Just CapWrite)
     RouteTagMerge -> row "POST" "/api/v1/tags/merge" TokenClass (Just CapWrite)
@@ -455,6 +458,7 @@ routeInfo = \case
     RouteExportNotes -> row "GET" "/api/v1/export/notes" TokenClass (Just CapRead)
     RouteStats -> row "GET" "/api/v1/stats" TokenClass (Just CapRead)
     RouteAiStatus -> row "GET" "/api/v1/ai/status" TokenClass (Just CapRead)
+    RouteJobStatus _ -> row "GET" "/api/v1/jobs/{id}" TokenClass (Just CapRead)
     RouteAdminUserList -> row "GET" "/api/v1/admin/users" AdminClass (Just CapAdmin)
     RouteAdminUserCreate -> row "POST" "/api/v1/admin/users" AdminClass (Just CapAdmin)
     RouteAdminUserUpdate _ -> row "PATCH" "/api/v1/admin/users/{id}" AdminClass (Just CapAdmin)
@@ -579,7 +583,7 @@ allRoutes =
     , RouteShareLinkCreate
     , RouteShareLinkRevoke 1
     , RouteTags
-    , RouteTagSuggestions "example"
+    , RouteAiSuggestions
     , RouteTagConsolidationCandidates
     , RouteTagApply
     , RouteTagMerge
@@ -611,6 +615,7 @@ allRoutes =
     , RouteExportNotes
     , RouteStats
     , RouteAiStatus
+    , RouteJobStatus 1
     , RouteAdminUserList
     , RouteAdminUserCreate
     , RouteAdminUserUpdate 1
@@ -682,7 +687,6 @@ matchGet path = case path of
     ["api", "v1", "share-links"] -> Just RouteShareLinkList
     ["api", "v1", "tags"] -> Just RouteTags
     ["api", "v1", "tags", "consolidation-candidates"] -> Just RouteTagConsolidationCandidates
-    ["api", "v1", "tags", tag, "suggestions"] -> Just (RouteTagSuggestions tag)
     ["api", "v1", "autocomplete"] -> Just RouteAutocomplete
     ["api", "v1", "graph"] -> Just RouteGraph
     ["api", "v1", "graph", "layout"] -> Just RouteGraphLayout
@@ -696,6 +700,7 @@ matchGet path = case path of
     ["api", "v1", "maintenance", "prune-candidates"] -> Just RouteMaintenancePruneCandidates
     ["api", "v1", "undo"] -> Just RouteUndoList
     ["api", "v1", "undo", idText] -> RouteUndoPreview <$> readInt idText
+    ["api", "v1", "jobs", idText] -> RouteJobStatus <$> readInt idText
     ["api", "v1", "export"] -> Just RouteExport
     ["api", "v1", "export", "notes"] -> Just RouteExportNotes
     ["api", "v1", "stats"] -> Just RouteStats
@@ -727,6 +732,7 @@ matchPost path = case path of
     ["api", "v1", "bookmarks", idText, action] -> do
         bookmarkId <- readInt idText
         bookmarkActionRoute bookmarkId action
+    ["api", "v1", "ai", "suggestions"] -> Just RouteAiSuggestions
     ["api", "v1", "quick-save"] -> Just RouteQuickSave
     ["api", "v1", "inbox", "mark-all-above"] -> Just RouteInboxMarkAbove
     ["api", "v1", "share-links"] -> Just RouteShareLinkCreate
@@ -880,7 +886,7 @@ renderRoutePath route = case route of
     RouteBookmarkRecheckLink bookmarkId -> idPath "/api/v1/bookmarks" bookmarkId <> "/recheck-link"
     RouteFaviconRead domain -> "/api/v1/favicons/" <> domain
     RouteShareLinkRevoke shareId -> idPath "/api/v1/share-links" shareId
-    RouteTagSuggestions tag -> "/api/v1/tags/" <> tag <> "/suggestions"
+    RouteJobStatus jobId -> idPath "/api/v1/jobs" jobId
     RouteTagRename segments -> renderSegments "/api/v1/tags" segments
     RouteTagDelete segments -> renderSegments "/api/v1/tags" segments
     RouteViewRead slug -> "/api/v1/views/" <> slug

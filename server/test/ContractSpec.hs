@@ -10,14 +10,15 @@ blank or half-defaulted screen.
 module ContractSpec (contractSpec) where
 
 import Control.Monad (void)
-import Data.Aeson (FromJSON (..), Result (..), Value (..), eitherDecode, fromJSON)
+import Data.Aeson (FromJSON (..), Result (..), Value (..), eitherDecode, encode, fromJSON, object, (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Text (Text)
+import qualified Data.Text as T
 import Test.Hspec
 
 import Eza.Account (AccountInfo, TokenView)
-import Eza.Ai (AiStatus, TagSuggestion)
+import Eza.Ai (AiStatus)
 import Eza.Boot (BootPayload (..), wireVersion)
 import qualified Eza.Control as Control
 import Eza.Rule (Rule)
@@ -50,17 +51,24 @@ contractSpec =
                 rules `shouldBe` []
                 void (getAs server session csrf "/api/v1/ai/status" :: IO AiStatus)
 
-            it "serves the strict AI suggestion wrapper" $ \server -> do
+            it "enqueues an async AI suggestion job and serves its status" $ \server -> do
                 (session, csrf) <- loginFixture server
-                suggestions <-
-                    getWrapped
+                enqueued <-
+                    httpRequest
                         server
-                        session
-                        csrf
-                        "/api/v1/tags/haskell/suggestions"
-                        "suggestions" ::
-                        IO [TagSuggestion]
-                suggestions `shouldBe` []
+                        "POST"
+                        "/api/v1/ai/suggestions"
+                        (authHeaders session csrf)
+                        (Just (encode (object ["tag" .= ("haskell" :: Text)])))
+                enqueued `shouldHaveStatus` 202
+                jobId <- expectJust "ai job id" (jsonIntField "job_id" (hrespBody enqueued))
+                runEgressJob server "contract" jobId
+                statusResponse <- httpRequest server "GET" ("/api/v1/jobs/" <> show jobId) (cookieHeaders session csrf) Nothing
+                statusResponse `shouldHaveStatus` 200
+                jsonTextField "kind" (hrespBody statusResponse) `shouldBe` Just "ai_suggestions"
+                jsonTextField "state" (hrespBody statusResponse) `shouldBe` Just "failed"
+                (jsonTextField "error" (hrespBody statusResponse))
+                    `shouldSatisfy` maybe False (T.isInfixOf "disabled")
 
 -- ----------------------------------------------------------------- helpers ---
 

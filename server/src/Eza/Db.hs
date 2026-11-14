@@ -33,6 +33,7 @@ module Eza.Db (
     schemaV15,
     schemaV16,
     schemaV17,
+    schemaV18,
     dbMigrationPlan,
     checkSchema,
     maxStoredTimestamp,
@@ -69,7 +70,7 @@ newtype DbError = DbError Text
 instance Exception DbError
 
 targetSchemaVersion :: Int
-targetSchemaVersion = 17
+targetSchemaVersion = 18
 
 {- | The last POSIX second SQLite can render as a calendar date: 9999-12-31
 23:59:59 UTC. A stored @created_at@ above this makes @strftime@ and @date@
@@ -368,6 +369,7 @@ dbMigrations =
     , Migrate.Migration 15 "bookmark dead overrides" schemaV15
     , Migrate.Migration 16 "schema metadata" schemaV16
     , Migrate.Migration 17 "change journal" schemaV17
+    , Migrate.Migration 18 "async egress jobs" schemaV18
     ]
 
 -- | Migration v16: the shared @schema_meta@ checksum table.
@@ -391,6 +393,19 @@ schemaV17 =
     , "DROP TABLE IF EXISTS undo_bookmark_tags"
     , "DROP TABLE IF EXISTS undo_bookmark_rows"
     , "DROP TABLE IF EXISTS undo_snapshots"
+    ]
+
+{- | Migration v18: egress jobs carry a stable dedupe @target@, an opaque JSON
+@payload@, a JSON @result@, and a cancellation flag. At most one active job per
+@(kind, target)@; enrichment keeps its @(kind, bookmark_id)@ index.
+-}
+schemaV18 :: [Query]
+schemaV18 =
+    [ "ALTER TABLE jobs ADD COLUMN target TEXT NOT NULL DEFAULT ''"
+    , "ALTER TABLE jobs ADD COLUMN payload TEXT NOT NULL DEFAULT '{}'"
+    , "ALTER TABLE jobs ADD COLUMN result TEXT NOT NULL DEFAULT ''"
+    , "ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
+    , "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_target ON jobs(kind, target) WHERE state IN ('queued','running') AND target <> ''"
     ]
 
 schemaV1 :: [Query]

@@ -25,7 +25,8 @@ import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Route (Route (..), isGraphRoute)
 import Eza.Web.Logic.Update.Common
 import Eza.Web.Logic.Update.Graph (graphEscape, graphOpenSelected, graphPan)
-import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
+import qualified Eza.Web.Logic.Update.Job as Job
+import Eza.Web.Logic.Update.Monad (Update, dispatch, get, put)
 import Eza.Web.Logic.Update.Route (loadRoute, reloadRoute)
 import Eza.Web.Logic.Update.ViewDefs (applyGraphView, defaultGraphView, isLocalGraphRoute)
 
@@ -137,6 +138,7 @@ handle = \case
                 -- (e.g. Forward while the guard is open) closes the guard
                 -- instead of re-deriving it.
                 putModel (\x -> x{mGuardOpen = False, mPendingRoute = Nothing, mGuardFromHistory = False})
+                Job.cancelAllJobs
                 loadRoute route
     Navigate route -> do
         m <- get
@@ -145,7 +147,9 @@ handle = \case
             else
                 if hasUnsaved m && isDetailRoute (mRoute m)
                     then put m{mGuardOpen = True, mPendingRoute = Just route, mGuardFromHistory = False}
-                    else navigateTo route
+                    else do
+                        Job.cancelAllJobs
+                        navigateTo route
     ThemeToggled -> toggleTheme
     ThemeLoaded theme -> putModel (\m -> m{mTheme = theme})
     ConnectivityChanged online -> putModel (\m -> m{mOnline = online})

@@ -13,7 +13,8 @@ algebra lives in "Eza.Web.Logic.Api".
 -}
 module Eza.Web.Logic.Model where
 
-import Data.Aeson (FromJSON (..), withObject, (.:))
+import Data.Aeson (FromJSON (..), Value, withObject, (.:))
+import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet as IS
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe)
@@ -67,6 +68,7 @@ import Eza.Web.Logic.Graph (
     initialGraphView,
  )
 import Eza.Web.Logic.Ids (RequestId (..), TimerId (..))
+import Eza.Web.Logic.Job (JobKind (..), JobPoll (..), JobStatus (..))
 import Eza.Web.Logic.Route (Route (..))
 import Eza.Web.Logic.Wire (ImportResponse (..), ListParams, WebhookTest (..))
 
@@ -470,9 +472,12 @@ data Action
     | TagOpFailed ApiError
     | -- AI tags
       AiTagSelected (Maybe Text)
-    | SuggestionsLoaded [TagSuggestion] (Maybe Text)
-    | SuggestionsFailed ApiError
+    | AiSuggestionsJobQueued (Maybe Text) Int
+    | AiSuggestionsJobDone Int (Maybe Value)
+    | AiSuggestionsJobFailed (Maybe Text)
+    | AiSuggestionsJobAbandoned
     | SuggestionApply Int [Text]
+    | SuggestionApplyFailed ApiError
     | SuggestionsApplied
     | AiStatusReload
     | AiSuggestRetry
@@ -486,7 +491,10 @@ data Action
     | PruneCancel
     | PruneDone Int
     | DeadCheckRun
-    | DeadCheckDone Int Int Int
+    | DeadCheckJobQueued Int
+    | DeadCheckJobDone (Maybe Value)
+    | DeadCheckJobFailed (Maybe Text)
+    | DeadCheckJobAbandoned
     | UndoRefresh
     | UndoEntriesLoaded [UndoEntry]
     | UndoEntriesFailed ApiError
@@ -598,6 +606,10 @@ data Action
     | ShareRevoked
     | -- snapshot
       SnapshotOpen
+    | SnapshotJobQueued Int Int
+    | SnapshotJobDone Int (Maybe Value)
+    | SnapshotJobFailed Int (Maybe Text)
+    | SnapshotJobAbandoned Int
     | SnapshotClose
     | -- ai status
       AiStatusLoaded AiStatus
@@ -645,8 +657,10 @@ data Action
     | WebhookToggled Webhook
     | WebhookToggleFailed ApiError
     | WebhookTestRequest Int
-    | WebhookTested Int WebhookTest
-    | WebhookTestFailed ApiError
+    | WebhookTestJobQueued Int Int
+    | WebhookTestJobDone Int (Maybe Value)
+    | WebhookTestJobFailed Int (Maybe Text)
+    | WebhookTestJobAbandoned Int
     | WebhookDelete Int
     | WebhookDeleted Int
     | WebhookDeleteFailed ApiError
@@ -677,6 +691,13 @@ data Action
     | -- toasts
       ToastAdd Text ToastKind
     | ToastDismiss Int
+    | -- async job polling (M4-D)
+      JobStarted JobKind Int
+    | JobTick JobKind Int TimerId
+    | JobStatusLoaded JobKind Int RequestId JobStatus
+    | JobStatusFailed JobKind Int RequestId ApiError
+    | JobAbandoned JobKind Int
+    | JobTimedOut JobKind Int
 
 -- | Everything the UI needs to render itself.
 data Model = Model
@@ -987,6 +1008,15 @@ data Model = Model
     , -- toasts
       mToasts :: [Toast]
     , mToastNext :: Int
+    , -- async job polling (M4-D)
+      mJobPolls :: IM.IntMap JobPoll
+    , mJobTimerNext :: TimerId
+    , mJobRequestNext :: RequestId
+    , -- snapshot capture in flight: busy while the enqueue/poll runs, and the
+      -- job id once the server accepted it
+      mSnapshotBusy :: Bool
+    , mSnapshotJob :: Maybe Int
+    , mWebhookTestBusy :: Bool
     }
     deriving (Eq)
 
@@ -1252,6 +1282,12 @@ initialModel =
         , mImportReport = Nothing
         , mToasts = []
         , mToastNext = 0
+        , mJobPolls = IM.empty
+        , mJobTimerNext = TimerId 0
+        , mJobRequestNext = RequestId 0
+        , mSnapshotBusy = False
+        , mSnapshotJob = Nothing
+        , mWebhookTestBusy = False
         }
 
 {- | Virtualized grid metrics.  Card height follows the design brief:

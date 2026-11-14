@@ -25,7 +25,7 @@ import Eza.Undo (recordUndoIds, undoLast)
 
 spec :: Spec
 spec = describe "change journal" $ do
-    it "migrates v16 to v17 with a pre-migration backup and drops the undo history" $
+    it "migrates v16 to the current target with a pre-migration backup and drops the undo history" $
         withSystemTempDirectory "eza-journal-v16" $ \dir -> do
             let path = dir </> "v16.db"
             bracket (Sqlite.open path) Sqlite.close $ \conn -> do
@@ -39,7 +39,7 @@ spec = describe "change journal" $ do
                 Sqlite.execute_ conn "INSERT INTO undo_snapshots (payload_json,created_at) VALUES ('{}',1)"
             migrated <- Db.openDb path
             version <- Db.schemaVersion migrated
-            version `shouldBe` 17
+            version `shouldBe` 18
             tables <- tableNames migrated
             ("journal" `elem` tables) `shouldBe` True
             ("journal_rows" `elem` tables) `shouldBe` True
@@ -48,12 +48,12 @@ spec = describe "change journal" $ do
             books <- countRows migrated "SELECT COUNT(*) FROM bookmarks"
             books `shouldBe` 1
             metaRows <- countRows migrated "SELECT COUNT(*) FROM schema_meta"
-            metaRows `shouldBe` 17
+            metaRows `shouldBe` 18
             Sqlite.close migrated
             backups <- backupsIn dir
             length backups `shouldBe` 1
 
-    it "refuses a v17 database with the v16 migration plan" $
+    it "refuses a current database with the v16 migration plan" $
         withSystemTempDirectory "eza-journal-oneway" $ \dir -> do
             let path = dir </> "oneway.db"
             conn <- Db.openDb path

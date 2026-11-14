@@ -281,6 +281,21 @@ export function makeApi(page) {
     );
 }
 
+
+// Poll one M4-D async job until it reaches a terminal state. The client polls
+// the same endpoint from the reducer; API-level e2e uses this so it exercises
+// the enqueue + status contract without depending on the AI provider.
+export async function waitForJob(api, jobId, { timeoutMs = 15000, intervalMs = 150 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = { status: 0, body: null };
+  while (Date.now() < deadline) {
+    last = await api("/api/v1/jobs/" + jobId);
+    if (last.status === 200 && ["done", "failed", "cancelled"].includes(last.body?.state)) return last;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return last;
+}
+
 export function attachErrors(page) {
   const errors = [];
   page.on("console", (message) => {

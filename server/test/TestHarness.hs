@@ -16,6 +16,7 @@ module TestHarness (
     withTestServer,
     withTestServerConfig,
     withTestServerCustom,
+    runEgressJob,
     createTestUser,
     withTwoUsers,
     userDbPath,
@@ -58,7 +59,7 @@ module TestHarness (
 
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (finally)
+import Control.Exception (bracket, finally)
 import Control.Monad (forM_)
 import Data.Aeson (FromJSON, Value (..), decode, eitherDecode, encode, object, (.=))
 import qualified Data.Aeson.Key as AesonKey
@@ -84,6 +85,8 @@ import qualified Eza.Auth as Auth
 import Eza.Config (Config (..))
 import qualified Eza.Control as Control
 import qualified Eza.Db as Db
+import qualified Eza.Egress as Egress
+import qualified Eza.Jobs as Jobs
 import qualified Eza.Password as Password
 import Eza.Server (AppState, app, closeAppState, newAppState)
 
@@ -377,6 +380,28 @@ writeTestStaticBundle root = do
 -- ---------------------------------------------------------------------------
 -- Accounts
 -- ---------------------------------------------------------------------------
+
+{- | Run the egress worker steps for one claimed job synchronously, as the
+library worker would. Tests enqueue through the HTTP handler, then call this to
+avoid waiting for the background loop.
+-}
+runEgressJob :: TestServer -> Text -> Int -> IO ()
+runEgressJob server username jobId = do
+    users <- Control.listUsers (tsControl server)
+    user <- case filter ((== username) . Control.cuUsername) users of
+        (found : _) -> pure found
+        [] -> expectationFailure ("no such test user: " <> T.unpack username) >> error "unreachable"
+    bracket (Db.openDb (userDbPath server username)) Sqlite.close $ \conn -> do
+        job <- Jobs.getJob conn jobId
+        case job of
+            Nothing -> expectationFailure "missing queued egress job"
+            Just claimed ->
+                Egress.processOneJob
+                    (tsManager server)
+                    (tsConfig server)
+                    (cfgUsersDir (tsConfig server) </> show (Control.cuId user) </> "snapshots")
+                    conn
+                    claimed
 
 userDbPath :: TestServer -> Text -> FilePath
 userDbPath server username = cfgUsersDir (tsConfig server) </> T.unpack username </> "eza.db"

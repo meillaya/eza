@@ -27,7 +27,7 @@ import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Route (Route (..))
 import Eza.Web.Logic.Update.Common
 import Eza.Web.Logic.Update.Graph (applyGraphScope, fitActiveView)
-import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
+import Eza.Web.Logic.Update.Monad (Update, dispatch, get)
 import Eza.Web.Logic.Update.ViewDefs (applyGraphView, currentGraphDefinition, currentLedgerDefinition, defaultGraphView, findViewBySlug, recomputeGraphColors, removeAt, setAt, upsertView)
 
 openSavedView :: Text -> Update ()

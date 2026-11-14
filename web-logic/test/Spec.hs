@@ -4,6 +4,7 @@ import Test.Hspec
 
 import ApiSpec (apiSpec)
 import HelperSpec (helperSpec)
+import JobSpec (jobSpec)
 import LedgerSpec (ledgerSpec)
 import ModelSpec (modelSpec)
 import PuritySpec (puritySpec)
@@ -17,5 +18,6 @@ main = hspec $ do
     ledgerSpec
     modelSpec
     updateSpec
+    jobSpec
     helperSpec
     puritySpec

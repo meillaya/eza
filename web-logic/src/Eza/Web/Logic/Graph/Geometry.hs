@@ -23,17 +23,15 @@ module Eza.Web.Logic.Graph.Geometry (
     detailChunkCount,
 ) where
 
-import Control.Monad (unless, when)
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet as IS
-import Data.List (foldl', sortOn)
+import Data.List (sortOn)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 
 import Eza.GraphLayout
 import Eza.Types (GraphRecord (..))
-import Eza.View (LabelMode (..))
 
 import Eza.Web.Logic.Graph (GraphMatches (..), GraphView (..), emptyMatches)
 

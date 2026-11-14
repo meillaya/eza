@@ -32,6 +32,7 @@ import Eza.Config
 import qualified Eza.Control as Control
 
 import Eza.Enrich (enqueueEnrichment)
+import Eza.Jobs (enqueueTrackedJob)
 
 import Eza.Favicon (Favicon (..), getFavicon)
 
@@ -41,8 +42,6 @@ import Eza.Routes (Route (..))
 
 import Eza.SavedSearches (listSavedSearches)
 import Eza.Shares (createShare, listShares, revokeShare)
-
-import Eza.Snapshot (captureSnapshot)
 
 import Eza.Types
 import Eza.Views (listViews)
@@ -325,7 +324,7 @@ bookmarkAction ::
     Int ->
     Text ->
     IO ResponseReceived
-bookmarkAction cfg slot conn respond bookmarkId action = do
+bookmarkAction _cfg _slot conn respond bookmarkId action = do
     exists <- query conn "SELECT 1 FROM bookmarks WHERE id = ?" (Only bookmarkId) :: IO [Only Int]
     if null exists
         then respond (jsonProblem status404 "not_found" "bookmark not found")
@@ -343,12 +342,24 @@ bookmarkAction cfg slot conn respond bookmarkId action = do
             "recheck-link" -> do
                 ok <- recheckLink conn bookmarkId
                 if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonProblem status404 "not_found" "bookmark not found")
-            "snapshot" -> do
-                m <- captureSnapshot cfg (usSnapshotDir slot) conn bookmarkId
-                case m of
-                    Nothing -> respond (jsonProblem status502 "snapshot_failed" "the snapshot could not be captured")
-                    Just (kind, value) -> respond (jsonResponse status200 (object ["ok" .= True, "kind" .= kind, "value" .= value]))
             _ -> respond (jsonProblem status404 "not_found" "No such action")
+
+{- | @POST /api/v1/bookmarks/{id}/snapshot@ validates and enqueues the capture;
+the egress worker runs monolith outside the request.
+-}
+snapshotJobHandler :: Connection -> Int -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+snapshotJobHandler conn bookmarkId respond = do
+    exists <- query conn "SELECT 1 FROM bookmarks WHERE id = ?" (Only bookmarkId) :: IO [Only Int]
+    if null exists
+        then respond (jsonProblem status404 "not_found" "bookmark not found")
+        else do
+            jobId <-
+                enqueueTrackedJob
+                    conn
+                    "snapshot"
+                    ("bookmark:" <> T.pack (show bookmarkId))
+                    (object ["bookmark_id" .= bookmarkId])
+            respond (jsonResponse status202 (object ["job_id" .= jobId]))
 
 -- | Dispatch the handlers this family owns from their "Eza.Routes" constructors.
 dispatch :: RequestContext -> Connection -> Route -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
@@ -402,7 +413,7 @@ dispatch rctx conn route req respond = case route of
     RouteBookmarkExtract bookmarkId -> bookmarkAction cfg slot conn respond bookmarkId "extract"
     RouteBookmarkMarkAlive bookmarkId -> bookmarkAction cfg slot conn respond bookmarkId "mark-alive"
     RouteBookmarkRecheckLink bookmarkId -> bookmarkAction cfg slot conn respond bookmarkId "recheck-link"
-    RouteBookmarkSnapshotWrite bookmarkId -> bookmarkAction cfg slot conn respond bookmarkId "snapshot"
+    RouteBookmarkSnapshotWrite bookmarkId -> snapshotJobHandler conn bookmarkId respond
     RouteBookmarkBacklinks bookmarkId -> do
         bl <- getBacklinks conn bookmarkId
         respond (jsonResponse status200 bl)

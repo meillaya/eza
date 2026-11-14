@@ -226,7 +226,7 @@ runEnrichWorkerFor manager cfg databasePath sem =
     -- or a dead supervisor) runs the closing bracket instead of leaking it.
     bracket (Db.openDb databasePath) Db.closeDb $ \conn ->
         forever $ do
-            claim <- claimJob conn
+            claim <- claimJobKind conn "enrich"
             case claim of
                 Nothing -> threadDelay (2 * 1000000)
                 Just job

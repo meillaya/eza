@@ -9,8 +9,10 @@ per-user snapshots directory.
 -}
 module AdminSpec (spec) where
 
-import Data.Aeson (encode, object, (.=))
+import Data.Aeson (Value (..), encode, object, (.=))
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -273,19 +275,16 @@ spec = describe "admin API" $ do
             (sessionB, csrfB) <- loginAs server "bob" "bob password"
             addTestBookmark server sessionA csrfA 1
             addTestBookmark server sessionB csrfB 1
-            aliceSnapshot <- snapshot server sessionA csrfA 1
-            bobSnapshot <- snapshot server sessionB csrfB 1
-            aliceValue <- expectJust "alice snapshot name" (jsonTextField "value" (hrespBody aliceSnapshot))
-            bobValue <- expectJust "bob snapshot name" (jsonTextField "value" (hrespBody bobSnapshot))
-            -- The API answers with a relative file name, never an absolute path.
-            aliceValue `shouldSatisfy` T.isSuffixOf ".html"
-            bobValue `shouldSatisfy` T.isSuffixOf ".html"
-            aliceValue `shouldSatisfy` (not . T.isInfixOf "/")
-            bobValue `shouldSatisfy` (not . T.isInfixOf "/")
+            aliceJob <- snapshot server sessionA csrfA 1
+            bobJob <- snapshot server sessionB csrfB 1
+            runEgressJob server "alice" aliceJob
+            runEgressJob server "bob" bobJob
+            alicePath <- snapshotPathOf server sessionA csrfA aliceJob
+            bobPath <- snapshotPathOf server sessionB csrfB bobJob
             let aliceDir = cfgUsersDir (tsConfig server) </> show (Control.cuId alice) </> "snapshots"
                 bobDir = cfgUsersDir (tsConfig server) </> show (Control.cuId bob) </> "snapshots"
-                alicePath = aliceDir </> T.unpack aliceValue
-                bobPath = bobDir </> T.unpack bobValue
+            alicePath `shouldBe` aliceDir </> "1.html"
+            bobPath `shouldBe` bobDir </> "1.html"
             alicePath `shouldNotBe` bobPath
             aliceFile <- doesFileExist alicePath
             aliceFile `shouldBe` True
@@ -409,14 +408,31 @@ spec = describe "admin API" $ do
             listed `shouldHaveStatus` 200
             hrespBody listed `shouldSatisfy` containsText "JSON import"
 
-snapshot :: TestServer -> T.Text -> T.Text -> Int -> IO HttpResponse
-snapshot server session csrf bookmarkId =
-    httpRequest
-        server
-        "POST"
-        ("/api/v1/bookmarks/" <> show bookmarkId <> "/snapshot")
-        (authHeaders session csrf)
-        Nothing
+-- | Enqueue a snapshot job and return its id (the response is now 202).
+snapshot :: TestServer -> T.Text -> T.Text -> Int -> IO Int
+snapshot server session csrf bookmarkId = do
+    response <-
+        httpRequest
+            server
+            "POST"
+            ("/api/v1/bookmarks/" <> show bookmarkId <> "/snapshot")
+            (authHeaders session csrf)
+            Nothing
+    response `shouldHaveStatus` 202
+    pure (fromMaybe 0 (jsonIntField "job_id" (hrespBody response)))
+
+snapshotPathOf :: TestServer -> T.Text -> T.Text -> Int -> IO FilePath
+snapshotPathOf server session csrf jobId = do
+    response <- httpRequest server "GET" ("/api/v1/jobs/" <> show jobId) (cookieHeaders session csrf) Nothing
+    response `shouldHaveStatus` 200
+    case jsonField "result" (hrespBody response) of
+        Just (Object result) -> case KeyMap.lookup "snapshot" result of
+            Just (Object snapshotObject) ->
+                case KeyMap.lookup "path" snapshotObject of
+                    Just (String path) -> pure (T.unpack path)
+                    _ -> expectationFailure "job result has no snapshot path" >> error "unreachable"
+            _ -> expectationFailure "job result has no snapshot" >> error "unreachable"
+        _ -> expectationFailure "job result is missing" >> error "unreachable"
 
 loginResponse :: TestServer -> T.Text -> T.Text -> IO HttpResponse
 loginResponse server username password =

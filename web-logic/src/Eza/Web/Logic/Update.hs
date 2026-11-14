@@ -23,6 +23,7 @@ import qualified Eza.Web.Logic.Update.Dedup as Dedup
 import qualified Eza.Web.Logic.Update.Detail as Detail
 import qualified Eza.Web.Logic.Update.Graph as Graph
 import qualified Eza.Web.Logic.Update.ImportExport as ImportExport
+import qualified Eza.Web.Logic.Update.Job as Job
 import qualified Eza.Web.Logic.Update.Ledger as Ledger
 import qualified Eza.Web.Logic.Update.Maintenance as Maintenance
 import qualified Eza.Web.Logic.Update.Shell as Shell
@@ -244,9 +245,12 @@ dispatchAll action = case action of
     TagDialogClose{} -> Tags.handle action
     TagOpFailed{} -> Tags.handle action
     AiTagSelected{} -> Tags.handle action
-    SuggestionsLoaded{} -> Tags.handle action
-    SuggestionsFailed{} -> Tags.handle action
+    AiSuggestionsJobQueued{} -> Tags.handle action
+    AiSuggestionsJobDone{} -> Tags.handle action
+    AiSuggestionsJobFailed{} -> Tags.handle action
+    AiSuggestionsJobAbandoned{} -> Tags.handle action
     SuggestionApply{} -> Tags.handle action
+    SuggestionApplyFailed{} -> Tags.handle action
     SuggestionsApplied{} -> Tags.handle action
     AiStatusReload{} -> Tags.handle action
     AiSuggestRetry{} -> Tags.handle action
@@ -259,7 +263,10 @@ dispatchAll action = case action of
     PruneCancel{} -> Maintenance.handle action
     PruneDone{} -> Maintenance.handle action
     DeadCheckRun{} -> Maintenance.handle action
-    DeadCheckDone{} -> Maintenance.handle action
+    DeadCheckJobQueued{} -> Maintenance.handle action
+    DeadCheckJobDone{} -> Maintenance.handle action
+    DeadCheckJobFailed{} -> Maintenance.handle action
+    DeadCheckJobAbandoned{} -> Maintenance.handle action
     UndoRefresh{} -> Maintenance.handle action
     UndoEntriesLoaded{} -> Maintenance.handle action
     UndoEntriesFailed{} -> Maintenance.handle action
@@ -364,6 +371,10 @@ dispatchAll action = case action of
     ShareRevoke{} -> Detail.handle action
     ShareRevoked{} -> Detail.handle action
     SnapshotOpen{} -> Detail.handle action
+    SnapshotJobQueued{} -> Detail.handle action
+    SnapshotJobDone{} -> Detail.handle action
+    SnapshotJobFailed{} -> Detail.handle action
+    SnapshotJobAbandoned{} -> Detail.handle action
     SnapshotClose{} -> Detail.handle action
     AiStatusLoaded{} -> Tags.handle action
     AiStatusFailed{} -> Tags.handle action
@@ -408,8 +419,10 @@ dispatchAll action = case action of
     WebhookToggled{} -> Account.handle action
     WebhookToggleFailed{} -> Account.handle action
     WebhookTestRequest{} -> Account.handle action
-    WebhookTested{} -> Account.handle action
-    WebhookTestFailed{} -> Account.handle action
+    WebhookTestJobQueued{} -> Account.handle action
+    WebhookTestJobDone{} -> Account.handle action
+    WebhookTestJobFailed{} -> Account.handle action
+    WebhookTestJobAbandoned{} -> Account.handle action
     WebhookDelete{} -> Account.handle action
     WebhookDeleted{} -> Account.handle action
     WebhookDeleteFailed{} -> Account.handle action
@@ -438,6 +451,12 @@ dispatchAll action = case action of
     RuleFailed{} -> Account.handle action
     ToastAdd{} -> Shell.handle action
     ToastDismiss{} -> Shell.handle action
+    JobStarted{} -> Job.handle action
+    JobTick{} -> Job.handle action
+    JobStatusLoaded{} -> Job.handle action
+    JobStatusFailed{} -> Job.handle action
+    JobAbandoned{} -> Job.handle action
+    JobTimedOut{} -> Job.handle action
 
 {- | The handler environment: dispatching another action runs it through the
 same total case below. Tying the knot lazily keeps the modules acyclic.

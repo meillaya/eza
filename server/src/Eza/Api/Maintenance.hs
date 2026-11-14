@@ -33,8 +33,8 @@ import Eza.Bookmarks
 import Eza.Config
 
 import qualified Eza.Db as Db
-import Eza.DeadLinks (checkDead)
 import Eza.Dedup (dedupCandidates, mergeBookmarksWithSnapshot, mergeUrlDuplicatesAll)
+import Eza.Jobs (enqueueTrackedJob)
 
 import Eza.Export (exportBookmarks)
 
@@ -204,8 +204,14 @@ dispatch rctx conn route req respond = case route of
                     limit = fromMaybe 500 (parseMaybe (.: "limit") o :: Maybe Int)
                     older = fromMaybe 0 (parseMaybe (.: "older_than") o :: Maybe Int)
                     includeDead = fromMaybe False (parseMaybe (.: "include_dead") o :: Maybe Bool)
-                (checked, dead, alive, totalDead) <- checkDead conn limit older includeDead
-                respond (jsonResponse status200 (object ["checked" .= checked, "dead" .= dead, "alive" .= alive, "total_dead" .= totalDead]))
+                    payload =
+                        object
+                            [ "limit" .= limit
+                            , "older_than" .= older
+                            , "include_dead" .= includeDead
+                            ]
+                jobId <- enqueueTrackedJob conn "check_dead" "maintenance" payload
+                respond (jsonResponse status202 (object ["job_id" .= jobId]))
     RouteMaintenancePruneCandidates -> do
         items <- pruneCandidates conn 365
         respond (jsonResponse status200 (object ["items" .= items]))

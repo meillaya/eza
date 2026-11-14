@@ -17,7 +17,7 @@ import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Route (Route (..))
 import Eza.Web.Logic.Update.Common
 import Eza.Web.Logic.Update.Graph (enterGraphRoute)
-import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
+import Eza.Web.Logic.Update.Monad (Update, get, put)
 import Eza.Web.Logic.Update.Views (openSavedView)
 
 -- | Reload the current route: the retry path for panel read errors.

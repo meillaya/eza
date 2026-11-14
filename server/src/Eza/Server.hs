@@ -89,6 +89,7 @@ import qualified Eza.Api.Admin as Admin
 import qualified Eza.Api.Bookmarks as Bookmarks
 import qualified Eza.Api.Extensions as Extensions
 import qualified Eza.Api.Graph as Graph
+import qualified Eza.Api.Jobs as Jobs
 import qualified Eza.Api.Maintenance as Maintenance
 import qualified Eza.Api.Tags as Tags
 
@@ -347,6 +348,7 @@ family modules own the handler bodies.
 -}
 authedRoute :: RequestContext -> Connection -> Route -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 authedRoute rctx conn route req respond
+    | Jobs.owns route = Jobs.dispatch rctx conn route req respond
     | Extensions.owns route = Extensions.dispatch rctx conn route req respond
     | Bookmarks.owns route = Bookmarks.dispatch rctx conn route req respond
     | Tags.owns route = Tags.dispatch rctx conn route req respond

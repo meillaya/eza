@@ -58,7 +58,8 @@ literalTable =
         , "/api/v1/dedup/candidates?url_offset=0&url_limit=25&title_offset=0&title_limit=10"
         )
     , (ApiTagConsolidationCandidates, "GET", "/api/v1/tags/consolidation-candidates")
-    , (ApiTagSuggestions "c++", "GET", "/api/v1/tags/c%2B%2B/suggestions")
+    , (ApiAiSuggestionsJob, "POST", "/api/v1/ai/suggestions")
+    , (ApiJobStatus 42, "GET", "/api/v1/jobs/42")
     , (ApiMaintenancePruneCandidates, "GET", "/api/v1/maintenance/prune-candidates")
     , (ApiAccount, "GET", "/api/v1/account")
     , (ApiTags, "GET", "/api/v1/tags")

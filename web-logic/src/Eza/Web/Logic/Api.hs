@@ -79,7 +79,11 @@ data ClientRequest
     | ApiSavedSearches
     | ApiDedupCandidates DedupCandidateQuery
     | ApiTagConsolidationCandidates
-    | ApiTagSuggestions Text
+    | {- | M4-D async jobs. The job paths are client-owned until the server
+      @Eza.Routes@ constructors land; both live only in this request table.
+      -}
+      ApiAiSuggestionsJob
+    | ApiJobStatus Int
     | ApiMaintenancePruneCandidates
     | ApiAccount
     | ApiTags
@@ -213,7 +217,6 @@ apiRoute = \case
     ApiSavedSearches -> Just RouteSavedSearchList
     ApiDedupCandidates _ -> Just RouteDedupCandidates
     ApiTagConsolidationCandidates -> Just RouteTagConsolidationCandidates
-    ApiTagSuggestions tag -> Just (RouteTagSuggestions (percentEncode tag))
     ApiMaintenancePruneCandidates -> Just RouteMaintenancePruneCandidates
     ApiAccount -> Just RouteAccountRead
     ApiTags -> Just RouteTags
@@ -283,6 +286,8 @@ apiRoute = \case
     ApiPatchRule ruleId -> Just (RouteRuleUpdate ruleId)
     ApiDeleteRule ruleId -> Just (RouteRuleDelete ruleId)
     ApiTestRule -> Just RouteRuleTest
+    ApiAiSuggestionsJob -> Just RouteAiSuggestions
+    ApiJobStatus jobId -> Just (RouteJobStatus jobId)
 
 -- | The bookmark post-actions the route table enumerates.
 bookmarkActionRoute :: Int -> Text -> Maybe Route

@@ -20,10 +20,14 @@ normalises @..@ segments before sending them; that would hide the bypass.
 module SecuritySpec (spec) where
 
 import Control.Exception (bracket)
+import Data.Aeson (Value (..))
+import qualified Data.Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Bits (shiftL, (.|.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -136,31 +140,35 @@ monolithScript payload =
     "#!/bin/sh\nprintf '%s' '" <> BSC.unpack payload <> "' > \"$2\"\nexit 0\n"
 
 snapshotSpec :: Spec
-snapshotSpec = describe "S2 snapshot capture" $ do
+snapshotSpec = describe "S2 snapshot capture (async job)" $ do
     it "refuses a loopback bookmark URL and spawns nothing" $
         withSnapshotServer "<html><body>snapshot body</body></html>" id $ \server -> do
             user <- createTestUser server "alice" "alice password" Control.RoleAdmin
             (session, csrf) <- loginAs server "alice" "alice password"
             bookmarkId <- addBookmarkWith server session csrf "http://127.0.0.1:9/internal"
-            failed <- captureSnapshotWith server session csrf bookmarkId
-            failed `shouldHaveStatus` 502
+            jobId <- enqueueSnapshot server session csrf bookmarkId
+            runEgressJob server "alice" jobId
+            jobState server session csrf jobId `shouldReturn` Just "failed"
+            reason <- jobError server session csrf jobId
+            reason `shouldSatisfy` maybe False (T.isInfixOf "could not be captured")
             let file = snapshotDir (tsConfig server) (Control.cuId user) </> show bookmarkId <> ".html"
             exists <- doesFileExist file
             exists `shouldBe` False
 
-    it "allows a public address, stores an absolute path, and returns a basename" $
+    it "allows a public address, stores an absolute path, and serves the file" $
         withSnapshotServer "<html><body>snapshot body</body></html>" id $ \server -> do
             user <- createTestUser server "alice" "alice password" Control.RoleAdmin
             (session, csrf) <- loginAs server "alice" "alice password"
             bookmarkId <- addBookmarkWith server session csrf "http://93.184.216.34/page"
-            captured <- captureSnapshotWith server session csrf bookmarkId
-            captured `shouldHaveStatus` 200
-            value <- expectJust "snapshot value" (jsonTextField "value" (hrespBody captured))
-            value `shouldBe` T.pack (show bookmarkId <> ".html")
-            value `shouldSatisfy` (not . T.isInfixOf "/")
+            jobId <- enqueueSnapshot server session csrf bookmarkId
+            runEgressJob server "alice" jobId
+            jobState server session csrf jobId `shouldReturn` Just "done"
+            path <- jobSnapshotPath server session csrf jobId
             let file = snapshotFile (tsConfig server) (Control.cuId user) bookmarkId
-            exists <- doesFileExist file
-            exists `shouldBe` True
+            path `shouldBe` Just (T.pack file)
+            (T.pack file `T.isSuffixOf` fromMaybe "" path) `shouldBe` True
+            bytes <- jobSnapshotBytes server session csrf jobId
+            bytes `shouldSatisfy` maybe False (> 0)
             stored <- storedSnapshotPath server "alice" bookmarkId
             stored `shouldBe` Just (T.pack file)
             served <- httpRequest server "GET" ("/api/v1/bookmarks/" <> show bookmarkId <> "/snapshot") (cookieHeaders session csrf) Nothing
@@ -172,8 +180,9 @@ snapshotSpec = describe "S2 snapshot capture" $ do
             user <- createTestUser server "alice" "alice password" Control.RoleAdmin
             (session, csrf) <- loginAs server "alice" "alice password"
             bookmarkId <- addBookmarkWith server session csrf "http://127.0.0.1:9/internal"
-            captured <- captureSnapshotWith server session csrf bookmarkId
-            captured `shouldHaveStatus` 200
+            jobId <- enqueueSnapshot server session csrf bookmarkId
+            runEgressJob server "alice" jobId
+            jobState server session csrf jobId `shouldReturn` Just "done"
             let file = snapshotFile (tsConfig server) (Control.cuId user) bookmarkId
             exists <- doesFileExist file
             exists `shouldBe` True
@@ -183,8 +192,9 @@ snapshotSpec = describe "S2 snapshot capture" $ do
             user <- createTestUser server "alice" "alice password" Control.RoleAdmin
             (session, csrf) <- loginAs server "alice" "alice password"
             bookmarkId <- insertRawBookmark server "alice" "javascript:alert(1)"
-            failed <- captureSnapshotWith server session csrf bookmarkId
-            failed `shouldHaveStatus` 502
+            jobId <- enqueueSnapshot server session csrf bookmarkId
+            runEgressJob server "alice" jobId
+            jobState server session csrf jobId `shouldReturn` Just "failed"
             let file = snapshotFile (tsConfig server) (Control.cuId user) bookmarkId
             exists <- doesFileExist file
             exists `shouldBe` False
@@ -197,13 +207,58 @@ snapshotSpec = describe "S2 snapshot capture" $ do
             user <- createTestUser server "alice" "alice password" Control.RoleAdmin
             (session, csrf) <- loginAs server "alice" "alice password"
             bookmarkId <- addBookmarkWith server session csrf "http://93.184.216.34/page"
-            failed <- captureSnapshotWith server session csrf bookmarkId
-            failed `shouldHaveStatus` 502
+            jobId <- enqueueSnapshot server session csrf bookmarkId
+            runEgressJob server "alice" jobId
+            jobState server session csrf jobId `shouldReturn` Just "failed"
             let file = snapshotFile (tsConfig server) (Control.cuId user) bookmarkId
             exists <- doesFileExist file
             exists `shouldBe` False
             stored <- storedSnapshotPath server "alice" bookmarkId
             stored `shouldBe` Just ""
+
+enqueueSnapshot :: TestServer -> Text -> Text -> Int -> IO Int
+enqueueSnapshot server session csrf bookmarkId = do
+    captured <- captureSnapshotWith server session csrf bookmarkId
+    captured `shouldHaveStatus` 202
+    pure (fromMaybe 0 (jsonIntField "job_id" (hrespBody captured)))
+
+captureSnapshotWith :: TestServer -> Text -> Text -> Int -> IO HttpResponse
+captureSnapshotWith server session csrf bookmarkId =
+    httpRequest
+        server
+        "POST"
+        ("/api/v1/bookmarks/" <> show bookmarkId <> "/snapshot")
+        (authHeaders session csrf)
+        (Just "{}")
+
+jobBody :: TestServer -> Text -> Text -> Int -> IO LBS.ByteString
+jobBody server session csrf jobId = do
+    response <- httpRequest server "GET" ("/api/v1/jobs/" <> show jobId) (cookieHeaders session csrf) Nothing
+    response `shouldHaveStatus` 200
+    pure (hrespBody response)
+
+jobState :: TestServer -> Text -> Text -> Int -> IO (Maybe Text)
+jobState server session csrf jobId = jsonTextField "state" <$> jobBody server session csrf jobId
+
+jobError :: TestServer -> Text -> Text -> Int -> IO (Maybe Text)
+jobError server session csrf jobId = jsonTextField "error" <$> jobBody server session csrf jobId
+
+jobSnapshotObject :: TestServer -> Text -> Text -> Int -> IO (Maybe Value)
+jobSnapshotObject server session csrf jobId = do
+    body <- jobBody server session csrf jobId
+    pure $ case jsonField "result" body of
+        Just (Object result) -> KeyMap.lookup "snapshot" result
+        _ -> Nothing
+
+jobSnapshotPath :: TestServer -> Text -> Text -> Int -> IO (Maybe Text)
+jobSnapshotPath server session csrf jobId = do
+    object <- jobSnapshotObject server session csrf jobId
+    pure (jsonTextField "path" (maybe "null" Data.Aeson.encode object))
+
+jobSnapshotBytes :: TestServer -> Text -> Text -> Int -> IO (Maybe Int)
+jobSnapshotBytes server session csrf jobId = do
+    object <- jobSnapshotObject server session csrf jobId
+    pure (jsonIntField "bytes" (maybe "null" Data.Aeson.encode object))
 
 addBookmarkWith :: TestServer -> Text -> Text -> Text -> IO Int
 addBookmarkWith server session csrf url = do
@@ -216,15 +271,6 @@ addBookmarkWith server session csrf url = do
             (Just (encodeJsonObject [("url", url), ("title", "audit")]))
     response `shouldHaveStatus` 201
     expectJust "bookmark id" (jsonIntField "id" (hrespBody response))
-
-captureSnapshotWith :: TestServer -> Text -> Text -> Int -> IO HttpResponse
-captureSnapshotWith server session csrf bookmarkId =
-    httpRequest
-        server
-        "POST"
-        ("/api/v1/bookmarks/" <> show bookmarkId <> "/snapshot")
-        (authHeaders session csrf)
-        (Just "{}")
 
 snapshotDir :: Config -> Int -> FilePath
 snapshotDir cfg userId = cfgUsersDir cfg </> show userId </> "snapshots"

@@ -3178,7 +3178,7 @@ webhooksPanel m =
             ]
     webhookRows
         | mWebhooksLoading m && null (mWebhooks m) = [quietNote "Loading webhooks."]
-        | otherwise = concatMap (\webhook -> webhookRecord webhook : webhookTestNote m (whId webhook)) (mWebhooks m)
+        | otherwise = concatMap (\webhook -> webhookRecord m webhook : webhookTestNote m (whId webhook)) (mWebhooks m)
 
 webhookEmpty :: Model -> View () () Model Action
 webhookEmpty m
@@ -3188,8 +3188,8 @@ webhookEmpty m
             [HP.class_ "account-empty", testId "webhook-empty"]
             [H.p_ [HP.class_ "account-empty-title display"] [text "No webhooks yet."]]
 
-webhookRecord :: Webhook -> View () () Model Action
-webhookRecord webhook =
+webhookRecord :: Model -> Webhook -> View () () Model Action
+webhookRecord m webhook =
     H.div_
         [ HP.class_ ("account-record webhook-record" <> if whEnabled webhook then "" else " is-off")
         , testId "webhook-row"
@@ -3233,12 +3233,14 @@ webhookRecord webhook =
                 ]
                 [text (if whEnabled webhook then "disable" else "enable")]
             , H.button_
-                [ HP.class_ "account-link"
-                , HP.type_ "button"
-                , testId "webhook-test"
-                , HE.onClick (WebhookTestRequest (whId webhook))
-                ]
-                [text "send test"]
+                ( [ HP.class_ "account-link"
+                  , HP.type_ "button"
+                  , testId "webhook-test"
+                  , HE.onClick (WebhookTestRequest (whId webhook))
+                  ]
+                    ++ attrDisabled (mWebhookTestBusy m)
+                )
+                [text (if mWebhookTestBusy m then "sending test…" else "send test")]
             , H.button_
                 [ HP.class_ "account-link"
                 , HP.type_ "button"
@@ -3257,8 +3259,13 @@ webhookRecord webhook =
         ]
 
 webhookTestNote :: Model -> Int -> [View () () Model Action]
-webhookTestNote m webhookId =
-    case mWebhookTest m of
+webhookTestNote m webhookId
+    | mWebhookTestBusy m =
+        [ H.p_
+            [HP.class_ "account-record-meta meta webhook-test-result", HP.role_ "status"]
+            [text "sending the test delivery…"]
+        ]
+    | otherwise = case mWebhookTest m of
         Just (id_, result)
             | id_ == webhookId ->
                 [ H.p_

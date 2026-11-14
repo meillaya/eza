@@ -42,6 +42,7 @@ import Network.HTTP.Client (Manager)
 import Eza.Auth (cleanupExpired)
 import Eza.Config (Config (..))
 import qualified Eza.Db as Db
+import Eza.Egress (runEgressWorkerFor)
 import Eza.Enrich (runEnrichWorkerFor, runFaviconWorkerFor)
 import Eza.Graph (LayoutCache, emptyLayoutCache)
 import Eza.Jobs (resetRunningJobs)
@@ -55,6 +56,7 @@ data LibraryWorkerConfig = LibraryWorkerConfig
     { lwcConfig :: Config
     , lwcManager :: Manager
     , lwcEnrichSem :: QSem
+    , lwcSnapshotDir :: FilePath
     }
 
 -- | An opened user database and its workers. Close it with 'closeLibrary'.
@@ -165,13 +167,15 @@ spawnLibraryWorkers workers library = do
         forM [1 .. enrichCount] $ \_ ->
             async (runEnrichWorkerFor manager cfg dbPath (lwcEnrichSem workers))
     webhookWorker <- async (runWebhookWorker webhookCfg)
+    -- One egress loop per account: snapshot, dead-link, AI, webhook-test jobs.
+    egressWorker <- async (runEgressWorkerFor manager cfg dbPath (lwcSnapshotDir workers) (lwcEnrichSem workers))
     -- One favicon backfill loop per account: cached domains cost no network,
     -- and each new domain costs one fetch no matter how many links it has.
     faviconWorkers <-
         if cfgFaviconBackfill cfg && enrichCount > 0
             then (: []) <$> async (runFaviconWorkerFor manager cfg dbPath (lwcEnrichSem workers))
             else pure []
-    pure (enrichWorkers <> [webhookWorker] <> faviconWorkers)
+    pure (enrichWorkers <> [webhookWorker, egressWorker] <> faviconWorkers)
 
 stillRunning :: Async () -> IO Bool
 stillRunning worker = isNothing <$> poll worker

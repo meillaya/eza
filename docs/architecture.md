@@ -87,6 +87,20 @@ failure placeholders once so the current parser gets a retry.
 stop on the next supervisor tick. Expired sessions are swept when a database
 opens and once a day after.
 
+Egress work is queued, never performed in a request handler. The `jobs` table
+is the durable queue: a handler validates the request and inserts a row in the
+same write transaction, returns 202 with the job id, and the per-library
+egress worker claims it with an atomic conditional update. Four kinds use this
+path: page snapshot capture (monolith, with the same public-address and byte
+guards), the dead-link sweep (with a cancel flag), AI tag suggestions (the
+existing bounded tag/all bucket, provider timeout) and the webhook test
+delivery. A partial unique index keeps at most one queued/running job per
+(kind, target), so a repeated click returns the existing job id instead of
+starting a second one; retries are bounded, and a restart resets interrupted
+running jobs to queued. `GET /api/v1/jobs/{id}` reports state, attempts, result
+and error for the caller's own library only. The snapshot file *read* remains a
+normal `GET /api/v1/bookmarks/{id}/snapshot`; only capture is a job.
+
 ![Architecture: one process, one control database, one library per account](figures/architecture.png)
 
 The CLI commands (`import`, `export`, `enrich`, `verify`, `backup`,
@@ -148,8 +162,9 @@ enrichment. When `EZA_DEFUDDLE_CMD` is set, `Eza.Enrich` first sends the page
 through the JSON-lines Node/Defuddle sidecar and falls back to the Haskell
 extractor on any error. The sidecar has no network access and a 5 MiB/15 s
 limit. Schema v16 adds `schema_meta` (per-migration sha256 checksums, verified
-on open) and schema v17 replaces the lossless undo side tables with one
-append-only journal. v8 added `captures`/`clip_templates`, v10 views, v11 the
+on open), schema v17 replaces the lossless undo side tables with one
+append-only journal, and schema v18 adds the job payload/result columns used by
+the egress worker. v8 added `captures`/`clip_templates`, v10 views, v11 the
 event log and webhooks, v13 the FTS source-domain column, v14 the webhook
 delivery kind and v15 manual dead-link overrides; v17's journal captures the
 before-image of bookmarks, tag links, highlights, wikilinks, captures and dead

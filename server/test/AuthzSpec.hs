@@ -138,7 +138,7 @@ tokenRoutes =
     , ("GET", ["api", "v1", "clip-templates", "1"])
     , ("GET", ["api", "v1", "tags"])
     , ("GET", ["api", "v1", "tags", "consolidation-candidates"])
-    , ("GET", ["api", "v1", "tags", "rust", "suggestions"])
+    , ("POST", ["api", "v1", "ai", "suggestions"])
     , ("POST", ["api", "v1", "tags", "apply"])
     , ("POST", ["api", "v1", "tags", "merge"])
     , ("POST", ["api", "v1", "tags", "rust"])
@@ -168,6 +168,7 @@ tokenRoutes =
     , ("GET", ["api", "v1", "export", "notes"])
     , ("GET", ["api", "v1", "stats"])
     , ("GET", ["api", "v1", "ai", "status"])
+    , ("GET", ["api", "v1", "jobs", "1"])
     ]
 
 authzSpec :: Spec

@@ -1,7 +1,7 @@
 // Cross-feature smoke flow: save two bookmarks, patch a note with a wikilink,
 // check backlinks and tag edits, then search and delete. Every step asserts the
 // contract; the script fails when an endpoint regresses.
-import { launchBrowser, launchPage, makeApi, newChecker } from "./lib/dom.mjs";
+import { launchBrowser, launchPage, makeApi, newChecker, waitForJob } from "./lib/dom.mjs";
 
 const BASE = process.env.EZA_BASE || "http://localhost:8108";
 const USER = process.env.EZA_TEST_USER || "e2e";
@@ -62,8 +62,19 @@ try {
   const search = await api("/api/v1/bookmarks?q=Beta&limit=5");
   check("search finds the saved record", search.status === 200 && search.body?.total >= 1, String(search.body?.total));
 
-  const suggest = await api("/api/v1/tags/smoke-a/suggestions");
-  check("AI suggestions answer 200/400 without a key", suggest.status === 200 || suggest.status === 400, String(suggest.status));
+  const suggest = await api("/api/v1/ai/suggestions", {
+    method: "POST",
+    body: JSON.stringify({ tag: "smoke-a" }),
+  });
+  check("AI suggestion job enqueues 202", suggest.status === 202 && Number.isInteger(suggest.body?.job_id), String(suggest.status));
+  if (suggest.status === 202) {
+    const job = await waitForJob(api, suggest.body.job_id);
+    check(
+      "AI suggestion job finishes without a key",
+      ["done", "failed", "cancelled"].includes(job.body?.state),
+      String(job.status) + " " + String(job.body?.state)
+    );
+  }
 
   const del = await api("/api/v1/bookmarks/" + b, { method: "DELETE" });
   const afterDelete = await api("/api/v1/bookmarks/" + b);

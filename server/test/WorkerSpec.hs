@@ -87,7 +87,7 @@ spec = describe "per-user workers" $ do
             syncUserWorkers state
             workers <- userWorkerIds state
             length workers `shouldBe` 2
-            map snd workers `shouldSatisfy` all (== 1) -- webhook only
+            map snd workers `shouldSatisfy` all (== 2) -- webhook + egress only
             enqueueBoom cfg alice
             threadDelay (3 * 1000000)
             attempts <- jobAttempts cfg alice

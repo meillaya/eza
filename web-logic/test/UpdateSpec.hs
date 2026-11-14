@@ -8,7 +8,6 @@ sequence the shell interpreter consumes.
 module UpdateSpec (updateSpec) where
 
 import Data.List (isInfixOf)
-import qualified Data.Text as T
 import Test.Hspec
 
 import Eza.View (ViewKind (..))

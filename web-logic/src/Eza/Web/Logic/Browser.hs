@@ -66,11 +66,11 @@ decides what to show and when it should go away.
 notify :: Text -> ToastKind -> Update ()
 notify message kind = do
     model <- get
-    let toastId = mToastNext model
-        toast = Toast toastId message kind
+    let nextToastId = mToastNext model
+        toast = Toast nextToastId message kind
         keep = drop (max 0 (length (mToasts model) - 3)) (mToasts model <> [toast])
-    putModel (\m -> m{mToasts = keep, mToastNext = toastId + 1})
-    emit (OpScheduleAction 4800 (ToastDismiss toastId))
+    putModel (\m -> m{mToasts = keep, mToastNext = nextToastId + 1})
+    emit (OpScheduleAction 4800 (ToastDismiss nextToastId))
 
 {- | The one error-to-interface policy: an expired session blocks the page and
 sends the reader to sign in; a planned-but-missing endpoint is an inline

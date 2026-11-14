@@ -18,6 +18,7 @@ module Eza.Web.Logic.Update.Detail (
 
 import Control.Monad
 import Data.Aeson
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Eza.Web.Logic.Effect (RequestId, nextRequestId, requestIsCurrent)
@@ -25,11 +26,12 @@ import Eza.Web.Logic.Effect (RequestId, nextRequestId, requestIsCurrent)
 import Eza.Types
 import Eza.Web.Logic.Browser
 import Eza.Web.Logic.Error
+import Eza.Web.Logic.Job (JobKind (..))
 import Eza.Web.Logic.Model
 import Eza.Web.Logic.Requests
 import Eza.Web.Logic.Route (Route (..))
 import Eza.Web.Logic.Update.Common
-import Eza.Web.Logic.Update.Monad (Update, dispatch, emit, get, put, putModel)
+import Eza.Web.Logic.Update.Monad (Update, dispatch, get, put)
 import Eza.Web.Logic.Update.Route (loadRoute)
 
 sameEpoch :: RequestId -> Update () -> Update ()
@@ -468,7 +470,31 @@ handle = \case
                     )
                 setNoteCursor newCursor
     LinkSuggestions suggestions -> putModel (\m -> m{mLinkResults = suggestions, mLinkSel = 0})
+    RunBookmarkAction bookmarkId "snapshot" -> do
+        putModel (\m -> m{mSnapshotBusy = True})
+        notify "Capturing a snapshot…" ToastInfo
+        createSnapshotJob
+            bookmarkId
+            (SnapshotJobQueued bookmarkId)
+            (\err -> SnapshotJobFailed bookmarkId (Just (aeMessage err)))
     RunBookmarkAction bookmarkId verb -> bookmarkAction bookmarkId verb (ToastAdd ((T.toTitle verb <> " queued")) ToastOk) (\err -> ApiErrorRaised err)
+    SnapshotJobQueued bookmarkId jobId -> do
+        putModel (\m -> m{mSnapshotJob = Just jobId})
+        dispatch (JobStarted (SnapshotJob bookmarkId) jobId)
+    SnapshotJobDone bookmarkId result -> do
+        putModel (\m -> m{mSnapshotBusy = False, mSnapshotJob = Nothing})
+        case result of
+            Nothing -> notify "The snapshot job returned no result." ToastError
+            Just value -> case decodeSnapshotJobResult value of
+                Left err -> notify (aeMessage err) ToastError
+                Right _report -> do
+                    notify "Snapshot captured" ToastOk
+                    dispatch (DetailReload bookmarkId)
+    SnapshotJobFailed _ message -> do
+        putModel (\m -> m{mSnapshotBusy = False, mSnapshotJob = Nothing})
+        notify (fromMaybe "The snapshot capture failed." message) ToastError
+    SnapshotJobAbandoned _ ->
+        putModel (\m -> m{mSnapshotBusy = False, mSnapshotJob = Nothing})
     DeleteBookmarkRequest bookmarkId -> do
         m <- get
         case currentDetail m of

@@ -26,6 +26,7 @@ library
   exposed-modules:  Eza.Web.Logic.Api
                     Eza.Web.Logic.Effect
                     Eza.Web.Logic.Error
+                    Eza.Web.Logic.Job
                     Eza.Web.Logic.Ids
                     Eza.Web.Logic.Graph.Geometry
                     Eza.Web.Logic.Graph
@@ -45,6 +46,7 @@ library
                     Eza.Web.Logic.Update.Tags
                     Eza.Web.Logic.Update
                     Eza.Web.Logic.Update.Dedup
+                    Eza.Web.Logic.Update.Job
                     Eza.Web.Logic.Update.ImportExport
                     Eza.Web.Logic.Update.Monad
                     Eza.Web.Logic.Requests
@@ -66,12 +68,14 @@ test-suite eza-web-logic-test
   other-modules:    ApiSpec
                     HelperSpec
                     LedgerSpec
+                    JobSpec
                     ModelSpec
                     UpdateSpec
                     PuritySpec
                     RouteSpec
   build-depends:    base >=4.18 && <5
                   , aeson
+                  , containers
                   , directory
                   , eza-core
                   , eza-web-logic

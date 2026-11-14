@@ -47,6 +47,7 @@ import Eza.Undo (UndoFailure (..), listUndoEntries, recordUndoIds, undoById, und
 import Eza.Url (dedupeKey, dedupeLookupUrls, normalizeUrl)
 import qualified GraphLayoutSpec
 import qualified IsolationSpec
+import qualified JobsSpec
 import qualified JournalSpec
 import qualified LedgerSpec
 import qualified LibrarySpec
@@ -1148,6 +1149,7 @@ main = hspec $ do
     ClipSpec.spec
     ViewServerSpec.spec
     IsolationSpec.spec
+    JobsSpec.spec
     JournalSpec.spec
     AdminSpec.spec
     BackupSpec.spec

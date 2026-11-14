@@ -39,6 +39,20 @@ if (group) {
   const restored = await api("/api/v1/bookmarks/" + b.body.id);
   console.log("restored row status:", restored.status, restored.body && restored.body.title);
 }
-const sug = await api("/api/v1/tags/imported/suggestions");
-console.log("suggestions:", sug.status, JSON.stringify(sug.body).slice(0,150));
+const sug = await api("/api/v1/ai/suggestions", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ tag: "imported" }),
+});
+console.log("suggestion job:", sug.status, JSON.stringify(sug.body).slice(0, 150));
+if (sug.status === 202) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const job = await api("/api/v1/jobs/" + sug.body.job_id);
+    if (job.status === 200 && ["done", "failed", "cancelled"].includes(job.body?.state)) {
+      console.log("suggestion job state:", job.status, job.body?.state, JSON.stringify(job.body?.result).slice(0, 120));
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+}
 await browser.close();
