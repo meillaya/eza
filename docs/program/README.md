@@ -41,11 +41,11 @@ Captured 2026-11-14 from `main` at commit `57639c0` before any program change.
 |---|---|---|
 | M0 Guardrails | complete | `docs/program/README.md` created; `scripts/check-docs.sh` green; `devenv shell -- docs` added; baseline build/test captured |
 | M1 Contract spine | complete | `Eza.Routes` (127 routes) is the single route truth and `Eza.Authz` derives from it; all boundary DTOs are core types; client strict decode (no `Eza.Web.Types`, no lenient helpers); graph layout wire in core and server-only; boot `wire_version`; 35 core golden tests + 316 server examples; full e2e 27/27; fourmolu/hlint/docs/spec gates green |
-| M2 Client architecture | in progress | M2-A: native `eza-web-logic` (Route/ClientRequest, 27 tests). M2-B1: Miso-free `Effect`/`RequestId` layer + native ledger reducer, 68 tests. M2-B2a: `Update.hs` 4,355→437-line dispatcher over 13 group modules, single `Eza.Web.Interpreter` (only FFI/effect executor), seven epoch counters → `RequestId`, all 53 write requests adopted (0 `/api/` literals in web), 89 logic tests; wasm 7,762,124 raw / 2,230,125 gzip (still above the 7.7 MB raw target). M2-B2b (Model/Action → web-logic with Text, size recovery) pending |
+| M2 Client architecture | in progress | M2-A native route/request logic; M2-B1 native effects + ledger reducer; M2-B2a Update split (437-line dispatcher over 13 modules), single `Interpreter`, RequestId staleness, all 53 write requests adopted (0 `/api/` literals in web); M2-B2b part 1 moved the whole `Model`+407-constructor `Action` to `web-logic` with `Text` (106 logic tests) while `web` keeps a Miso facade and a documented `-fno-specialise` stopgap; wasm 7,776,200 raw / 2,206,619 gzip. Remaining M2-B2b (task-21): pure per-group reducers, delete projection/bootstrap, view accessor conversion, drop stopgap, hit <7.7M/<2.20M |
 | M3 Build/assets/runtime | complete | M3-A: content-addressed bundle + manifest + server `Eza.Assets`/`Eza.Shell`. M3-B: WASM built inside Nix from pinned FOD tarballs + vendored cabal revisions + a deterministic local Hackage index; `nix build .#eza-web` (7,775,380 raw / 2,201,325 gzip), `.#docker`, module check and docker smoke green; SRI pin/release-asset chain deleted; gates enforced in the Nix path |
-| M4 Server architecture | in progress | M4-C: read-path auth + `Eza.Library` lifecycle. M4-A: dispatch parses once via `Eza.Routes.matchRoute` and cases on `Route`; `Server.hs` 3,595→469 lines; 12 `Eza.Api.*` modules; JSON 405/404; `DispatchSpec`; 341 server examples. M4-B (Problem errors) and M4-D (egress jobs) pending |
-| M5 Data layer/journal/upgrade | not started | — |
-| M6 Feature completion, formal specs, deployment subtraction | not started | — |
+| M4 Server architecture | in progress | M4-C read-path auth + `Eza.Library`; M4-A dispatch from `Eza.Routes` (`Server.hs` 3,595→469 lines, 12 `Eza.Api.*`, 405/404 JSON); M4-B one `Eza.Problem` error path (`jsonError`=0, six `toProblem` converters), catch-all JSON 500/503 middleware, `ProblemSpec`; 351 server examples. M4-D (egress jobs) pending |
+| M5 Data layer/journal/upgrade | in progress | M5-A shared append-only `Eza.Migrate` engine with sha256 checksums (`schema_meta`), user v16 / control v2, legacy backfill, verify-on-open + `verify` schema checks, `MigrationSpec`; 359 server examples. M5-B (journal + one-way upgrade) pending |
+| M6 Feature completion, formal specs, deployment subtraction | in progress | M6-DS removed Kubernetes manifests/docs, rclone offsite backup and Tailscale Serve from code/Nix module/image/docs/figures and kept Docker/Compose/NixOS+Caddy; README/architecture/deployment docs updated (deployment Excalidraw figure removed). Feature completion/formal specs pending |
 | M7 Validation/release | not started | — |
 
 ## Gate log
@@ -100,7 +100,24 @@ Append one entry per gate run: milestone, date, commands, result, commit.
 2026-11-14 M4-A+M2-B2a: bash scripts/e2e.sh       -> 27/27; first full run flaked only `graph-views-smoke` (ledger-view navigation stayed on /graph), the script passes in isolation and the full rerun is green. Known flake to stabilise in M6/M7; the client ViewOpen flow was not changed after the isolated pass.
 2026-11-14 M4-A+M2-B2a: nix build .#eza-web       -> ok, 7,763,006 raw / 2,221,493 gzip (max 2,250,000), manifest 5950f92afcf6fb3e
 2026-11-14 M4-A+M2-B2a: nix build .#docker + checks.eza-module -> ok
+2026-11-14 M4-B: cabal test eza-test            -> ok, 351 examples (+10 ProblemSpec: six toProblem converters, 404/405 JSON, catch-all 500/503)
+2026-11-14 M5-A: cabal test eza-test            -> ok, 359 examples (+8 MigrationSpec: schema_meta v16/control v2, legacy backfill, tamper/rollback/upgrade)
+2026-11-14 M2-B2b-1: cabal test eza-web-logic   -> ok, 106 examples (+17 ModelSpec)
+2026-11-14 M2-B2b-1: bash scripts/build-web.sh  -> ok, 7,776,200 raw / 2,206,619 gzip (max 7,800,000 / 2,250,000; stopgap -fno-specialise in web)
+2026-11-14 M6-DS: deployment subtraction         -> k8s/rclone/offsite/tailscale references removed; nix module check green; deployment figure removed
+2026-11-14 round-4 gate: cabal test all         -> 106 logic + 35 core + 359 server examples, 0 failures, 1 pending
+2026-11-14 round-4 gate: bash scripts/e2e.sh    -> ok, 27 scripts passed, 0 failed
+2026-11-14 round-4 gate: bash scripts/build-web.sh -> ok, 7,776,200 raw / 2,206,619 gzip, bundle bb04b64055cb29a8
+2026-11-14 round-4 gate: fourmolu/hlint/check-docs/check-specs/version/notices -> ok
+2026-11-14 round-4 gate: nix build .#checks.eza-module + .#docker -> ok (after staging the new Migrate.hs for the git flake)
 ```
+
+## Round-4 note
+
+M2-B2b part 1 was committed by its owner as `664d6ea` (Model/Action moved
+into `web-logic`). The Lead follow-up commit drops two unused imports that the
+committed tree still had; the facade/stopgap and remaining task-21 work are
+recorded above.
 
 ## M2-B1 / M4-C decisions (recorded)
 
@@ -214,3 +231,27 @@ Append one entry per gate run: milestone, date, commands, result, commit.
   Kept: Docker, Compose, NixOS module, Caddy.
 - One-way compatibility cut happens in M5 as part of schema v17 and the
   legacy-library relocation; the upgrade guide lands in M7.
+
+## M4-B / M5-A / M2-B2b-1 / M6-DS decisions (recorded)
+
+- M4-B: `catchAllMiddleware` sits inside `app` (so security/gzip/access logging
+  stay outside and TestHarness exercises it). Async exceptions are rethrown for
+  worker cancellation; SQLite busy/locked becomes 503 `database_busy`; the log
+  line uses the `Eza.Routes` template, so a share token never appears. All six
+  feature error ADTs now have exactly one `toProblem`.
+- M5-A: shipped migrations are now frozen twice over: editing or renaming any
+  v1..v16 (or control v1..v2) migration breaks checksum verification on every
+  existing DB. A newer schema is refused by older binaries; rollback means
+  restoring the pre-migration backup (user DBs) or the pre-upgrade stamp
+  (control DB, which still has no automatic pre-migration copy). `verify`
+  without `--user` opens pending account DBs and may migrate them as a side
+  effect — documented in the CLI help.
+- M2-B2b part 1: converting all views to native `Text` accessors measured
+  7,956,845 raw, so the facade (64 `MisoString` accessors + `Render.Event`) was
+  kept and `-fno-specialise` added to web as a documented stopgap. It must be
+  removed once the reducers move and the facade is deleted; sizes remain under
+  the hard ceilings but not at the targets.
+- M6-DS: the deployment Excalidraw figure was deleted rather than regenerated
+  (its content was the three old targets); the README/architecture now describe
+  Docker/Compose, NixOS+Caddy only. `Fetch.hs` keeps a factual CGNAT comment
+  that mentions overlay networks, not the removed deployment branch.
