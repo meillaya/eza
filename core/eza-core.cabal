@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               eza-core
-version:            0.2.0.0
+version:            0.4.0.0
 synopsis:           Shared pure types and logic for eza
 description:        DTOs, JSON codecs, search-query parsing, wikilink parsing,
                     and URL normalization shared by the Haskell server and the

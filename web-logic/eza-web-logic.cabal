@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               eza-web-logic
-version:            0.2.0.0
+version:            0.4.0.0
 synopsis:           Miso-free client logic for eza
 description:        The client's route algebra, client request model, effect
                     algebra and native reducers, free of Miso, WebAssembly and

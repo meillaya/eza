@@ -13,7 +13,7 @@
 # share/eza/static. There is no separate prebuilt web-asset upload or SRI pin.
 #
 # Version: derived from flake.nix via scripts/version.sh, which also verifies
-# the Cabal packages agree (0.2.0.0). There is no separate release version.
+# the Cabal packages agree (0.4.0.0). There is no separate release version.
 #
 # Binary: built through the deployment flake (`nix build .#eza-bookmarks`) when
 # Nix is available, so the artifact is the reproducible package rather than an

@@ -52,7 +52,7 @@ docker run -d --name eza \
   -e EZA_RP_ID=eza.example.com \
   --read-only --tmpfs /tmp \
   --cap-drop ALL --security-opt no-new-privileges \
-  ghcr.io/meillaya/eza:0.2.0.0
+  ghcr.io/meillaya/eza:0.4.0.0
 ```
 
 Put a TLS terminator in front (Caddy or nginx) on the same host:
@@ -66,10 +66,10 @@ WebAuthn passkeys require a **secure origin**, so plain
 # (Use `nix build path:.#docker` if the tree has uncommitted files, a git
 # flake only sees tracked files.)
 nix build .#docker              # -> ./result is a gzip'd image tarball
-docker load < result            # -> Loaded image: eza:0.2.0.0 (some Docker
-                                #    versions report localhost/eza:0.2.0.0)
+docker load < result            # -> Loaded image: eza:0.4.0.0 (some Docker
+                                #    versions report localhost/eza:0.4.0.0)
 docker image ls | grep eza
-EZA_IMAGE=eza:0.2.0.0 docker compose up -d
+EZA_IMAGE=eza:0.4.0.0 docker compose up -d
 ```
 
 The same binary provides `healthcheck` (for HEALTHCHECK / probes), `backup`,

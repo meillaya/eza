@@ -22,7 +22,7 @@ Captured 2026-11-14 from `main` at commit `57639c0` before any program change.
 
 | Metric | Value |
 |---|---|
-| Version | 0.2.0.0 |
+| Version | 0.4.0.0 |
 | Haskell lines (tracked `.hs`) | 49,663 |
 | Server / web / core / tests (lines) | 20,574 / 18,343 / 3,089 / 7,640 |
 | Hspec cases (`it`) | 293 |

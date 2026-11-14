@@ -2,7 +2,7 @@
 # Smoke-test a built eza container image before CI/release publishes it.
 #
 #   bash scripts/docker-smoke.sh result
-#   bash scripts/docker-smoke.sh ghcr.io/meillaya/eza:0.2.0.0
+#   bash scripts/docker-smoke.sh ghcr.io/meillaya/eza:0.4.0.0
 #   EZA_DOCKER_BROWSER=1 bash scripts/docker-smoke.sh result
 #
 # The argument is either the tarball produced by `nix build .#docker` (the
