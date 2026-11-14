@@ -98,6 +98,8 @@ Append one entry per gate run: milestone, date, commands, result, commit.
 2026-11-14 M2-B2a: Update.hs                     -> 4,355 -> 437-line dispatcher over 13 group modules; 53 write requests adopted; 0 `/api/` literals in web
 2026-11-14 M4-A+M2-B2a: fourmolu/hlint/check-docs/check-specs/version -> ok
 2026-11-14 M4-A+M2-B2a: bash scripts/e2e.sh       -> 27/27; first full run flaked only `graph-views-smoke` (ledger-view navigation stayed on /graph), the script passes in isolation and the full rerun is green. Known flake to stabilise in M6/M7; the client ViewOpen flow was not changed after the isolated pass.
+2026-11-14 M4-A+M2-B2a: nix build .#eza-web       -> ok, 7,763,006 raw / 2,221,493 gzip (max 2,250,000), manifest 5950f92afcf6fb3e
+2026-11-14 M4-A+M2-B2a: nix build .#docker + checks.eza-module -> ok
 ```
 
 ## M2-B1 / M4-C decisions (recorded)
