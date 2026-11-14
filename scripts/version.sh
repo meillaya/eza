@@ -48,19 +48,6 @@ for cabal_file in core/eza-core.cabal server/eza-server.cabal web/eza-web.cabal 
   fi
 done
 
-# The Kubernetes manifests are removed in the v0.4 deployment cleanup; check
-# them only while they still exist. The web bundle is built from source by the
-# flake (packages.<system>.eza-web), so there is no pinned asset version to
-# compare any more.
-if [ -f "$ROOT/deploy/k8s/deployment.yaml" ]; then
-  k8s_version="$(
-    sed -n 's/.*image: ghcr\.io\/meillaya\/eza:\([^[:space:]]*\).*/\1/p' "$ROOT/deploy/k8s/deployment.yaml" | head -n 1
-  )"
-  if [ -n "$k8s_version" ] && [ "$k8s_version" != "$flake_version" ]; then
-    echo "version.sh: version drift: deploy/k8s/deployment.yaml has '$k8s_version' but flake.nix has '$flake_version'" >&2
-    status=1
-  fi
-fi
 if [ "$status" -ne 0 ]; then
   exit 1
 fi

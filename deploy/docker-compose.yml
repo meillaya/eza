@@ -26,7 +26,7 @@ services:
     container_name: eza
     restart: unless-stopped
     ports:
-      # Bind to loopback and put a TLS proxy (Caddy / Tailscale Serve) in
+      # Bind to loopback and put a TLS proxy (Caddy or nginx) in
       # front: passkeys require a secure origin.
       - "127.0.0.1:${EZA_PORT:-8080}:8080"
     environment:

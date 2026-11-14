@@ -1,7 +1,6 @@
 # Figures
 
-The figures explain the architecture, the import result, the search path, and
-the deployment shape. `generate.py` writes each Excalidraw scene from a
+The figures explain the architecture, the import result, and the search path. `generate.py` writes each Excalidraw scene from a
 hand-authored definition, with a fixed palette and a fixed set of elements, so
 a change to a box or label produces the same scene on every run.
 

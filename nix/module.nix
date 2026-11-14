@@ -66,7 +66,7 @@ let
   };
   extraReadWritePaths = optional (!stateDirSupported) dataDir;
 
-  # EZA_BIND is "host:port". Parse it once so the Caddy/Tailscale proxies and
+  # EZA_BIND is "host:port". Parse it once so the Caddy proxy and
   # the health probe target agree with the server.
   bindMatch = builtins.match "(.+):([0-9]+)" cfg.bind;
   bindHost = if bindMatch == null then "127.0.0.1" else builtins.elemAt bindMatch 0;
@@ -203,7 +203,7 @@ in
       example = "0.0.0.0:8080";
       description = ''
         Address and port the Warp server listens on (EZA_BIND). Keep it on
-        loopback when Caddy or Tailscale Serve is the public frontend.
+        loopback when Caddy is the public frontend.
       '';
     };
 
@@ -411,19 +411,6 @@ in
       '';
     };
 
-    tailscaleServe = {
-      enable = mkEnableOption "publishing eza via Tailscale Serve HTTPS (recommended; passkeys require a secure origin)";
-
-      httpsPort = mkOption {
-        type = types.port;
-        default = 443;
-        description = ''
-          Tailscale Serve HTTPS port. Tailscale only accepts 443 (the tailnet
-          root), 8443, or 10000; use 8443 or 10000 if the tailnet root is taken.
-        '';
-      };
-    };
-
     caddy = {
       enable = mkEnableOption "a Caddy reverse proxy with automatic HTTPS in front of eza";
 
@@ -453,21 +440,10 @@ in
         default = 14;
         description = ''
           Passed to `eza-bookmarks backup` as `EZA_BACKUP_KEEP_DAYS`. The
-          command prunes backup stamp directories older than this many days;
-          the systemd oneshot only performs the backup and the offsite copy.
+          command prunes backup stamp directories older than this many days.
         '';
       };
 
-      offsite = mkOption {
-        type = types.nullOr types.str;
-        default = null;
-        example = "eza-backups:eza";
-        description = ''
-          Optional offsite destination for each backup: an absolute local path
-          (e.g. a mounted disk) or an rclone remote/path (contains `:`, e.g.
-          `eza-backups:eza`). Local paths must be writable by the eza user.
-        '';
-      };
     };
   };
 
@@ -480,10 +456,6 @@ in
         {
           assertion = !cfg.caddy.enable || (cfg.caddy.hostname != null && cfg.caddy.hostname != "");
           message = "services.eza.caddy.hostname must be set when services.eza.caddy.enable is enabled.";
-        }
-        {
-          assertion = !cfg.tailscaleServe.enable || config.services.tailscale.enable;
-          message = "services.eza.tailscaleServe requires services.tailscale.enable = true.";
         }
         {
           assertion = cfg.bind != "";
@@ -527,10 +499,7 @@ in
       };
 
       systemd.tmpfiles.rules =
-        optional (!stateDirSupported) "d ${dataDir} 0750 eza eza -"
-        ++ optional (
-          cfg.backup.enable && cfg.backup.offsite != null && lib.hasPrefix "/" cfg.backup.offsite
-        ) "d ${cfg.backup.offsite} 0700 eza eza -";
+        optional (!stateDirSupported) "d ${dataDir} 0750 eza eza -";
 
       systemd.services.eza = {
         description = "eza bookmark manager";
@@ -603,25 +572,6 @@ in
         ];
       };
 
-      # Publish the loopback Warp listener through Tailscale Serve (HTTPS).
-      # Runs as root: `tailscale serve` needs the tailscaled socket.
-      systemd.services.eza-tailscale-serve = mkIf cfg.tailscaleServe.enable {
-        description = "Publish eza via Tailscale Serve";
-        wantedBy = [ "multi-user.target" ];
-        wants = [ "eza.service" ];
-        after = [
-          "tailscaled.service"
-          "eza.service"
-          "network-online.target"
-        ];
-        serviceConfig = {
-          Type = "oneshot";
-          RemainAfterExit = true;
-          ExecStart = "${pkgs.tailscale}/bin/tailscale serve --bg --https=${toString cfg.tailscaleServe.httpsPort} http://${cfg.bind}";
-          TimeoutStartSec = "60s";
-        };
-      };
-
       # Optional Caddy reverse proxy with automatic ACME HTTPS. Keep
       # publicOrigin/rpId pointed at the same hostname.
       services.caddy = mkIf (cfg.caddy.enable && cfg.caddy.hostname != null) {
@@ -634,15 +584,15 @@ in
 
       # ---------------------------------------------------------------------
       # Backups: the server's own backup command (per-database VACUUM INTO +
-      # integrity check), plus the module's offsite copy. Retention is owned by
-      # the command (EZA_BACKUP_KEEP_DAYS), not by a second find pass here.
+      # integrity check) and its stamp-directory retention
+      # (EZA_BACKUP_KEEP_DAYS); the module does not run a second find pass.
       # ---------------------------------------------------------------------
       systemd.services.eza-backup = mkIf cfg.backup.enable {
         description = "Online backup of the eza database";
         after = [ "eza.service" ];
         path = [
           pkgs.coreutils
-        ] ++ optional (cfg.backup.offsite != null && !lib.hasPrefix "/" cfg.backup.offsite) pkgs.rclone;
+        ];
         serviceConfig = mkMerge [
           stateDirConfig
           commonHardening
@@ -657,9 +607,7 @@ in
               "EZA_BACKUP_DIR=${dataDir}/backups"
               "EZA_BACKUP_KEEP_DAYS=${toString cfg.backup.keepDays}"
             ];
-            ReadWritePaths =
-              extraReadWritePaths
-              ++ optional (cfg.backup.offsite != null && lib.hasPrefix "/" cfg.backup.offsite) cfg.backup.offsite;
+            ReadWritePaths = extraReadWritePaths;
           }
         ];
         script = ''
@@ -686,24 +634,6 @@ in
             echo "eza-backup: backup stamp directory does not exist: $dest" >&2
             exit 1
           fi
-        ''
-        + optionalString (cfg.backup.offsite != null) ''
-          offsite=${lib.escapeShellArg cfg.backup.offsite}
-          case "$offsite" in
-            /*)
-              mkdir -p "$offsite"
-              cp -a "$dest" "$offsite/"
-              echo "eza-backup: copied $dest to $offsite/"
-              ;;
-            *:*)
-              rclone copy "$dest" "$offsite/$(basename "$dest")"
-              echo "eza-backup: rclone copy $dest -> $offsite/$(basename "$dest")"
-              ;;
-            *)
-              echo "eza-backup: services.eza.backup.offsite must be an absolute path or an rclone remote (name:path)" >&2
-              exit 1
-              ;;
-          esac
         '';
       };
 

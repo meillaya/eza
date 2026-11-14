@@ -24,8 +24,8 @@ The deployment binary is **eza-bookmarks**:
 
 - NixOS with flakes enabled (24.11+; tested on nixos-unstable).
 - A **secure origin** for passkeys: WebAuthn only works over HTTPS (or
-  `http://localhost`). Use [Tailscale Serve](tailscale.md) or the module's
-  Caddy option. Never expose plain HTTP to the internet.
+  `http://localhost`). Use the module's Caddy option (or another TLS proxy).
+  Never expose plain HTTP to the internet.
 - The web client bundle. The flake builds it from source with the
   `ghc-wasm-meta` toolchain input (see [Web assets](#web-assets)); no release
   asset download or hash pin is involved.
@@ -60,7 +60,7 @@ Or, if you keep the module in your own flake, import
 `./path/to/eza/nix/module.nix` through `eza.nixosModules.default` (the module
 needs its flake-provided package defaults, so always import the flake output).
 
-## Minimal configuration (Tailscale Serve)
+## Minimal configuration (Caddy)
 
 ```nix
 { ... }:
@@ -68,16 +68,15 @@ needs its flake-provided package defaults, so always import the flake output).
   services.eza = {
     enable = true;
 
-    # The tailnet DNS name of this machine. Find it with:
-    #   tailscale status --json | jq -r .Self.DNSName
-    publicOrigin = "https://eza.tail1234.ts.net";
-    rpId = "eza.tail1234.ts.net";   # host without scheme/port; must stay stable
+    # Keep the public origin and relying-party ID on one stable hostname.
+    publicOrigin = "https://eza.example.com";
+    rpId = "eza.example.com";   # host without scheme/port; must stay stable
 
-    tailscaleServe.enable = true;   # HTTPS on https://eza.tail1234.ts.net/
-    backup.enable = true;           # daily online SQLite backup at 03:17
+    caddy = { enable = true; hostname = "eza.example.com"; };
+    backup.enable = true;       # daily online SQLite backup at 03:17
   };
 
-  services.tailscale.enable = true;
+  networking.firewall.allowedTCPPorts = [ 80 443 ];
 
   # Optional: AI tagging keys, loaded through SecretSpec/systemd credentials.
   # See docs/secrets.md. Files must be readable by root, e.g. agenix paths.
@@ -127,7 +126,7 @@ All options live under `services.eza`:
 | `package` | flake `eza-bookmarks` | Server package (provides `bin/eza-bookmarks`). |
 | `webAssets` | flake `eza-web` (built from source) | Bundle served at `share/eza/static`; override for a locally built tree. |
 | `dataDir` | `/var/lib/eza` | `control.db` + `users/<id>/eza.db` + `backups/`. Default is a systemd StateDirectory owned by user `eza`. |
-| `bind` | `127.0.0.1:8080` | Warp listen address (`EZA_BIND`). Keep loopback behind Caddy/Tailscale. |
+| `bind` | `127.0.0.1:8080` | Warp listen address (`EZA_BIND`). Keep loopback behind Caddy. |
 | `publicOrigin` | `https://<caddy.hostname>` or `http://localhost:<port>` | Browser-visible origin (`PUBLIC_ORIGIN`). Passkeys are bound to it. |
 | `rpId` | host of `publicOrigin` | WebAuthn relying-party ID (`EZA_RP_ID`); host only, no scheme/port. |
 | `rpName` | `eza` | Relying-party display name (`EZA_RP_NAME`). |
@@ -147,14 +146,11 @@ All options live under `services.eza`:
 | `secretspecProvider` | `systemd-credential` | Provider used by the wrapped ExecStart; `env` is the fallback. |
 | `anthropicApiKeyFile` | `null` | Absolute path loaded as the `ANTHROPIC_API_KEY` systemd credential. |
 | `openaiApiKeyFile` | `null` | Absolute path loaded as the `OPENAI_API_KEY` systemd credential. |
-| `tailscaleServe.enable` | `false` | Publish the loopback listener over Tailscale Serve HTTPS. |
-| `tailscaleServe.httpsPort` | `443` | Serve HTTPS port: 443, 8443 or 10000. |
 | `caddy.enable` | `false` | Enable a Caddy reverse proxy with automatic ACME HTTPS. |
 | `caddy.hostname` | `null` | Caddy site hostname; required when Caddy is enabled. |
 | `backup.enable` | `false` | Daily SQLite backup timer. |
 | `backup.schedule` | `*-*-* 03:17:00` | systemd `OnCalendar` for the timer. |
 | `backup.keepDays` | `14` | Passed to `backup` as `EZA_BACKUP_KEEP_DAYS`; stamp directories older than this are pruned by the command. |
-| `backup.offsite` | `null` | Absolute local path or rclone remote (`remote:path`) for an offsite copy. |
 
 ## What the unit does
 
@@ -242,9 +238,8 @@ record UI.
    `manifest.json`, and `<backups>/<stamp>/users/<id>/eza.db`, safe while eza
    is writing); the command prunes stamp directories older than
    `backup.keepDays`;
-2. optionally copies the stamp to `backup.offsite` (absolute local path or
-   rclone remote). Page snapshots are not part of a stamp; include
-   `users/<id>/snapshots/` in the volume backup when they matter.
+Page snapshots are not part of a stamp; include `users/<id>/snapshots/` in the
+volume backup when they matter.
 
 A single account can be backed up with
 `eza-bookmarks backup --user <name|id>` (the control database is always
@@ -385,6 +380,6 @@ nix flake check
 | Unit fails immediately | `journalctl -u eza.service`; usually an unreadable `LoadCredential` path or an invalid origin. |
 | `/healthz` 503 | Database path/dataDir permissions; `sudo -u eza ls -l /var/lib/eza`. |
 | Passkey registration fails | `publicOrigin`/`rpId` must exactly match the browser URL; must be HTTPS. |
-| 502 from Caddy/Tailscale | `bind` must be a loopback address the proxy can reach, unit must be running. |
+| 502 from Caddy | `bind` must be a loopback address Caddy can reach; the unit must be running. |
 | Web client 404 / blank | `webAssets` empty or wrong; check `EZA_STATIC_DIR` in `systemctl show eza`. |
 | Backup timer silent | `systemctl list-timers eza-backup.timer`; `journalctl -u eza-backup`. |

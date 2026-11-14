@@ -9,7 +9,7 @@ FIGURES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$FIGURES"
 python3 -B generate.py
 
-for scene in architecture import search deployment; do
+for scene in architecture import search; do
   excalidraw render "${scene}.excalidraw" \
     --out "${scene}.png" \
     --scale 2 \

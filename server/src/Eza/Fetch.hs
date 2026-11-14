@@ -410,7 +410,7 @@ byteSwap32 value =
         .|. (value .&. 0xff000000) `shiftR` 24
 
 {- | Whether an IPv4 address (in host order) may be reached. 100.64.0.0/10 is
-counted as private: it is the carrier-grade NAT range, used by Tailscale and
+counted as private: it is the carrier-grade NAT range, used by overlay networks
 some carriers, and is not a public destination.
 -}
 publicV4 :: Word32 -> Bool

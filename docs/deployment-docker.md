@@ -2,8 +2,7 @@
 
 The published image is `ghcr.io/meillaya/eza`, built for `linux/amd64` and
 `linux/arm64`. It contains the **eza-bookmarks** server, the Miso/WASM web
-client, curl, sqlite3, monolith (snapshot capture), rclone (offsite backups) and
-SecretSpec. The container runs as non-root **uid/gid 10001**, stores all state
+client, curl, sqlite3, monolith (snapshot capture) and SecretSpec. The container runs as non-root **uid/gid 10001**, stores all state
 under **/data**, and exposes **/healthz** for health checks.
 
 The image is produced by Nix (`packages.<system>.docker` in the deployment
@@ -56,7 +55,7 @@ docker run -d --name eza \
   ghcr.io/meillaya/eza:0.2.0.0
 ```
 
-Put a TLS terminator in front (Caddy, nginx, Tailscale Serve) on the same host:
+Put a TLS terminator in front (Caddy or nginx) on the same host:
 WebAuthn passkeys require a **secure origin**, so plain
 `http://<host>:8080` will not work except on `http://localhost`.
 
@@ -65,8 +64,7 @@ WebAuthn passkeys require a **secure origin**, so plain
 ```bash
 # In the eza checkout (deployment flake):
 # (Use `nix build path:.#docker` if the tree has uncommitted files, a git
-# flake only sees tracked files. `.#docker-local` builds the same image with
-# the locally built web bundle instead of the released one.)
+# flake only sees tracked files.)
 nix build .#docker              # -> ./result is a gzip'd image tarball
 docker load < result            # -> Loaded image: eza:0.2.0.0 (some Docker
                                 #    versions report localhost/eza:0.2.0.0)
@@ -104,7 +102,6 @@ The same binary provides `healthcheck` (for HEALTHCHECK / probes), `backup`,
 | `EZA_SNAPSHOT_MAX_BYTES` | `52428800` | Upper bound on one captured page snapshot file. |
 | `EZA_MAX_BODY_BYTES` | `8388608` | Limit for authenticated JSON request bodies; oversize returns 413. |
 | `EZA_IMPORT_MAX_BYTES` | `33554432` | Limit for one import upload (Netscape HTML or eza JSON). |
-| `EZA_BACKUP_OFFSITE` | unset | Optional local directory: `eza-bookmarks backup` copies each `<stamp>/` tree there. |
 | `EZA_MONOLITH` | `monolith` | Snapshot tool (on PATH in the image). |
 | `EZA_LOG_LEVEL` | `info` | `debug` logs a development request line, `info` one access line per request, `warn`/`error` disable access logging (error lines still reach stderr). |
 | `EZA_ENRICH_WORKERS` | `2` | Process-wide enrichment concurrency; `0` disables the per-account enrichment loop. |
@@ -237,7 +234,6 @@ Copy a backup off the host:
 
 ```bash
 docker cp eza:/data/backups/<stamp> /out/
-docker compose exec eza rclone copy /data/backups/<stamp> remote:eza-backups
 ```
 
 

@@ -74,7 +74,6 @@ import System.Directory (
     removePathForcibly,
     renameFile,
  )
-import System.Environment (lookupEnv)
 import System.FilePath (addTrailingPathSeparator, isAbsolute, takeDirectory, takeFileName, (</>))
 
 import qualified Eza.Admin as Admin
@@ -235,7 +234,6 @@ runBackupInternal cfg selector pruneOld = do
                             cleanupFailed root
                             pure (Left (T.pack (show err)))
                         Right report -> do
-                            copyOffsite root
                             when pruneOld $ do
                                 pruneBackups (cfgBackupDir cfg) (cfgBackupKeepDays cfg)
                                 prunePreMigrationSiblings cfg users
@@ -376,34 +374,6 @@ removeIfExists path = do
 
 cleanupFailed :: FilePath -> IO ()
 cleanupFailed root = voidSafe (removePathForcibly root)
-
-copyOffsite :: FilePath -> IO ()
-copyOffsite root = do
-    offsite <- lookupEnv "EZA_BACKUP_OFFSITE"
-    case offsite of
-        Nothing -> pure ()
-        Just directory -> do
-            let dest = directory </> takeFileName root
-            createDirectoryIfMissing True directory
-            removeIfExistsDirectory dest
-            copyTree root dest
-
-removeIfExistsDirectory :: FilePath -> IO ()
-removeIfExistsDirectory path = do
-    exists <- doesDirectoryExist path
-    when exists (voidSafe (removePathForcibly path))
-
-copyTree :: FilePath -> FilePath -> IO ()
-copyTree source dest = do
-    createDirectoryIfMissing True dest
-    entries <- listDirectory source
-    forM_ entries $ \entry -> do
-        let from = source </> entry
-            to = dest </> entry
-        isDirectory <- doesDirectoryExist from
-        if isDirectory
-            then copyTree from to
-            else copyFile from to
 
 {- | Prune the per-database sibling @backups@ directories as well as the
 configured backup directory. "Eza.Db.preMigrationBackup" writes its verified

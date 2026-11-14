@@ -137,9 +137,8 @@ control database and every account library.
 
 | Route | Best for | What you get |
 |---|---|---|
-| [NixOS module](#nixos-module) | a NixOS host | hardened systemd unit, Tailscale Serve or Caddy, daily backup timer |
+| [NixOS module](#nixos-module) | a NixOS host | hardened systemd unit, Caddy, daily backup timer |
 | [Docker Compose](#docker-compose) | one Linux host | one container, one named volume |
-| [Kubernetes](#kubernetes) | a cluster | a kustomization, a PVC and probe wiring |
 | [From source](#from-source) | trying it out or developing | the devenv toolchain, no install |
 
 ### NixOS module
@@ -165,28 +164,19 @@ Add the deployment flake input:
 }
 ```
 
-Then enable the service. This example publishes it over Tailscale Serve, which
-gives HTTPS without opening a port:
+Then enable the service. This example puts Caddy's automatic HTTPS in front of
+the loopback listener and sets the public origin to the same hostname:
 
 ```nix
 {
   services.eza = {
     enable = true;
-    publicOrigin = "https://eza.tail1234.ts.net";
-    rpId = "eza.tail1234.ts.net";   # host only, no scheme or port
-    tailscaleServe.enable = true;
-    backup.enable = true;           # daily online backup at 03:17
+    publicOrigin = "https://eza.example.com";
+    rpId = "eza.example.com";   # host only, no scheme or port
+    caddy = { enable = true; hostname = "eza.example.com"; };
+    backup.enable = true;       # daily online backup at 03:17
   };
 
-  services.tailscale.enable = true;
-}
-```
-
-For a public domain, use Caddy instead:
-
-```nix
-{
-  services.eza.caddy = { enable = true; hostname = "eza.example.com"; };
   networking.firewall.allowedTCPPorts = [ 80 443 ];
 }
 ```
@@ -226,24 +216,8 @@ docker compose up -d
 ```
 
 The container runs as uid and gid 10001, keeps `/data` on a named volume and
-serves the `/healthz` probe. Put a TLS proxy in front for passkeys. To build
-the image locally instead, run `devenv shell -- web`, `nix build path:.#docker-local`,
-and set `EZA_IMAGE=eza:0.2.0.0`.
-
-### Kubernetes
-
-Use the published image and apply the kustomization:
-
-```bash
-(cd deploy/k8s && kustomize edit set image eza=ghcr.io/meillaya/eza:0.2.0.0)
-kubectl apply -k deploy/k8s
-kubectl -n eza rollout status deployment/eza
-```
-
-The manifests run one replica with a `Recreate` strategy and a 10 GiB
-`ReadWriteOnce` volume, because SQLite allows one writer. Set `PUBLIC_ORIGIN` and
-`EZA_RP_ID` in `deploy/k8s/configmap.yaml` first; optional AI keys live in the
-`eza-secrets` Secret. See [docs/deployment-k8s.md](docs/deployment-k8s.md).
+serves the `/healthz` probe. Put a TLS proxy in front for passkeys. To build the image locally instead,
+run `nix build .#docker` and set `EZA_IMAGE=eza:0.2.0.0`.
 
 ### From source
 
@@ -329,7 +303,7 @@ docker compose run --rm eza /bin/eza-bookmarks restore /data/backups/<stamp> --y
 - [x] Optional passkey second factor and hashed sessions
 - [x] Scoped API tokens, CSRF and origin checks, admin and member roles
 - [x] Online backup stamps and offline restore
-- [x] NixOS module, Docker image, Kubernetes manifests, Tailscale Serve and Caddy
+- [x] NixOS module, Docker image, Compose stack and Caddy
 - [x] `/healthz` probe, hardened unit and static asset caching
 
 ---
@@ -433,8 +407,6 @@ Node sidecar (`EZA_DEFUDDLE_CMD`) handles extraction for the server. See
 | [docs/performance.md](docs/performance.md) | Benchmark method, raw output and limits |
 | [docs/deployment-nixos.md](docs/deployment-nixos.md) | Flake input, module options, unit, backup timer and the in-Nix web build |
 | [docs/deployment-docker.md](docs/deployment-docker.md) | Image build, Compose, environment, healthcheck and secrets |
-| [docs/deployment-k8s.md](docs/deployment-k8s.md) | Image publish, kustomize apply, HTTPS, probes, storage and upgrades |
-| [docs/tailscale.md](docs/tailscale.md) | Tailscale Serve for NixOS and Docker |
 | [docs/secrets.md](docs/secrets.md) | SecretSpec manifest and provider setup |
 | [docs/figures/README.md](docs/figures/README.md) | Excalidraw sources, generators, render script and wordmark |
 | [docs/screenshots/README.md](docs/screenshots/README.md) | Screenshot provenance and capture procedure |
@@ -488,8 +460,7 @@ eza stands on a lot of good work:
   [Newsreader](https://fonts.google.com/specimen/Newsreader) and
   [IBM Plex Mono](https://fonts.google.com/specimen/IBM+Plex+Mono), under the SIL
   Open Font License.
-- [Excalidraw](https://excalidraw.com) for the architecture and deployment
-  figures.
+- [Excalidraw](https://excalidraw.com) for the architecture figures.
 - And you, for keeping your own shelf.
 
 ---

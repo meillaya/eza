@@ -206,29 +206,11 @@ def search_figure():
     return _scene(elements)
 
 
-def deployment_figure():
-    elements = [_title("One binary, three deployment targets")]
-    elements += _box("NixOS module", 60, 150, 300, 100, "purple")
-    elements += _box("Docker image", 60, 330, 300, 100, "blue")
-    elements += _box("Kubernetes manifests", 60, 510, 300, 100, "gray")
-    elements += _box("eza-bookmarks serve", 470, 280, 320, 120, "orange")
-    elements += _box("SQLite /data/eza.db", 880, 200, 300, 100, "teal")
-    elements += _box("Backup timer", 880, 450, 300, 100, "orange")
-    elements += _arrow(360, 200, 470, 310, "systemd")
-    elements += _arrow(360, 380, 470, 340, "OCI")
-    elements += _arrow(360, 560, 470, 370, "manifests")
-    elements += _arrow(790, 340, 880, 250, "one writer")
-    elements += _arrow(1030, 300, 1030, 450, "copies")
-    elements += _note("Every target runs the same eza-bookmarks binary. Tailscale Serve or Caddy terminates HTTPS in front; replicas are not safe.")
-    return _scene(elements)
-
-
 def main():
     for name, builder in [
         ("architecture", architecture),
         ("import", import_figure),
         ("search", search_figure),
-        ("deployment", deployment_figure),
     ]:
         scene = builder()
         path = ROOT / f"{name}.excalidraw"

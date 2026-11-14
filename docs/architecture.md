@@ -285,13 +285,13 @@ answering instead of a raw socket error.
 
 ## Deployment shape
 
-All deployment targets run the same `eza-bookmarks` binary. The NixOS module
-wraps it in a hardened systemd unit with `StateDirectory=eza`, a
-SecretSpec-wrapped `ExecStart`, a `/healthz` probe, and a daily backup timer.
-The Docker image runs as uid 10001 with `/data` as the state volume. The
-Kubernetes manifests use one replica, a `Recreate` strategy, and a
-`ReadWriteOncePod` `PersistentVolumeClaim` (with a documented `ReadWriteOnce`
-fallback for clusters that do not support pod-scoped access).
+All deployment targets run the same `eza-bookmarks` binary and the same
+content-addressed web bundle. The NixOS module wraps it in a hardened systemd
+unit with `StateDirectory=eza`, a SecretSpec-wrapped `ExecStart`, a `/healthz`
+probe, and a daily backup timer; Caddy is the optional HTTPS front end. The
+Docker image runs as uid 10001 with `/data` as the state volume and is the
+portable artifact; `deploy/docker-compose.yml` is the Compose stack. SQLite
+allows one writer, so both targets run a single instance.
 
 ## Build reproducibility
 
@@ -327,9 +327,7 @@ derivation directly, so a release builds both halves from one revision with no
 separately published bundle or SRI pin. `nix build .#eza-web` builds just the
 bundle (see [deployment-nixos.md](deployment-nixos.md#web-assets)).
 
-![Deployment: one binary across NixOS, Docker, and Kubernetes](figures/deployment.png)
-
-Tailscale Serve or Caddy terminates HTTPS in front of the process. Set
+Caddy terminates HTTPS in front of the process. Set
 `PUBLIC_ORIGIN` to the public hostname before claiming the library. A legacy
 passkey is bound to `PUBLIC_ORIGIN` and `EZA_RP_ID` at registration time, so
 keep both stable while a passkey is still in use.

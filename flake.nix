@@ -213,7 +213,6 @@
               pkgs.coreutils
               pkgs.curl
               pkgs.monolith
-              pkgs.rclone
               pkgs.secretspec
               pkgs.sqlite
             ];
@@ -247,7 +246,6 @@
                   pkgs.coreutils
                   pkgs.curl
                   pkgs.monolith
-                  pkgs.rclone
                   pkgs.secretspec
                   pkgs.sqlite
                 ]}"

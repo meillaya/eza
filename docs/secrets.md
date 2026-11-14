@@ -30,7 +30,7 @@ Profiles:
 |---|---|---|
 | `default` | provider chosen by the caller | generic `secretspec` use |
 | `development` | env (see `devenv.yaml`) with empty defaults | `devenv shell` |
-| `production` | `systemd-credential`, then `env` | NixOS module, Docker/K8s wrappers |
+| `production` | `systemd-credential`, then `env` | NixOS module, Docker image |
 
 Because every secret is optional, **eza runs fine with no secrets at all**:
 AI tagging is off by default (`EZA_AI_PROVIDER=none`) and key-based providers
@@ -205,7 +205,7 @@ settings (log level, etc.). Do not put secrets there: values in an
 EnvironmentFile are visible in the unit environment, unlike systemd
 credentials.
 
-## Production with Docker / Kubernetes (env provider)
+## Production with Docker (env provider)
 
 The image ships `/etc/eza/secretspec.toml` and `secretspec`; run the server
 through the env provider instead of the systemd one:
@@ -217,14 +217,11 @@ through the env provider instead of the systemd one:
 
 - **Docker Compose**: put the keys in the compose environment / `env_file`;
   see `deploy/docker-compose.yml` for a commented `command:` block.
-- **Kubernetes**: the Deployment already uses this command and reads the keys
-  from the `eza-secrets` Secret via `envFrom`; see
-  [deployment-k8s.md](deployment-k8s.md).
 
 Environment variables are more exposed than systemd credentials (visible in
-`/proc/<pid>/environ`, `docker inspect`, pod specs). Prefer Docker secrets /
-K8s Secrets over plain environment where your threat model requires it, and
-keep the pod spec free of literal values.
+`/proc/<pid>/environ`, `docker inspect`). Prefer Docker secrets or a restricted
+environment file where your threat model requires it, and keep the compose
+file free of literal values.
 
 ## Troubleshooting
 
