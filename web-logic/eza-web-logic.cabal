@@ -2,10 +2,11 @@ cabal-version:      3.0
 name:               eza-web-logic
 version:            0.2.0.0
 synopsis:           Miso-free client logic for eza
-description:        The client's route algebra and client request model, free of
-                    Miso, WebAssembly and browser dependencies. The package
-                    builds natively so the URL grammar, the request table and
-                    the shared route truth can be tested without a WASM
+description:        The client's route algebra, client request model, effect
+                    algebra and native reducers, free of Miso, WebAssembly and
+                    browser dependencies. The package builds natively so the
+                    URL grammar, the request table, the shared route truth and
+                    the ledger/search reducer can be tested without a WASM
                     toolchain; web/ keeps only the Miso boundary.
 license:            Apache-2.0
 author:             eza
@@ -23,6 +24,8 @@ library
   import:           logic-common
   hs-source-dirs:   src
   exposed-modules:  Eza.Web.Logic.Api
+                    Eza.Web.Logic.Effect
+                    Eza.Web.Logic.Ledger
                     Eza.Web.Logic.Route
   build-depends:    base >=4.18 && <5
                   , bytestring
@@ -35,6 +38,7 @@ test-suite eza-web-logic-test
   hs-source-dirs:   test
   main-is:          Spec.hs
   other-modules:    ApiSpec
+                    LedgerSpec
                     PuritySpec
                     RouteSpec
   build-depends:    base >=4.18 && <5

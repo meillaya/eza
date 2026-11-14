@@ -100,6 +100,7 @@ import Eza.Web.Graph (
     emptyMatches,
     initialGraphView,
  )
+import Eza.Web.Logic.Effect (RequestId, TimerId)
 import Eza.Web.Logic.Route (Route (..), isGraphRoute)
 import qualified Eza.Web.Logic.Route as ClientRoute
 import Eza.Webhook (DeliveryView, EventType, Webhook (..))
@@ -342,21 +343,20 @@ data Action
     | QuickSaveFailed ApiError
     | ScrollMetrics (Maybe (Int, Int, Int))
     | TagsRefreshed [TagStat]
-    | StatsRefreshed LibraryStats
-    | StatsFailed ApiError
+    | StatsLoaded RequestId LibraryStats
+    | StatsFailed RequestId ApiError
     | ReloadRoute
     | -- library
       SearchInput MisoString
     | SearchCommit
-    | DebouncedSearch
     | TimerRegistered Int
+    | TimerFired TimerId
     | TagToggled Text
     | ClearFilters
     | SortSelected Text
     | UnreadToggled
-    | ListLoaded Bool Int SearchPage
-    | ListFailed Bool Int ApiError
-    | LoadMore
+    | ListLoaded Bool RequestId SearchPage
+    | ListFailed Bool RequestId ApiError
     | MarkAllAbove
     | MarkAllDone Int
     | MarkAllFailed ApiError
@@ -785,10 +785,16 @@ data Model = Model
     , mLoadingMore :: Bool
     , mError :: Maybe MisoString
     , mNotice :: Maybe MisoString
-    , mDebounce :: Maybe Int
+    , -- the browser timeout handle of the pending search debounce
+      mDebounce :: Maybe Int
+    , -- the native ledger's debounce TimerId and the last allocated timer id
+      mDebounceTimer :: Maybe TimerId
+    , mTimerSeq :: Int
     , mTags :: [TagStat]
     , mStats :: Maybe LibraryStats
     , mStatsError :: Maybe MisoString
+    , -- the current stats request id: an answer for an older refresh is dropped
+      mStatsEpoch :: Int
     , mYearHere :: [(Int, Int)]
     , mLedgerCursor :: Maybe Int
     , mDrawer :: Maybe Int
@@ -1076,9 +1082,12 @@ initialModel =
         , mError = Nothing
         , mNotice = Nothing
         , mDebounce = Nothing
+        , mDebounceTimer = Nothing
+        , mTimerSeq = 0
         , mTags = []
         , mStats = Nothing
         , mStatsError = Nothing
+        , mStatsEpoch = 0
         , mYearHere = []
         , mLedgerCursor = Nothing
         , mDrawer = Nothing

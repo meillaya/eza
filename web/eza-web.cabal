@@ -35,6 +35,7 @@ executable eza-web
                     Eza.Web.Detail
                     Eza.Web.Error
                     Eza.Web.Graph
+                    Eza.Web.LedgerBridge
                     Eza.Web.Markdown
                     Eza.Web.Model
                     Eza.Web.Panels

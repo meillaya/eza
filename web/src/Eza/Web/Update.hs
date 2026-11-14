@@ -45,6 +45,9 @@ import qualified Eza.View as EV
 import Eza.Web.Api
 import Eza.Web.Error (ApiError (..))
 import Eza.Web.Graph
+import Eza.Web.LedgerBridge (extractLedger, runLedgerAction)
+import Eza.Web.Logic.Effect (TimerId)
+import qualified Eza.Web.Logic.Ledger as Ledger
 import Eza.Web.Model
 import Eza.Webhook (Webhook (..), WebhookInput (..))
 
@@ -144,7 +147,7 @@ documentTitle route = case route of
 the panels stop showing a pre-write number.
 -}
 refreshStats :: Effect () () Model Action
-refreshStats = fetchStats StatsRefreshed StatsFailed
+refreshStats = runLedgerAction Ledger.StatsRequested
 
 {- | The first page of both duplicate sections. The server's defaults are 60
 same-URL groups and 40 review-only title groups; the counts in the report always
@@ -241,30 +244,66 @@ bootPageMatchesLedger m =
         && mSort m == "created"
         && not (mUnreadOnly m)
 
+{- | The shell half of a ledger reload: the selection, the confirmations and
+the boot seed are invalidated by a new result set. The ledger's own loading and
+request-id fields are reset by the native reducer, which then emits the fetch.
+-}
+resetShellForReload :: Model -> Model
+resetShellForReload m =
+    m
+        { mListDeferred = False
+        , mBootSeeded = False
+        , -- a new result set invalidates the old selection
+          mSelection = IS.empty
+        , mSelectAnchor = Nothing
+        , mSelectingAll = False
+        , mSelectFetched = 0
+        , mSelectEpoch = mSelectEpoch m + 1
+        , mSelectParams = Nothing
+        , mConfirmMarkAll = False
+        , mBulkBusy = False
+        , mConfirmBulkDelete = False
+        }
+
+{- | The shell half of the search box: the uncommitted query invalidates the
+selection at once, but it does not consume the boot seed.
+-}
+resetShellForSearch :: Model -> Model
+resetShellForSearch m =
+    m
+        { mSelection = IS.empty
+        , mSelectAnchor = Nothing
+        , mSelectingAll = False
+        , mSelectFetched = 0
+        , mSelectEpoch = mSelectEpoch m + 1
+        , mSelectParams = Nothing
+        , mConfirmMarkAll = False
+        }
+
+{- | The shell half of a list response: a replace clears the selection, an
+append keeps it but clamps the keyboard cursor to the rows that now exist.
+-}
+settleLedgerSelection :: Bool -> Model -> Model
+settleLedgerSelection append m =
+    m
+        { mConfirmMarkAll = False
+        , mSelection = if append then mSelection m else IS.empty
+        , mSelectAnchor = if append then mSelectAnchor m else Nothing
+        , mSelectingAll = if append then mSelectingAll m else False
+        , mSelectEpoch = if append then mSelectEpoch m else mSelectEpoch m + 1
+        , mSelectParams = if append then mSelectParams m else Nothing
+        , mLedgerCursor =
+            case (append, mLedgerCursor m) of
+                (False, _) -> Nothing
+                (True, Just idx) | idx < length (mItems m) -> Just idx
+                _ -> Nothing
+        }
+
+-- | Reload the first page of the current ledger query.
 reloadList :: Effect () () Model Action
 reloadList = do
-    m <- get
-    let epoch = mListEpoch m + 1
-    put
-        m
-            { mLoading = True
-            , mLoadingMore = False
-            , mError = Nothing
-            , mListDeferred = False
-            , mBootSeeded = False
-            , mListEpoch = epoch
-            , -- a new result set invalidates the old selection
-              mSelection = IS.empty
-            , mSelectAnchor = Nothing
-            , mSelectingAll = False
-            , mSelectFetched = 0
-            , mSelectEpoch = mSelectEpoch m + 1
-            , mSelectParams = Nothing
-            , mConfirmMarkAll = False
-            , mBulkBusy = False
-            , mConfirmBulkDelete = False
-            }
-    fetchBookmarks (listParams m False) (ListLoaded False epoch) (ListFailed False epoch)
+    putModel resetShellForReload
+    runLedgerAction Ledger.Reload
 
 {- | Load the ledger for @/@. On the first paint the boot payload already
 carries the same default page, so the fetch is deferred until @/boot@ answers
@@ -281,13 +320,23 @@ loadIndexList = do
                 then putModel (\x -> x{mLoading = True, mListDeferred = True, mError = Nothing})
                 else reloadList
 
+{- | Ask the native reducer for the next page. It owns the guards, so the
+scroll callback cannot double-fetch.
+-}
 loadMore :: Effect () () Model Action
-loadMore = do
+loadMore = runLedgerAction Ledger.LoadMore
+
+{- | A native debounce timer fired. The reducer accepts the id only while it is
+still current, so a late fire changes nothing; the shell reset around it
+matches the old @DebouncedSearch@ handler.
+-}
+fireTimer :: TimerId -> Effect () () Model Action
+fireTimer timerId = do
     m <- get
-    unless (mLoading m || mLoadingMore m || not (mHasMore m)) $ do
-        put m{mLoadingMore = True}
-        let epoch = mListEpoch m
-        fetchBookmarks (listParams m True) (ListLoaded True epoch) (ListFailed True epoch)
+    when (Ledger.debounceTimerIsCurrent (extractLedger m) timerId) $ do
+        putModel (\x -> x{mDebounce = Nothing})
+        putModel resetShellForReload
+        runLedgerAction (Ledger.SearchDebounceElapsed timerId)
 
 refreshTags :: Effect () () Model Action
 refreshTags = fetchTags TagsRefreshed (\_ -> Noop)
@@ -482,16 +531,6 @@ loadRoute route = do
                         }
                 )
         NotFound -> pure ()
-scheduleSearch :: Int -> Effect () () Model Action
-scheduleSearch delayMs = do
-    m <- get
-    put m{mDebounce = Nothing}
-    withSink $ \sink -> do
-        case mDebounce m of
-            Just oldTimer -> void $ jsgf "clearTimeout" (oldTimer :: Int)
-            Nothing -> pure ()
-        timer <- fromJSValUnchecked =<< jsgf "setTimeout" (asyncCallback1 (\_ -> sink DebouncedSearch), delayMs :: Int)
-        sink (TimerRegistered (timer :: Int))
 
 {- | The ledger owns its scroll container now, so the next page is fetched when
 that element approaches its end. The window itself does not scroll.
@@ -896,8 +935,8 @@ updateModel = \case
     ApiUnauthorized -> putModel (\m -> m{mSignedOut = True})
     ApiErrorRaised err -> handleApiError err
     TagsRefreshed stats -> putModel (\m -> m{mTags = stats})
-    StatsRefreshed stats -> putModel (\m -> m{mStats = Just stats, mStatsError = Nothing})
-    StatsFailed err -> putModel (\m -> m{mStatsError = Just (ms (aeMessage err))})
+    StatsLoaded requestId stats -> runLedgerAction (Ledger.StatsLoaded requestId stats)
+    StatsFailed requestId err -> runLedgerAction (Ledger.StatsFailed requestId (aeMessage err))
     ReloadRoute -> reloadRoute
     LedgerCursorNext -> moveCursor 1
     LedgerCursorPrev -> moveCursor (-1)
@@ -924,97 +963,37 @@ updateModel = \case
                 fetchAdminUsers AdminUsersLoaded AdminUsersFailed
     -- library ---------------------------------------------------------------
     SearchInput query -> do
-        putModel
-            ( \m ->
-                m
-                    { mQ = query
-                    , mSelection = IS.empty
-                    , mSelectAnchor = Nothing
-                    , mSelectingAll = False
-                    , mSelectFetched = 0
-                    , mSelectEpoch = mSelectEpoch m + 1
-                    , mSelectParams = Nothing
-                    , mConfirmMarkAll = False
-                    , -- The input now names a query no in-flight page can
-                      -- answer, so invalidate the list epoch at once: stale
-                      -- ListLoaded/ListFailed responses are dropped and
-                      -- loadMore cannot mix the new query with the old offset
-                      -- during the debounce window.
-                      mListEpoch = mListEpoch m + 1
-                    , mLoading = True
-                    , mLoadingMore = False
-                    , mHasMore = False
-                    , mError = Nothing
-                    }
-            )
-        scheduleSearch 180
+        putModel resetShellForSearch
+        runLedgerAction (Ledger.SearchInput (fromMisoString query))
     SearchCommit -> reloadList
-    DebouncedSearch -> do
-        putModel (\m -> m{mDebounce = Nothing})
-        reloadList
     TimerRegistered timer -> putModel (\m -> m{mDebounce = Just timer})
+    TimerFired timerId -> fireTimer timerId
     TagToggled tag -> do
-        putModel (\m -> m{mTagsFilter = toggleMember tag (mTagsFilter m)})
-        reloadList
+        putModel resetShellForReload
+        runLedgerAction (Ledger.TagToggled tag)
     ClearFilters -> do
-        putModel (\m -> m{mQ = "", mTagsFilter = [], mUnreadOnly = False})
-        reloadList
+        putModel resetShellForReload
+        runLedgerAction Ledger.ClearFilters
     SortSelected sort -> do
-        putModel (\m -> m{mSort = sort})
-        reloadList
+        putModel resetShellForReload
+        runLedgerAction (Ledger.SortSelected sort)
     UnreadToggled -> do
-        putModel (\m -> m{mUnreadOnly = not (mUnreadOnly m)})
-        reloadList
-    ListLoaded append epoch page -> do
+        putModel resetShellForReload
+        runLedgerAction Ledger.UnreadToggled
+    ListLoaded append requestId page -> do
         m <- get
         -- A response for an older query no longer paints: the user may have
         -- typed again, changed the sort, or left the list route entirely.
-        when (epoch == mListEpoch m) $ do
-            let fresh =
-                    if append
-                        then mItems m ++ spItems page
-                        else spItems page
-            put
-                m
-                    { mItems = fresh
-                    , mTotal = spTotal page
-                    , -- The server computes the per-year match counts on the
-                      -- first page only; keeping them on append stops the
-                      -- "/ N here" figure vanishing on the first scroll.
-                      mYearHere = if append then mYearHere m else spYearCounts page
-                    , mHasMore = spHasMore page
-                    , mLoading = False
-                    , mLoadingMore = False
-                    , mOffset = spOffset page + length (spItems page)
-                    , mError = Nothing
-                    , mConfirmMarkAll = False
-                    , mSelection = if append then mSelection m else IS.empty
-                    , mSelectAnchor = if append then mSelectAnchor m else Nothing
-                    , mSelectingAll = if append then mSelectingAll m else False
-                    , mSelectEpoch = if append then mSelectEpoch m else mSelectEpoch m + 1
-                    , mSelectParams = if append then mSelectParams m else Nothing
-                    , mLedgerCursor =
-                        case (append, mLedgerCursor m) of
-                            (False, _) -> Nothing
-                            (True, Just idx) | idx < length fresh -> Just idx
-                            _ -> Nothing
-                    }
+        when (Ledger.listRequestIsCurrent (extractLedger m) requestId) $ do
+            runLedgerAction (Ledger.ListLoaded append requestId page)
+            putModel (settleLedgerSelection append)
             continueScrollRestore
-    ListFailed _append epoch err -> do
+    ListFailed _append requestId err -> do
         m <- get
-        when (epoch == mListEpoch m) $ do
-            putModel
-                ( \x ->
-                    x
-                        { mLoading = False
-                        , mLoadingMore = False
-                        , mScrollRestore = Nothing
-                        , mError = Just (ms (aeMessage err))
-                        , mConfirmMarkAll = False
-                        }
-                )
+        when (Ledger.listRequestIsCurrent (extractLedger m) requestId) $ do
+            runLedgerAction (Ledger.ListFailed requestId (aeMessage err))
+            putModel (\x -> x{mScrollRestore = Nothing, mConfirmMarkAll = False})
             handleApiError err
-    LoadMore -> loadMore
     -- The old call sent the first row's id to an id-cutoff endpoint and marked
     -- rows the reader could not see.  Now the client confirms and sends the
     -- explicit ids of the loaded, unread records.

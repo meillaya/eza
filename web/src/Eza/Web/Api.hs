@@ -17,6 +17,7 @@ module Eza.Web.Api (
     -- reads
     fetchBoot,
     fetchBookmarks,
+    fetchBookmarksQuery,
     fetchDetail,
     fetchBacklinks,
     fetchAutocomplete,
@@ -644,7 +645,19 @@ fetchBookmarks ::
     (SearchPage -> action) ->
     (ApiError -> action) ->
     Eff model action
-fetchBookmarks lp = requestGetJson (ApiBookmarks (listQuery lp))
+fetchBookmarks lp = fetchBookmarksQuery (listQuery lp)
+
+{- | Fetch one ledger page from the native request record. The native ledger
+reducer emits the request it wants; this is the bridge point between that
+record and the shared JSON transport. 'fetchBookmarks' keeps the 'ListParams'
+surface for the select-all paging chain, which is still shell-side.
+-}
+fetchBookmarksQuery ::
+    BookmarkListQuery ->
+    (SearchPage -> action) ->
+    (ApiError -> action) ->
+    Eff model action
+fetchBookmarksQuery query = requestGetJson (ApiBookmarks query)
 
 fetchDetail ::
     Int ->
