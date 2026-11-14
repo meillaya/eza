@@ -20,6 +20,11 @@ on:
         description: "Release version (e.g. 0.4.0.0); the tag v<version> must exist"
         required: true
         type: string
+      ref:
+        description: "Optional git ref to build (default: the default branch). Use refs/tags/v<version> to publish a tag release from a branch dispatch."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -52,9 +57,13 @@ jobs:
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             version="${{ inputs.version }}"
-            # Build backfills from the default branch so they include the
-            # current flake/packaging fixes. Normal tag releases build the tag.
-            ref="${{ github.event.repository.default_branch }}"
+            # Build backfills from the default branch (or an explicit ref) so
+            # they include the current flake/packaging fixes. Normal tag
+            # releases build the tag.
+            ref="${{ inputs.ref }}"
+            if [ -z "$ref" ]; then
+              ref="${{ github.event.repository.default_branch }}"
+            fi
           else
             tag="${{ github.event.workflow_run.head_branch }}"
             version="${tag#v}"
