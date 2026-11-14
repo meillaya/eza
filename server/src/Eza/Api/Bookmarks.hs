@@ -22,8 +22,8 @@ import Network.Wai
 
 import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist)
 
-import Eza.Version (ezaVersionText)
 import Eza.Assets (assetPath)
+import Eza.Version (ezaVersionText)
 
 import Eza.Bookmarks
 import Eza.Boot (BootPayload (..), wireVersion)

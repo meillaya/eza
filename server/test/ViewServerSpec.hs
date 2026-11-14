@@ -21,10 +21,10 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
-import Eza.Version (ezaVersionText)
 import Eza.Boot (BootPayload (..))
 import Eza.Db
 import Eza.Server (bootPayloadFor)
+import Eza.Version (ezaVersionText)
 import Eza.View
 import Eza.Views
 

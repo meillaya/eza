@@ -67,9 +67,9 @@ import qualified Eza.Password as Password
 import Eza.Problem (pMessage)
 import qualified Eza.Routes as Routes
 import Eza.Server (runServer)
-import Eza.Version (ezaVersionText)
 import Eza.Types (DedupReport (..), ImportReport (..), TagStat (..))
 import Eza.User (UserRole (..), userRoleText)
+import Eza.Version (ezaVersionText)
 
 -- ---------------------------------------------------------------------------
 -- Commands

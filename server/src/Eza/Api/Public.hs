@@ -16,8 +16,8 @@ import Database.SQLite.Simple (Connection)
 import Network.HTTP.Types
 import Network.Wai
 
-import Eza.Version (ezaVersionText)
 import Eza.Bookmarks
+import Eza.Version (ezaVersionText)
 
 import qualified Eza.Db as Db
 
