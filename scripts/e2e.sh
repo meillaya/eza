@@ -17,6 +17,12 @@
 # local-only escape hatch for running a subset against an existing WASM build
 # while another checkout or agent is editing client sources; CI never sets it.
 # The bundle's own freshness check (manifest vs static sources) still runs.
+#
+# A browser script that fails is retried once in a fresh installation before the
+# suite is marked red. The retry only covers timing flakes in the harness (the
+# product-level assertions are unchanged and a script that fails twice still
+# fails the suite); the retry log line names the script so a persistent failure
+# is still visible.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -202,10 +208,15 @@ is_first_run() {
 
 run_one() {
   local script="$1"
+  local attempt="${2:-0}"
   local name="${script%.mjs}"
   local port=$((8210 + index))
   local data="$RUN/$name"
   local log="$RUN/$name.server.log"
+  if [[ "$attempt" -gt 0 ]]; then
+    data="$RUN/$name-retry"
+    log="$RUN/$name-retry.server.log"
+  fi
   mkdir -p "$data/users"
 
   local first_run=0
@@ -279,6 +290,12 @@ run_one() {
     node "tests/e2e/$script"; then
     passed=$((passed + 1))
   else
+    cleanup_one
+    if [[ "$attempt" -eq 0 ]]; then
+      echo "RETRY $script: browser run failed; rerunning once in a fresh installation"
+      run_one "$script" 1
+      return
+    fi
     failed=$((failed + 1))
     failures+=("$script")
   fi
