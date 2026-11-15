@@ -392,7 +392,7 @@ Node sidecar (`EZA_DEFUDDLE_CMD`) handles extraction for the server. See
 
 ---
 
-## Documentation
+<!--## Documentation
 
 | Document | What is in it |
 |---|---|
@@ -411,7 +411,7 @@ Node sidecar (`EZA_DEFUDDLE_CMD`) handles extraction for the server. See
 | [docs/secrets.md](docs/secrets.md) | SecretSpec manifest and provider setup |
 | [docs/figures/README.md](docs/figures/README.md) | Excalidraw sources, generators, render script and wordmark |
 | [docs/screenshots/README.md](docs/screenshots/README.md) | Screenshot provenance and capture procedure |
-| [extension/README.md](extension/README.md) | Clipper install, options, shortcuts and security notes |
+| [extension/README.md](extension/README.md) | Clipper install, options, shortcuts and security notes |-->
 
 ---
 
