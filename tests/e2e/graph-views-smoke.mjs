@@ -104,7 +104,9 @@ async function labelCount() {
 }
 
 async function zoomPercent() {
-  const text = (await page.locator(SEL.graphZoomValue).first().innerText()) || "";
+  const zoom = page.locator(SEL.graphZoomValue).first();
+  await zoom.waitFor({ state: "visible", timeout: 20000 }).catch(() => {});
+  const text = (await zoom.innerText().catch(() => "")) || "";
   const match = text.match(/(\d+)/);
   return match ? Number(match[1]) : Number.NaN;
 }
@@ -299,7 +301,11 @@ try {
   check("zooming raises the zoom readout", zoomedPercent > 200, String(zoomedPercent));
   check("the label count changes with zoom", zoomedLabels !== overviewLabels, overviewLabels + " -> " + zoomedLabels);
   await page.click(SEL.graphFit);
-  await page.waitForTimeout(100);
+  // Let any in-flight graph read settle before measuring the preset behaviour;
+  // the assertion below is about the preset not triggering a graph refetch,
+  // not about racing an earlier request.
+  await page.waitForTimeout(400);
+  await page.waitForLoadState("networkidle").catch(() => {});
 
   // ------------------------------------------------------ layout presets ---
   const layoutsBeforePreset = layoutRequests.length;
@@ -311,6 +317,7 @@ try {
   await page.click(SEL.graphPresetCompact);
   await compactLayout;
   await waitPressed(SEL.graphPresetCompact);
+  await page.waitForTimeout(200);
   check("the compact preset asks for its layout", layoutRequests.length > layoutsBeforePreset, JSON.stringify(layoutRequests.slice(-3)));
   check("a preset change does not refetch the graph", graphRequests.length === graphFetchesBeforePreset, String(graphRequests.length - graphFetchesBeforePreset));
   check("the compact preset button is pressed", (await page.locator(SEL.graphPresetCompact).getAttribute("aria-pressed")) === "true", String(await page.locator(SEL.graphPresetCompact).getAttribute("aria-pressed")));
