@@ -24,6 +24,31 @@ examples in `docs/deployment-docker.md`, `docs/upgrade.md`, `README.md` and
 the Compose files name the current tag. `CHANGELOG.md` gets the release section
 and the new version's schema map.
 
+## Nix cache (Cachix)
+
+Every CI and release job that runs Nix configures Cachix before its first Nix
+command. With no further setup it pulls from the public `devenv` cache, which
+covers the devenv/nixpkgs toolchain. eza's own derivations (the from-source
+WASM bundle, the server package and the Docker image) need a project cache:
+
+1. Create a binary cache on <https://cachix.org> for this repository.
+2. Set the repository **variable** `CACHIX_CACHE` to the cache name.
+3. Set the repository **secret** `CACHIX_AUTH_TOKEN` to a Cachix cache write
+   token (cache settings, "Auth tokens"). Without the secret the jobs are
+   pull-only; fork pull requests never receive it.
+4. Run a workflow once to warm it; later `test`/`docker-smoke`/release-image
+   jobs pull their outputs instead of rebuilding the WASM client and image from
+   scratch.
+
+The workflows use `name: ${{ vars.CACHIX_CACHE || 'devenv' }}` with
+`extraPullNames: devenv`, so an unconfigured repository still uses the public
+devenv cache and a configured one also falls back to it. A cold first run is
+expected; the cache is for subsequent pushes and release tags.
+
+Local development can use the same cache with `cachix use <name>` (or `cachix
+use devenv` for the toolchain); `devenv` already pulls from the devenv cache in
+CI.
+
 ## 2. Pre-release gates
 
 Run from the repository root inside the devenv shell:

@@ -17,7 +17,9 @@ jobs:
             experimental-features = nix-command flakes
       - uses: cachix/cachix-action@v16
         with:
-          name: devenv
+          name: ${{ vars.CACHIX_CACHE || 'devenv' }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          extraPullNames: devenv
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
       # devenv.nix sets CABAL_DIR to <checkout>/.devenv/cabal, and
@@ -124,7 +126,9 @@ jobs:
             experimental-features = nix-command flakes
       - uses: cachix/cachix-action@v16
         with:
-          name: devenv
+          name: ${{ vars.CACHIX_CACHE || 'devenv' }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          extraPullNames: devenv
       - name: NixOS module posture check
         run: nix build -L .#checks.x86_64-linux.eza-module
 
@@ -142,6 +146,15 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+      # Always use the public devenv cache. When the repository has a project
+      # cache configured (vars.CACHIX_CACHE + secrets.CACHIX_AUTH_TOKEN), the
+      # project derivations (WASM bundle, server, image) are pulled and pushed
+      # through it; without it they are rebuilt on the cold store each run.
+      - uses: cachix/cachix-action@v16
+        with:
+          name: ${{ vars.CACHIX_CACHE || 'devenv' }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          extraPullNames: devenv
       - name: Build the release container
         run: nix build -L .#docker
       - name: Smoke-test the release container
