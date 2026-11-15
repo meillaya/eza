@@ -139,6 +139,18 @@ async function waitForPath(pathname) {
   return new URL(page.url()).pathname;
 }
 
+// Click through the DOM rather than Playwright's actionability check: the graph
+// panel re-renders as layout responses land, and a freshly rendered button can
+// be detached between the stability check and the click. The click still runs
+// the real Miso handler, and the caller asserts the visible effect.
+async function clickNow(selector) {
+  await page.waitForSelector(selector, { timeout: 20000 });
+  await page.evaluate((sel) => {
+    const element = document.querySelector(sel);
+    if (element instanceof HTMLElement) element.click();
+  }, selector);
+}
+
 function rowByName(name) {
   return page.locator(SEL.viewRow).filter({ hasText: name });
 }
@@ -337,7 +349,7 @@ try {
   await page.click(SEL.graphPresetCompact);
   await compactAgain;
 
-  await page.click(SEL.viewSaveGraph);
+  await clickNow(SEL.viewSaveGraph);
   await page.waitForSelector(SEL.toast, { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(300);
   const reloadedLayout = page.waitForResponse((response) => {
