@@ -392,27 +392,6 @@ Node sidecar (`EZA_DEFUDDLE_CMD`) handles extraction for the server. See
 
 ---
 
-<!--## Documentation
-
-| Document | What is in it |
-|---|---|
-| [docs/API.md](docs/API.md) | Routes, auth and scopes, status codes, DTO reference |
-| [CHANGELOG.md](CHANGELOG.md) | Release notes and the one-way 0.4 upgrade summary |
-| [docs/upgrade.md](docs/upgrade.md) | Upgrade from 0.3 to 0.4: backup, schema map, Docker/NixOS/source steps, verify and rollback |
-| [docs/release.md](docs/release.md) | Release version bump, gates, one-way upgrade drill, tag/publish and post-release checks |
-| [docs/architecture.md](docs/architecture.md) | Data layout, request path, import math, search model, storage invariants |
-| [docs/UI.md](docs/UI.md) | Tokens, type, layout, screens, keyboard, accessibility, voice |
-| [docs/import.md](docs/import.md) | Netscape import rules and the reference result |
-| [docs/clipper.md](docs/clipper.md) | Clipper, clip API, CORS origins, sidecar and templates |
-| [docs/extensions.md](docs/extensions.md) | View and webhook contract, limits, delivery and threat model |
-| [docs/performance.md](docs/performance.md) | Benchmark method, raw output and limits |
-| [docs/deployment-nixos.md](docs/deployment-nixos.md) | Flake input, module options, unit, backup timer and the in-Nix web build |
-| [docs/deployment-docker.md](docs/deployment-docker.md) | Image build, Compose, environment, healthcheck and secrets |
-| [docs/secrets.md](docs/secrets.md) | SecretSpec manifest and provider setup |
-| [docs/figures/README.md](docs/figures/README.md) | Excalidraw sources, generators, render script and wordmark |
-| [docs/screenshots/README.md](docs/screenshots/README.md) | Screenshot provenance and capture procedure |
-| [extension/README.md](extension/README.md) | Clipper install, options, shortcuts and security notes |-->
-
 ---
 
 <details>
