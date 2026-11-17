@@ -1569,6 +1569,25 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
 .detail-record.is-read .read-word-yes { display: inline; }
 .detail-record.is-read .read-word-no { display: none; }
 
+/* tag row: pills and the dashed add-tag field share one baseline */
+.detail-head .record-tags {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin: 8px 0 0;
+}
+.record-tagadd {
+  box-sizing: border-box;
+  width: 78px; height: 20px; margin: 0; padding: 1px 6px;
+  border: 1px dashed var(--rule); border-radius: 2px;
+  background: transparent; color: var(--ink);
+  font-family: var(--mono); font-size: 12px; line-height: 16px;
+}
+.record-tagadd::placeholder { color: var(--muted); }
+.record-tagadd:hover { border-color: var(--muted); }
+.record-tagadd:focus { border-color: var(--accent); }
+.record-tagadd:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+
 /* action line */
 .detail-actions {
   display: flex; align-items: center; flex-wrap: wrap; gap: 9px 10px;

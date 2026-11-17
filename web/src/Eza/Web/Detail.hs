@@ -699,7 +699,6 @@ tagRow m =
             ++ [ H.input_
                     [ HP.id_ "new-tag"
                     , HP.class_ "record-tagadd"
-                    , C.styleInline_ "width:78px;background:transparent"
                     , HP.value_ (ms (mNewTag m))
                     , HP.placeholder_ "+ tag"
                     , HP.aria_ "label" "Add a tag"

@@ -31,6 +31,9 @@ outputs are the installable artifacts; both are built from the same revision.
 
 ### Client polish
 
+- The record tag row aligns the tag pills and the **+ tag** field on one
+  baseline, and the add field uses a subtle dashed outline instead of the
+  browser's input frame.
 - The command palette lists commands, saved searches and actions only. It no
   longer mixes recent records into the slip, so the list stays scannable;
   record lookup stays on the search line and the ledger.
