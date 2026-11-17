@@ -2,21 +2,25 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eza.local/spec/schema/view.schema.json",
   "title": "eza view",
-  "description": "A declarative graph or ledger view stored in one user database. Extensions v1 stores view definitions as data and never executes them. The wrapper is versioned by the schema field; a graph and a ledger carry different definition shapes.",
+  "description": "A declarative graph or ledger view, stored in one user database and exchanged over /api/v1/views. One schema covers both shapes: a create or PATCH payload (which omits the server-assigned fields) and the stored/exported wrapper (which carries all of them). `name`, `kind` and `definition` are required; `schema`, `slug`, `is_default`, `id`, `created_at` and `updated_at` are optional because the server assigns them when they are absent, and every stored/exported document includes them. The server decoder also fills omitted graph-definition fields with their documented defaults, so a minimal create payload can be smaller than the canonical document shape. Extensions v1 stores view definitions as data and never executes them.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "slug", "name", "kind", "definition"],
+  "required": ["name", "kind", "definition"],
   "properties": {
     "schema": {
       "const": 1,
-      "description": "View definition schema version. Only version 1 is defined."
+      "description": "View definition schema version. Only version 1 is defined. Optional on create (the server writes 1); always present on a stored/exported wrapper."
+    },
+    "id": {
+      "type": "integer",
+      "description": "Server-assigned row id. Optional on create (the server allocates it); always present on a stored/exported wrapper."
     },
     "slug": {
       "type": "string",
       "minLength": 1,
       "maxLength": 48,
       "pattern": "^[a-z0-9][a-z0-9-]*$",
-      "description": "Lowercase identifier used in URLs and as the view id."
+      "description": "Lowercase identifier used in URLs and as the view id. Optional on create (derived from the name when absent); always present on a stored/exported wrapper."
     },
     "name": {
       "type": "string",
@@ -31,10 +35,18 @@
     "is_default": {
       "type": "boolean",
       "default": false,
-      "description": "Default view for its owner and kind. At most one default per (owner, kind)."
+      "description": "Default view for its owner and kind. At most one default per (owner, kind). Optional on create (defaults to false); present on a stored/exported wrapper."
     },
     "definition": {
       "description": "The declarative definition. Its shape depends on kind."
+    },
+    "created_at": {
+      "type": "integer",
+      "description": "POSIX seconds. Server-assigned on create; always present on a stored/exported wrapper."
+    },
+    "updated_at": {
+      "type": "integer",
+      "description": "POSIX seconds. Server-assigned; always present on a stored/exported wrapper."
     }
   },
   "allOf": [
@@ -109,10 +121,10 @@
           "description": "Deterministic layout spacing preset."
         },
         "local_depth": {
-          "type": "integer",
+          "type": ["integer", "null"],
           "minimum": 1,
           "maximum": 3,
-          "description": "Neighbourhood depth around the focused record."
+          "description": "Neighbourhood depth around the focused record: 1 to 3, or null for the whole library. The seeded default graph view uses null."
         },
         "color_groups": {
           "type": "array",

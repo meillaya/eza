@@ -208,8 +208,10 @@ app cfg state =
 The request is parsed once: "Eza.Routes.matchRoute" yields the route the
 server implements and "Eza.Routes.routeClass" says who may reach it. The
 public surface runs before the guard; everything else goes through
-'withAuthed'. Unknown API paths answer a JSON 404 and a known path with an
-unsupported method answers a JSON 405 that names the methods it does allow.
+'withAuthed'. Unknown paths answer a JSON 404; a known path with an unsupported
+method answers a JSON 405 that names the methods it does allow; OPTIONS on any
+known path answers 204 with the same Allow header, and HEAD is answered exactly
+like GET (Warp drops the body).
 -}
 dispatchApp :: Config -> AppState -> Application
 dispatchApp cfg state req respond =
@@ -222,14 +224,10 @@ dispatchApp cfg state req respond =
     method = TE.decodeUtf8 (requestMethod req)
     path = pathInfo req
 
-    -- HEAD is the GET headers without a body. A public GET route is served
-    -- for HEAD exactly as before; token reads are matched as HEAD by
-    -- "Eza.Routes" itself.
-    effectiveRoute = case Routes.matchRoute method path of
-        Just route -> Just route
-        Nothing
-            | method == "HEAD" -> Routes.matchRoute "GET" path
-            | otherwise -> Nothing
+    -- HEAD is the GET headers without a body; "Eza.Routes.matchRoute"
+    -- classifies it exactly like GET (the route class/capability of the GET
+    -- route), and Warp drops the body.
+    effectiveRoute = Routes.matchRoute method path
 
     authed route =
         withAuthed cfg state req respond $ \rctx conn ->
@@ -243,17 +241,9 @@ dispatchApp cfg state req respond =
         Routes.AdminClass -> authed route
         Routes.DeniedClass -> respond (jsonProblem status404 "not_found" "No such route")
 
-    dispatchUnmatched
-        | isApiPath path = case knownMethods path of
-            [] -> respond (respondClipped (jsonProblem status404 "not_found" "No such route"))
-            allowed -> respond (respondClipped (methodNotAllowed allowed))
-        | otherwise = authedSpa
-      where
-        -- A non-API path that matched no route is still not an API request:
-        -- keep the old authenticated fallthrough (which the guard denies).
-        authedSpa = case Routes.matchRoute "GET" path of
-            Just route -> authed route
-            Nothing -> respond (jsonProblem status404 "not_found" "No such route")
+    dispatchUnmatched = case knownMethods path of
+        [] -> respond (respondClipped (jsonProblem status404 "not_found" "No such route"))
+        allowed -> respond (respondClipped (methodNotAllowed allowed))
 
     -- Clip routes are cross-origin by contract, so even a pre-guard error
     -- (unknown clip sub-path, wrong method) must be readable by the clipper.
@@ -263,11 +253,15 @@ dispatchApp cfg state req respond =
 
     optionsDispatch
         | isClipPreflightPath path = clipPreflight cfg req respond
-        | otherwise = case publicAllow (pathInfo req) of
-            Just allow -> respond (responseLBS status204 [(hAllow, allow)] "")
-            Nothing -> case effectiveRoute of
-                Just route -> authed route
-                Nothing -> respond (jsonProblem status404 "not_found" "No such route")
+        | otherwise = case knownMethods path of
+            [] -> respond (jsonProblem status404 "not_found" "No such route")
+            allowed ->
+                respond
+                    ( responseLBS
+                        status204
+                        [(hAllow, allowHeader allowed)]
+                        ""
+                    )
 
     publicRoute route = case route of
         RouteHealth -> health state respond
@@ -297,32 +291,9 @@ dispatchApp cfg state req respond =
         -- These match before the guard; an authenticated method is a bug.
         _ -> respond (jsonProblem status405 "method_not_allowed" "method not allowed for this route")
 
-{- | The methods the public surface answers for a path, for an OPTIONS
-answer. A HEAD response always comes from the GET route, so it is added
-explicitly. Nothing outside the public surface is advertised.
+{- | The enumerated methods that reach a path (GET also implies HEAD); used for
+the 405 @Allow@ and the 204 OPTIONS answer.
 -}
-publicAllow :: [Text] -> Maybe BS.ByteString
-publicAllow path = case matched of
-    [] -> Nothing
-    _
-        | any ((/= Routes.PublicClass) . Routes.routeClass) routes -> Nothing
-        | otherwise ->
-            Just
-                ( BSC.pack
-                    ( T.unpack
-                        (T.intercalate ", " (ordered <> ["OPTIONS"]))
-                    )
-                )
-  where
-    methods = ["GET", "POST"]
-    matched = [(m, route) | m <- methods, Just route <- [Routes.matchRoute m path]]
-    routes = map snd matched
-    ordered =
-        concatMap
-            (\(m, _) -> if m == "GET" then ["GET", "HEAD"] else [m])
-            matched
-
--- | Methods that reach a known API path with a different method, used for 405.
 knownMethods :: [Text] -> [Text]
 knownMethods path =
     nub
@@ -331,17 +302,19 @@ knownMethods path =
             [m | m <- ["GET", "HEAD", "POST", "PATCH", "DELETE"], Just _ <- [Routes.matchRoute m path]]
         )
 
+{- | The @Allow@ header for the methods a path answers: the enumerated methods
+(GET also implies HEAD) plus OPTIONS, which every known path answers with 204.
+-}
+allowHeader :: [Text] -> BS.ByteString
+allowHeader allowed =
+    BSC.pack (T.unpack (T.intercalate ", " (allowed <> ["OPTIONS"])))
+
 -- | A JSON 405 with the methods this path does answer.
 methodNotAllowed :: [Text] -> Response
 methodNotAllowed allowed =
     mapResponseHeaders
-        (<> [(hAllow, BSC.pack (T.unpack (T.intercalate ", " (allowed <> ["OPTIONS"]))))])
+        (<> [(hAllow, allowHeader allowed)])
         (jsonProblem status405 "method_not_allowed" "method not allowed for this path")
-
-isApiPath :: [Text] -> Bool
-isApiPath path = case path of
-    ("api" : _) -> True
-    _ -> False
 
 {- | Clip CORS preflights run before the guard. The clip path family (which
 includes quick-save) is the single classification; "Eza.Api.Extensions" uses

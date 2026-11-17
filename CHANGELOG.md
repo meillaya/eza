@@ -36,6 +36,27 @@ outputs are the installable artifacts; both are built from the same revision.
   write-only highlights-loading/snapshot-job fields.
 - A failed saved-search background refresh keeps the previous list and raises
   one toast until a successful refresh.
+- Every non-journaled destructive action now asks first: view delete, rule
+  delete, webhook delete, API-token revoke, passkey delete and recovery-code
+  regeneration share one top-most confirmation layer.
+- The undo preview is request-scoped, so a cancelled or superseded inspection
+  cannot re-open itself or undo a different snapshot than the one shown.
+- Webhook-test and AI-suggestion busy state is per row; the AI status failure
+  shows one explanation and one retry control; the account forms submit through
+  their reducers, so Enter no longer reloads the page.
+- Runtime OS theme changes reach the client model and canvas, and both
+  `theme-color` metas are kept in step; the install button sits above the mobile
+  tab bar; `/save` falls back to the offline shell instead of the network-error
+  page; `Esc` always closes the top-most layer (dirty guard first); highlighted
+  passages in the reader open their editor.
+- Returning to a record with unsaved note edits no longer refetches over them;
+  a boot payload that fails to decode shows the protocol-mismatch page instead
+  of a generic error; saved-search apply clears stale tag facets; the pending
+  search debounce is cancelled on navigation; nine never-constructed actions
+  were removed.
+- The account panel shows the temporary password and the rotated recovery codes
+  after an admin password reset (they are returned once), and the export panel
+  gained a Markdown notes download.
 
 ### Server
 
@@ -56,6 +77,34 @@ outputs are the installable artifacts; both are built from the same revision.
   drops every saved search and rule.
 - Dedupe merge keeps the earliest non-zero filing date; an undated duplicate no
   longer zeroes the keeper's `created_at`.
+- Egress jobs retry transient failures with the bounded backoff, stale
+  `running` jobs are requeued after a crash or long stall, finished jobs are
+  pruned on a timer, and a new `POST /api/v1/jobs/{id}/cancel` sets the
+  cooperative cancel flag for a queued/running job.
+- A recovery session reaches only setup, logout and the account summary; a
+  completed recovery setup revokes every session (single use); the first-setup
+  claim is atomic, so concurrent first requests create exactly one admin.
+- Disabled and deleted accounts release their user slots, so `EZA_MAX_USERS`
+  counts live slots instead of historical accounts; the last admin delete and
+  the admin password reset are atomic, and a reset rotates the recovery codes
+  and returns them once.
+- Public share pages use the manifest-hashed asset URLs, stable `/favicon.svg`
+  and `/theme.js` revalidate instead of being cached immutably, `GET
+  /api/v1/export/notes` serves the Markdown notes document instead of 501, and
+  `EZA_SHARE_TTL_DAYS` is clamped to 1-365 with a startup warning.
+- `HEAD` mirrors `GET`, `OPTIONS` answers with `Allow` on every known path, and
+  known non-API paths with the wrong method return 405 with `Allow`.
+- The backup stamp-directory retry is bounded, and a partial `restore --user`
+  keeps uncaptured accounts and carries current accounts instead of deleting or
+  relinking control rows silently.
+- The portable JSON import is atomic for bookmarks, highlights, captures,
+  saved searches and rules, enqueues enrichment for inserted records, validates
+  every imported URL against the http(s) policy, and reports honest
+  inserted/existing/skipped counts; undo no longer wedges when a clip template
+  was deleted before the capture row is restored.
+- Response DTOs decode strictly (a missing or renamed field fails instead of
+  defaulting), while create bodies keep their documented defaults; `isHttpUrl`
+  rejects empty, dot-only or credential hosts and whitespace.
 
 ### Repository
 
@@ -71,6 +120,19 @@ outputs are the installable artifacts; both are built from the same revision.
   checks the commit), and the command-palette description.
 - The add-passkey e2e script now asserts page render and the credential count
   instead of exiting 0 without checks.
+- The webhook/view JSON Schemas now describe the documents the server stores and
+  exports (ids, timestamps, nullable `local_depth`, webhook delivery fields) as
+  well as the create payloads; stored-wrapper fixtures and boundary counter-
+  examples are validated by `scripts/check-specs.sh`, and the webhook URL
+  pattern matches the stricter runtime policy.
+- `docs/performance.md` separates the historical pre-0.4 benchmark run from the
+  current 0.4 account-library path and bundle numbers; the docs/figures removal
+  left no dangling references.
+- CI gained a manual/weekly `nixos-vm` job (the module VM test needs KVM, so it
+  is not on every pull request), and the release-image workflow already builds
+  and verifies the release tag.
+- The e2e suite covers the new confirmation layer for view/rule deletion and
+  token revocation (cancel then confirm).
 - The generated architecture/import/search figures and the README wordmark
   generators were removed from the repository; the README uses a plain text
   wordmark and the architecture page relies on its prose. `docs/figures` is no

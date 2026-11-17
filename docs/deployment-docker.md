@@ -109,7 +109,7 @@ The same binary provides `healthcheck` (for HEALTHCHECK / probes), `backup`,
 | `EZA_FAVICON_MAX_BYTES` | `262144` | Maximum favicon download size. Complete ICO entries are cropped before storage. |
 | `EZA_FAVICON_TTL_DAYS` | `90` | Favicon cache lifetime. |
 | `EZA_FAVICON_BACKFILL` | `1` | Background per-domain favicon cache fill (one request per source, not per link); `0` disables it. |
-| `EZA_SHARE_TTL_DAYS` | `7` | Public share-link lifetime. |
+| `EZA_SHARE_TTL_DAYS` | `7` | Public share-link lifetime in days, clamped to 1-365 (a value outside the range prints a startup warning and is clamped). |
 | `EZA_ALLOW_PRIVATE_FETCH` | `0` | Set `1` to allow fetching private/RFC1918 URLs (lifts the SSRF guard). |
 | `EZA_AI_PROVIDER` | `none` | AI tagging: `none`, `ollama`, `openai`, `openai-compatible`, `anthropic`. |
 | `EZA_OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama endpoint for the `ollama` provider. |

@@ -5,6 +5,8 @@ import Data.Aeson
 
 import Data.Aeson.Types (parseMaybe)
 
+import Control.Monad (when)
+
 import Data.Maybe (fromMaybe)
 
 import qualified Data.Text as T
@@ -92,6 +94,9 @@ adminPatchUser state admin targetId req respond = do
                                 case enabledResult of
                                     Left err -> respondProblem respond (Admin.toProblem err)
                                     Right _ -> do
+                                        -- A disabled account must not keep its
+                                        -- library slot (and EZA_MAX_USERS budget).
+                                        when (wantedEnabled == Just False) (releaseUserSlot state targetId)
                                         updated <- withControl state $ \control -> Control.lookupUserById control targetId
                                         case updated of
                                             Nothing -> respondProblem respond (Admin.toProblem Admin.AdminNotFound)
@@ -110,10 +115,15 @@ adminResetPassword state targetId req respond = do
                 Just password -> do
                     result <-
                         withControl state $ \control ->
-                            Admin.resetUserPassword (asConfig state) control targetId password
+                            Admin.resetUserPasswordRotatingCodes (asConfig state) control targetId password
                     case result of
                         Left err -> respondProblem respond (Admin.toProblem err)
-                        Right () -> respond (jsonResponse status200 (object ["ok" .= True]))
+                        Right codes ->
+                            respond
+                                ( jsonResponse
+                                    status200
+                                    (object ["ok" .= True, "recovery_codes" .= codes])
+                                )
 
 {- | Delete one account. The control row always goes; the library and its
 snapshots go only when @delete_db@ is true, because they are the user's
@@ -135,6 +145,13 @@ adminDeleteUser state admin targetId req respond = do
                         if targetId == Control.cuId admin
                             then respondProblem respond (Admin.toProblem Admin.AdminSelfDisable)
                             else do
+                                -- Close the library before the optional file
+                                -- removal: an account that is being deleted must
+                                -- not keep an open database handle, and the
+                                -- delete path unlinks the files. If the delete is
+                                -- refused (last admin) the slot simply reopens on
+                                -- the next request.
+                                releaseUserSlot state targetId
                                 result <-
                                     withControl state $ \control ->
                                         Admin.deleteUserAccount (asConfig state) control targetId deleteDb

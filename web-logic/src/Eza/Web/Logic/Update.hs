@@ -53,6 +53,7 @@ dispatchAll action = case action of
     BootLoaded{} -> Shell.handle action
     BootFailed{} -> Shell.handle action
     WireVersionMismatch{} -> Shell.handle action
+    BootDecodeFailed{} -> Shell.handle action
     ApiErrorRaised{} -> Shell.handle action
     ThemeLoaded{} -> Shell.handle action
     ConnectivityChanged{} -> Shell.handle action
@@ -98,6 +99,8 @@ dispatchAll action = case action of
     PaletteNext{} -> Shell.handle action
     PaletteChoose{} -> Shell.handle action
     PaletteSelect{} -> Shell.handle action
+    ConfirmAccepted{} -> Shell.handle action
+    ConfirmCancelled{} -> Shell.handle action
     DetailLoaded{} -> Detail.handle action
     DetailFailed{} -> Detail.handle action
     TitleInput{} -> Detail.handle action
@@ -112,7 +115,6 @@ dispatchAll action = case action of
     ExtractEditStart{} -> Detail.handle action
     ExtractEditChanged{} -> Detail.handle action
     ExtractEditCancel{} -> Detail.handle action
-    ExtractSaved{} -> Detail.handle action
     MarkLinkAlive{} -> Detail.handle action
     LinkMarkedAlive{} -> Detail.handle action
     RecheckLink{} -> Detail.handle action
@@ -124,15 +126,11 @@ dispatchAll action = case action of
     ReadPatchFailed{} -> Detail.handle action
     BacklinksLoaded{} -> Detail.handle action
     BacklinksFailed{} -> Detail.handle action
-    LinkPrev{} -> Detail.handle action
-    LinkNext{} -> Detail.handle action
     LinkChoose{} -> Detail.handle action
     LinkSuggestions{} -> Detail.handle action
     RunBookmarkAction{} -> Detail.handle action
-    DeleteBookmark{} -> Detail.handle action
     DeletedOk{} -> Detail.handle action
     DeleteFailed{} -> Detail.handle action
-    DirtyGuardOpen{} -> Detail.handle action
     DirtyGuardClose{} -> Detail.handle action
     DirtyGuardDiscard{} -> Detail.handle action
     ImportStart{} -> ImportExport.handle action
@@ -140,7 +138,6 @@ dispatchAll action = case action of
     ImportDone{} -> ImportExport.handle action
     ImportFailed{} -> ImportExport.handle action
     SavedSearchSave{} -> Ledger.handle action
-    SavedSearchNameInput{} -> Ledger.handle action
     SavedSearchDelete{} -> Ledger.handle action
     SavedSearchDone{} -> Ledger.handle action
     SavedSearchFailed{} -> Ledger.handle action
@@ -172,7 +169,6 @@ dispatchAll action = case action of
     GraphDetailStep{} -> Graph.handle action
     GraphLayoutLoaded{} -> Graph.handle action
     GraphLayoutFailed{} -> Graph.handle action
-    GraphLabelModeSelected{} -> Views.handle action
     GraphPresetSelected{} -> Views.handle action
     GraphScopeToggled{} -> Views.handle action
     GraphLocalDepthSelected{} -> Views.handle action
@@ -188,6 +184,7 @@ dispatchAll action = case action of
     ViewOpenView{} -> Views.handle action
     ViewDefaultView{} -> Views.handle action
     ViewDeleteView{} -> Views.handle action
+    ViewDeleteConfirmed{} -> Views.handle action
     ViewExportView{} -> Views.handle action
     ViewExportClose{} -> Views.handle action
     ViewRenameStart{} -> Views.handle action
@@ -280,9 +277,11 @@ dispatchAll action = case action of
     AccountLoaded{} -> Account.handle action
     AccountFailed{} -> Account.handle action
     RecoveryRegenerate{} -> Account.handle action
+    RecoveryRegenerateConfirmed{} -> Account.handle action
     RecoveryLoaded{} -> Account.handle action
     CredentialRenamed{} -> Account.handle action
     CredentialDeleted{} -> Account.handle action
+    CredentialDeleteConfirmed{} -> Account.handle action
     CredentialOpFailed{} -> Account.handle action
     CredentialEditStart{} -> Account.handle action
     CredentialNameInput{} -> Account.handle action
@@ -332,6 +331,7 @@ dispatchAll action = case action of
     TokenCreated{} -> Account.handle action
     TokenCreateFailed{} -> Account.handle action
     TokenRevoke{} -> Account.handle action
+    TokenRevokeConfirmed{} -> Account.handle action
     TokenRevoked{} -> Account.handle action
     TokenRevealDismiss{} -> Account.handle action
     TokenCopied{} -> Account.handle action
@@ -425,6 +425,7 @@ dispatchAll action = case action of
     WebhookTestJobFailed{} -> Account.handle action
     WebhookTestJobAbandoned{} -> Account.handle action
     WebhookDelete{} -> Account.handle action
+    WebhookDeleteConfirmed{} -> Account.handle action
     WebhookDeleted{} -> Account.handle action
     WebhookDeleteFailed{} -> Account.handle action
     WebhookSecretCopied{} -> Account.handle action
@@ -445,6 +446,7 @@ dispatchAll action = case action of
     RuleToggleEnabled{} -> Account.handle action
     RuleToggled{} -> Account.handle action
     RuleDelete{} -> Account.handle action
+    RuleDeleteConfirmed{} -> Account.handle action
     RuleDeleted{} -> Account.handle action
     RuleDryRun{} -> Account.handle action
     RuleDryRunResult{} -> Account.handle action
@@ -456,8 +458,6 @@ dispatchAll action = case action of
     JobTick{} -> Job.handle action
     JobStatusLoaded{} -> Job.handle action
     JobStatusFailed{} -> Job.handle action
-    JobAbandoned{} -> Job.handle action
-    JobTimedOut{} -> Job.handle action
 
 {- | The handler environment: dispatching another action runs it through the
 same total case below. Tying the knot lazily keeps the modules acyclic.

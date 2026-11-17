@@ -18,7 +18,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
-import Database.SQLite.Simple (Connection)
+import Database.SQLite.Simple (Connection, query_)
 
 import Network.HTTP.Types
 import Network.Wai
@@ -87,9 +87,9 @@ importHandler cfg conn req respond =
                                     [ "format" .= ("eza-json" :: Text)
                                     , "json_report" .= report
                                     , "imported" .= jrBookmarks report
-                                    , "inserted" .= jrBookmarks report
+                                    , "inserted" .= jrInserted report
+                                    , "existing" .= jrExisting report
                                     , "found" .= jrBookmarks report
-                                    , "existing" .= (0 :: Int)
                                     , "highlights" .= jrHighlights report
                                     , "captures" .= jrCaptures report
                                     , "views" .= jrViews report
@@ -128,9 +128,9 @@ importHandler cfg conn req respond =
                                                 [ "format" .= ("eza-json" :: Text)
                                                 , "json_report" .= report
                                                 , "imported" .= jrBookmarks report
-                                                , "inserted" .= jrBookmarks report
+                                                , "inserted" .= jrInserted report
+                                                , "existing" .= jrExisting report
                                                 , "found" .= jrBookmarks report
-                                                , "existing" .= (0 :: Int)
                                                 , "highlights" .= jrHighlights report
                                                 , "captures" .= jrCaptures report
                                                 , "views" .= jrViews report
@@ -150,6 +150,40 @@ isEzaJsonExport (Object o) = case KeyMap.lookup "format" o of
     Just (String "eza-json") -> True
     _ -> False
 isEzaJsonExport _ = False
+
+{- | The Markdown notes export served by @GET /api/v1/export/notes@: the
+library's notes as one Markdown section per record that has a non-empty
+@note_body@, newest save first. Records without a note are omitted so the
+document mirrors what the notes screen shows. The body is a download
+(@text/markdown@, @eza-notes.md@), never JSON.
+-}
+notesExportMarkdown :: Connection -> IO Text
+notesExportMarkdown conn = do
+    rows <-
+        query_
+            conn
+            "SELECT title,url,note_body FROM bookmarks WHERE trim(note_body) <> '' ORDER BY created_at DESC, id DESC" ::
+            IO [(Text, Text, Text)]
+    pure $
+        T.unlines
+            ( [ "# eza notes"
+              , ""
+              , T.pack (show (length rows)) <> " records with notes, newest save first."
+              , ""
+              ]
+                <> concatMap render rows
+            )
+  where
+    render (title, url, note) =
+        [ "## " <> heading title url
+        , url
+        , ""
+        , T.stripEnd note
+        , ""
+        ]
+    heading title url
+        | T.null (T.strip title) = T.strip url
+        | otherwise = T.replace "\n" " " (T.strip title)
 
 -- | Dispatch the handlers this family owns from their "Eza.Routes" constructors.
 dispatch :: RequestContext -> Connection -> Route -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
@@ -287,8 +321,17 @@ dispatch rctx conn route req respond = case route of
                         ]
                         (LBS.fromStrict (TE.encodeUtf8 content))
                     )
-    RouteExportNotes ->
-        respond (jsonProblem status501 "not_implemented" "Markdown note export is coming in a later milestone")
+    RouteExportNotes -> do
+        notes <- notesExportMarkdown conn
+        respond
+            ( responseLBS
+                status200
+                [ (hContentType, "text/markdown; charset=utf-8")
+                , (hContentDisposition, "attachment; filename=\"eza-notes.md\"")
+                , ("Cache-Control", "no-store")
+                ]
+                (LBS.fromStrict (TE.encodeUtf8 notes))
+            )
     RouteStats -> do
         stats <- libraryStats conn
         links <- Db.queryScalar conn "SELECT COUNT(*) FROM links"

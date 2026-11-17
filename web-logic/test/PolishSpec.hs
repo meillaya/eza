@@ -28,18 +28,18 @@ polishSpec = describe "client polish" $ do
     describe "webhook test failure" $ do
         it "a failed job stores the error against the webhook and clears busy" $ do
             let (model, _) = run (WebhookTestJobFailed 3 (Just "boom"))
-            mWebhookTestBusy model `shouldBe` False
+            mWebhookTestBusy model `shouldBe` Nothing
             mWebhookTestError model `shouldBe` Just (3, "boom")
         it "a retry clears the previous failure" $ do
             let (failed, _) = run (WebhookTestJobFailed 3 (Just "boom"))
                 (retried, _) = update failed (WebhookTestRequest 3)
             mWebhookTestError retried `shouldBe` Nothing
-            mWebhookTestBusy retried `shouldBe` True
+            mWebhookTestBusy retried `shouldBe` Just 3
         it "a successful result clears the error" $ do
             let (failed, _) = run (WebhookTestJobFailed 3 (Just "boom"))
                 (ok, _) = update failed (WebhookTestJobDone 3 (Just (object ["ok" .= True, "status" .= (200 :: Int)])))
             mWebhookTestError ok `shouldBe` Nothing
-            mWebhookTestBusy ok `shouldBe` False
+            mWebhookTestBusy ok `shouldBe` Nothing
     describe "ai provider status" $ do
         it "stores a failed status read but keeps a previous status" $ do
             let status = AiStatus "anthropic" "claude" True
@@ -81,14 +81,14 @@ polishSpec = describe "client polish" $ do
         it "a second apply click is a no-op while the first is in flight" $ do
             let (first, firstEffects) = run (SuggestionApply 4 ["ai"])
                 (second, secondEffects) = update first (SuggestionApply 4 ["ai"])
-            mSuggestionApplyBusy first `shouldBe` True
+            mSuggestionApplyBusy first `shouldBe` Just 4
             effectShows firstEffects `shouldSatisfy` any (isInfixOf "ApiRequest")
             secondEffects `shouldBe` []
-            mSuggestionApplyBusy second `shouldBe` True
+            mSuggestionApplyBusy second `shouldBe` Just 4
         it "the apply failure clears the guard and reports the error" $ do
             let (busy, _) = run (SuggestionApply 4 ["ai"])
                 (failed, _) = update busy (SuggestionApplyFailed (mkApiError Nothing (Just "nope")))
-            mSuggestionApplyBusy failed `shouldBe` False
+            mSuggestionApplyBusy failed `shouldBe` Nothing
             mSuggestionError failed `shouldBe` Just "nope"
     describe "saved-search refresh" $ do
         it "a failed background refresh keeps the list and raises one notice" $ do

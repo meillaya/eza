@@ -34,6 +34,7 @@ import Eza.Bookmarks
 import Eza.Config
 
 import Eza.Dedup (DedupQuery (..))
+import qualified Eza.Url as Url
 
 requestTooLargeResponse :: Word64 -> Response
 requestTooLargeResponse limit =
@@ -272,10 +273,13 @@ readInt t = case reads (T.unpack t) of
     [(n, "")] -> Just n
     _ -> Nothing
 
+{- | The strict write-gate URL policy shared with the core helpers: http(s)
+only, a real authority/host, no userinfo, no whitespace or control characters.
+The old prefix check accepted e.g. @https://@, @http://user@:pass@host@ and
+hosts made only of dots, which then reached the ledger and the share pages.
+-}
 isHttpUrl :: Text -> Bool
-isHttpUrl t =
-    let l = T.toLower (T.strip t)
-     in "http://" `T.isPrefixOf` l || "https://" `T.isPrefixOf` l
+isHttpUrl = Url.isHttpUrl
 
 -- ---------------------------------------------------------------------------
 -- Static

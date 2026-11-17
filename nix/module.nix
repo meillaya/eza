@@ -304,8 +304,9 @@ in
       type = types.int;
       default = 7;
       description = ''
-        Lifetime of public share links in days (EZA_SHARE_TTL_DAYS); links
-        stop resolving after this many days.
+        Lifetime of public share links in days (`EZA_SHARE_TTL_DAYS`, 1 to
+        365); links stop resolving after this many days. The server clamps the
+        environment value to the same range and warns.
       '';
     };
 
@@ -478,8 +479,8 @@ in
           message = "services.eza.faviconTtlDays must be at least 1.";
         }
         {
-          assertion = cfg.shareTtlDays >= 1;
-          message = "services.eza.shareTtlDays must be at least 1.";
+          assertion = cfg.shareTtlDays >= 1 && cfg.shareTtlDays <= 365;
+          message = "services.eza.shareTtlDays must be between 1 and 365 days.";
         }
         {
           assertion = cfg.backup.keepDays >= 1;

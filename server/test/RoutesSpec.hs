@@ -122,21 +122,35 @@ spec = describe "Eza.Routes" $ do
             let path = splitPath (renderRoutePath route)
             sessionRoleAllows RoleAdmin (routeMethod route) path `shouldBe` True
 
-    it "limits a recovery session to the password setup and its account reads" $ do
+    it "limits a recovery session to the password setup, logout, and the account read" $ do
         recoverySessionAllows "POST" ["api", "setup", "password"] `shouldBe` True
         recoverySessionAllows "POST" ["api", "auth", "logout"] `shouldBe` True
-        recoverySessionAllows "GET" ["api", "v1", "boot"] `shouldBe` True
         recoverySessionAllows "GET" ["api", "v1", "account"] `shouldBe` True
+        -- The boot payload carries the library contents, so a recovery session
+        -- must not read it (only the account document is in scope).
+        recoverySessionAllows "GET" ["api", "v1", "boot"] `shouldBe` False
         recoverySessionAllows "GET" ["api", "v1", "bookmarks"] `shouldBe` False
         recoverySessionAllows "POST" ["api", "v1", "bookmarks"] `shouldBe` False
         recoverySessionAllows "GET" ["api", "v1", "admin", "users"] `shouldBe` False
 
-    it "treats HEAD as a read alias for token routes only" $ do
+    it "treats HEAD as the GET alias for every read route" $ do
         matchRoute "HEAD" ["api", "v1", "graph"] `shouldBe` Just RouteGraph
         Authz.routeClass "HEAD" ["api", "v1", "graph"] `shouldBe` TokenClass
-        matchRoute "HEAD" ["api", "v1", "account"] `shouldBe` Nothing
-        matchRoute "HEAD" ["healthz"] `shouldBe` Nothing
+        matchRoute "HEAD" ["api", "v1", "account"] `shouldBe` Just RouteAccountRead
+        Authz.routeClass "HEAD" ["api", "v1", "account"] `shouldBe` SessionClass
+        matchRoute "HEAD" ["healthz"] `shouldBe` Just RouteHealth
+        Authz.routeClass "HEAD" ["healthz"] `shouldBe` PublicClass
+        matchRoute "HEAD" ["api", "v1", "jobs", "7", "cancel"] `shouldBe` Nothing
         matchRoute "get" ["api", "v1", "graph"] `shouldBe` Just RouteGraph
+
+    it "renders and re-parses the job cancel route" $ do
+        routePath (RouteJobCancel 7) `shouldBe` "/api/v1/jobs/{id}/cancel"
+        renderRoutePath (RouteJobCancel 7) `shouldBe` "/api/v1/jobs/7/cancel"
+        matchRoute "POST" ["api", "v1", "jobs", "7", "cancel"] `shouldBe` Just (RouteJobCancel 7)
+        Routes.routeClass (RouteJobCancel 7) `shouldBe` TokenClass
+        Routes.routeCapability (RouteJobCancel 7) `shouldBe` Just CapWrite
+        tokenAllows [ScopeWrite] "POST" ["api", "v1", "jobs", "7", "cancel"] `shouldBe` True
+        tokenAllows [ScopeRead] "POST" ["api", "v1", "jobs", "7", "cancel"] `shouldBe` False
 
     it "represents every client URL literal family in web/src/Eza/Web/Api.hs" $
         forM_ clientRouteSamples $ \(method, path) ->

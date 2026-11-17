@@ -10,14 +10,71 @@ module Eza.Url (
     dedupeLookupUrls,
 ) where
 
+import Data.Char (isControl, isDigit, isSpace)
 import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as T
 
+{- | Is the value an absolute @http@ or @https@ URL with a usable host?
+
+This is the write-gate shared by the server and the client, so it is stricter
+than a prefix test: the scheme must be @http@ or @https@ (case-insensitive),
+the URL must carry a non-empty host, a host made only of dots is rejected, the
+authority may not carry userinfo (@user:password@@, rejected as URL
+credentials), and whitespace or control characters are rejected in the
+authority. Only the authority is checked this tightly; the path and query keep
+the tolerance the importer and the clipper have always had (the browser
+encodes them before the request). 'normalizeUrl' still performs the
+canonicalisation used for de-duplication, unchanged.
+-}
 isHttpUrl :: Text -> Bool
-isHttpUrl t =
-    let l = T.toLower (T.strip t)
-     in "http://" `T.isPrefixOf` l || "https://" `T.isPrefixOf` l
+isHttpUrl raw =
+    case schemeRest (T.strip raw) of
+        Nothing -> False
+        Just rest -> validAuthority rest
+
+{- | Strip a case-insensitive @http://@/@https://@ prefix, returning the
+remainder in its original spelling. 'Nothing' for every other scheme and for a
+scheme-only value such as @http:@.
+-}
+schemeRest :: Text -> Maybe Text
+schemeRest text
+    | "http://" `T.isPrefixOf` lowered = Just (T.drop 7 text)
+    | "https://" `T.isPrefixOf` lowered = Just (T.drop 8 text)
+    | otherwise = Nothing
+  where
+    lowered = T.toLower text
+
+{- | Validate the authority of an http(s) URL: a non-empty host (a bracketed
+IPv6 literal or a reg-name) with an optional all-digit port, no userinfo and no
+whitespace/control characters.
+-}
+validAuthority :: Text -> Bool
+validAuthority rest
+    | T.null authority = False
+    | T.any invalidAuthorityChar authority = False
+    | "@" `T.isInfixOf` authority = False
+    | otherwise = validHostPort authority
+  where
+    authority = T.takeWhile (\c -> c /= '/' && c /= '?' && c /= '#') rest
+    invalidAuthorityChar c = isSpace c || isControl c
+
+validHostPort :: Text -> Bool
+validHostPort authority = case T.stripPrefix "[" authority of
+    Just afterOpen -> case T.breakOn "]" afterOpen of
+        (inside, afterClose)
+            | T.null afterClose -> False
+            | T.null inside || T.all (== '.') inside -> False
+            | otherwise -> validPortSuffix (T.drop 1 afterClose)
+    Nothing -> case T.breakOn ":" authority of
+        (host, suffix)
+            | T.null host || T.all (== '.') host -> False
+            | otherwise -> validPortSuffix suffix
+  where
+    validPortSuffix suffix
+        | T.null suffix = True
+        | Just port <- T.stripPrefix ":" suffix = not (T.null port) && T.all isDigit port
+        | otherwise = False
 
 {- | Host component without userinfo, port, or path.  IPv6 literals keep
 their address without the surrounding brackets.

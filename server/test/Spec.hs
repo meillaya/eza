@@ -1,6 +1,6 @@
 module Main (main) where
 
-import Control.Exception (bracket)
+import Control.Exception (SomeException, bracket, try)
 import Data.Aeson (Value (..), decode, encode, object, toJSON)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -229,6 +229,114 @@ main = hspec $ do
                         rules <- Sqlite.query_ target "SELECT name, add_tags FROM rules" :: IO [(Text, Text)]
                         rules `shouldBe` [("legacy rule", "[\"oldtag\"]")]
                         close target
+
+    describe "JSON import counts and policy" $ do
+        it "reports inserted, existing and skipped honestly and queues enrichment for new rows" $
+            withSystemTempDirectory "eza-json-counts" $ \dir -> do
+                source <- openDb (dir </> "source.db")
+                Sqlite.execute_ source "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://example.test/counts','Counts','example.test',1,1,1)"
+                document <- exportJson source
+                close source
+                target <- openDb (dir </> "target.db")
+                Sqlite.execute_ target "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://example.test/counts','Counts','example.test',1,1,1)"
+                matched <- importJson target document
+                case matched of
+                    Left err -> expectationFailure (T.unpack err)
+                    Right report -> do
+                        jrInserted report `shouldBe` 0
+                        jrExisting report `shouldBe` 1
+                        jrBookmarks report `shouldBe` 1
+                        jrSkipped report `shouldBe` 0
+                -- Matched rows keep their enrichment state: no job is queued.
+                matchedJobs <- queryScalar target "SELECT COUNT(*) FROM jobs WHERE kind = 'enrich'"
+                matchedJobs `shouldBe` 0
+                close target
+                fresh <- openDb (dir </> "fresh.db")
+                inserted <- importJson fresh document
+                case inserted of
+                    Left err -> expectationFailure (T.unpack err)
+                    Right report -> do
+                        jrInserted report `shouldBe` 1
+                        jrExisting report `shouldBe` 0
+                        jrSkipped report `shouldBe` 0
+                jobs <- Sqlite.query_ fresh "SELECT kind, bookmark_id, state FROM jobs ORDER BY id" :: IO [(Text, Maybe Int, Text)]
+                jobs `shouldBe` [("enrich", Just 1, "queued")]
+                close fresh
+
+        it "rejects non-http bookmark URLs with the same policy as other writes" $
+            withSystemTempDirectory "eza-json-url-policy" $ \dir -> do
+                conn <- openDb (dir </> "url-policy.db")
+                let fixture =
+                        decode
+                            ( LBS.fromStrict
+                                ( BSC.pack
+                                    "{\"format\":\"eza-json\",\"version\":2,\"bookmarks\":"
+                                    <> "[{\"url\":\"javascript:alert(1)\"},{\"url\":\"http://\"},{\"url\":\"https://example.test/ok\"}]}"
+                                )
+                            ) ::
+                            Maybe Value
+                case fixture of
+                    Nothing -> expectationFailure "the URL-policy fixture is not valid JSON"
+                    Just value -> do
+                        result <- importJson conn value
+                        case result of
+                            Left err -> expectationFailure (T.unpack err)
+                            Right report -> do
+                                jrInserted report `shouldBe` 1
+                                jrSkipped report `shouldBe` 2
+                        stored <- Sqlite.query_ conn "SELECT url FROM bookmarks" :: IO [Sqlite.Only Text]
+                        stored `shouldBe` [Sqlite.Only "https://example.test/ok"]
+                        close conn
+
+        it "imports the bookmark data in one transaction" $
+            withSystemTempDirectory "eza-json-atomic" $ \dir -> do
+                conn <- openDb (dir </> "atomic.db")
+                -- Force a SQLite failure on the second bookmark insert.
+                Sqlite.execute_ conn "CREATE TRIGGER fail_import BEFORE INSERT ON bookmarks WHEN new.url = 'https://fail.test/x' BEGIN SELECT RAISE(ABORT, 'forced'); END"
+                let fixture =
+                        decode
+                            ( LBS.fromStrict
+                                ( BSC.pack
+                                    "{\"format\":\"eza-json\",\"version\":2,\"bookmarks\":"
+                                    <> "[{\"url\":\"https://ok.test/first\"},{\"url\":\"https://fail.test/x\"}]}"
+                                )
+                            ) ::
+                            Maybe Value
+                case fixture of
+                    Nothing -> expectationFailure "the atomicity fixture is not valid JSON"
+                    Just value -> do
+                        result <- try (importJson conn value) :: IO (Either SomeException (Either Text JsonImportReport))
+                        case result of
+                            Left _ -> pure ()
+                            Right (Left message) -> expectationFailure ("the forced failure must not become a 200: " <> T.unpack message)
+                            Right (Right _) -> expectationFailure "the forced failure must abort the import"
+                        stored <- queryScalar conn "SELECT COUNT(*) FROM bookmarks"
+                        stored `shouldBe` 0
+                        jobs <- queryScalar conn "SELECT COUNT(*) FROM jobs"
+                        jobs `shouldBe` 0
+                        close conn
+
+    describe "capture undo with a deleted clip template" $ do
+        it "restores the capture with a NULL template_id instead of wedging the undo" $
+            withSystemTempDirectory "eza-undo-template" $ \dir -> do
+                conn <- openDb (dir </> "undo-template.db")
+                Sqlite.execute_ conn "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://example.test/cap','Captured','example.test',1,1,1)"
+                bid <- (fromIntegral <$> Sqlite.lastInsertRowId conn) :: IO Int
+                Sqlite.execute_ conn "INSERT INTO clip_templates (name,created_at,updated_at) VALUES ('tpl',1,1)"
+                templateId <- (fromIntegral <$> Sqlite.lastInsertRowId conn) :: IO Int
+                Sqlite.execute
+                    conn
+                    "INSERT INTO captures (bookmark_id,url,template_id,captured_at,created_at) VALUES (?,?,?,1,1)"
+                    (bid, "https://example.test/cap" :: Text, templateId)
+                _ <- deleteBookmark conn bid
+                -- The template disappears before the delete is undone; the capture
+                -- before-image still names it.
+                Sqlite.execute conn "DELETE FROM clip_templates WHERE id = ?" (Sqlite.Only templateId)
+                restored <- undoLast conn
+                restored `shouldBe` 1
+                captures <- Sqlite.query_ conn "SELECT template_id FROM captures" :: IO [Sqlite.Only (Maybe Int)]
+                captures `shouldBe` [Sqlite.Only Nothing]
+                close conn
 
     describe "tag-aware search" $ do
         it "finds a record by a tag name in free-text search" $
@@ -632,9 +740,9 @@ main = hspec $ do
                         <> "\"revision\":\"r1:3:4:5:2\"}"
             decode (encode graph) `shouldBe` Just graph
             (decode wire :: Maybe GraphData) `shouldBe` Just graph
-            -- Older payloads had no revision; the decoder defaults it.
+            -- The strict decoder requires the revision.
             (decode "{\"tags\":[],\"records\":[],\"links\":[]}" :: Maybe GraphData)
-                `shouldBe` Just (GraphData [] [] [] "")
+                `shouldBe` Nothing
             -- The compact shapes cannot drift: tag 2, record 7, link 2.
             arrayLength (toJSON (GraphTag "rust" 2)) `shouldBe` Just 2
             arrayLength (toJSON (GraphRecord 7 "Title" "example.com" 1700000000 True False [0, 1])) `shouldBe` Just 7
@@ -1021,7 +1129,9 @@ main = hspec $ do
                 Auth.scopeAllows "normal" "GET" ["api", "v1", "account"] `shouldBe` True
                 Auth.scopeAllows "recovery" "POST" ["api", "setup", "password"] `shouldBe` True
                 Auth.scopeAllows "recovery" "GET" ["api", "v1", "account"] `shouldBe` True
-                Auth.scopeAllows "recovery" "GET" ["api", "v1", "boot"] `shouldBe` True
+                -- Recovery sessions are limited to the setup/logout ceremonies and
+                -- the account read (AGENTS auth rules); boot is not on that list.
+                Auth.scopeAllows "recovery" "GET" ["api", "v1", "boot"] `shouldBe` False
                 Auth.scopeAllows "recovery" "POST" ["api", "v1", "bookmarks"] `shouldBe` False
                 close conn
         it "refuses to revoke the last passkey while two-factor is on" $

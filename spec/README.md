@@ -22,10 +22,10 @@ spec/
   Undo.cfg            bounds: three rows, two values, journal depth 2
   README.md           this file
   schema/
-    view.schema.json      view wrapper and graph/ledger definitions, draft 2020-12
-    webhook.schema.json   webhook document, draft 2020-12
-  examples/           documents that satisfy the plan constraints
-  bad/                documents that violate exactly one plan constraint
+    view.schema.json      view shape: create payload and stored/exported wrapper, draft 2020-12
+    webhook.schema.json   webhook shape: create payload and stored object, draft 2020-12
+  examples/           create payloads and stored/exported documents that satisfy the schemas
+  bad/                documents that violate exactly one contract requirement
 ```
 
 `scripts/check-specs.sh` runs TLC on all four models and validates the JSON.
@@ -71,8 +71,9 @@ workstream.
   file per user. SQLite serializes writers; the deployment keeps one replica.
 - Credentials, sessions, views, webhooks, events, and share links live in the
   user database. The control database holds account rows and no library data.
-- Extensions v1 are declarative. A view or webhook document is stored, read,
-  and validated against the schemas here. No extension-provided code runs.
+- Extensions v1 are declarative. The schemas here describe both the create
+  payload and the stored/exported document; the Haskell decoders and semantic
+  validators enforce them. No extension-provided code runs.
 - Event delivery uses a transactional outbox, at-least-once delivery, an HMAC
   signature, retries, and disable on terminal failure. The models abstract
   timing, HTTP calls, and cryptography.
@@ -156,12 +157,14 @@ these invariants. Current bounds find about 48,000 (`MultiUser`), 232,000
 (`Extensions`), 2,000 (`Jobs`) and 216,000 (`Undo`) distinct states.
 
 The JSON checks are shape checks. `view.schema.json` and
-`webhook.schema.json` are draft 2020-12 schemas. `scripts/check-specs.sh`
+`webhook.schema.json` are draft 2020-12 schemas for one document in two states:
+a create/PATCH payload and the stored/exported document. `scripts/check-specs.sh`
 requires a validator (`python3` with the `jsonschema` package, provided by the
 dev shell) and fails instead of skipping the pass when it is missing: it checks
-the schemas themselves and validates every example and every `bad/` document.
-The `jq` checks in the same script are an earlier, hand-written shape pass that
-runs before the full schema validation.
+the schemas themselves and validates every file under `examples/` (create
+payloads and stored wrappers) and every `bad/` document. The `jq` checks in the
+same script are an earlier, hand-written shape pass that pins the fields each
+fixture is meant to exercise.
 
 ## What is not proven
 
@@ -186,12 +189,15 @@ runs before the full schema validation.
   the index is a derived set, not an FTS5 table, and the model checks that the
   restore leaves it consistent rather than checking trigger SQL.
 - The schemas check shape, not semantics. A query string of 512 characters can
-  still be nonsense; the Haskell parser is the deeper check. The decoder
-  contract is covered: `server/test/ViewContractSpec.hs` (run by
-  `cabal test all`) decodes every example document with the real server codecs
-  and rejects every `spec/bad/` fixture. That test is part of the normal test
-  suite; `scripts/check-specs.sh` still checks JSON shape and the TLA+ model
-  only.
+  still be nonsense; the Haskell parser is the deeper check.
+  `scripts/check-specs.sh` validates every example (create payload and stored
+  wrapper) and every bad fixture against the schemas. The decoder contract is
+  covered separately: `server/test/ViewContractSpec.hs` (run by
+  `cabal test all`) decodes the create examples with the real server codecs and
+  rejects the bad fixtures it lists. That test does not decode the
+  stored-wrapper examples, and the server decoder fills omitted
+  graph-definition fields with their documented defaults, so the schemas pin the
+  canonical JSON shape while the codecs own the lenient create-side decoding.
 - The authorization matrix for current routes is a separate M0 workstream. The
   models cover the multi-user and extension transitions only.
 
@@ -234,16 +240,33 @@ jq -e . spec/examples/graph-view.json
 
 Keep the state space small. Add a bound to the `.cfg` file rather than a new
 constant when a model needs another account, view, or event. Run
-`scripts/check-specs.sh` after any change. The `bad/` fixtures exist so a schema
-edit that accepts an invalid document is noticed by the script.
+`scripts/check-specs.sh` after any change; it requires and validates every file
+under `examples/` (create payloads and stored/exported wrappers) and every file
+under `bad/`, so a schema edit that accepts an invalid document or rejects a
+stored document fails the script. When the stored shape changes, update the
+schema, a stored fixture under `examples/`, and the Haskell codec (the writer)
+together.
 
-The schema assumptions that need review:
+The schema contract decisions:
 
-- `slug` is lowercase letters, digits, and hyphens, at most 48 characters.
+- `name`, `kind` and `definition` are required; `slug` is optional because a
+  create payload may omit it and the server derives it. A stored/exported view
+  always carries every wrapper field: `schema`, `id`, `slug`, `name`, `kind`,
+  `is_default`, `definition`, `created_at` and `updated_at`.
+- `id`, `created_at` and `updated_at` are server-assigned: optional in the
+  schema so a create payload validates, always emitted on a stored document.
 - `ledger.definition.sort` accepts `created`, `added`, or `opened`, matching the
   bookmarks API sort parameter.
+- `graph.definition.local_depth` is `1` to `3` or null for the whole library;
+  the seeded default graph view uses null.
 - `is_default` is optional and defaults to false. The bounded model still
   treats a missing default as no default.
-- `webhook.enabled` is required in the document. A request may set it to false
-  to create a stopped webhook.
+- `webhook.enabled` is optional and defaults to true when omitted; it is always
+  present on a stored object.
+- `webhook.events` may repeat in an input document; the server de-duplicates
+  before storing, so the schema does not require unique items.
+- Stored webhook fields (`id`, `created_at`, `last_status`, `last_attempt_at`,
+  `last_error`, `fail_streak`) are optional in the schema and always emitted on
+  a stored object; `last_status` and `last_attempt_at` may be null before the
+  first attempt.
 - `webhook.url` accepts `http` and `https` only.

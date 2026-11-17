@@ -640,7 +640,17 @@ try {
   await rowByName("Smoke graph view").locator(SEL.viewDefaultBadge).waitFor({ timeout: 20000 }).catch(() => {});
   check("setting a default moves the single badge", (await page.locator(SEL.viewDefaultBadge).count()) === 1, String(await page.locator(SEL.viewDefaultBadge).count()));
 
+  // Deleting a saved view goes through the shell confirmation layer: cancel
+  // keeps it, confirm removes it.
   await rowByName("Smoke graph view").locator(SEL.viewDelete).click();
+  await page.waitForSelector(SEL.dialogConfirm, { timeout: 10000 });
+  check("deleting a view asks for confirmation", (await page.locator(SEL.dialogConfirm).count()) === 1);
+  await page.locator(SEL.dialogCancel).click();
+  await page.waitForTimeout(300);
+  check("cancelling the delete keeps the view", (await rowByName("Smoke graph view").count()) === 1);
+  await rowByName("Smoke graph view").locator(SEL.viewDelete).click();
+  await page.waitForSelector(SEL.dialogConfirm, { timeout: 10000 });
+  await page.locator(SEL.dialogConfirm).click();
   await rowByName("Smoke graph view").waitFor({ state: "detached", timeout: 20000 }).catch(() => {});
   // Deleting the default view promotes another view server-side; the manager
   // must show that surviving default without waiting for a page reload.

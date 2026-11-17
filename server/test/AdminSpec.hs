@@ -12,6 +12,7 @@ module AdminSpec (spec) where
 import Data.Aeson (Value (..), encode, object, (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
+import Data.List (sort)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -31,11 +32,13 @@ import System.Posix.Files (
  )
 import Test.Hspec
 
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (finally)
 import qualified Database.SQLite.Simple as Sqlite
 import qualified Eza.Admin as Admin
 import Eza.Config (Config (..))
 import qualified Eza.Control as Control
+import Eza.Server (userSlotCount)
 import Eza.User (UserCreateResult (..), UserView (..))
 import TestHarness
 
@@ -407,6 +410,184 @@ spec = describe "admin API" $ do
             listed <- httpRequest server "GET" "/api/v1/bookmarks?limit=10" (cookieHeaders session csrf) Nothing
             listed `shouldHaveStatus` 200
             hrespBody listed `shouldSatisfy` containsText "JSON import"
+
+    it "releases a disabled or deleted account's slot so the user cap counts live slots" $
+        withTestServerCustom (\cfg -> cfg{cfgMaxUsers = 2}) (\_ -> pure ()) $ \server -> do
+            alice <- createTestUser server "alice" "alice password" Control.RoleAdmin
+            bob <- createTestUser server "bob" "bob password" Control.RoleMember
+            (session, csrf) <- loginAs server "alice" "alice password"
+            _ <- loginAs server "bob" "bob password"
+            slotsAfterLogin <- userSlotCount (tsState server)
+            slotsAfterLogin `shouldBe` 2
+            let bobPath = "/api/v1/admin/users/" <> show (Control.cuId bob)
+            disabled <-
+                httpRequest
+                    server
+                    "PATCH"
+                    bobPath
+                    (authHeaders session csrf)
+                    (Just (encode (object ["enabled" .= False])))
+            disabled `shouldHaveStatus` 200
+            slotsAfterDisable <- userSlotCount (tsState server)
+            slotsAfterDisable `shouldBe` 1
+            reenabled <-
+                httpRequest
+                    server
+                    "PATCH"
+                    bobPath
+                    (authHeaders session csrf)
+                    (Just (encode (object ["enabled" .= True])))
+            reenabled `shouldHaveStatus` 200
+            _ <- loginAs server "bob" "bob password"
+            slotsAfterReopen <- userSlotCount (tsState server)
+            slotsAfterReopen `shouldBe` 2
+            removed <-
+                httpRequest
+                    server
+                    "DELETE"
+                    bobPath
+                    (authHeaders session csrf)
+                    (Just (encode (object ["confirm" .= True, "delete_db" .= False])))
+            removed `shouldHaveStatus` 200
+            slotsAfterDelete <- userSlotCount (tsState server)
+            slotsAfterDelete `shouldBe` 1
+            -- With the slot released, a new account still fits under the cap.
+            created <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/v1/admin/users"
+                    (authHeaders session csrf)
+                    (Just (encode (object ["username" .= ("carol" :: Text), "password" .= ("carol password" :: Text), "role" .= ("member" :: Text)])))
+            created `shouldHaveStatus` 201
+            _ <- loginAs server "carol" "carol password"
+            slotsAfterChurn <- userSlotCount (tsState server)
+            slotsAfterChurn `shouldBe` 2
+            users <- withControlUsers (tsConfig server) Control.listUsers
+            map Control.cuUsername users `shouldBe` [Control.cuUsername alice, "carol"]
+
+    it "rotates the account's recovery codes on an admin password reset" $
+        withTwoUsers $ \server _ _ -> do
+            (adminSession, adminCsrf) <- loginAs server "alice" "alice password"
+            created <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/v1/admin/users"
+                    (authHeaders adminSession adminCsrf)
+                    (Just (encode (object ["username" .= ("carol" :: Text), "password" .= ("carol password" :: Text)])))
+            created `shouldHaveStatus` 201
+            result <- expectJust "user create result" (jsonBody created :: Maybe UserCreateResult)
+            let carolId = uvId (ucrUser result)
+                oldCode = case ucrRecoveryCodes result of
+                    (code : _) -> code
+                    [] -> ""
+            reset <-
+                httpRequest
+                    server
+                    "POST"
+                    ("/api/v1/admin/users/" <> show carolId <> "/password")
+                    (authHeaders adminSession adminCsrf)
+                    (Just (encode (object ["password" .= ("temporary carol password" :: Text)])))
+            reset `shouldHaveStatus` 200
+            newCodes <- case jsonBody reset :: Maybe Value of
+                Just (Object top) -> case KeyMap.lookup "recovery_codes" top of
+                    Just (Array values) ->
+                        mapM
+                            ( \value -> case value of
+                                String code -> pure code
+                                _ -> expectationFailure "recovery_codes must be strings" >> error "unreachable"
+                            )
+                            (foldr (:) [] values)
+                    _ -> expectationFailure "reset response has no recovery_codes" >> error "unreachable"
+                _ -> expectationFailure "reset response is not an object" >> error "unreachable"
+            length newCodes `shouldBe` 10
+            oldCode `shouldNotBe` ""
+            -- The previous codes are invalid, so the reset is exclusive.
+            redeemed <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/recovery/redeem"
+                    jsonHeaders
+                    (Just (encode (object ["username" .= ("carol" :: Text), "code" .= oldCode])))
+            redeemed `shouldHaveStatus` 400
+            hrespBody redeemed `shouldSatisfy` containsText "bad_code"
+
+    it "keeps one admin when two admins delete each other concurrently" $
+        withTwoUsers $ \server alice bob -> do
+            (adminSession, adminCsrf) <- loginAs server "alice" "alice password"
+            promoted <-
+                httpRequest
+                    server
+                    "PATCH"
+                    ("/api/v1/admin/users/" <> show (Control.cuId bob))
+                    (authHeaders adminSession adminCsrf)
+                    (Just (encode (object ["role" .= ("admin" :: Text)])))
+            promoted `shouldHaveStatus` 200
+            (bobSession, bobCsrf) <- loginAs server "bob" "bob password"
+            bobResult <- newEmptyMVar
+            _ <- forkIO $ do
+                response <-
+                    httpRequest
+                        server
+                        "DELETE"
+                        ("/api/v1/admin/users/" <> show (Control.cuId alice))
+                        (authHeaders bobSession bobCsrf)
+                        (Just (encode (object ["confirm" .= True])))
+                putMVar bobResult response
+            aliceDelete <-
+                httpRequest
+                    server
+                    "DELETE"
+                    ("/api/v1/admin/users/" <> show (Control.cuId bob))
+                    (authHeaders adminSession adminCsrf)
+                    (Just (encode (object ["confirm" .= True])))
+            bobDelete <- takeMVar bobResult
+            -- Exactly one delete wins. The other admin either loses the
+            -- guarded last-admin write (409) or its session is already gone
+            -- because it was the one deleted (401); both keep the invariant.
+            let statuses = sort [hrespStatus aliceDelete, hrespStatus bobDelete]
+            case statuses of
+                [200, other] -> other `shouldSatisfy` (`elem` [401, 409])
+                _ -> expectationFailure ("expected one 200 and one refused delete, got " <> show statuses)
+            admins <- Control.countEnabledAdmins (tsControl server)
+            admins `shouldBe` 1
+
+    it "exports notes as a Markdown attachment" $
+        withTwoUsers $ \server _ _ -> do
+            (session, csrf) <- loginAs server "alice" "alice password"
+            created <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/v1/bookmarks"
+                    (authHeaders session csrf)
+                    (Just (encode (object ["url" .= ("https://example.test/note-export" :: Text), "title" .= ("Note export" :: Text)])))
+            created `shouldHaveStatus` 201
+            bookmarkId <- expectJust "bookmark id" (jsonIntField "id" (hrespBody created))
+            patched <-
+                httpRequest
+                    server
+                    "PATCH"
+                    ("/api/v1/bookmarks/" <> show bookmarkId)
+                    (authHeaders session csrf)
+                    (Just (encode (object ["note_body" .= ("A note body for the export." :: Text)])))
+            patched `shouldHaveStatus` 200
+            exported <-
+                httpRequest
+                    server
+                    "GET"
+                    "/api/v1/export/notes"
+                    (cookieHeaders session csrf)
+                    Nothing
+            exported `shouldHaveStatus` 200
+            headerValue exported "Content-Type" `shouldBe` Just "text/markdown; charset=utf-8"
+            headerValue exported "Content-Disposition"
+                `shouldSatisfy` maybe False (T.isInfixOf "eza-notes.md" . TE.decodeUtf8)
+            hrespBody exported `shouldSatisfy` containsText "# eza notes"
+            hrespBody exported `shouldSatisfy` containsText "Note export"
+            hrespBody exported `shouldSatisfy` containsText "A note body for the export."
 
 -- | Enqueue a snapshot job and return its id (the response is now 202).
 snapshot :: TestServer -> T.Text -> T.Text -> Int -> IO Int

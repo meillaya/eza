@@ -1638,6 +1638,7 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
 .read-paras.reading { max-width: none; }
 .read-paras p { position: relative; hyphens: auto; }
 .read-paras mark { color: inherit; }
+.read-mark { cursor: pointer; }
 .read-paras::-webkit-scrollbar { width: 8px; }
 .read-paras::-webkit-scrollbar-track { background: transparent; }
 .read-paras::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 8px; }
@@ -3561,6 +3562,11 @@ html[data-theme="dark"] .slip-wrap{background:var(--scrim-strong)}
   min-height: 34px;
 }
 .install-fab[hidden] { display: none !important; }
+/* The tab bar owns the bottom 46px on phones; keep the install control above
+   it instead of on top of the last navigation item. */
+@media (max-width: 767px) {
+  .install-fab { bottom: calc(46px + var(--s4)); min-height: 44px; }
+}
 
 .snapshot-frame {
   width: 100%;

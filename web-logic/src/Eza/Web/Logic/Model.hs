@@ -134,6 +134,14 @@ wireVersionMismatchMessage serverVersion =
             <> ". Reload the page to load a matching build."
         )
 
+{- | The boot body could not be decoded at all, so the client cannot even read
+the server's wire version. Treat that exactly like a version refusal: block the
+paint instead of showing a generic failure over a possibly different contract.
+-}
+bootDecodeMismatchMessage :: Text
+bootDecodeMismatchMessage =
+    "This page could not read the server's boot document, so the client and server may be different versions. Reload the page; if this keeps happening, update eza so the app and the server match."
+
 data Theme = ThemeLight | ThemeDark
     deriving (Eq, Show)
 
@@ -268,6 +276,8 @@ data Action
     | BootFailed ApiError
     | -- a boot document built for another wire contract: block the UI
       WireVersionMismatch Int
+    | -- the boot body itself could not be decoded: treat as a protocol mismatch
+      BootDecodeFailed Text
     | ApiErrorRaised ApiError
     | ThemeLoaded Theme
     | ConnectivityChanged Bool
@@ -316,6 +326,9 @@ data Action
     | PaletteNext
     | PaletteChoose Int
     | PaletteSelect
+    | -- the reusable shell confirmation layer
+      ConfirmAccepted
+    | ConfirmCancelled
     | -- detail
       DetailLoaded RequestId BookmarkDetail
     | DetailFailed RequestId ApiError
@@ -332,7 +345,6 @@ data Action
     | ExtractEditStart
     | ExtractEditChanged Text
     | ExtractEditCancel
-    | ExtractSaved Int
     | MarkLinkAlive
     | LinkMarkedAlive
     | RecheckLink
@@ -344,15 +356,11 @@ data Action
     | ReadPatchFailed RequestId Bool ApiError
     | BacklinksLoaded RequestId [Backlink]
     | BacklinksFailed RequestId ApiError
-    | LinkPrev
-    | LinkNext
     | LinkChoose Int
     | LinkSuggestions [BookmarkSummary]
     | RunBookmarkAction Int Text
-    | DeleteBookmark Int
     | DeletedOk Int
     | DeleteFailed ApiError
-    | DirtyGuardOpen Route
     | DirtyGuardClose
     | DirtyGuardDiscard
     | -- import / export
@@ -362,7 +370,6 @@ data Action
     | ImportFailed ApiError
     | -- saved searches
       SavedSearchSave
-    | SavedSearchNameInput Text
     | SavedSearchDelete Int
     | SavedSearchDone
     | SavedSearchFailed ApiError
@@ -395,7 +402,6 @@ data Action
     | GraphDetailStep RequestId Int
     | GraphLayoutLoaded LayoutPreset GraphLayoutWire
     | GraphLayoutFailed ApiError
-    | GraphLabelModeSelected LabelMode
     | GraphPresetSelected LayoutPreset
     | GraphScopeToggled
     | GraphLocalDepthSelected Int
@@ -406,6 +412,7 @@ data Action
     | ViewSaved View
     | ViewSaveFailed ApiError
     | ViewDeleted Text
+    | ViewDeleteConfirmed Text
     | ViewDeleteFailed ApiError
     | ViewFetched View
     | ViewFetchFailed ApiError
@@ -498,8 +505,8 @@ data Action
     | UndoEntriesLoaded [UndoEntry]
     | UndoEntriesFailed ApiError
     | UndoPreviewRequest Int
-    | UndoPreviewLoaded UndoPreview
-    | UndoPreviewFailed ApiError
+    | UndoPreviewLoaded RequestId Int UndoPreview
+    | UndoPreviewFailed RequestId Int ApiError
     | UndoPreviewClose
     | UndoConfirm Int
     | UndoDone UndoResult
@@ -510,8 +517,10 @@ data Action
     | AccountFailed ApiError
     | RecoveryRegenerate
     | RecoveryLoaded [Text]
+    | RecoveryRegenerateConfirmed
     | CredentialRenamed Text Text
     | CredentialDeleted Text
+    | CredentialDeleteConfirmed Text
     | CredentialOpFailed ApiError
     | CredentialEditStart Text
     | CredentialNameInput Text
@@ -564,6 +573,7 @@ data Action
     | TokenCreateFailed ApiError
     | TokenRevoke Int
     | TokenRevoked
+    | TokenRevokeConfirmed Int
     | TokenRevealDismiss
     | TokenCopied Text
     | -- enrichment
@@ -639,7 +649,7 @@ data Action
     | UserResetPasswordInput Text
     | UserResetSubmit
     | UserResetCancel
-    | UserResetDone Int Text
+    | UserResetDone Int Text [Text]
     | UserResetFailed ApiError
     | UserRecoveryCopied Text
     | UserRecoveryDismiss
@@ -664,6 +674,7 @@ data Action
     | WebhookTestJobAbandoned Int
     | WebhookDelete Int
     | WebhookDeleted Int
+    | WebhookDeleteConfirmed Int
     | WebhookDeleteFailed ApiError
     | WebhookSecretCopied Text
     | WebhookSecretDismiss
@@ -685,6 +696,7 @@ data Action
     | RuleToggled Rule
     | RuleDelete Int
     | RuleDeleted Int
+    | RuleDeleteConfirmed Int
     | RuleDryRun
     | RuleDryRunResult Int [Int]
     | RuleDryRunFailed ApiError
@@ -697,8 +709,39 @@ data Action
     | JobTick JobKind Int TimerId
     | JobStatusLoaded JobKind Int RequestId JobStatus
     | JobStatusFailed JobKind Int RequestId ApiError
-    | JobAbandoned JobKind Int
-    | JobTimedOut JobKind Int
+
+{- | The one shell-level confirmation layer. A destructive request action arms
+it with copy and a 'ConfirmKind'; only 'ConfirmAccepted' runs the kind's action
+and 'ConfirmCancelled'/Escape drop it. It is rendered above every other layer so
+Escape always resolves it first.
+-}
+data Confirmation = Confirmation
+    { cfTitle :: Text
+    , cfMessage :: Text
+    , cfConfirmLabel :: Text
+    , cfKind :: ConfirmKind
+    }
+    deriving (Eq, Show)
+
+-- | The six non-journaled destructive actions that ask before they run.
+data ConfirmKind
+    = ConfirmViewDelete Text
+    | ConfirmRuleDelete Int
+    | ConfirmWebhookDelete Int
+    | ConfirmTokenRevoke Int
+    | ConfirmCredentialDelete Text
+    | ConfirmRecoveryRegenerate
+    deriving (Eq, Show)
+
+-- | The action a confirmation runs once it is accepted.
+confirmKindAction :: ConfirmKind -> Action
+confirmKindAction kind = case kind of
+    ConfirmViewDelete slug -> ViewDeleteConfirmed slug
+    ConfirmRuleDelete targetRule -> RuleDeleteConfirmed targetRule
+    ConfirmWebhookDelete targetWebhook -> WebhookDeleteConfirmed targetWebhook
+    ConfirmTokenRevoke targetToken -> TokenRevokeConfirmed targetToken
+    ConfirmCredentialDelete targetCredential -> CredentialDeleteConfirmed targetCredential
+    ConfirmRecoveryRegenerate -> RecoveryRegenerateConfirmed
 
 -- | Everything the UI needs to render itself.
 data ShellFields = ShellFields
@@ -737,6 +780,7 @@ data ShellFields = ShellFields
       -- not push a second entry
       sfGuardFromHistory :: Bool
     , sfConfirmLogout :: Bool
+    , sfConfirmation :: Maybe Confirmation
     , -- toasts
       sfToasts :: [Toast]
     , sfToastNext :: Int
@@ -925,7 +969,7 @@ data TagsFields = TagsFields
     , tgSuggestionNotice :: Maybe Text
     , tgSuggestionError :: Maybe Text
     , tgAiStatusError :: Maybe Text
-    , tgSuggestionApplyBusy :: Bool
+    , tgSuggestionApplyBusy :: Maybe Int
     }
     deriving (Eq)
 
@@ -962,6 +1006,10 @@ data MaintFields = MaintFields
     , mnUndoPreview :: Maybe UndoPreview
     , mnUndoPreviewLoading :: Bool
     , mnUndoPreviewError :: Maybe Text
+    , -- request epoch and target id of the undo-preview fetch: a stale answer
+      -- is dropped and a close invalidates the in-flight fetch
+      mnUndoPreviewEpoch :: RequestId
+    , mnUndoPreviewId :: Maybe Int
     , mnUndoBusy :: Bool
     }
     deriving (Eq)
@@ -997,7 +1045,9 @@ data AccountFields = AccountFields
     , acUserRecovery :: Maybe (Text, [Text])
     , acUserReset :: Maybe Int
     , acUserResetPassword :: Text
-    , acUserResetShown :: Maybe (Text, Text)
+    , -- username, temporary password, and the replacement recovery codes the
+      -- reset response returned; all one-time, shown once
+      acUserResetShown :: Maybe (Text, Text, [Text])
     , acUserActionError :: Maybe Text
     , acUserDelete :: Maybe UserView
     , acUserDeleteName :: Text
@@ -1051,7 +1101,7 @@ data WebhookFields = WebhookFields
     , wkWebhookTestError :: Maybe (Int, Text)
     , wkWebhookDeliveries :: Maybe (Int, [DeliveryView])
     , wkWebhookDeliveriesError :: Maybe Text
-    , wkWebhookTestBusy :: Bool
+    , wkWebhookTestBusy :: Maybe Int
     }
     deriving (Eq)
 
@@ -1130,6 +1180,7 @@ initialModel =
                 , sfPendingRoute = Nothing
                 , sfGuardFromHistory = False
                 , sfConfirmLogout = False
+                , sfConfirmation = Nothing
                 , sfToasts = []
                 , sfToastNext = 0
                 }
@@ -1276,7 +1327,7 @@ initialModel =
                 , tgSuggestionNotice = Nothing
                 , tgSuggestionError = Nothing
                 , tgAiStatusError = Nothing
-                , tgSuggestionApplyBusy = False
+                , tgSuggestionApplyBusy = Nothing
                 }
         , gDedup =
             DedupFields
@@ -1309,6 +1360,8 @@ initialModel =
                 , mnUndoPreview = Nothing
                 , mnUndoPreviewLoading = False
                 , mnUndoPreviewError = Nothing
+                , mnUndoPreviewEpoch = RequestId 0
+                , mnUndoPreviewId = Nothing
                 , mnUndoBusy = False
                 }
         , gAccount =
@@ -1393,7 +1446,7 @@ initialModel =
                 , wkWebhookTestError = Nothing
                 , wkWebhookDeliveries = Nothing
                 , wkWebhookDeliveriesError = Nothing
-                , wkWebhookTestBusy = False
+                , wkWebhookTestBusy = Nothing
                 }
         , gAdd =
             AddFields
@@ -1917,6 +1970,10 @@ mGuardFromHistory model = sfGuardFromHistory (gShell model)
 mConfirmLogout :: Model -> Bool
 mConfirmLogout model = sfConfirmLogout (gShell model)
 
+{-# INLINE mConfirmation #-}
+mConfirmation :: Model -> Maybe Confirmation
+mConfirmation model = sfConfirmation (gShell model)
+
 {-# INLINE mGraphView #-}
 mGraphView :: Model -> GraphView
 mGraphView model = grGraphView (gGraph model)
@@ -2241,6 +2298,14 @@ mUndoPreview model = mnUndoPreview (gMaint model)
 mUndoPreviewLoading :: Model -> Bool
 mUndoPreviewLoading model = mnUndoPreviewLoading (gMaint model)
 
+{-# INLINE mUndoPreviewEpoch #-}
+mUndoPreviewEpoch :: Model -> RequestId
+mUndoPreviewEpoch model = mnUndoPreviewEpoch (gMaint model)
+
+{-# INLINE mUndoPreviewId #-}
+mUndoPreviewId :: Model -> Maybe Int
+mUndoPreviewId model = mnUndoPreviewId (gMaint model)
+
 {-# INLINE mUndoPreviewError #-}
 mUndoPreviewError :: Model -> Maybe Text
 mUndoPreviewError model = mnUndoPreviewError (gMaint model)
@@ -2386,7 +2451,7 @@ mUserResetPassword :: Model -> Text
 mUserResetPassword model = acUserResetPassword (gAccount model)
 
 {-# INLINE mUserResetShown #-}
-mUserResetShown :: Model -> Maybe (Text, Text)
+mUserResetShown :: Model -> Maybe (Text, Text, [Text])
 mUserResetShown model = acUserResetShown (gAccount model)
 
 {-# INLINE mUserActionError #-}
@@ -2458,7 +2523,7 @@ mSnapshotBusy :: Model -> Bool
 mSnapshotBusy model = dtSnapshotBusy (gDetail model)
 
 {-# INLINE mWebhookTestBusy #-}
-mWebhookTestBusy :: Model -> Bool
+mWebhookTestBusy :: Model -> Maybe Int
 mWebhookTestBusy model = wkWebhookTestBusy (gWebhooks model)
 
 {- | Virtualized grid metrics.  Card height follows the design brief:
@@ -2666,7 +2731,7 @@ mAiStatusError :: Model -> Maybe Text
 mAiStatusError model = tgAiStatusError (gTags model)
 
 {-# INLINE mSuggestionApplyBusy #-}
-mSuggestionApplyBusy :: Model -> Bool
+mSuggestionApplyBusy :: Model -> Maybe Int
 mSuggestionApplyBusy model = tgSuggestionApplyBusy (gTags model)
 
 {-# INLINE mSavedSearchesError #-}

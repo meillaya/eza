@@ -32,7 +32,8 @@ import Eza.Web.Logic.Update.ViewDefs (applyGraphView, defaultGraphView, isLocalG
 
 hasModalLayer :: Model -> Bool
 hasModalLayer m =
-    mPaletteOpen m
+    isJust (mConfirmation m)
+        || mPaletteOpen m
         || mAddOpen m
         || mGuardOpen m
         || mConfirmLogout m
@@ -56,28 +57,34 @@ hasModalLayer m =
 
 closeTopLayer :: Model -> Update ()
 closeTopLayer m
+    -- Layers are tested in the order the view renders them, top first: the
+    -- shell confirmation, the views dialogs, the shell dialogs, then the
+    -- route-owned dialogs. This matters for the dirty guard: it renders above
+    -- the palette, the add sheet and the record dialogs, so it must be closed
+    -- before them.
+    | isJust (mConfirmation m) = putModel (\x -> x{gShell = (gShell x){sfConfirmation = Nothing}})
     | mUndoPreviewLoading m || isJust (mUndoPreview m) || isJust (mUndoPreviewError m) = dispatch UndoPreviewClose
-    | vuSaveOpen (mViewUi m) = putModel (\x -> x{gViews = (gViews x){vwViewUi = (mViewUi x){vuSaveOpen = False, vuError = Nothing}}})
-    | vuImportOpen (mViewUi m) = putModel (\x -> x{gViews = (gViews x){vwViewUi = (mViewUi x){vuImportOpen = False, vuError = Nothing}}})
     | isJust (vuExport (mViewUi m)) = putModel (\x -> x{gViews = (gViews x){vwViewUi = (mViewUi x){vuExport = Nothing}}})
+    | vuImportOpen (mViewUi m) = putModel (\x -> x{gViews = (gViews x){vwViewUi = (mViewUi x){vuImportOpen = False, vuError = Nothing}}})
+    | vuSaveOpen (mViewUi m) = putModel (\x -> x{gViews = (gViews x){vwViewUi = (mViewUi x){vuSaveOpen = False, vuError = Nothing}}})
+    | mConfirmBulkDelete m = putModel (\x -> x{gLedger = (gLedger x){lfConfirmBulkDelete = False}})
+    | isJust (mTagPrompt m) = putModel (\x -> x{gLedger = (gLedger x){lfTagPrompt = Nothing, lfTagPromptValue = ""}})
     | mConfirmLogout m = putModel (\x -> x{gShell = (gShell x){sfConfirmLogout = False}})
-    | mHighlightNoteOpen m = putModel (\x -> x{gDetail = (gDetail x){dtHighlightNoteOpen = False, dtHighlightNote = ""}})
-    | isJust (mHighlightEdit m) = putModel (\x -> x{gDetail = (gDetail x){dtHighlightEdit = Nothing, dtHighlightEditNote = ""}})
-    | mShareDialogOpen m = putModel (\x -> x{gShares = (gShares x){srShareDialogOpen = False, srShareUrl = Nothing}})
-    | isJust (mSavedShare m) = putModel (\x -> x{gLedger = (gLedger x){lfSavedShare = Nothing}, gShares = (gShares x){srShareUrl = Nothing}})
-    | isJust (mTagDialog m) = putModel (\x -> x{gTags = (gTags x){tgTagDialog = Nothing, tgTagDialogError = Nothing}})
-    | isJust (mDedupConfirm m) = putModel (\x -> x{gDedup = (gDedup x){ddDedupConfirm = Nothing}})
-    | mDedupMergeAllOpen m = putModel (\x -> x{gDedup = (gDedup x){ddDedupMergeAllOpen = False}})
-    | mSnapshotOpen m = putModel (\x -> x{gDetail = (gDetail x){dtSnapshotOpen = False}})
-    | isJust (mReaderSel m) = putModel (\x -> x{gDetail = (gDetail x){dtReaderSel = Nothing}})
+    | mGuardOpen m = dispatch DirtyGuardClose
     | mPaletteOpen m = putModel (\x -> x{gShell = (gShell x){sfPaletteOpen = False, sfPaletteQ = "", sfPaletteSel = 0}})
     | mAddOpen m = putModel (\x -> x{gAdd = (gAdd x){adAddOpen = False}})
-    | mGuardOpen m = dispatch DirtyGuardClose
-    | isJust (mTagPrompt m) = putModel (\x -> x{gLedger = (gLedger x){lfTagPrompt = Nothing, lfTagPromptValue = ""}})
-    | mConfirmBulkDelete m = putModel (\x -> x{gLedger = (gLedger x){lfConfirmBulkDelete = False}})
+    | isJust (mSavedShare m) = putModel (\x -> x{gLedger = (gLedger x){lfSavedShare = Nothing}, gShares = (gShares x){srShareUrl = Nothing}})
+    | mDedupMergeAllOpen m = putModel (\x -> x{gDedup = (gDedup x){ddDedupMergeAllOpen = False}})
+    | isJust (mDedupConfirm m) = putModel (\x -> x{gDedup = (gDedup x){ddDedupConfirm = Nothing}})
+    | isJust (mTagDialog m) = putModel (\x -> x{gTags = (gTags x){tgTagDialog = Nothing, tgTagDialogError = Nothing}})
+    | isJust (mConfirmDelete m) = putModel (\x -> x{gLedger = (gLedger x){lfConfirmDelete = Nothing}})
+    | mSnapshotOpen m = putModel (\x -> x{gDetail = (gDetail x){dtSnapshotOpen = False}})
+    | isJust (mHighlightEdit m) = putModel (\x -> x{gDetail = (gDetail x){dtHighlightEdit = Nothing, dtHighlightEditNote = ""}})
+    | mHighlightNoteOpen m = putModel (\x -> x{gDetail = (gDetail x){dtHighlightNoteOpen = False, dtHighlightNote = ""}})
+    | mShareDialogOpen m = putModel (\x -> x{gShares = (gShares x){srShareDialogOpen = False, srShareUrl = Nothing}})
+    | isJust (mReaderSel m) = putModel (\x -> x{gDetail = (gDetail x){dtReaderSel = Nothing}})
     | isJust (mLinkQuery m) = putModel (\x -> x{gDetail = (gDetail x){dtLinkQuery = Nothing, dtLinkResults = []}})
     | isJust (mDrawer m) = putModel (\x -> x{gLedger = (gLedger x){lfDrawer = Nothing}})
-    | isJust (mConfirmDelete m) = putModel (\x -> x{gLedger = (gLedger x){lfConfirmDelete = Nothing}})
     | not (IS.null (mSelection m)) = putModel (\x -> (cancelSelectAllPaging x){gLedger = (gLedger (cancelSelectAllPaging x)){lfSelection = IS.empty, lfSelectAnchor = Nothing}})
     | mSelectingAll m = putModel cancelSelectAllPaging
     | otherwise = pure ()
@@ -126,20 +133,27 @@ handle = \case
         -- cannot land after a tab click and undo it.
         when (route == Account) $
             putModel (\x -> x{gAccount = (gAccount x){acAccountTab = accountTabFromSlug fragmentText}})
-        if hasUnsaved m && route /= mRoute m && isDetailRoute (mRoute m)
+        if hasUnsaved m && route == mRoute m
             then
-                -- The browser already changed the address before the
-                -- subscription delivered this route. Remember that so
-                -- cancelling can put the address back and discarding
-                -- can avoid a duplicate history entry.
-                put m{gShell = (gShell m){sfGuardOpen = True, sfPendingRoute = Just route, sfGuardFromHistory = True}}
-            else do
-                -- A history navigation that lands on the rendered route
-                -- (e.g. Forward while the guard is open) closes the guard
-                -- instead of re-deriving it.
+                -- Forward lands on the record already on screen: the editor is
+                -- the truth here, so drop the guard and keep the edits instead
+                -- of refetching the record over them.
                 putModel (\x -> x{gShell = (gShell x){sfGuardOpen = False, sfPendingRoute = Nothing, sfGuardFromHistory = False}})
-                Job.cancelAllJobs
-                loadRoute route
+            else
+                if hasUnsaved m && route /= mRoute m && isDetailRoute (mRoute m)
+                    then
+                        -- The browser already changed the address before the
+                        -- subscription delivered this route. Remember that so
+                        -- cancelling can put the address back and discarding
+                        -- can avoid a duplicate history entry.
+                        put m{gShell = (gShell m){sfGuardOpen = True, sfPendingRoute = Just route, sfGuardFromHistory = True}}
+                    else do
+                        -- A history navigation that lands on the rendered
+                        -- route (e.g. Forward while the guard is open) closes
+                        -- the guard instead of re-deriving it.
+                        putModel (\x -> x{gShell = (gShell x){sfGuardOpen = False, sfPendingRoute = Nothing, sfGuardFromHistory = False}})
+                        Job.cancelAllJobs
+                        loadRoute route
     Navigate route -> do
         m <- get
         if route == mRoute m
@@ -317,6 +331,20 @@ handle = \case
             ( \m ->
                 m{gShell = (gShell m){sfBootReady = True, sfBlockingError = Just (wireVersionMismatchMessage serverVersion)}}
             )
+    BootDecodeFailed _detail ->
+        putModel
+            ( \m ->
+                m{gShell = (gShell m){sfBootReady = True, sfBlockingError = Just bootDecodeMismatchMessage}}
+            )
+    ConfirmAccepted -> do
+        m <- get
+        case mConfirmation m of
+            Nothing -> pure ()
+            Just confirmation -> do
+                putModel (\x -> x{gShell = (gShell x){sfConfirmation = Nothing}})
+                dispatch (confirmKindAction (cfKind confirmation))
+    ConfirmCancelled ->
+        putModel (\x -> x{gShell = (gShell x){sfConfirmation = Nothing}})
     ApiErrorRaised err -> handleApiError err
     ReloadRoute -> reloadRoute
     LedgerCursorNext -> moveCursor 1

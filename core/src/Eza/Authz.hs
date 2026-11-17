@@ -100,7 +100,9 @@ sessionRoleAllows role method path = case routeClass method path of
     DeniedClass -> False
 
 {- | A recovery session: only finish the password setup, sign out, and read
-the account/boot state that the recovery page needs.
+the account it is recovering. The boot payload carries the library contents
+(stats, tags, views, first page), so it is deliberately not part of the
+recovery scope; the server-rendered recovery page needs none of it.
 -}
 recoverySessionAllows :: Text -> [Text] -> Bool
 recoverySessionAllows method path = case Routes.matchRoute method path of
@@ -110,6 +112,5 @@ recoverySessionAllows method path = case Routes.matchRoute method path of
     recoveryRoutes =
         [ Routes.RoutePasswordSetup
         , Routes.RouteLogout
-        , Routes.RouteBoot
         , Routes.RouteAccountRead
         ]

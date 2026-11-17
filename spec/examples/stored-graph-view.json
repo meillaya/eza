@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": 1,
+  "slug": "graph",
+  "name": "Graph",
+  "kind": "graph",
+  "is_default": true,
+  "definition": {
+    "query": "",
+    "tags_shown": true,
+    "label_mode": "auto",
+    "layout_preset": "standard",
+    "local_depth": null,
+    "color_groups": []
+  },
+  "created_at": 1760000000,
+  "updated_at": 1760000000
+}

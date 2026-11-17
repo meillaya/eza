@@ -1,0 +1,12 @@
+{
+  "id": 7,
+  "name": "Inbox bridge",
+  "url": "https://example.com/hooks/eza",
+  "events": ["bookmark.created", "clip.created"],
+  "enabled": true,
+  "created_at": 1760000000,
+  "last_status": 200,
+  "last_attempt_at": 1760000100,
+  "last_error": "",
+  "fail_streak": 0
+}

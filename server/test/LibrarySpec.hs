@@ -124,7 +124,8 @@ spec = describe "library lifecycle and read-path authentication" $ do
                 bracket (Library.openLibrary (cuDbPath alice)) Library.closeLibrary (\_ -> pure ())
             afterOpenClose <- Db.connectionStats
             balanced "open/close cycles" beforeOpenClose afterOpenClose
-            -- Server slot cycles: enable, start workers, disable, stop them.
+            -- Server slot cycles: enable, start workers, disable (the supervisor
+            -- releases the slot and closes the library), repeat.
             state <- newAppState cfg
             forM_ [1 .. 2 :: Int] $ \_ -> do
                 setEnabled cfg (cuId alice) True
@@ -133,8 +134,8 @@ spec = describe "library lifecycle and read-path authentication" $ do
                     maybe 0 id (lookup (cuId alice) ids) >= 2
                 setEnabled cfg (cuId alice) False
                 syncUserWorkers state
-                waitUntil "the workers stopped" (userWorkerIds state) $ \ids ->
-                    lookup (cuId alice) ids == Just 0
+                waitUntil "the slot was released" (userWorkerIds state) $ \ids ->
+                    lookup (cuId alice) ids == Nothing
             closeAppState state
             finalStats <- Db.connectionStats
             balanced "worker enable/disable cycles" afterOpenClose finalStats

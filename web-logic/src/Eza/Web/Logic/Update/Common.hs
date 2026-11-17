@@ -32,6 +32,7 @@ module Eza.Web.Logic.Update.Common (
     putModel,
     refreshStats,
     refreshTags,
+    requestConfirmation,
     reloadList,
     resetShellForReload,
     resetShellForSearch,
@@ -51,6 +52,7 @@ import qualified Data.Text as T
 
 import Eza.Ledger (LedgerEntry (..))
 import Eza.Types
+import Eza.Url (isHttpUrl)
 
 import Eza.Web.Logic.Browser (scrollLedger, scrollRowIntoView)
 import Eza.Web.Logic.Effect (TimerId (..), nextRequestId)
@@ -115,10 +117,13 @@ cover the whole library.
 dedupFirstPage :: (DedupReport -> Action) -> (ApiError -> Action) -> Update ()
 dedupFirstPage = fetchDedupReport 0 60 0 40
 
+{- | The write gate for the add form and the share-target page. It delegates
+to the shared 'Eza.Url.isHttpUrl' policy (scheme plus a usable authority: no
+credentials, whitespace, control characters or dot-only host), so a URL the
+server will reject is also refused before the request.
+-}
 isHttpUrlText :: Text -> Bool
-isHttpUrlText value =
-    let lowered = T.toLower (T.strip value)
-     in "http://" `T.isPrefixOf` lowered || "https://" `T.isPrefixOf` lowered
+isHttpUrlText = isHttpUrl
 
 -- | The native tag-input parser, wrapped for the shell's MisoString field.
 splitTags :: Text -> [Text]
@@ -132,6 +137,15 @@ toggleMember :: (Eq a) => a -> [a] -> [a]
 toggleMember x xs
     | x `elem` xs = filter (/= x) xs
     | otherwise = xs ++ [x]
+
+{- | Arm the reusable shell confirmation layer: the destructive request action
+records the copy and the execute 'ConfirmKind' instead of sending, and only
+'ConfirmAccepted' runs that kind's action.
+-}
+requestConfirmation :: Text -> Text -> Text -> ConfirmKind -> Update ()
+requestConfirmation title message confirmLabel kind =
+    putModel
+        (\m -> m{gShell = (gShell m){sfConfirmation = Just (Confirmation title message confirmLabel kind)}})
 
 {- | Route predicates live in the native route module; these aliases keep the
 shell calling one vocabulary.

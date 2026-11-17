@@ -52,8 +52,6 @@ handle = \case
     JobTick kind jobId timerId -> tick kind jobId timerId
     JobStatusLoaded kind jobId requestId status -> statusLoaded kind jobId requestId status
     JobStatusFailed kind jobId requestId err -> statusFailed kind jobId requestId err
-    JobAbandoned kind jobId -> abandon kind jobId
-    JobTimedOut kind jobId -> timedOut kind jobId
     _ -> pure ()
 
 {- | Record a job and schedule its first status poll. The owning group has
@@ -156,15 +154,6 @@ advance poll
                 m{gJobs = (gJobs m){jbJobPolls = IM.insert (jpJobId poll) poll' (mJobPolls m), jbJobTimerNext = timerId}}
             )
         scheduleAction delay (JobTick (jpKind poll) (jpJobId poll) timerId)
-
--- | A stale timer or a route change: drop the poll; late answers are ignored.
-abandon :: JobKind -> Int -> Update ()
-abandon _ jobId = removeJob jobId
-
-timedOut :: JobKind -> Int -> Update ()
-timedOut kind jobId = do
-    removeJob jobId
-    dispatch (failedAction kind jobId (Just timeoutMessage))
 
 {- | Drop every active poll and tell the owning groups, so no busy indicator
 survives a route change. The group actions are dispatched after the polls are

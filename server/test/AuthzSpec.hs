@@ -224,8 +224,8 @@ authzSpec = describe "Eza.Authz" $ do
     it "limits a recovery session to the password setup and its account reads" $ do
         recoverySessionAllows "POST" ["api", "setup", "password"] `shouldBe` True
         recoverySessionAllows "POST" ["api", "auth", "logout"] `shouldBe` True
-        recoverySessionAllows "GET" ["api", "v1", "boot"] `shouldBe` True
         recoverySessionAllows "GET" ["api", "v1", "account"] `shouldBe` True
+        recoverySessionAllows "GET" ["api", "v1", "boot"] `shouldBe` False
         recoverySessionAllows "GET" ["api", "v1", "bookmarks"] `shouldBe` False
         recoverySessionAllows "POST" ["api", "v1", "bookmarks"] `shouldBe` False
         recoverySessionAllows "GET" ["api", "v1", "admin", "users"] `shouldBe` False
@@ -240,9 +240,8 @@ authzSpec = describe "Eza.Authz" $ do
 
     it "treats HEAD like GET for route classification" $ do
         routeClass "HEAD" ["api", "v1", "graph"] `shouldBe` TokenClass
-        -- The server's health route is GET-only; a HEAD request falls through
-        -- to the auth guard today, so the matrix must not call it public.
-        routeClass "HEAD" ["healthz"] `shouldBe` DeniedClass
+        routeClass "HEAD" ["api", "v1", "account"] `shouldBe` SessionClass
+        routeClass "HEAD" ["healthz"] `shouldBe` PublicClass
 
     it "classifies methods case-insensitively" $ do
         routeClass "get" ["api", "v1", "graph"] `shouldBe` TokenClass

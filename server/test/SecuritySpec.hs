@@ -19,6 +19,7 @@ normalises @..@ segments before sending them; that would hide the bypass.
 -}
 module SecuritySpec (spec) where
 
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (bracket)
 import Data.Aeson (Value (..))
 import qualified Data.Aeson
@@ -27,6 +28,7 @@ import Data.Bits (shiftL, (.|.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
+import Data.List (sort)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -60,6 +62,7 @@ spec = describe "Phase A security fixes" $ do
     recoveryCsrfSpec
     loginEnumerationSpec
     loginCaseSpec
+    setupClaimSpec
 
 -- ---------------------------------------------------------------------------
 -- S1: static asset path traversal
@@ -517,6 +520,99 @@ recoveryCsrfSpec = describe "S5 recovery setup CSRF" $ do
                     (authHeaders session csrf)
                     (Just setup)
             accepted `shouldHaveStatus` 200
+
+    it "revokes the recovery session when the setup completes" $
+        withTestServer $ \server -> do
+            _ <- createTestUser server "alice" "alice password" Control.RoleAdmin
+            recovery <- withUserDb server "alice" Auth.regenerateRecoveryCodes
+            code <- case recovery of
+                (first : _) -> pure first
+                [] -> expectationFailure "expected recovery codes" >> error "unreachable"
+            redeemed <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/recovery/redeem"
+                    jsonHeaders
+                    (Just (encodeJsonObject [("username", "alice"), ("code", code)]))
+            redeemed `shouldHaveStatus` 200
+            recoverySession <- expectJust "recovery session" (setCookieValue redeemed Auth.sessionCookieName)
+            recoveryCsrf <- expectJust "recovery csrf" (setCookieValue redeemed Auth.csrfCookieName)
+            let setup =
+                    encodeJsonObject
+                        [ ("username", "alice")
+                        , ("password", "recovery password 2")
+                        , ("confirm", "recovery password 2")
+                        ]
+            completed <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/setup/password"
+                    (authHeaders recoverySession recoveryCsrf)
+                    (Just setup)
+            completed `shouldHaveStatus` 200
+            -- The recovery cookie is single-use: after setup it is a 401, and
+            -- it cannot reset the password a second time.
+            stale <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/setup/password"
+                    (authHeaders recoverySession recoveryCsrf)
+                    (Just setup)
+            stale `shouldHaveStatus` 401
+            -- The normal session issued by the setup still works.
+            session <- expectJust "session" (setCookieValue completed Auth.sessionCookieName)
+            csrfCookie <- expectJust "csrf" (setCookieValue completed Auth.csrfCookieName)
+            account <- httpRequest server "GET" "/api/v1/account" (cookieHeaders session csrfCookie) Nothing
+            account `shouldHaveStatus` 200
+
+-- ---------------------------------------------------------------------------
+-- S8: first-install claim is atomic
+-- ---------------------------------------------------------------------------
+
+{- | Two concurrent first setup POSTs must create exactly one admin: the claim
+check and the account creation are one control critical section. The loser gets
+a clean 409 setup_claimed and no second account exists.
+-}
+setupClaimSpec :: Spec
+setupClaimSpec = describe "S8 atomic first-setup claim" $ do
+    it "creates exactly one admin from concurrent first setup requests" $
+        withTestServer $ \server -> do
+            started <- newEmptyMVar
+            _ <- forkIO $ do
+                response <-
+                    httpRequest
+                        server
+                        "POST"
+                        "/api/setup/password"
+                        jsonHeaders
+                        (Just (setupBody "first-admin" "first admin password"))
+                putMVar started response
+            other <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/setup/password"
+                    jsonHeaders
+                    (Just (setupBody "second-admin" "second admin password"))
+            forked <- takeMVar started
+            let (winner, loser) =
+                    if hrespStatus other == 200 then (other, forked) else (forked, other)
+            winner `shouldHaveStatus` 200
+            loser `shouldHaveStatus` 409
+            hrespBody loser `shouldSatisfy` containsText "setup_claimed"
+            Control.countUsers (tsControl server) `shouldReturn` 1
+
+-- | One setup body with a matching confirm field.
+setupBody :: Text -> Text -> LBS.ByteString
+setupBody username password =
+    encodeJsonObject
+        [ ("username", username)
+        , ("password", password)
+        , ("confirm", password)
+        ]
 
 -- ---------------------------------------------------------------------------
 -- S6: no account-existence oracle through the login lockout

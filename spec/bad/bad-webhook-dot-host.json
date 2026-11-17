@@ -1,0 +1,6 @@
+{
+  "name": "Dot host sink",
+  "url": "https://...",
+  "events": ["bookmark.created"],
+  "enabled": true
+}

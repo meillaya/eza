@@ -65,6 +65,7 @@ viewModel m = case mBlockingError m of
                 ++ [tagPromptDialog m | isJust (mTagPrompt m)]
                 ++ [bulkDeleteDialog m | mConfirmBulkDelete m]
                 ++ viewDialogs m
+                ++ [confirmationDialog m | isJust (mConfirmation m)]
             )
 
 {- | The screen shown when this build cannot read the server's boot document
@@ -2015,6 +2016,58 @@ importInput =
         , HP.accept_ ".html,.json,text/html,application/json"
         , HE.onChange (const ImportFileChosen)
         ]
+
+-- ------------------------------------------------------- confirmation layer ---
+
+{- | One reusable confirmation for the destructive actions that are not
+journaled. It renders last, above every other layer, so Escape resolves it
+first and the action only runs on ConfirmAccepted.
+-}
+confirmationDialog :: Model -> View () () Model Action
+confirmationDialog m = case mConfirmation m of
+    Nothing -> H.span_ [] []
+    Just confirmation ->
+        H.div_
+            [ HP.class_ "overlay is-open"
+            , HP.data_ "testid" "dialog"
+            , HE.onClick ConfirmCancelled
+            ]
+            [ H.div_
+                [ HP.class_ "dialog"
+                , HP.data_ "testid" "dialog-confirm-action"
+                , HP.role_ "dialog"
+                , HP.aria_ "modal" "true"
+                , HP.aria_ "label" (ms (T.unpack (cfTitle confirmation)))
+                , HE.onClickWithOptions stopPropagation Noop
+                ]
+                [ H.div_
+                    [HP.class_ "dialog__head"]
+                    [ H.h2_ [HP.class_ "dialog__title"] [txt (cfTitle confirmation)]
+                    , H.kbd_ [] [text "esc"]
+                    ]
+                , H.div_
+                    [HP.class_ "dialog__body"]
+                    [H.p_ [] [txt (cfMessage confirmation)]]
+                , H.div_
+                    [HP.class_ "dialog__foot"]
+                    [ H.span_ [HP.class_ "spacer"] []
+                    , H.button_
+                        [ HP.class_ "btn"
+                        , HP.type_ "button"
+                        , HP.data_ "testid" "dialog-cancel"
+                        , HE.onClick ConfirmCancelled
+                        ]
+                        [text "cancel"]
+                    , H.button_
+                        [ HP.class_ "btn btn--danger"
+                        , HP.type_ "button"
+                        , HP.data_ "testid" "dialog-confirm"
+                        , HE.onClick ConfirmAccepted
+                        ]
+                        [txt (cfConfirmLabel confirmation)]
+                    ]
+                ]
+            ]
 
 -- --------------------------------------------------------------- queries ---
 

@@ -26,7 +26,7 @@ import Eza.Pages (addPasskeyPage)
 import Eza.Routes (Route (..))
 
 import Eza.SavedSearches (listSavedSearches)
-import Eza.Shares (ShareRecord (..), ShareState (..), ShareUnavailable (..), resolveShareState, shareBookmarkPage, shareSearchFeed, shareSearchPage, shareUnavailablePage)
+import Eza.Shares (ShareRecord (..), ShareState (..), ShareUnavailable (..), resolveShareState, shareBookmarkPage, shareSearchFeed, shareSearchPage, shareUnavailablePageWith)
 import Eza.Shell (pageAssets)
 
 import Eza.Types
@@ -61,30 +61,33 @@ publicShareHandler state token respond = do
                 ShareGone reason ->
                     if isFeed
                         then respond (shareHeaders (jsonProblem (unavailableStatus reason) "not_found" "share link is not readable"))
-                        else respond (shareHeaders (htmlResponseAt (unavailableStatus reason) (shareUnavailablePage reason)))
+                        else respond (shareHeaders (htmlResponseAt (unavailableStatus reason) (shareUnavailablePageWith pages reason)))
                 ShareReadable record
                     | srScope record == "bookmark" -> do
                         bookmark <- getBookmark conn (srTargetId record)
                         case bookmark of
-                            Nothing -> respond (shareHeaders (htmlResponseAt status404 (shareUnavailablePage ShareInvalid)))
+                            Nothing -> respond (shareHeaders (htmlResponseAt status404 (shareUnavailablePageWith pages ShareInvalid)))
                             Just detail
                                 | isFeed -> respond (shareHeaders (jsonProblem status404 "not_found" "feeds are only available for saved searches"))
-                                | otherwise -> respond (shareHeaders (htmlResponseAt status200 (shareBookmarkPage record detail)))
+                                | otherwise -> respond (shareHeaders (htmlResponseAt status200 (shareBookmarkPage pages record detail)))
                     | srScope record == "saved_search" -> do
                         searches <- listSavedSearches conn
                         case [saved | saved <- searches, ssId saved == srTargetId record] of
-                            [] -> respond (shareHeaders (htmlResponseAt status404 (shareUnavailablePage ShareInvalid)))
+                            [] -> respond (shareHeaders (htmlResponseAt status404 (shareUnavailablePageWith pages ShareInvalid)))
                             (saved : _) -> do
                                 page <- listBookmarks conn (defaultListQuery{lqQ = ssQ saved, lqTags = ssTags saved, lqLimit = 100})
                                 if isFeed
                                     then respond (shareHeaders (responseLBS status200 [(hContentType, "application/atom+xml; charset=utf-8")] (LBS.fromStrict (TE.encodeUtf8 (shareSearchFeed saved page)))))
-                                    else respond (shareHeaders (htmlResponseAt status200 (shareSearchPage record saved page)))
-                    | otherwise -> respond (shareHeaders (htmlResponseAt status404 (shareUnavailablePage ShareInvalid)))
+                                    else respond (shareHeaders (htmlResponseAt status200 (shareSearchPage pages record saved page)))
+                    | otherwise -> respond (shareHeaders (htmlResponseAt status404 (shareUnavailablePageWith pages ShareInvalid)))
   where
+    -- The public pages load the same content-addressed assets as the shell and
+    -- auth pages; never hand-maintain a second asset list here.
+    pages = pageAssets (asAssets state)
     shareHeaders = mapResponseHeaders (<> [("X-Robots-Tag", "noindex")])
     unavailableStatus ShareInvalid = status404
     unavailableStatus _ = status410
-    shareGone = shareHeaders (htmlResponseAt status404 (shareUnavailablePage ShareInvalid))
+    shareGone = shareHeaders (htmlResponseAt status404 (shareUnavailablePageWith pages ShareInvalid))
 
 -- | Dispatch the handlers this family owns from their "Eza.Routes" constructors.
 dispatch :: RequestContext -> Connection -> Route -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived

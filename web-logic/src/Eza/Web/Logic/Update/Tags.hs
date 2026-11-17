@@ -5,7 +5,7 @@
 module Eza.Web.Logic.Update.Tags (handle) where
 
 import Control.Monad
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import qualified Data.Text as T
 
 import Eza.Web.Logic.Browser
@@ -135,16 +135,14 @@ handle = \case
             )
     SuggestionApply bookmarkId tags -> do
         m <- get
-        if mSuggestionApplyBusy m
-            then pure ()
-            else do
-                putModel (\x -> x{gTags = (gTags x){tgSuggestionApplyBusy = True}})
-                applyTagSuggestion bookmarkId tags SuggestionsApplied (\err -> SuggestionApplyFailed err)
+        when (isNothing (mSuggestionApplyBusy m)) $ do
+            putModel (\x -> x{gTags = (gTags x){tgSuggestionApplyBusy = Just bookmarkId}})
+            applyTagSuggestion bookmarkId tags SuggestionsApplied (\err -> SuggestionApplyFailed err)
     SuggestionApplyFailed err -> do
-        putModel (\m -> m{gTags = (gTags m){tgSuggestionApplyBusy = False, tgSuggestionError = Just (aeMessage err)}})
+        putModel (\m -> m{gTags = (gTags m){tgSuggestionApplyBusy = Nothing, tgSuggestionError = Just (aeMessage err)}})
         when (aeStatus err == Just 401) (handleApiError err)
     SuggestionsApplied -> do
-        putModel (\m -> m{gTags = (gTags m){tgSuggestionApplyBusy = False}})
+        putModel (\m -> m{gTags = (gTags m){tgSuggestionApplyBusy = Nothing}})
         notify "Tags applied" ToastOk
         refreshTags
         refreshStats

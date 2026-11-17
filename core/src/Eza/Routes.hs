@@ -86,6 +86,7 @@ POST
   \/api\/auth\/logout                          RouteLogout
   \/api\/v1\/bookmarks\/bulk                   RouteBookmarkBulk
   \/api\/v1\/tokens                            RouteTokenCreate
+  \/api\/v1\/jobs\/{id}\/cancel                 RouteJobCancel
   \/api\/v1\/bookmarks\/{id}\/highlights       RouteHighlightCreate
   \/api\/v1\/share-links                       RouteShareLinkCreate
   \/api\/v1\/rules                             RouteRuleCreate
@@ -317,6 +318,7 @@ data Route
     | RouteStats
     | RouteAiStatus
     | RouteJobStatus Int
+    | RouteJobCancel Int
     | -- admin user management
       RouteAdminUserList
     | RouteAdminUserCreate
@@ -455,6 +457,7 @@ routeInfo = \case
     RouteStats -> row "GET" "/api/v1/stats" TokenClass (Just CapRead)
     RouteAiStatus -> row "GET" "/api/v1/ai/status" TokenClass (Just CapRead)
     RouteJobStatus _ -> row "GET" "/api/v1/jobs/{id}" TokenClass (Just CapRead)
+    RouteJobCancel _ -> row "POST" "/api/v1/jobs/{id}/cancel" TokenClass (Just CapWrite)
     RouteAdminUserList -> row "GET" "/api/v1/admin/users" AdminClass (Just CapAdmin)
     RouteAdminUserCreate -> row "POST" "/api/v1/admin/users" AdminClass (Just CapAdmin)
     RouteAdminUserUpdate _ -> row "PATCH" "/api/v1/admin/users/{id}" AdminClass (Just CapAdmin)
@@ -610,6 +613,7 @@ allRoutes =
     , RouteStats
     , RouteAiStatus
     , RouteJobStatus 1
+    , RouteJobCancel 1
     , RouteAdminUserList
     , RouteAdminUserCreate
     , RouteAdminUserUpdate 1
@@ -632,10 +636,8 @@ routeTable =
 is total: anything that is not an enumerated route is 'Nothing', which callers
 must treat as denied.
 
-HEAD is accepted as a read alias for the token routes, because a bearer token
-may read them with HEAD. Public pages are served for HEAD by the dispatcher
-before the authorization guard, and the session-only routes are GET/POST/
-PATCH/DELETE only, so they do not classify HEAD here.
+HEAD is the GET alias for every route: it carries the GET status and headers
+(Warp drops the body), so the same authorization class and capability apply.
 -}
 matchRoute :: Text -> [Text] -> Maybe Route
 matchRoute method path = case T.toUpper method of
@@ -648,10 +650,7 @@ matchRoute method path = case T.toUpper method of
     _ -> Nothing
 
 matchHead :: [Text] -> Maybe Route
-matchHead path = case matchGet path of
-    Just route
-        | routeClass route == TokenClass -> Just route
-    _ -> Nothing
+matchHead = matchGet
 
 matchGet :: [Text] -> Maybe Route
 matchGet path = case path of
@@ -742,6 +741,7 @@ matchPost path = case path of
     ["api", "v1", "maintenance", "prune"] -> Just RouteMaintenancePrune
     ["api", "v1", "undo"] -> Just RouteUndoApply
     ["api", "v1", "import"] -> Just RouteImport
+    ["api", "v1", "jobs", idText, "cancel"] -> RouteJobCancel <$> readInt idText
     ["api", "v1", "import", "json"] -> Just RouteImportJson
     ["api", "v1", "rules"] -> Just RouteRuleCreate
     ["api", "v1", "rules", "test"] -> Just RouteRuleTest
@@ -879,6 +879,7 @@ renderRoutePath route = case route of
     RouteFaviconRead domain -> "/api/v1/favicons/" <> domain
     RouteShareLinkRevoke shareId -> idPath "/api/v1/share-links" shareId
     RouteJobStatus jobId -> idPath "/api/v1/jobs" jobId
+    RouteJobCancel jobId -> idPath "/api/v1/jobs" jobId <> "/cancel"
     RouteTagRename segments -> renderSegments "/api/v1/tags" segments
     RouteTagDelete segments -> renderSegments "/api/v1/tags" segments
     RouteViewRead slug -> "/api/v1/views/" <> slug

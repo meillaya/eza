@@ -7,6 +7,7 @@ cross-account 404, and worker execution of a job.
 -}
 module JobsSpec (spec) where
 
+import Control.Concurrent.QSem (newQSem)
 import Control.Exception (bracket)
 import Control.Monad (forM_)
 import Data.Aeson (Value (..), object, (.=))
@@ -151,6 +152,83 @@ spec = do
                 (jvAttempts <$> parked) `shouldBe` Just 3
                 Sqlite.close conn
 
+        it "cancels queued and running jobs and ignores a late worker completion" $
+            withSystemTempDirectory "eza-jobs-request-cancel" $ \dir -> do
+                conn <- Db.openDb (dir </> "request-cancel.db")
+                queuedId <- enqueueTrackedJob conn "snapshot" "bookmark:1" (object ["bookmark_id" .= (1 :: Int)])
+                requestJobCancel conn queuedId `shouldReturn` True
+                queuedView <- getJobView conn queuedId
+                (jvState <$> queuedView) `shouldBe` Just "cancelled"
+                -- A cancelled queued job is never claimed.
+                claimJobKind conn "snapshot" `shouldReturn` Nothing
+                -- A job cancelled while running keeps the cancelled state when
+                -- its worker finishes late.
+                runningId <- enqueueTrackedJob conn "snapshot" "bookmark:2" (object ["bookmark_id" .= (2 :: Int)])
+                _ <- claimJobKind conn "snapshot"
+                requestJobCancel conn runningId `shouldReturn` True
+                completeJobResult conn runningId (object ["snapshot" .= object ["path" .= ("/tmp/x.html" :: Text), "bytes" .= (1 :: Int)]])
+                _ <- failJobPermanent conn runningId "late failure"
+                _ <- failJob conn runningId "late retry" 1
+                runningView <- getJobView conn runningId
+                (jvState <$> runningView) `shouldBe` Just "cancelled"
+                -- Unknown and terminal ids are not cancellable.
+                requestJobCancel conn 999999 `shouldReturn` False
+                requestJobCancel conn queuedId `shouldReturn` False
+                Sqlite.close conn
+
+        it "requeues stale running jobs and parks them when the attempt budget is spent" $
+            withSystemTempDirectory "eza-jobs-stale" $ \dir -> do
+                conn <- Db.openDb (dir </> "stale.db")
+                jobId <- enqueueTrackedJob conn "snapshot" "bookmark:1" (object ["bookmark_id" .= (1 :: Int)])
+                _ <- claimJobKind conn "snapshot"
+                ageJob conn jobId (2 * 60 * 60)
+                requeueStaleJobs conn (15 * 60) `shouldReturn` (1, 0, 0)
+                first <- getJobView conn jobId
+                (jvState <$> first) `shouldBe` Just "queued"
+                (jvAttempts <$> first) `shouldBe` Just 1
+                _ <- claimJobKind conn "snapshot"
+                ageJob conn jobId (2 * 60 * 60)
+                requeueStaleJobs conn (15 * 60) `shouldReturn` (1, 0, 0)
+                _ <- claimJobKind conn "snapshot"
+                ageJob conn jobId (2 * 60 * 60)
+                requeueStaleJobs conn (15 * 60) `shouldReturn` (0, 1, 0)
+                parked <- getJobView conn jobId
+                (jvState <$> parked) `shouldBe` Just "failed"
+                (jvAttempts <$> parked) `shouldBe` Just 3
+                -- A stale job that had a cancel request is cancelled, not retried.
+                cancelId <- enqueueTrackedJob conn "snapshot" "bookmark:2" (object ["bookmark_id" .= (2 :: Int)])
+                _ <- claimJobKind conn "snapshot"
+                Sqlite.execute conn "UPDATE jobs SET cancel_requested = 1 WHERE id = ?" (Only cancelId)
+                ageJob conn cancelId (2 * 60 * 60)
+                requeueStaleJobs conn (15 * 60) `shouldReturn` (0, 0, 1)
+                cancelledView <- getJobView conn cancelId
+                (jvState <$> cancelledView) `shouldBe` Just "cancelled"
+                Sqlite.close conn
+
+        it "retries a transient egress failure instead of parking it on the first attempt" $
+            withSystemTempDirectory "eza-jobs-egress-retry" $ \dir -> do
+                manager <- newManager defaultManagerSettings
+                let cfg =
+                        (testConfig dir)
+                            { cfgAiProvider = "ollama"
+                            , cfgOllamaBaseUrl = "http://127.0.0.1:9"
+                            }
+                conn <- Db.openDb (dir </> "egress-retry.db")
+                Sqlite.execute_ conn "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://example.test/retry','Retry','example.test',1,1,1)"
+                jobId <- enqueueTrackedJob conn "ai_suggestions" "all" (object [])
+                _ <- claimJobKind conn "ai_suggestions"
+                job <- expectJustIO "ai job" =<< getJob conn jobId
+                sem <- newQSem 1
+                -- The provider request throws; the worker wrapper must turn that
+                -- into a bounded retry rather than a one-shot failure.
+                Egress.runClaimedJob manager cfg (dir </> "snapshots") conn sem job
+                view <- getJobView conn jobId
+                -- The provider is unreachable: the attempt is queued for a bounded
+                -- retry with backoff, not failed permanently.
+                (jvState <$> view) `shouldBe` Just "queued"
+                (jvAttempts <$> view) `shouldBe` Just 1
+                Sqlite.close conn
+
         it "executes a check_dead job and an AI job without a provider" $
             withSystemTempDirectory "eza-jobs-exec" $ \dir -> do
                 manager <- newManager defaultManagerSettings
@@ -169,6 +247,43 @@ spec = do
                 aiView <- getJobView conn aiId
                 (jvState <$> aiView) `shouldBe` Just "failed"
                 (jvError <$> aiView) `shouldSatisfy` maybe False (maybe False ((not . null) . show))
+                Sqlite.close conn
+
+        it "keeps a policy-refused snapshot job permanently failed" $
+            withSystemTempDirectory "eza-jobs-snapshot-refused" $ \dir -> do
+                manager <- newManager defaultManagerSettings
+                let cfg = testConfig dir
+                conn <- Db.openDb (dir </> "refused.db")
+                Sqlite.execute_ conn "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('http://127.0.0.1:9/x','Loopback','127.0.0.1',1,1,1)"
+                jobId <- enqueueTrackedJob conn "snapshot" "bookmark:1" (object ["bookmark_id" .= (1 :: Int)])
+                _ <- claimJobKind conn "snapshot"
+                job <- expectJustIO "snapshot job" =<< getJob conn jobId
+                Egress.processOneJob manager cfg (dir </> "snapshots") conn job
+                view <- getJobView conn jobId
+                -- A private-address refusal is deterministic: failed, not retried.
+                (jvState <$> view) `shouldBe` Just "failed"
+                (jvAttempts <$> view) `shouldBe` Just 1
+                Sqlite.close conn
+
+        it "retries a transient snapshot tool failure" $
+            withSystemTempDirectory "eza-jobs-snapshot-transient" $ \dir -> do
+                manager <- newManager defaultManagerSettings
+                let cfg =
+                        (testConfig dir)
+                            { cfgAllowPrivateFetch = True
+                            , cfgMonolith = "eza-no-such-snapshot-tool"
+                            }
+                conn <- Db.openDb (dir </> "transient.db")
+                Sqlite.execute_ conn "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('http://127.0.0.1:9/x','Loopback','127.0.0.1',1,1,1)"
+                jobId <- enqueueTrackedJob conn "snapshot" "bookmark:1" (object ["bookmark_id" .= (1 :: Int)])
+                _ <- claimJobKind conn "snapshot"
+                job <- expectJustIO "snapshot job" =<< getJob conn jobId
+                -- The monolith binary is missing: the capture is unavailable
+                -- transiently, so the attempt is queued for a bounded retry.
+                Egress.processOneJob manager cfg (dir </> "snapshots") conn job
+                view <- getJobView conn jobId
+                (jvState <$> view) `shouldBe` Just "queued"
+                (jvAttempts <$> view) `shouldBe` Just 1
                 Sqlite.close conn
 
     describe "no inline egress" $ do
@@ -272,3 +387,8 @@ jobIdOf response = fromMaybe 0 (jsonIntField "job_id" (hrespBody response))
 
 expectJustIO :: String -> Maybe a -> IO a
 expectJustIO label = maybe (expectationFailure ("missing " <> label) >> error "unreachable") pure
+
+-- | Pretend a job row has not been touched for a while (stale-job tests).
+ageJob :: Sqlite.Connection -> Int -> Int -> IO ()
+ageJob conn jobId seconds =
+    Sqlite.execute conn "UPDATE jobs SET updated_at = updated_at - ? WHERE id = ?" (seconds, jobId)

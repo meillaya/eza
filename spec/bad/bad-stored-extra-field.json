@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": 3,
+  "slug": "bad-stored-field",
+  "name": "Unknown stored field",
+  "kind": "ledger",
+  "is_default": false,
+  "owner_id": 1,
+  "definition": {
+    "query": "",
+    "sort": "created"
+  },
+  "created_at": 1760000000,
+  "updated_at": 1760000000
+}

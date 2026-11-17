@@ -8,6 +8,7 @@ security tests share the same shape the bundler emits.
 -}
 module AssetsSpec (spec) where
 
+import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -149,13 +150,17 @@ spec = do
                 fresh <- httpRequest server "GET" "/sw.js" [("If-None-Match", etag)] Nothing
                 fresh `shouldHaveStatus` 304
 
-        it "serves the stable favicon route from the manifest copy" $
+        it "serves the stable favicon route from the manifest copy with revalidation" $
             withBundleServer $ \server -> do
                 response <- httpRequest server "GET" "/favicon.svg" [] Nothing
                 response `shouldHaveStatus` 200
-                headerValue response "cache-control" `shouldBe` Just "public, max-age=31536000, immutable"
+                -- The URL is stable, so it must not be cached as immutable.
+                headerValue response "cache-control" `shouldBe` Just "no-cache"
                 headerValue response "content-type" `shouldBe` Just "image/svg+xml"
                 hrespBody response `shouldSatisfy` containsText "<svg"
+                etag <- expectJust "favicon etag" (headerValue response "etag")
+                fresh <- httpRequest server "GET" "/favicon.svg" [("If-None-Match", etag)] Nothing
+                fresh `shouldHaveStatus` 304
 
         it "serves the generated web manifest at its fixed route" $
             withBundleServer $ \server -> do
@@ -172,6 +177,36 @@ spec = do
                 hrespBody response `shouldSatisfy` containsText testBundleThemeJsPath
                 hrespBody response `shouldSatisfy` containsText testBundleAuthJsPath
                 hrespBody response `shouldSatisfy` containsText testBundleFaviconPath
+
+        it "renders public share pages with the manifest's hashed assets" $
+            withBundleServer $ \server -> do
+                _ <- createTestUser server "alice" "alice password" Control.RoleAdmin
+                (session, csrf) <- loginAs server "alice" "alice password"
+                bookmark <-
+                    httpRequest
+                        server
+                        "POST"
+                        "/api/v1/bookmarks"
+                        (authHeaders session csrf)
+                        (Just (Aeson.encode (Aeson.object ["url" .= ("https://example.test/share-assets" :: Text), "title" .= ("Share assets" :: Text)])))
+                bookmark `shouldHaveStatus` 201
+                bookmarkId <- expectJust "bookmark id" (jsonIntField "id" (hrespBody bookmark))
+                share <-
+                    httpRequest
+                        server
+                        "POST"
+                        "/api/v1/share-links"
+                        (authHeaders session csrf)
+                        (Just (Aeson.encode (Aeson.object ["scope" .= ("bookmark" :: Text), "target_id" .= bookmarkId])))
+                share `shouldHaveStatus` 201
+                url <- expectJust "share url" (jsonTextField "url" (hrespBody share))
+                page <- httpRequest server "GET" ("/s/" <> T.unpack (T.takeWhileEnd (/= '/') url)) [] Nothing
+                page `shouldHaveStatus` 200
+                hrespBody page `shouldSatisfy` containsText testBundleCssPath
+                hrespBody page `shouldSatisfy` containsText testBundleThemeJsPath
+                hrespBody page `shouldSatisfy` containsText testBundleFaviconPath
+                hrespBody page `shouldSatisfy` (not . containsText "/assets/eza.css")
+                hrespBody page `shouldSatisfy` (not . containsText "/assets/theme.js")
 
         it "404s an unhashed asset path that the bundle does not name" $
             withBundleServer $ \server -> do

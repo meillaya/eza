@@ -99,9 +99,11 @@ handle = \case
         putModel (\m -> m{gLedger = (gLedger m){lfBulkBusy = False, lfConfirmMarkAll = False}})
         handleApiError err
     SavedSearchApply saved -> do
+        -- A saved search is a complete query: applying one with no tags must
+        -- clear a tag facet left over from the current ledger, not keep it.
         putModel
             ( \m ->
-                m{gLedger = (gLedger m){lfQ = (ssQ saved), lfTagsFilter = if null (ssTags saved) then mTagsFilter m else ssTags saved}}
+                m{gLedger = (gLedger m){lfQ = (ssQ saved), lfTagsFilter = ssTags saved}}
             )
         reloadList
     ExportClicked -> redirect exportUrl
@@ -115,7 +117,6 @@ handle = \case
             else do
                 let name = if T.null explicitName then mQ m else mSavedName m
                 saveSavedSearch name (mQ m) (mTagsFilter m) (\_ -> SavedSearchDone) SavedSearchFailed
-    SavedSearchNameInput name -> putModel (\m -> m{gLedger = (gLedger m){lfSavedName = name}})
     SavedSearchDelete savedSearchId -> deleteSavedSearch savedSearchId SavedSearchDone SavedSearchFailed
     SavedSearchDone -> do
         notify "Saved searches updated" ToastOk

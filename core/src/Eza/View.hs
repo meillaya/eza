@@ -8,6 +8,13 @@ A view is data, not code. The server validates a view before storing it, the
 client renders only the known fields, and unknown schema versions or kinds are
 rejected. Everything here is pure so the server, the WASM client, and the tests
 share one definition.
+
+Decoding has two faces: the stored 'View' a response carries is decoded
+strictly (its wrapper, kind and definition fields are required, so a server
+rename fails the parse instead of defaulting), while 'ViewInput' — the
+create/update body — keeps the documented input defaults. The lenient
+definition instances below belong to that input side (and to the server's
+stored @definition_json@ column); 'View' responses use the strict parser.
 -}
 module Eza.View (
     -- * Kinds and enums
@@ -50,7 +57,7 @@ module Eza.View (
 
 import Control.Monad (when)
 import Data.Aeson
-import Data.Aeson.Types (Parser)
+import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum, isAsciiLower, isDigit, toLower)
@@ -129,6 +136,10 @@ instance ToJSON ColorGroup where
             , "enabled" .= cgEnabled group
             ]
 
+{- | Input-side decoder: the documented defaults apply when a create/update
+body omits a colour-group field. Stored-view responses use the strict parser
+below and must carry all four fields.
+-}
 instance FromJSON ColorGroup where
     parseJSON = withObject "ColorGroup" $ \o ->
         ColorGroup
@@ -167,6 +178,9 @@ instance ToJSON GraphViewDefinition where
             , "color_groups" .= gvdColorGroups definition
             ]
 
+{- | Input-side decoder: the documented defaults apply when a create/update
+body omits a field. Stored-view responses use the strict parser below.
+-}
 instance FromJSON GraphViewDefinition where
     parseJSON = withObject "GraphViewDefinition" $ \o -> do
         mode <- o .:? "label_mode" .!= ("auto" :: Text)
@@ -188,6 +202,9 @@ instance ToJSON LedgerViewDefinition where
             , "sort" .= ledgerSortText (lvdSort definition)
             ]
 
+{- | Input-side decoder: an omitted sort means @created@, per the documented
+input defaults. Stored-view responses use the strict parser below.
+-}
 instance FromJSON LedgerViewDefinition where
     parseJSON = withObject "LedgerViewDefinition" $ \o -> do
         rawSort <- o .:? "sort" .!= ("created" :: Text)
@@ -201,7 +218,11 @@ instance ToJSON ViewDefinition where
         GraphDefinition definition -> toJSON definition
         LedgerDefinition definition -> toJSON definition
 
--- | A stored view with its server-assigned identity and timestamps.
+{- | A stored view with its server-assigned identity and timestamps. The response
+codec is strict: the wrapper (@schema@, @id@, @slug@, @name@, @kind@,
+@is_default@, @created_at@, @updated_at@) and every definition field are
+required.
+-}
 data View = View
     { vId :: Int
     , vSlug :: Text
@@ -230,23 +251,26 @@ instance ToJSON View where
 
 instance FromJSON View where
     parseJSON = withObject "View" $ \o -> do
-        schema <- o .:? "schema" .!= (1 :: Int)
+        schema <- o .: "schema" :: Parser Int
         when (schema /= 1) (fail "unsupported view schema")
         rawKind <- o .: "kind" :: Parser Text
         kind <- maybe (fail "kind must be graph or ledger") pure (parseViewKind rawKind)
         rawDefinition <- o .: "definition" :: Parser Value
-        definition <- either (fail . T.unpack) pure (decodeViewDefinition kind rawDefinition)
+        definition <- either (fail . T.unpack) pure (decodeStoredViewDefinition kind rawDefinition)
         View
-            <$> (o .:? "id" .!= 0)
-            <*> (o .:? "slug" .!= "")
-            <*> (o .:? "name" .!= "")
+            <$> o .: "id"
+            <*> o .: "slug"
+            <*> o .: "name"
             <*> pure kind
-            <*> (o .:? "is_default" .!= False)
+            <*> o .: "is_default"
             <*> pure definition
-            <*> (o .:? "created_at" .!= 0)
-            <*> (o .:? "updated_at" .!= 0)
+            <*> o .: "created_at"
+            <*> o .: "updated_at"
 
--- | The create/update body: no server-owned fields.
+{- | The create/update body: no server-owned fields, and the definition is
+decoded with the documented input defaults (see the lenient definition
+instances above). The stored 'View' response is strict.
+-}
 data ViewInput = ViewInput
     { viName :: Text
     , viKind :: ViewKind
@@ -423,6 +447,11 @@ viewDefinitionKind = \case
 encodeViewDefinition :: ViewDefinition -> Text
 encodeViewDefinition = TE.decodeUtf8 . LBS.toStrict . encode
 
+{- | Tolerant definition decoder: create/update bodies and the server's stored
+@definition_json@ column use it, so the documented input defaults still apply.
+The stored view a response carries is decoded with 'decodeStoredViewDefinition'
+instead.
+-}
 decodeViewDefinition :: ViewKind -> Value -> Either Text ViewDefinition
 decodeViewDefinition kind value = case kind of
     GraphKind -> GraphDefinition <$> decodeValue value
@@ -432,6 +461,50 @@ decodeViewDefinition kind value = case kind of
     decodeValue raw = case fromJSON raw of
         Error message -> Left (T.pack message)
         Success parsed -> Right parsed
+
+{- | Strict definition decoder for the definition a stored view response
+carries: the kind selects the shape and every field the server writes is
+required.
+-}
+decodeStoredViewDefinition :: ViewKind -> Value -> Either Text ViewDefinition
+decodeStoredViewDefinition kind value = case kind of
+    GraphKind -> GraphDefinition <$> strictValue parseStoredGraphViewDefinition value
+    LedgerKind -> LedgerDefinition <$> strictValue parseStoredLedgerViewDefinition value
+  where
+    strictValue :: (Value -> Parser a) -> Value -> Either Text a
+    strictValue parser raw = case parseEither parser raw of
+        Left message -> Left (T.pack message)
+        Right parsed -> Right parsed
+
+parseStoredGraphViewDefinition :: Value -> Parser GraphViewDefinition
+parseStoredGraphViewDefinition = withObject "GraphViewDefinition" $ \o -> do
+    rawMode <- o .: "label_mode"
+    labelMode <- maybe (fail "label_mode must be auto, tags, or none") pure (parseLabelMode rawMode)
+    rawPreset <- o .: "layout_preset"
+    layoutPreset <- maybe (fail "layout_preset must be compact, standard, or airy") pure (parseLayoutPreset rawPreset)
+    GraphViewDefinition
+        <$> o .: "query"
+        <*> o .: "tags_shown"
+        <*> pure labelMode
+        <*> pure layoutPreset
+        <*> o .: "local_depth"
+        <*> (o .: "color_groups" >>= traverse parseStoredColorGroup)
+
+parseStoredColorGroup :: Value -> Parser ColorGroup
+parseStoredColorGroup = withObject "ColorGroup" $ \o ->
+    ColorGroup
+        <$> o .: "name"
+        <*> o .: "query"
+        <*> o .: "color"
+        <*> o .: "enabled"
+
+parseStoredLedgerViewDefinition :: Value -> Parser LedgerViewDefinition
+parseStoredLedgerViewDefinition = withObject "LedgerViewDefinition" $ \o -> do
+    rawSort <- o .: "sort"
+    sortValue <- maybe (fail "sort must be created, added, or opened") pure (parseLedgerSort rawSort)
+    LedgerViewDefinition
+        <$> o .: "query"
+        <*> pure sortValue
 
 layoutPresetText :: LayoutPreset -> Text
 layoutPresetText = \case

@@ -54,7 +54,7 @@ jobs:
           fi
           if [ ! -f ".devenv/cabal-wasm/$index" ]; then
             echo "::notice::WASM Cabal index is not cached; running 'cabal update' for scripts/build-web.sh's CABAL_DIR."
-            devenv shell -- bash -c 'CABAL_DIR="$PWD/.devenv/cabal-wasm" cabal update' || {
+            devenv shell -- bash -c "CABAL_DIR=\"\$PWD/.devenv/cabal-wasm\" cabal update" || {
               echo "::error title=WASM Cabal index bootstrap failed::'cabal update' failed for CABAL_DIR=$PWD/.devenv/cabal-wasm, which scripts/build-web.sh uses. Check Hackage reachability and re-run the job."
               exit 1
             }
@@ -70,7 +70,7 @@ jobs:
             echo "::error title=Native dependency resolution failed::cabal could not resolve cabal.project. Run 'devenv shell -- cabal build all --dry-run' locally for the full error."
             exit 1
           }
-          devenv shell -- bash -c 'CABAL_DIR="$PWD/.devenv/cabal-wasm" wasm32-wasi-cabal build --project-file=cabal.project.wasm eza-web --dry-run' || {
+          devenv shell -- bash -c "CABAL_DIR=\"\$PWD/.devenv/cabal-wasm\" wasm32-wasi-cabal build --project-file=cabal.project.wasm eza-web --dry-run" || {
             echo "::error title=WASM dependency resolution failed::wasm32-wasi-cabal could not resolve cabal.project.wasm (the same CABAL_DIR problem as the native project)."
             exit 1
           }

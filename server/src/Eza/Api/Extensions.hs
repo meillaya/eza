@@ -25,6 +25,7 @@ import Eza.Enrich (enqueueEnrichment)
 
 import Eza.Routes (Route (..))
 
+import Eza.Rule (RuleInput, ruleInputToRule)
 import Eza.Rules (Rule (..), createRule, deleteRule, listRules, matchingBookmarks, updateRule)
 
 import Eza.Tokens (Token (..))
@@ -353,22 +354,26 @@ dispatch rctx conn route req respond = case route of
         body <- jsonValue cfg req
         case body of
             Left response -> respond response
-            Right rule -> do
-                created <- createRule conn (sanitizeRule rule)
+            -- The response Rule is strict; the create/update/test body is the
+            -- lenient RuleInput with the documented defaults (enabled true,
+            -- field url, empty add_tags, mark_read false).
+            Right input -> do
+                created <- createRule conn (sanitizeRule (ruleInputToRule input))
                 respond (jsonResponse status201 created)
     RouteRuleTest -> do
         body <- jsonValue cfg req
         case body of
             Left response -> respond response
-            Right rule -> do
+            Right input -> do
+                let rule = ruleInputToRule input
                 ids <- matchingBookmarks conn (ruleField rule) (rulePattern rule)
                 respond (jsonResponse status200 (object ["matches" .= length ids, "bookmark_ids" .= ids]))
     RouteRuleUpdate ruleId -> do
         body <- jsonValue cfg req
         case body of
             Left response -> respond response
-            Right rule -> do
-                ok <- updateRule conn (sanitizeRule rule){ruleId = ruleId}
+            Right input -> do
+                ok <- updateRule conn (sanitizeRule (ruleInputToRule input)){ruleId = ruleId}
                 if ok then respond (jsonResponse status200 (object ["ok" .= True])) else respond (jsonProblem status404 "not_found" "rule not found")
     RouteRuleDelete ruleId -> do
         ok <- deleteRule conn ruleId

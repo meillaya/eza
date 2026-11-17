@@ -62,7 +62,7 @@ import Eza.Web.Graph (
     labelCount,
  )
 import Eza.Web.Logic.Model
-import Eza.Web.Logic.Requests (exportJsonUrl, exportUrl)
+import Eza.Web.Logic.Requests (exportJsonUrl, exportUrl, notesExportUrl)
 import Eza.Web.Logic.Route (Route (..))
 import Eza.Web.Logic.Update.ViewDefs (effectiveGraphLabelMode)
 import Eza.Web.Logic.Wire (WebhookTest (..))
@@ -2114,21 +2114,26 @@ aiBanner m =
         [HP.class_ "ai-banner", testId "ai-banner"]
         ( aiStatusErrorViews m
             ++ case mAiStatus m of
-                Nothing ->
-                    [ H.p_
-                        [HP.class_ "ai-banner-lead read"]
-                        [text "The provider status has not loaded."]
-                    , H.div_
-                        [HP.class_ "ai-tools"]
-                        [ H.button_
-                            [ HP.class_ "btn btn--sm"
-                            , HP.type_ "button"
-                            , HP.data_ "testid" "ai-status-retry"
-                            , HE.onClick AiStatusReload
+                -- With no status loaded the error view is the only banner: do
+                -- not print a second "not loaded" line and a second retry for
+                -- the same read.
+                Nothing
+                    | isJust (mAiStatusError m) -> []
+                    | otherwise ->
+                        [ H.p_
+                            [HP.class_ "ai-banner-lead read"]
+                            [text "The provider status has not loaded."]
+                        , H.div_
+                            [HP.class_ "ai-tools"]
+                            [ H.button_
+                                [ HP.class_ "btn btn--sm"
+                                , HP.type_ "button"
+                                , HP.data_ "testid" "ai-status-retry"
+                                , HE.onClick AiStatusReload
+                                ]
+                                [text "read the provider status"]
                             ]
-                            [text "read the provider status"]
                         ]
-                    ]
                 Just status ->
                     [ H.p_
                         [HP.class_ "ai-banner-lead read"]
@@ -2277,9 +2282,10 @@ suggestionRow m suggestion =
     suggestedTag tag = H.span_ [HP.class_ "tagpill tagpill--sug"] [text (ms tag)]
     actionCell =
         strongAction
-            (if mSuggestionApplyBusy m then "applying…" else "apply")
-            (attrDisabled (mSuggestionApplyBusy m))
+            (if applying then "applying…" else "apply")
+            (attrDisabled applying)
             (SuggestionApply (bsId bookmark) (tsgTags suggestion))
+    applying = mSuggestionApplyBusy m == Just (bsId bookmark)
 
 -- ============================================================ maintenance ===
 
@@ -3271,9 +3277,9 @@ webhookRecord m webhook =
                   , testId "webhook-test"
                   , HE.onClick (WebhookTestRequest (whId webhook))
                   ]
-                    ++ attrDisabled (mWebhookTestBusy m)
+                    ++ attrDisabled sendingTest
                 )
-                [text (if mWebhookTestBusy m then "sending test…" else "send test")]
+                [text (if sendingTest then "sending test…" else "send test")]
             , H.button_
                 [ HP.class_ "account-link"
                 , HP.type_ "button"
@@ -3290,6 +3296,8 @@ webhookRecord m webhook =
                 [text "delete"]
             ]
         ]
+  where
+    sendingTest = mWebhookTestBusy m == Just (whId webhook)
 
 webhookTestNote :: Model -> Int -> [View () () Model Action]
 webhookTestNote m webhookId
@@ -3299,7 +3307,7 @@ webhookTestNote m webhookId
             [HP.class_ "account-record-meta meta webhook-test-result is-error", HP.role_ "status"]
             [text (ms ("the test failed · " <> T.unpack message))]
         ]
-    | mWebhookTestBusy m =
+    | mWebhookTestBusy m == Just webhookId =
         [ H.p_
             [HP.class_ "account-record-meta meta webhook-test-result", HP.role_ "status"]
             [text "sending the test delivery…"]
@@ -3357,7 +3365,7 @@ deliveryRow delivery =
 webhookForm :: Model -> View () () Model Action
 webhookForm m =
     H.form_
-        [HP.class_ "account-form", testId "webhook-form"]
+        [HP.class_ "account-form", testId "webhook-form", HE.onSubmit WebhookCreate]
         [ H.h3_ [HP.class_ "account-h3 display"] [text "Create a webhook"]
         , H.div_
             [HP.class_ "account-form-grid"]
@@ -3489,19 +3497,37 @@ usersPanel m
             ]
     resetReveal = case mUserResetShown m of
         Nothing -> []
-        Just (username, password) ->
+        Just (username, password, codes) ->
             [ H.div_
                 [HP.class_ "account-created", testId "user-reset-shown"]
                 [ H.p_
                     [HP.class_ "account-created-label meta"]
                     [text (ms ("temporary password for " <> T.unpack username <> ", shown once"))]
                 , H.code_ [HP.class_ "account-created-token mono"] [text (ms (T.unpack password))]
-                , H.button_
-                    [HP.class_ "btn btn--ghost", HP.type_ "button", HE.onClick UserResetShownDismiss]
-                    [text "done"]
+                , H.p_
+                    [HP.class_ "account-created-label meta"]
+                    [text (ms ("new recovery codes for " <> T.unpack username <> ", shown once"))]
+                , H.ul_
+                    [HP.class_ "account-created-codes mono"]
+                    [H.li_ [] [H.code_ [] [text (ms (T.unpack code))]] | code <- codes]
+                , H.div_
+                    [HP.class_ "account-created-row"]
+                    [ H.button_
+                        ( [ HP.class_ "btn"
+                          , HP.type_ "button"
+                          , HP.data_ "testid" "user-reset-codes-copy"
+                          , HE.onClick (UserRecoveryCopied (T.intercalate "\n" codes))
+                          ]
+                            ++ attrDisabled (null codes)
+                        )
+                        [text "copy recovery codes"]
+                    , H.button_
+                        [HP.class_ "btn btn--ghost", HP.type_ "button", HE.onClick UserResetShownDismiss]
+                        [text "done"]
+                    ]
                 , H.p_
                     [HP.class_ "account-note meta"]
-                    [text "Its second factor is off and its sessions are revoked."]
+                    [text "Its second factor is off, its sessions are revoked, and its previous recovery codes no longer work. Copy both values now."]
                 ]
             ]
 
@@ -3649,7 +3675,7 @@ deleteAccountForm m user =
 userCreateForm :: Model -> View () () Model Action
 userCreateForm m =
     H.form_
-        [HP.class_ "account-form", testId "user-create-form"]
+        [HP.class_ "account-form", testId "user-create-form", HE.onSubmit UserCreate]
         [ H.h3_ [HP.class_ "account-h3 display"] [text "Add a user"]
         , H.div_
             [HP.class_ "account-form-grid"]
@@ -3797,7 +3823,7 @@ scopePill scope = H.span_ [HP.class_ "tagpill"] [text (ms scope)]
 tokenForm :: Model -> View () () Model Action
 tokenForm m =
     H.form_
-        [HP.class_ "account-form"]
+        [HP.class_ "account-form", HE.onSubmit TokenCreate]
         [ H.h3_ [HP.class_ "account-h3 display"] [text "Create a token"]
         , H.div_
             [HP.class_ "account-form-grid"]
@@ -4064,7 +4090,7 @@ safeHead (x : _) = Just x
 ruleForm :: Model -> View () () Model Action
 ruleForm m =
     H.form_
-        [HP.class_ "account-form"]
+        [HP.class_ "account-form", HE.onSubmit RuleCreate]
         [ H.h3_ [HP.class_ "account-h3 display"] [text "New rule"]
         , H.div_
             [HP.class_ "account-form-grid"]
@@ -4175,7 +4201,7 @@ importPanel m =
             [ H.h3_ [HP.class_ "account-h3 display"] [text "Export"]
             , H.p_
                 [HP.class_ "account-note meta"]
-                [text "Netscape HTML any browser can import, or the versioned eza JSON."]
+                [text "Netscape HTML any browser can import, the versioned eza JSON, or the notes as a Markdown document."]
             , H.div_
                 [HP.class_ "account-actions"]
                 [ H.a_
@@ -4184,6 +4210,12 @@ importPanel m =
                 , H.a_
                     [HP.class_ "btn btn--ghost", HP.href_ (ms exportJsonUrl)]
                     [text "export eza.json"]
+                , H.a_
+                    [ HP.class_ "btn btn--ghost"
+                    , HP.href_ (ms notesExportUrl)
+                    , HP.data_ "testid" "export-notes"
+                    ]
+                    [text "export notes.md"]
                 ]
             ]
     progress =

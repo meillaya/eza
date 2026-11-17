@@ -403,8 +403,32 @@ restoreCaptures conn changeId restoredIds = do
         Nothing -> pure ()
         Just bookmarkId -> do
             parent <- bookmarkExists conn bookmarkId
-            when (parent && (null restoredIds || bookmarkId `elem` restoredIds)) $
-                executeJsonReplace conn "captures" captureColumns raw
+            when (parent && (null restoredIds || bookmarkId `elem` restoredIds)) $ do
+                image <- captureImageForRestore conn raw
+                executeJsonReplace conn "captures" captureColumns image
+
+{- | A capture before-image can name a @clip_template@ that was deleted after the
+capture was taken. Restored as-is it would violate @captures.template_id@'s
+foreign key and abort the whole undo transaction; because the failed change then
+stays the newest usable change, every later undo attempt would fail too. Fall
+back to @template_id = NULL@ (the column is nullable and uses
+@ON DELETE SET NULL@ for exactly this state) so the undo cannot wedge.
+-}
+captureImageForRestore :: Connection -> Text -> IO Text
+captureImageForRestore conn raw = case jsonObject raw of
+    Just value -> case jsonInt (KeyMap.lookup "template_id" value) of
+        Nothing -> pure raw
+        Just templateId -> do
+            found <- clipTemplateExists conn templateId
+            if found
+                then pure raw
+                else pure (TE.decodeUtf8 (LBS.toStrict (encode (Object (KeyMap.insert "template_id" Null value)))))
+    Nothing -> pure raw
+
+clipTemplateExists :: Connection -> Int -> IO Bool
+clipTemplateExists conn templateId = do
+    rows <- query conn "SELECT 1 FROM clip_templates WHERE id = ?" (Only templateId) :: IO [Only Int]
+    pure (not (null rows))
 
 restoreDeadOverrides :: Connection -> Int -> [Int] -> IO ()
 restoreDeadOverrides conn changeId restoredIds = do

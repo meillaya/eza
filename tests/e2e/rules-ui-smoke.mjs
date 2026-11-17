@@ -166,8 +166,17 @@ try {
   }
   check("rule re-enabled via ui", current?.enabled === true, String(current?.enabled));
 
-  // Delete.
+  // Delete asks for confirmation first: cancel keeps the rule, then confirm
+  // removes it.
   await listed.locator(SEL.ruleDelete).click();
+  await page.waitForSelector(SEL.dialogConfirm, { timeout: 10000 });
+  check("deleting a rule asks for confirmation", (await page.locator(SEL.dialogConfirm).count()) === 1);
+  await page.locator(SEL.dialogCancel).click();
+  await page.waitForTimeout(400);
+  check("cancelling the delete keeps the rule", (await rules()).length === countBeforeValidation, "remaining " + (await rules()).length);
+  await page.locator(SEL.ruleRow, { hasText: "E2E domain rule" }).locator(SEL.ruleDelete).click();
+  await page.waitForSelector(SEL.dialogConfirm, { timeout: 10000 });
+  await page.locator(SEL.dialogConfirm).click();
   await waitToast("deleted");
   for (let attempt = 0; attempt < 12; attempt++) {
     await page.waitForTimeout(400);

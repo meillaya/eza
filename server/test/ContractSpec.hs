@@ -21,7 +21,7 @@ import Eza.Account (AccountInfo, TokenView)
 import Eza.Ai (AiStatus)
 import Eza.Boot (BootPayload (..), wireVersion)
 import qualified Eza.Control as Control
-import Eza.Rule (Rule)
+import Eza.Rule (Rule (..))
 import Eza.Share (ShareView)
 import TestHarness
 
@@ -50,6 +50,46 @@ contractSpec =
                 rules <- getWrapped server session csrf "/api/v1/rules" "rules" :: IO [Rule]
                 rules `shouldBe` []
                 void (getAs server session csrf "/api/v1/ai/status" :: IO AiStatus)
+
+            it "creates, tests, and updates a rule from a body with documented defaults" $ \server -> do
+                (session, csrf) <- loginFixture server
+                created <-
+                    httpRequest
+                        server
+                        "POST"
+                        "/api/v1/rules"
+                        (authHeaders session csrf)
+                        (Just (encode (object ["name" .= ("Haskell" :: Text), "pattern" .= ("haskell" :: Text)])))
+                created `shouldHaveStatus` 201
+                rule <- case eitherDecode (hrespBody created) :: Either String Rule of
+                    Left message -> expectationFailure ("created rule does not decode: " <> message) >> error "unreachable"
+                    Right value -> pure value
+                ruleName rule `shouldBe` "Haskell"
+                ruleEnabled rule `shouldBe` True
+                ruleField rule `shouldBe` "url"
+                ruleAddTags rule `shouldBe` []
+                ruleMarkRead rule `shouldBe` False
+                ruleId rule `shouldSatisfy` (> 0)
+                tested <-
+                    httpRequest
+                        server
+                        "POST"
+                        "/api/v1/rules/test"
+                        (authHeaders session csrf)
+                        (Just (encode (object ["name" .= ("Haskell" :: Text), "pattern" .= ("haskell" :: Text)])))
+                tested `shouldHaveStatus` 200
+                jsonIntField "matches" (hrespBody tested) `shouldBe` Just 0
+                patched <-
+                    httpRequest
+                        server
+                        "PATCH"
+                        ("/api/v1/rules/" <> show (ruleId rule))
+                        (authHeaders session csrf)
+                        (Just (encode (object ["name" .= ("Haskell tools" :: Text), "pattern" .= ("haskell" :: Text)])))
+                patched `shouldHaveStatus` 200
+                -- The list still decodes strictly after the update.
+                rules <- getWrapped server session csrf "/api/v1/rules" "rules" :: IO [Rule]
+                map ruleName rules `shouldBe` ["Haskell tools"]
 
             it "enqueues an async AI suggestion job and serves its status" $ \server -> do
                 (session, csrf) <- loginFixture server

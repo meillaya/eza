@@ -23,16 +23,28 @@ viewContractSpec :: Spec
 viewContractSpec = do
     it "accepts every valid example document with the server codecs" $ do
         root <- findRepoRoot
-        -- Graph and ledger examples are stored views; they must decode and
-        -- pass the same validation the API applies to a draft.
+        -- Graph and ledger examples are create-shaped drafts (no id or
+        -- timestamps): decode them as ViewInput and apply the same draft
+        -- validation the API applies to a create/update body.
         forM_ ["graph-view.json", "ledger-view.json"] $ \name -> do
             value <- readJson (root </> "spec" </> "examples" </> name)
-            case fromJSON value :: Result View of
+            case fromJSON value :: Result ViewInput of
                 Error message -> expectationFailure (name <> " failed to decode: " <> message)
-                Success view ->
-                    validateViewDraft
-                        (ViewInput (vName view) (vKind view) (vDefinition view) (Just (vSlug view)))
-                        `shouldBe` Right ()
+                Success input -> validateViewDraft input `shouldBe` Right ()
+        -- The stored-view and stored-webhook wrappers carry every response
+        -- field, so the strict response decoders must accept them.
+        storedGraph <- readJson (root </> "spec" </> "examples" </> "stored-graph-view.json")
+        case fromJSON storedGraph :: Result View of
+            Error message -> expectationFailure ("stored-graph-view.json failed to decode: " <> message)
+            Success view -> do
+                vKind view `shouldBe` GraphKind
+                vSlug view `shouldBe` "graph"
+        storedWebhook <- readJson (root </> "spec" </> "examples" </> "stored-webhook.json")
+        case fromJSON storedWebhook :: Result Webhook of
+            Error message -> expectationFailure ("stored-webhook.json failed to decode: " <> message)
+            Success webhook -> do
+                whName webhook `shouldBe` "Inbox bridge"
+                whEnabled webhook `shouldBe` True
         -- The webhook example is an input document.
         value <- readJson (root </> "spec" </> "examples" </> "webhook.json")
         case fromJSON value :: Result WebhookInput of

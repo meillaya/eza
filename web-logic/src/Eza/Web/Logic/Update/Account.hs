@@ -8,7 +8,7 @@ module Eza.Web.Logic.Update.Account (
 ) where
 
 import Control.Monad
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import qualified Data.Text as T
 
 import Data.Text (Text)
@@ -24,6 +24,14 @@ import Eza.Web.Logic.Update.Common
 import Eza.Web.Logic.Update.Monad (Update, dispatch, get)
 import Eza.Web.Logic.Update.ViewDefs (isUserEnabled, upsertUser, upsertWebhook)
 import Eza.Webhook
+
+{- | A terminal webhook-test answer is accepted for its own webhook, or when no
+test is marked active (a standalone/cancelled run); an answer for a different
+active webhook is stale and dropped.
+-}
+webhookTestIsCurrent :: Model -> Int -> Bool
+webhookTestIsCurrent m webhookId =
+    maybe True (== webhookId) (mWebhookTestBusy m)
 
 setSecurityError :: Text -> Update ()
 setSecurityError message =
@@ -71,13 +79,30 @@ handle = \case
     AccountFailed err -> do
         putModel (\m -> m{gAccount = (gAccount m){acAccountLoading = False, acAccountError = Just ((aeMessage err))}})
         handleApiError err
-    RecoveryRegenerate -> regenerateRecovery RecoveryLoaded AccountFailed
+    RecoveryRegenerate ->
+        requestConfirmation
+            "Regenerate recovery codes?"
+            "This replaces every unused recovery code; the current codes stop working immediately."
+            "regenerate codes"
+            ConfirmRecoveryRegenerate
+    RecoveryRegenerateConfirmed -> regenerateRecovery RecoveryLoaded AccountFailed
     RecoveryLoaded codes -> do
         putModel (\m -> m{gAccount = (gAccount m){acRecoveryCodes = codes}})
         notify "New recovery codes. Store them now." ToastOk
     CredentialRenamed credentialId nickname -> do
         renameCredential credentialId nickname (ToastAdd "Passkey renamed" ToastOk) CredentialOpFailed
-    CredentialDeleted credentialId -> deleteCredential credentialId (CredentialRemoved credentialId) CredentialOpFailed
+    CredentialDeleted credentialId -> do
+        m <- get
+        let nickname = case [crNickname credential | credential <- maybe [] aiCredentials (mAccount m), crId credential == credentialId] of
+                (name : _) | not (T.null (T.strip name)) -> name
+                _ -> "this passkey"
+        requestConfirmation
+            "Delete this passkey?"
+            ("Delete " <> nickname <> "? It can no longer sign in, and a deleted passkey cannot be recovered.")
+            "delete the passkey"
+            (ConfirmCredentialDelete credentialId)
+    CredentialDeleteConfirmed credentialId ->
+        deleteCredential credentialId (CredentialRemoved credentialId) CredentialOpFailed
     CredentialRemoved _ -> do
         notify "Passkey deleted" ToastOk
         fetchAccount AccountLoaded AccountFailed
@@ -241,7 +266,17 @@ handle = \case
     TokenCreateFailed err -> do
         putModel (\m -> m{gAccount = (gAccount m){acTokenBusy = False}})
         handleApiError err
-    TokenRevoke tokenId -> revokeApiToken tokenId TokenRevoked TokenCreateFailed
+    TokenRevoke tokenId -> do
+        m <- get
+        let name = case [tvName token | token <- mTokens m, tvId token == tokenId] of
+                (value : _) -> value
+                [] -> "this token"
+        requestConfirmation
+            "Revoke this API token?"
+            ("Revoke " <> name <> "? Any client using it stops working immediately. This cannot be undone.")
+            "revoke the token"
+            (ConfirmTokenRevoke tokenId)
+    TokenRevokeConfirmed tokenId -> revokeApiToken tokenId TokenRevoked TokenCreateFailed
     TokenRevoked -> do
         notify "Token revoked" ToastOk
         fetchTokens TokensLoaded TokensFailed
@@ -314,15 +349,17 @@ handle = \case
                 let password = (mUserResetPassword m)
                  in if T.null (T.strip password)
                         then putModel (\x -> x{gAccount = (gAccount x){acUserActionError = Just "a temporary password is required"}})
-                        else resetAdminPassword userId password (UserResetDone userId password) UserResetFailed
-    UserResetDone userId password -> do
-        notify "Temporary password set. The user's sessions were revoked." ToastOk
+                        else resetAdminPassword userId password (\codes -> UserResetDone userId password codes) UserResetFailed
+    UserResetDone userId password codes -> do
+        -- The reset rotated the account's recovery codes; they are returned
+        -- once and must stay visible until the admin dismisses the reveal.
+        notify "Temporary password set. Its sessions and recovery codes were replaced." ToastOk
         putModel
             ( \m ->
                 let username = case [uvUsername user | user <- mAdminUsers m, uvId user == userId] of
                         (name : _) -> name
                         [] -> T.pack (show userId)
-                 in m{gAccount = (gAccount m){acUserReset = Nothing, acUserResetPassword = "", acUserResetShown = Just (username, password), acUserActionError = Nothing}}
+                 in m{gAccount = (gAccount m){acUserReset = Nothing, acUserResetPassword = "", acUserResetShown = Just (username, password, codes), acUserActionError = Nothing}}
             )
     UserResetCancel -> putModel (\m -> m{gAccount = (gAccount m){acUserReset = Nothing, acUserResetPassword = "", acUserActionError = Nothing}})
     UserResetFailed err ->
@@ -424,48 +461,70 @@ handle = \case
         putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhooks = upsertWebhook webhook (mWebhooks m)}})
     WebhookToggleFailed err -> handleApiError err
     WebhookTestRequest webhookId -> do
-        putModel
-            ( \m ->
-                m{gWebhooks = (gWebhooks m){wkWebhookTest = Nothing, wkWebhookTestError = Nothing, wkWebhookTestBusy = True}}
-            )
-        createWebhookTestJob
-            webhookId
-            (WebhookTestJobQueued webhookId)
-            (\err -> WebhookTestJobFailed webhookId (Just (aeMessage err)))
+        m <- get
+        when (isNothing (mWebhookTestBusy m)) $ do
+            putModel
+                ( \x ->
+                    x{gWebhooks = (gWebhooks x){wkWebhookTest = Nothing, wkWebhookTestError = Nothing, wkWebhookTestBusy = Just webhookId}}
+                )
+            createWebhookTestJob
+                webhookId
+                (WebhookTestJobQueued webhookId)
+                (\err -> WebhookTestJobFailed webhookId (Just (aeMessage err)))
     WebhookTestJobQueued webhookId jobId -> dispatch (JobStarted (WebhookTestJob webhookId) jobId)
     WebhookTestJobDone webhookId result -> do
-        putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookTestBusy = False}})
-        case result of
-            Nothing ->
-                putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookTestError = Just (webhookId, "The webhook test returned no result.")}})
-            Just value -> case decodeWebhookTestJobResult value of
-                Left err -> putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookTestError = Just (webhookId, aeMessage err)}})
-                Right report ->
-                    putModel
-                        ( \m ->
-                            m
-                                { gWebhooks =
-                                    (gWebhooks m)
-                                        { wkWebhookTest =
-                                            Just
-                                                ( webhookId
-                                                , WebhookTest
-                                                    (wtjrOk report)
-                                                    (Just (wtjrStatus report))
-                                                    (fromMaybe "" (wtjrError report))
-                                                )
-                                        , wkWebhookTestError = Nothing
-                                        }
-                                }
-                        )
-    WebhookTestJobFailed webhookId message ->
-        putModel
-            ( \m ->
-                m{gWebhooks = (gWebhooks m){wkWebhookTestBusy = False, wkWebhookTest = Nothing, wkWebhookTestError = Just (webhookId, fromMaybe "The webhook test failed." message)}}
-            )
-    WebhookTestJobAbandoned webhookId ->
-        putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookTestBusy = False, wkWebhookTestError = Just (webhookId, "The webhook test was cancelled.")}})
-    WebhookDelete webhookId ->
+        -- Only the test that is still the active row may publish its result.
+        m <- get
+        when (webhookTestIsCurrent m webhookId) $ do
+            putModel (\x -> x{gWebhooks = (gWebhooks x){wkWebhookTestBusy = Nothing}})
+            case result of
+                Nothing ->
+                    putModel (\x -> x{gWebhooks = (gWebhooks x){wkWebhookTestError = Just (webhookId, "The webhook test returned no result.")}})
+                Just value -> case decodeWebhookTestJobResult value of
+                    Left err -> putModel (\x -> x{gWebhooks = (gWebhooks x){wkWebhookTestError = Just (webhookId, aeMessage err)}})
+                    Right report ->
+                        putModel
+                            ( \x ->
+                                x
+                                    { gWebhooks =
+                                        (gWebhooks x)
+                                            { wkWebhookTest =
+                                                Just
+                                                    ( webhookId
+                                                    , WebhookTest
+                                                        (wtjrOk report)
+                                                        (Just (wtjrStatus report))
+                                                        (fromMaybe "" (wtjrError report))
+                                                    )
+                                            , wkWebhookTestError = Nothing
+                                            }
+                                    }
+                            )
+    WebhookTestJobFailed webhookId message -> do
+        m <- get
+        when (webhookTestIsCurrent m webhookId) $
+            putModel
+                ( \x ->
+                    x{gWebhooks = (gWebhooks x){wkWebhookTestBusy = Nothing, wkWebhookTest = Nothing, wkWebhookTestError = Just (webhookId, fromMaybe "The webhook test failed." message)}}
+                )
+    WebhookTestJobAbandoned webhookId -> do
+        m <- get
+        when (webhookTestIsCurrent m webhookId) $
+            putModel
+                ( \x ->
+                    x{gWebhooks = (gWebhooks x){wkWebhookTestBusy = Nothing, wkWebhookTestError = Just (webhookId, "The webhook test was cancelled.")}}
+                )
+    WebhookDelete webhookId -> do
+        m <- get
+        let name = case [whName webhook | webhook <- mWebhooks m, whId webhook == webhookId] of
+                (value : _) -> value
+                [] -> "this webhook"
+        requestConfirmation
+            "Delete this webhook?"
+            ("Delete " <> name <> "? Its events stop being delivered and its delivery history is removed.")
+            "delete the webhook"
+            (ConfirmWebhookDelete webhookId)
+    WebhookDeleteConfirmed webhookId ->
         deleteWebhook webhookId (WebhookDeleted webhookId) WebhookDeleteFailed
     WebhookDeleted webhookId -> do
         notify "Webhook deleted" ToastOk
@@ -480,6 +539,9 @@ handle = \case
                                 other -> other
                             , wkWebhookTest = case mWebhookTest m of
                                 Just (showId, _) | showId == webhookId -> Nothing
+                                other -> other
+                            , wkWebhookTestBusy = case mWebhookTestBusy m of
+                                Just showId | showId == webhookId -> Nothing
                                 other -> other
                             }
                     }
@@ -537,7 +599,17 @@ handle = \case
             ( \m ->
                 m{gRules = (gRules m){ruRules = map (\rule -> if ruleId rule == ruleId updated then updated else rule) (mRules m)}}
             )
-    RuleDelete ruleIdToDelete -> deleteRule ruleIdToDelete (RuleDeleted ruleIdToDelete) RuleFailed
+    RuleDelete ruleIdToDelete -> do
+        m <- get
+        let name = case [ruleName rule | rule <- mRules m, ruleId rule == ruleIdToDelete] of
+                (value : _) -> value
+                [] -> "this rule"
+        requestConfirmation
+            "Delete this rule?"
+            ("Delete " <> name <> "? Its automatic tagging stops and this cannot be undone.")
+            "delete the rule"
+            (ConfirmRuleDelete ruleIdToDelete)
+    RuleDeleteConfirmed ruleIdToDelete -> deleteRule ruleIdToDelete (RuleDeleted ruleIdToDelete) RuleFailed
     RuleDeleted ruleIdToDelete -> do
         putModel (\m -> m{gRules = (gRules m){ruRules = filter (\rule -> ruleId rule /= ruleIdToDelete) (mRules m)}})
         notify "Rule deleted" ToastOk

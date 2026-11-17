@@ -290,7 +290,6 @@ handle = \case
                     ( \x ->
                         x{gDetail = (gDetail x){dtExtractEditing = False, dtExtractDraft = (bdExtractedText detail), dtExtractDirty = False}}
                     )
-    ExtractSaved _ -> pure ()
     MarkLinkAlive -> do
         m <- get
         case currentDetail m of
@@ -362,11 +361,6 @@ handle = \case
             Bookmark _ -> putModel (\x -> x{gDetail = (gDetail x){dtBacklinks = links}})
             _ -> pure ()
     BacklinksFailed epoch err -> sameEpoch epoch (handleApiError err)
-    LinkPrev -> putModel (\m -> m{gDetail = (gDetail m){dtLinkSel = max 0 (mLinkSel m - 1)}})
-    LinkNext -> do
-        m <- get
-        let count = length (mLinkResults m)
-        putModel (\x -> x{gDetail = (gDetail x){dtLinkSel = if count == 0 then 0 else min (count - 1) (mLinkSel x + 1)}})
     LinkChoose index -> do
         m <- get
         case drop index (mLinkResults m) of
@@ -421,11 +415,6 @@ handle = \case
                 | bdId detail == bookmarkId ->
                     deleteBookmark bookmarkId (DeletedOk bookmarkId) DeleteFailed
             _ -> pure ()
-    DeleteBookmark bookmarkId -> do
-        m <- get
-        case currentDetail m of
-            Just detail | bdId detail == bookmarkId -> deleteBookmark bookmarkId (DeletedOk bookmarkId) DeleteFailed
-            _ -> pure ()
     DeletedOk bookmarkId -> do
         m <- get
         notify "Bookmark deleted" ToastOk
@@ -435,7 +424,6 @@ handle = \case
             Bookmark currentId | currentId == bookmarkId -> navigateTo Index
             _ -> reloadList
     DeleteFailed err -> handleApiError err
-    DirtyGuardOpen route -> putModel (\m -> m{gShell = (gShell m){sfGuardOpen = True, sfPendingRoute = Just route, sfGuardFromHistory = False}})
     -- Keep editing. When the guard came from a history navigation the address
     -- has already moved to the pending route; put it back without adding a
     -- history entry so the URL matches the record still on screen.

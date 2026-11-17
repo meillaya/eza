@@ -47,9 +47,16 @@ Stored and imported view documents carry `"schema": 1` on the wrapper. A
 document with an unknown wrapper schema or an unknown `kind` is rejected with
 `400 bad_request`. A definition shape change that old readers could not ignore
 bumps the schema number instead. The JSON schemas in
-[../spec/schema](../spec/schema) are the shape contract; the server is the
-semantic check behind them, covering slug rules, query length, colours, local
-depth, and operators the graph does not support.
+[../spec/schema](../spec/schema) are the shape contract for one document in two
+states: a create/PATCH payload and the stored/exported wrapper. One schema
+covers both, so the server-assigned fields (`schema`, `slug`, `id`,
+`created_at`, `updated_at`, and `is_default`) are optional in the schema and
+present on every stored/exported document. The Haskell decoders and semantic
+validators are the deeper check behind the schemas; they cover slug rules,
+query length, colours, local depth, and operators the graph does not support.
+The server decoder also fills omitted graph-definition fields with their
+documented defaults, so a minimal create payload can be smaller than the
+canonical document shape.
 
 The webhook event catalog is versioned with the API. Subscriptions name the
 event kinds they want; an unknown kind is rejected when the subscription is
@@ -73,26 +80,33 @@ and a definition whose shape depends on the kind:
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema` | integer | `1`. Assigned by the server, rejected when unknown. |
-| `id` | integer | Server-assigned. |
-| `slug` | string | At most 48 characters, lowercase letters, digits and hyphens. Used in URLs and as the view name in routes. |
+| `schema` | integer | `1`. Server-assigned; optional on create, always present on a stored/exported wrapper. |
+| `id` | integer | Server-assigned row id. Optional on create; always present on a stored/exported wrapper. |
+| `slug` | string | At most 48 characters, lowercase letters, digits and hyphens. Used in URLs and as the view name in routes. Optional on create (derived from the name); always present on a stored/exported wrapper. |
 | `name` | string | Required, at most 80 characters. |
 | `kind` | string | `graph` or `ledger`. |
-| `is_default` | boolean | At most one default per kind. |
+| `is_default` | boolean | At most one default per kind. Optional on create (defaults to false); present on a stored/exported wrapper. |
 | `definition` | object | Graph or ledger shape, below. |
-| `created_at` | integer | POSIX seconds, server-assigned. |
-| `updated_at` | integer | POSIX seconds, server-assigned. |
+| `created_at` | integer | POSIX seconds, server-assigned. Optional on create; always present on a stored/exported wrapper. |
+| `updated_at` | integer | POSIX seconds, server-assigned. Optional on create; always present on a stored/exported wrapper. |
 
-A create request sends a `ViewInput`: `name`, `kind`, `definition`, and an
-optional `slug`. When the slug is omitted the server derives it from the name,
-appends `-2`, `-3` and so on on a collision, and stores the result. The server
-owns `id`, `schema`, `created_at`, `updated_at` and the default flag on create;
-set a default with a PATCH.
+A create request sends a `ViewInput`: `name`, `kind`, `definition`, and
+optional `slug` and `schema`. When the slug is omitted the server derives it
+from the name, appends `-2`, `-3` and so on on a collision, and stores the
+result. The server owns `id`, `schema`, `created_at`, `updated_at` and the
+default flag on create; set a default with a PATCH. The same schema validates
+both shapes, so the server-assigned fields are optional and a create payload may
+omit them.
 
 The full wrapper is what export and import carry. See
-[../spec/examples/graph-view.json](../spec/examples/graph-view.json) and
-[../spec/examples/ledger-view.json](../spec/examples/ledger-view.json), and
-[view.schema.json](../spec/schema/view.schema.json) for the machine shape.
+[../spec/examples/stored-graph-view.json](../spec/examples/stored-graph-view.json)
+(the seeded default graph view, with `local_depth` null) and
+[../spec/examples/stored-webhook.json](../spec/examples/stored-webhook.json)
+for stored documents, and
+[../spec/examples/graph-view.json](../spec/examples/graph-view.json) /
+[../spec/examples/ledger-view.json](../spec/examples/ledger-view.json) for
+create payloads. The machine shape is
+[view.schema.json](../spec/schema/view.schema.json).
 
 ### Graph definitions
 
@@ -102,7 +116,7 @@ The full wrapper is what export and import carry. See
 | `tags_shown` | boolean | Draw tag nodes. |
 | `label_mode` | string | `auto`, `tags` or `none`. |
 | `layout_preset` | string | `compact`, `standard` or `airy`. Deterministic spacing. |
-| `local_depth` | integer or null | `1` to `3` for a neighbourhood around the focused record; null for the whole library. |
+| `local_depth` | integer or null | `1` to `3` for a neighbourhood around the focused record; null for the whole library (the seeded default view uses null). |
 | `color_groups` | array | Up to 24 ordered colour rules. |
 
 The query is evaluated against the fields the graph payload carries: title,
@@ -137,7 +151,7 @@ An empty query with the `created` sort opens the ordinary ledger.
 | Query, per view and per colour group | 512 characters |
 | Colour groups per graph view | 24 |
 | Colour | `#rrggbb` |
-| `local_depth` | 1 to 3 |
+| `local_depth` | 1 to 3, or null for the whole library |
 | Colour group name | 80 characters |
 
 The server enforces these defaults, and the schema records them. A create
@@ -212,18 +226,28 @@ curl -sS -X DELETE https://eza.example/api/v1/views/reading-graph \
 |---|---|---|
 | `name` | string | Required, at most 80 characters. |
 | `url` | string | Required, absolute `http` or `https` URL, at most 2048 characters. |
-| `events` | array | One to four unique event kinds from the catalog below. |
-| `enabled` | boolean | Delivery is attempted only while true. Omitted on create it defaults to true. |
+| `events` | array | One to four event kinds from the catalog below. Duplicates are accepted on input and de-duplicated before storage. |
+| `enabled` | boolean | Optional on create; omitted means true. Delivery is attempted only while true. Always present on a stored object. |
+
+The schema's `url` pattern rejects whitespace, credential (`user:pass@`) URLs, an
+empty host and an all-dot host; the server then applies the stricter runtime
+policy (`Eza.Url.isHttpUrl`: http/https only, non-empty non-dot host, no
+userinfo, no whitespace or control characters) before storing a subscription.
 
 At most 16 subscriptions exist per database. A create beyond the limit returns
 `409 webhook_limit`. A missing subscription returns `404 not_found`, and
 validation failures return `400 bad_request`. The stored object also carries
 `id`, `created_at`, `last_status`, `last_attempt_at`, `last_error` and
-`fail_streak`; the secret is separate and never part of the list payload.
+`fail_streak` (see
+[webhook.schema.json](../spec/schema/webhook.schema.json)); they are optional in
+the schema because a create payload does not send them. The secret is separate
+and never part of the list payload.
 
 `PATCH /api/v1/webhooks/{id}` takes a full subscription document, not a partial
-one: send `name`, `url`, `events` and `enabled` together. To re-enable a
-disabled subscription after fixing the receiver, PATCH it with `enabled` true.
+one: send `name`, `url` and `events` together; `enabled` is optional and omitted
+means true, so include `enabled: false` when updating a stopped subscription. To
+re-enable a disabled subscription after fixing the receiver, PATCH it with
+`enabled` true.
 
 ### Management routes
 
@@ -388,12 +412,14 @@ an ordered stream.
 
 ## Threat model and boundaries
 
-Extensions v1 is data. The server validates a view or a webhook against the
-schemas and the semantic rules above, stores it, and renders or posts it from
-the trusted code that already exists. No extension-provided code path exists,
-so there is no sandbox to escape. The bounded `NoCodeExecution` invariant in
-[Extensions.tla](../spec/Extensions.tla) models this with a run counter that no
-transition increments.
+Extensions v1 is data. The Haskell decoders and semantic validators enforce the
+contract summarised above, and the JSON schemas in
+[../spec/schema](../spec/schema) validate both create payloads and
+stored/exported documents. The server stores a view or a webhook, and renders or
+posts it from the trusted code that already exists. No extension-provided code
+path exists, so there is no sandbox to escape. The bounded `NoCodeExecution`
+invariant in [Extensions.tla](../spec/Extensions.tla) models this with a run
+counter that no transition increments.
 
 The design targets multiple accounts. In that design each account's views,
 webhooks, events and deliveries live in that account's database; a view or
@@ -441,5 +467,5 @@ exactly which invariants are checked and what is not proven.
 - [view.schema.json](../spec/schema/view.schema.json) and
   [webhook.schema.json](../spec/schema/webhook.schema.json): draft 2020-12
   schemas.
-- [../spec/examples](../spec/examples): valid graph, ledger and webhook
-  documents.
+- [../spec/examples](../spec/examples): create payloads and stored/exported
+  wrapper documents (views and webhooks).

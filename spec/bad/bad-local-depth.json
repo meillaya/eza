@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": 2,
+  "slug": "bad-local-depth",
+  "name": "Bad local depth",
+  "kind": "graph",
+  "is_default": false,
+  "definition": {
+    "query": "",
+    "tags_shown": true,
+    "label_mode": "auto",
+    "layout_preset": "compact",
+    "local_depth": 0,
+    "color_groups": []
+  },
+  "created_at": 1760000000,
+  "updated_at": 1760000000
+}

@@ -75,7 +75,18 @@ try {
   const tokenRow = page.locator(SEL.tokenRow, { hasText: "E2E token" }).first();
   check("token row visible after reload", (await tokenRow.count()) > 0);
 
+  // Revoking goes through the shell confirmation layer: cancel keeps the token
+  // active, confirm revokes it.
   await tokenRow.locator(SEL.tokenRevoke).click();
+  await page.waitForSelector(SEL.dialogConfirm, { timeout: 10000 });
+  check("revoking a token asks for confirmation", (await page.locator(SEL.dialogConfirm).count()) === 1);
+  await page.locator(SEL.dialogCancel).click();
+  await page.waitForTimeout(400);
+  const stillActive = ((await api("/api/v1/tokens")).body?.tokens || []).find((token) => token.name === "E2E token");
+  check("cancelling the revoke keeps the token active", !stillActive?.revoked_at, String(stillActive?.revoked_at));
+  await tokenRow.locator(SEL.tokenRevoke).click();
+  await page.waitForSelector(SEL.dialogConfirm, { timeout: 10000 });
+  await page.locator(SEL.dialogConfirm).click();
   await page.waitForSelector(SEL.toast, { timeout: 20000 }).catch(() => {});
   let revoked = null;
   for (let attempt = 0; attempt < 12; attempt++) {

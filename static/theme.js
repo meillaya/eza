@@ -26,8 +26,22 @@
 
   function apply(theme) {
     root.setAttribute("data-theme", theme);
-    var meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute("content", theme === "dark" ? "#10141F" : "#F2EDE3");
+    // Both theme-color metas must agree with the applied theme: the media-scoped
+    // one would otherwise keep describing the OS preference after the reader
+    // picked a theme explicitly.
+    var color = theme === "dark" ? "#10141F" : "#F2EDE3";
+    var metas = document.querySelectorAll('meta[name="theme-color"]');
+    for (var i = 0; i < metas.length; i++) metas[i].setAttribute("content", color);
+  }
+
+  // Tell the client shell that the OS changed the resolved theme, so the model
+  // (graph palette, toggle labels) follows the CSS the page already re-themed.
+  function announce(theme) {
+    try {
+      window.dispatchEvent(new CustomEvent("eza-theme", { detail: { theme: theme } }));
+    } catch (e) {
+      /* older browsers without CustomEvent still get the CSS theme */
+    }
   }
 
   var stored = read();
@@ -37,7 +51,11 @@
   try {
     var mq = window.matchMedia("(prefers-color-scheme: dark)");
     var onChange = function () {
-      if (!read()) apply(system());
+      if (!read()) {
+        var theme = system();
+        apply(theme);
+        announce(theme);
+      }
     };
     if (mq.addEventListener) mq.addEventListener("change", onChange);
     else if (mq.addListener) mq.addListener(onChange);

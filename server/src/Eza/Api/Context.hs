@@ -6,7 +6,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Concurrent.QSem (QSem, newQSem)
 import Control.Exception (SomeException, bracket, try)
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (forM, forM_, when)
 
 import qualified Data.ByteString as BS
 
@@ -251,6 +251,25 @@ closeAppState state = do
 closeUserSlot :: UserSlot -> IO ()
 closeUserSlot slot = Library.closeLibrary (usLibrary slot)
 
+{- | Stop and close one account's slot and forget it, so disabled and deleted
+accounts do not keep a library (and its writer/read pool) open for the life of
+the process. The entry is removed under the registry MVar first and the library
+is closed outside it; the supervisor calls this for accounts that stop being
+enabled, and the admin paths call it on disable/delete. A request that already
+resolved the slot may see its connection close; that account has just lost
+access, so failing that in-flight request is acceptable (it is not retried).
+-}
+releaseUserSlot :: AppState -> Int -> IO ()
+releaseUserSlot state userId = do
+    removed <-
+        modifyMVar (asUsers state) $ \slots ->
+            pure (Map.delete userId slots, Map.lookup userId slots)
+    case removed of
+        Nothing -> pure ()
+        Just slot -> do
+            stopUserWorkers slot
+            closeUserSlot slot
+
 {- | The slot for one account, opening the library the first time this process
 needs it. The registry cap is enforced here so a request cannot make the
 server open unbounded database files.
@@ -449,10 +468,11 @@ stopAllUserWorkers state = do
     slots <- readMVar (asUsers state)
     mapM_ stopUserWorkers (Map.elems slots)
 
-{- | One reconciliation pass: workers exist only for enabled accounts, enabled
-accounts get their library opened, and disabled or removed accounts lose their
-workers. Disabling therefore stops enrichment and webhook delivery at the next
-tick without touching the control row again. The supervisor is the only place
+{- | One reconciliation pass: slots exist only for enabled accounts, enabled
+accounts get their library opened, and disabled or removed accounts get their
+slot closed and released (not just their workers stopped). The slot cap
+therefore counts live slots, and an account that was disabled or deleted does
+not keep a library handle open until shutdown. The supervisor is the only place
 workers start, so a library opened by a request never starts them implicitly.
 -}
 syncUserWorkers :: AppState -> IO ()
@@ -461,8 +481,12 @@ syncUserWorkers state = do
     let enabledUsers = [user | user <- users, isNothing (cuDisabledAt user)]
         enabledIds = Set.fromList (map cuId enabledUsers)
     slots <- readMVar (asUsers state)
-    forM_ (Map.elems slots) $ \slot ->
-        unless (cuId (usUser slot) `Set.member` enabledIds) (stopUserWorkers slot)
+    let staleIds =
+            [ cuId (usUser slot)
+            | slot <- Map.elems slots
+            , cuId (usUser slot) `Set.notMember` enabledIds
+            ]
+    forM_ staleIds (releaseUserSlot state)
     misses <-
         fmap catMaybes $
             forM enabledUsers $ \user -> do

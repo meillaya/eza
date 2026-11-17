@@ -31,7 +31,7 @@ import System.FilePath (takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
-import System.Posix.Files (setFileTimes)
+import System.Posix.Files (setFileMode, setFileTimes)
 
 import qualified Eza.Admin as Admin
 import Eza.Backup
@@ -270,6 +270,84 @@ spec = describe "backup and restore" $ do
             -- The refusal is before any write: the current library is intact.
             bracket (Db.openDb (cuDbPath alice)) Sqlite.close $ \conn ->
                 scalar conn "SELECT COUNT(*) FROM bookmarks" `shouldReturn` 2
+
+    it "fails with an actionable error when the backup directory is not writable" $
+        withSystemTempDirectory "eza-backup-readonly" $ \dir -> do
+            let cfg = testConfig dir
+                backupDir = cfgBackupDir cfg
+            (alice, _) <- createAccounts cfg
+            addBookmarkTo cfg alice "https://alice.example/readonly"
+            createDirectoryIfMissing True backupDir
+            result <-
+                (setFileMode backupDir 0o555 >> runBackup cfg Nothing)
+                    `finally` setFileMode backupDir 0o755
+            case result of
+                Left message -> message `shouldSatisfy` T.isInfixOf "could not be created"
+                Right _ -> expectationFailure "a backup directory that cannot be written must fail the backup"
+
+    it "keeps a partial --user stamp's other accounts from the current installation" $
+        withSystemTempDirectory "eza-backup-partial-keep" $ \dir -> do
+            let cfg = testConfig dir
+            (alice, bob) <- createAccounts cfg
+            addBookmarkTo cfg alice "https://alice.example/before"
+            addBookmarkTo cfg bob "https://bob.example/before"
+            backup <- expectBackup =<< runBackup cfg (Just "bob")
+            -- The installation moves on for the account the stamp did not capture.
+            addBookmarkTo cfg alice "https://alice.example/after"
+            report <- expectRestore =<< runRestore cfg (RestoreOptions (brRoot backup) False False)
+            rrsRestored report `shouldBe` [(cuId bob, "bob")]
+            rrsPreserved report `shouldBe` [(cuId alice, "alice")]
+            rrsCarried report `shouldBe` []
+            rrsDropped report `shouldBe` []
+            -- Alice keeps both current bookmarks; Bob is restored from the stamp.
+            bracket (Db.openDb (cuDbPath alice)) Sqlite.close $ \conn ->
+                scalar conn "SELECT COUNT(*) FROM bookmarks" `shouldReturn` 2
+            bracket (Db.openDb (cuDbPath bob)) Sqlite.close $ \conn ->
+                scalar conn "SELECT COUNT(*) FROM bookmarks" `shouldReturn` 1
+
+    it "refuses a partial --user stamp when an uncaptured account no longer exists" $
+        withSystemTempDirectory "eza-backup-partial-missing" $ \dir -> do
+            let cfg = testConfig dir
+            (alice, _) <- createAccounts cfg
+            addBookmarkTo cfg alice "https://alice.example/current"
+            backup <- expectBackup =<< runBackup cfg (Just "bob")
+            withControl cfg $ \control -> do
+                deleted <- Control.deleteUserRow control (cuId alice)
+                deleted `shouldBe` True
+            result <- runRestore cfg (RestoreOptions (brRoot backup) False False)
+            case result of
+                Left message -> message `shouldSatisfy` T.isInfixOf "does not capture"
+                Right _ -> expectationFailure "a partial stamp must not delete the account it did not capture"
+
+    it "refuses to relink a stamp account to a different current account name" $
+        withSystemTempDirectory "eza-backup-partial-relink" $ \dir -> do
+            let cfg = testConfig dir
+            (alice, _) <- createAccounts cfg
+            addBookmarkTo cfg alice "https://alice.example/before"
+            backup <- expectBackup =<< runBackup cfg (Just "bob")
+            withControl cfg $ \control ->
+                Control.setUsername control (cuId alice) "alicia" `shouldReturn` Right ()
+            result <- runRestore cfg (RestoreOptions (brRoot backup) False False)
+            case result of
+                Left message -> message `shouldSatisfy` T.isInfixOf "refusing to relink"
+                Right _ -> expectationFailure "id/username mismatches must refuse the restore"
+
+    it "carries accounts created after a full backup instead of deleting them" $
+        withSystemTempDirectory "eza-backup-carry" $ \dir -> do
+            let cfg = testConfig dir
+            (alice, _bob) <- createAccounts cfg
+            addBookmarkTo cfg alice "https://alice.example/before"
+            backup <- expectBackup =<< runBackup cfg Nothing
+            carol <- withControl cfg $ \control ->
+                mustCreate (Admin.createUserAccount cfg control "carol" RoleMember "carol password")
+            addBookmarkTo cfg carol "https://carol.example/kept"
+            report <- expectRestore =<< runRestore cfg (RestoreOptions (brRoot backup) False False)
+            rrsCarried report `shouldBe` [(cuId carol, "carol")]
+            rrsDropped report `shouldBe` []
+            users <- listUsers cfg
+            map cuUsername users `shouldBe` ["alice", "bob", "carol"]
+            bracket (Db.openDb (cuDbPath carol)) Sqlite.close $ \conn ->
+                scalar conn "SELECT COUNT(*) FROM bookmarks" `shouldReturn` 1
 
 -- --------------------------------------------------------------------------- helpers
 

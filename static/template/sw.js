@@ -19,8 +19,10 @@ const RUNTIME_CACHE = VERSION + "-runtime";
 // Hashed shell assets and the app shell route, from the asset manifest.
 const SHELL_ASSETS = {{precache_json}};
 
-// Endpoints that must always talk to the network and never be cached.
-const NETWORK_ONLY_PREFIXES = ["/api/", "/save", "/login", "/setup", "/recover"];
+// Server-rendered auth ceremonies and API calls always talk to the network.
+// /save is an app route (the PWA share target), so it gets the shell fallback
+// like every other client route and works offline.
+const NETWORK_ONLY_PREFIXES = ["/api/", "/login", "/setup", "/recover"];
 
 function isNetworkOnly(url) {
   const path = url.pathname;

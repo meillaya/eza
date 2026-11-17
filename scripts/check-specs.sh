@@ -5,7 +5,8 @@
 #   1. every schema, example, and bad document is valid JSON;
 #   2. TLC model-checks spec/MultiUser.tla, spec/Extensions.tla, spec/Jobs.tla
 #      and spec/Undo.tla;
-#   3. the example documents carry the fields the bounded plan requires;
+#   3. the example documents (create payloads and stored/exported wrappers)
+#      carry the fields the bounded plan requires;
 #   4. the bad documents violate one of those requirements.
 #
 # TLC discovery order:
@@ -14,11 +15,12 @@
 #   - share/java/tla2tools.jar in a nix profile,
 #   - `nix build nixpkgs#tlaplus` as a last resort.
 #
-# The decoder contract between these documents and the Haskell decoders is not
-# part of this script: server/test/ViewContractSpec.hs (run by `cabal test
-# all`) decodes every example with the real server codecs and rejects every
-# bad fixture. This script only proves JSON shape and the bounded model's
-# invariants. See spec/README.md for the scope.
+# The Haskell decoder contract for the create payloads is not part of this
+# script: server/test/ViewContractSpec.hs (run by `cabal test all`) decodes the
+# create examples with the real server codecs and rejects its bad fixtures. The
+# stored/exported wrapper examples are shape-validated by the JSON-Schema pass
+# here. This script proves JSON shape and the bounded model's invariants; see
+# spec/README.md for the scope.
 set -euo pipefail
 shopt -s nullglob
 
@@ -52,15 +54,14 @@ required_files=(
     "$spec_dir/README.md"
     "$schema_dir/view.schema.json"
     "$schema_dir/webhook.schema.json"
-    "$examples_dir/graph-view.json"
-    "$examples_dir/ledger-view.json"
-    "$examples_dir/webhook.json"
 )
-# The counterexample list is derived from spec/bad/ so a new fixture cannot be
-# added without being required and validated below.
+# Examples and counterexamples are derived from their directories so a new
+# fixture cannot be added without being required and validated below.
+example_files=("$examples_dir"/*.json)
+(( ${#example_files[@]} > 0 )) || die "no example fixtures found under spec/examples"
 bad_files=("$bad_dir"/*.json)
 (( ${#bad_files[@]} > 0 )) || die "no bad fixtures found under spec/bad"
-required_files+=("${bad_files[@]}")
+required_files+=("${example_files[@]}" "${bad_files[@]}")
 for file in "${required_files[@]}"; do
     [[ -r "$file" ]] || die "missing required file: ${file#"$repo_root"/}"
 done
@@ -219,14 +220,35 @@ json_ok "$ledger_view" '.definition.sort | IN("created", "added", "opened")' 'so
 webhook="$examples_dir/webhook.json"
 json_ok "$webhook" '(.name | type == "string") and (.name | length > 0)' 'a nonempty name'
 json_ok "$webhook" '.url | test("^https?://")' 'an http or https URL'
+json_ok "$webhook" '.url | test("^https?://[^/@\\s]*[^/@\\s.][^/@\\s]*(?:[/?#][^\\s]*)?$")' 'a webhook URL with a non-dot host and no userinfo'
 json_ok "$webhook" '(.events | length) >= 1' 'at least one event'
 json_ok "$webhook" 'all(.events[]; . == "bookmark.created" or . == "bookmark.updated" or . == "bookmark.deleted" or . == "clip.created")' 'only the four v1 event kinds'
 json_ok "$webhook" '(.enabled | type == "boolean")' 'boolean enabled'
+
+# Stored/exported wrappers are what the schemas must also accept: the server
+# fills the optional wrapper fields and the seeded default graph view is one
+# real example (local_depth null).
+stored_graph="$examples_dir/stored-graph-view.json"
+json_ok "$stored_graph" '.schema == 1' 'stored view schema 1'
+json_ok "$stored_graph" '(.id | type == "number") and (.created_at | type == "number") and (.updated_at | type == "number")' 'server-assigned id and timestamps'
+json_ok "$stored_graph" '.is_default == true' 'the seeded default is_default flag'
+json_ok "$stored_graph" '.definition.local_depth == null' 'null local_depth for the whole-library default view'
+
+stored_webhook="$examples_dir/stored-webhook.json"
+json_ok "$stored_webhook" '.id | type == "number"' 'a server-assigned webhook id'
+json_ok "$stored_webhook" '(.created_at | type == "number") and (.fail_streak | type == "number")' 'stored status counters'
+json_ok "$stored_webhook" '(.last_status == 200) and (.last_attempt_at | type == "number")' 'the last delivery status and timestamp'
+json_ok "$stored_webhook" '(.last_error | type == "string") and (.enabled | type == "boolean")' 'stored error and enabled flag'
+json_ok "$stored_webhook" '.url | test("^https?://[^/@\\s]*[^/@\\s.][^/@\\s]*(?:[/?#][^\\s]*)?$")' 'a stored webhook URL with a non-dot host and no userinfo'
 
 json_bad "$bad_dir/unknown-kind.json" '(.kind == "graph") or (.kind == "ledger")' 'an unknown kind'
 json_bad "$bad_dir/bad-schema.json" '.schema == 1' 'an unknown schema version'
 json_bad "$bad_dir/bad-color.json" 'all(.definition.color_groups[]; (.color | test("^#[0-9a-f]{6}$")))' 'an invalid color'
 json_bad "$bad_dir/bad-slug.json" '(.slug | type == "string") and (.slug | test("^[a-z0-9][a-z0-9-]*$"))' 'a slug starting with a lower-case letter or digit'
+json_bad "$bad_dir/bad-local-depth.json" '(.definition.local_depth == null) or ((.definition.local_depth >= 1) and (.definition.local_depth <= 3))' 'a local_depth outside 1 to 3'
+json_bad "$bad_dir/bad-stored-extra-field.json" '(has("owner_id") | not)' 'an unknown stored field'
+json_bad "$bad_dir/bad-webhook-credential-url.json" '.url | test("^https?://[^/@\\s]*[^/@\\s.][^/@\\s]*(?:[/?#][^\\s]*)?$")' 'a webhook URL with userinfo'
+json_bad "$bad_dir/bad-webhook-dot-host.json" '.url | test("^https?://[^/@\\s]*[^/@\\s.][^/@\\s]*(?:[/?#][^\\s]*)?$")' 'a webhook URL with an all-dot host'
 json_bad "$bad_dir/too-many-groups.json" '(.definition.color_groups | length) <= 24' 'more than 24 color groups'
 json_bad "$bad_dir/webhook-unknown-event.json" 'all(.events[]; . == "bookmark.created" or . == "bookmark.updated" or . == "bookmark.deleted" or . == "clip.created")' 'an unknown event kind'
 
@@ -262,8 +284,10 @@ Draft202012Validator.check_schema(webhook.schema)
 def validator_for(document):
     return webhook if document.get("events") is not None else view
 
-for name in ["graph-view.json", "ledger-view.json", "webhook.json"]:
-    path = os.path.join(examples_dir, name)
+example_paths = sorted(glob.glob(os.path.join(examples_dir, "*.json")))
+if not example_paths:
+    sys.exit(f"{examples_dir}: no example fixtures found")
+for path in example_paths:
     with open(path, encoding="utf-8") as handle:
         document = json.load(handle)
     errors = sorted(validator_for(document).iter_errors(document), key=lambda error: error.path)
@@ -278,7 +302,11 @@ for path in bad_paths:
         document = json.load(handle)
     if validator_for(document).is_valid(document):
         sys.exit(f"{path}: expected invalid but the schema accepted it")
-print(f"jsonschema: {len(bad_paths)} bad fixtures rejected", file=sys.stderr)
+print(
+    f"jsonschema: {len(example_paths)} example documents valid, "
+    f"{len(bad_paths)} bad fixtures rejected",
+    file=sys.stderr,
+)
 PY
 
 log "all spec checks passed"

@@ -64,7 +64,7 @@ spec = describe "per-user workers" $ do
             syncUserWorkers state
             workersAfterDisable <- userWorkerIds state
             map fst (filter ((> 0) . snd) workersAfterDisable) `shouldBe` [cuId alice]
-            lookup (cuId bob) workersAfterDisable `shouldBe` Just 0
+            lookup (cuId bob) workersAfterDisable `shouldBe` Nothing
             enqueueBoom cfg bob
             threadDelay (3 * 1000000)
             disabledAttempts <- jobAttempts cfg bob

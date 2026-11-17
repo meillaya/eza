@@ -289,7 +289,15 @@ passwordSetupHandler state req respond =
                                                     finishRecoverySetup user slot rawUsername password
                                             Just _ ->
                                                 respond (jsonProblem status403 "recovery_session_required" "a recovery session is required to finish recovery setup")
-                                            Nothing -> startFreshSetup rawUsername password
+                                            Nothing -> do
+                                                -- An expired/invalid session cookie must not
+                                                -- be treated as a fresh install (the user
+                                                -- would get the setup-claimed response at
+                                                -- best); once accounts exist it is a 401.
+                                                accounts <- withControl state Control.countUsers
+                                                if accounts /= 0 && hasSessionCookie req
+                                                    then respond (jsonProblem status401 "unauthenticated" "your session has expired; sign in again")
+                                                    else startFreshSetup rawUsername password
   where
     cfg = asConfig state
 
@@ -304,7 +312,44 @@ passwordSetupHandler state req respond =
                     Left err -> respond (jsonProblem status500 "control" (T.pack (show err)))
                     Right () -> do
                         passwordHash <- Password.hashPassword (cfgArgon2 cfg) password
-                        codes <- withDb slot $ \conn -> Auth.completeSetup conn username passwordHash
+                        -- Recovery is single-use: the recovery cookie that
+                        -- authorised this setup must not be able to run it
+                        -- again, so every existing session (including that
+                        -- recovery session) is revoked before the normal session
+                        -- is issued.
+                        (codes, session) <-
+                            withDb slot $ \conn -> do
+                                codes <- Auth.completeSetup conn username passwordHash
+                                _ <- Auth.deleteAllSessions conn
+                                session <- Auth.createSession conn "normal" (cfgSessionTtlSeconds cfg)
+                                pure (codes, session)
+                        withControl state $ \control -> Control.setUserLastLogin control (cuId user)
+                        respond
+                            ( withAuthCookies
+                                cfg
+                                (wireSessionToken user session)
+                                (jsonResponse status200 (object ["codes" .= codes, "redirect" .= ("/" :: Text)]))
+                            )
+
+    startFreshSetup rawUsername password =
+        case validateSetupCredentials rawUsername password of
+            Left response -> respond response
+            Right username -> do
+                -- Claiming the installation and creating the first account are
+                -- one critical section on the control MVar: two concurrent first
+                -- POSTs cannot both observe an empty control database, so exactly
+                -- one becomes the admin and the other gets a clean 409.
+                claim <-
+                    withControl state $ \control -> do
+                        accounts <- Control.countUsers control
+                        if accounts /= 0
+                            then pure Nothing
+                            else fmap Just (Admin.createUserAccount cfg control username RoleAdmin password)
+                case claim of
+                    Nothing ->
+                        respond (jsonProblem status409 "setup_claimed" "another account already claimed this installation")
+                    Just (Left err) -> respondProblem respond (Admin.toProblem err)
+                    Just (Right (user, codes)) -> withSlot state user respond $ \slot -> do
                         session <- withDb slot $ \conn -> Auth.createSession conn "normal" (cfgSessionTtlSeconds cfg)
                         withControl state $ \control -> Control.setUserLastLogin control (cuId user)
                         respond
@@ -314,29 +359,9 @@ passwordSetupHandler state req respond =
                                 (jsonResponse status200 (object ["codes" .= codes, "redirect" .= ("/" :: Text)]))
                             )
 
-    startFreshSetup rawUsername password = do
-        accounts <- withControl state Control.countUsers
-        if accounts /= 0
-            then respond (jsonProblem status403 "setup_unavailable" "setup is not available")
-            else case validateSetupCredentials rawUsername password of
-                Left response -> respond response
-                Right username -> do
-                    -- The shared account path allocates the control row first,
-                    -- then creates and migrates the user database.
-                    created <-
-                        withControl state $ \control ->
-                            Admin.createUserAccount cfg control username RoleAdmin password
-                    case created of
-                        Left err -> respondProblem respond (Admin.toProblem err)
-                        Right (user, codes) -> withSlot state user respond $ \slot -> do
-                            session <- withDb slot $ \conn -> Auth.createSession conn "normal" (cfgSessionTtlSeconds cfg)
-                            withControl state $ \control -> Control.setUserLastLogin control (cuId user)
-                            respond
-                                ( withAuthCookies
-                                    cfg
-                                    (wireSessionToken user session)
-                                    (jsonResponse status200 (object ["codes" .= codes, "redirect" .= ("/" :: Text)]))
-                                )
+    hasSessionCookie req = case cookieValue req Auth.sessionCookieName of
+        Just _ -> True
+        Nothing -> False
 
     validateSetupCredentials rawUsername password =
         case validateUsername rawUsername of

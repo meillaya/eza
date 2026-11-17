@@ -159,7 +159,17 @@ handle = \case
     ViewDefaultView slug -> do
         putModel (\x -> x{gViews = (gViews x){vwViewUi = (mViewUi x){vuBusy = True, vuError = Nothing}}})
         patchView slug (ViewPatch Nothing Nothing Nothing (Just True)) ViewSaved ViewSaveFailed
-    ViewDeleteView slug -> deleteView slug (ViewDeleted slug) ViewDeleteFailed
+    ViewDeleteView slug -> do
+        m <- get
+        let name = case findViewBySlug slug (mViews m) of
+                Just view -> EV.vName view
+                Nothing -> slug
+        requestConfirmation
+            "Delete this view?"
+            ("Delete the saved view “" <> name <> "”? Its definition is removed; this cannot be undone.")
+            "delete the view"
+            (ConfirmViewDelete slug)
+    ViewDeleteConfirmed slug -> deleteView slug (ViewDeleted slug) ViewDeleteFailed
     ViewExportView slug -> do
         m <- get
         case findViewBySlug slug (mViews m) of
@@ -291,7 +301,6 @@ handle = \case
     ViewSaveGraph -> do
         m <- get
         saveCurrentGraphView m
-    GraphLabelModeSelected mode -> putModel (\m -> m{gGraph = (gGraph m){grGraphLabelMode = mode}})
     GraphPresetSelected preset -> do
         m <- get
         putModel (\x -> x{gGraph = (gGraph x){grGraphPreset = preset, grGraphLoading = True, grGraphError = Nothing}})

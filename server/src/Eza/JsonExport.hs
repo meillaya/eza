@@ -20,12 +20,15 @@ import GHC.Generics (Generic)
 
 import Eza.ClipTemplates (ClipTemplate (..), createTemplate, listTemplates)
 import Eza.Db (normaliseTimestamp)
-import Eza.Url (dedupeLookupUrls, hostOf, normalizeUrl)
+import Eza.Jobs (enqueueJob)
+import Eza.Url (dedupeLookupUrls, hostOf, isHttpUrl, normalizeUrl)
 import Eza.View (View (..), ViewDefinition, ViewInput (..), ViewKind (..), decodeViewDefinition, parseViewKind, viewKindText)
 import Eza.Views (ViewPatch (..), createView, listViews, updateView)
 
 data JsonImportReport = JsonImportReport
-    { jrBookmarks :: Int
+    { jrInserted :: Int
+    , jrExisting :: Int
+    , jrBookmarks :: Int
     , jrHighlights :: Int
     , jrCaptures :: Int
     , jrViews :: Int
@@ -38,7 +41,9 @@ data JsonImportReport = JsonImportReport
 instance ToJSON JsonImportReport where
     toJSON report =
         object
-            [ "bookmarks" .= jrBookmarks report
+            [ "inserted" .= jrInserted report
+            , "existing" .= jrExisting report
+            , "bookmarks" .= jrBookmarks report
             , "highlights" .= jrHighlights report
             , "captures" .= jrCaptures report
             , "views" .= jrViews report
@@ -46,6 +51,17 @@ instance ToJSON JsonImportReport where
             , "skipped" .= jrSkipped report
             , "timestamps_normalised" .= jrTimestampsNormalised report
             ]
+
+{- | One bookmark the JSON importer processed: the old and new ids for mapping
+its child rows, whether it was inserted or matched an existing row, and whether
+its timestamps had to be normalised.
+-}
+data BookmarkImportResult = BookmarkImportResult
+    { birOldId :: Maybe Int
+    , birNewId :: Int
+    , birInserted :: Bool
+    , birTimestampsNormalised :: Bool
+    }
 
 data ExportBookmark = ExportBookmark
     { ebId :: Int
@@ -396,29 +412,45 @@ importJson conn value =
             | version < 1 || version > 2 -> pure (Left ("unsupported eza JSON export version: " <> T.pack (show version)))
             | otherwise -> do
                 now <- (floor <$> getPOSIXTime) :: IO Int
-                imported <- forM bookmarks (importBookmark now)
-                let idPairs = [(old, new) | Right (Just old, new, _) <- imported]
-                    bookmarkMap = Map.fromList idPairs
-                    bad = length [() | Left _ <- imported]
-                    normalisedTimestamps = length [() | Right (_, _, True) <- imported]
-                importedHighlights <- forM highlights (importHighlight now bookmarkMap)
-                importedSearches <- forM searches (importSavedSearch now)
-                importedRules <- forM rules (importRule now)
-                importedCaptures <- forM captures (importCapture now bookmarkMap)
+                -- The bookmark data is written in one immediate transaction so a
+                -- document that fails mid-way cannot leave a partial import
+                -- behind (F11). Views and templates own their write
+                -- transactions inside "Eza.Views"/"Eza.ClipTemplates", so they
+                -- are imported after the atomic block; they are additive and
+                -- idempotent, and a per-item failure is only counted as skipped.
+                (imported, importedHighlights, importedSearches, importedRules, importedCaptures) <-
+                    withImmediateTransaction conn $ do
+                        imported <- forM bookmarks (importBookmark now)
+                        let idPairs =
+                                [ (old, birNewId result)
+                                | Right result <- imported
+                                , Just old <- [birOldId result]
+                                ]
+                            bookmarkMap = Map.fromList idPairs
+                        importedHighlights <- forM highlights (importHighlight now bookmarkMap)
+                        importedSearches <- forM searches (importSavedSearch now)
+                        importedRules <- forM rules (importRule now)
+                        importedCaptures <- forM captures (importCapture now bookmarkMap)
+                        pure (imported, importedHighlights, importedSearches, importedRules, importedCaptures)
                 importedViews <- importViews views
                 importedTemplates <- forM templates importTemplate
                 let countRight results = length [() | Right _ <- results]
+                    inserted = length [() | Right result <- imported, birInserted result]
+                    existing = length [() | Right result <- imported, not (birInserted result)]
                     skipped =
-                        bad
+                        length [() | Left _ <- imported]
                             + length [() | Left _ <- importedHighlights]
                             + length [() | Left _ <- importedSearches]
                             + length [() | Left _ <- importedRules]
                             + length [() | Left _ <- importedCaptures]
                             + length [() | Left _ <- importedViews]
                             + length [() | Left _ <- importedTemplates]
+                    normalisedTimestamps = length [() | Right result <- imported, birTimestampsNormalised result]
                 pure
                     ( Right
                         ( JsonImportReport
+                            inserted
+                            existing
                             (countRight imported)
                             (countRight importedHighlights)
                             (countRight importedCaptures)
@@ -429,32 +461,36 @@ importJson conn value =
                         )
                     )
   where
-    importBookmark :: Int -> Value -> IO (Either Text (Maybe Int, Int, Bool))
+    importBookmark :: Int -> Value -> IO (Either Text BookmarkImportResult)
     importBookmark now raw =
         case parseMaybe parseBookmark raw of
             Nothing -> pure (Left "invalid bookmark")
             Just bookmark -> do
-                -- An out-of-range created_at/added_at would make SQLite's
-                -- strftime/date return NULL and break the ledger and stats
-                -- queries for the whole library, so a bad export value is
-                -- normalised before it can be stored.
-                let rawCreated = normaliseTimestamp (ibCreated bookmark)
-                    rawAdded = normaliseTimestamp (ibAdded bookmark)
-                    url = normalizeUrl (ibUrl bookmark)
-                    created = if rawCreated > 0 then rawCreated else rawAdded
-                    added = if rawAdded > 0 then rawAdded else now
-                    timestampsAdjusted = rawCreated /= ibCreated bookmark || rawAdded /= ibAdded bookmark
-                let candidates = dedupeLookupUrls (ibUrl bookmark)
-                    marks = T.intercalate "," (replicate (length candidates) "?")
-                existing <- query conn (Query ("SELECT id FROM bookmarks WHERE url IN (" <> marks <> ") ORDER BY id LIMIT 1")) candidates :: IO [Only Int]
-                case existing of
-                    (Only bid : _) -> do
-                        fillMissing conn bid bookmark
-                        mergeTags conn bid (ibTags bookmark) now
-                        pure (Right (ibOldId bookmark, bid, timestampsAdjusted))
-                    [] -> do
-                        bid <-
-                            withImmediateTransaction conn $ do
+                -- Same policy as every other write path: only a real http(s)
+                -- URL with a host is stored, so a portable import cannot
+                -- introduce javascript:/data:/hostless bookmark rows (F14).
+                let url = normalizeUrl (ibUrl bookmark)
+                if not (isHttpUrl url) || T.null (T.strip (hostOf url))
+                    then pure (Left "bookmark url is not http(s)")
+                    else do
+                        -- An out-of-range created_at/added_at would make SQLite's
+                        -- strftime/date return NULL and break the ledger and stats
+                        -- queries for the whole library, so a bad export value is
+                        -- normalised before it can be stored.
+                        let rawCreated = normaliseTimestamp (ibCreated bookmark)
+                            rawAdded = normaliseTimestamp (ibAdded bookmark)
+                            created = if rawCreated > 0 then rawCreated else rawAdded
+                            added = if rawAdded > 0 then rawAdded else now
+                            timestampsAdjusted = rawCreated /= ibCreated bookmark || rawAdded /= ibAdded bookmark
+                            candidates = dedupeLookupUrls (ibUrl bookmark)
+                            marks = T.intercalate "," (replicate (length candidates) "?")
+                        existing <- query conn (Query ("SELECT id FROM bookmarks WHERE url IN (" <> marks <> ") ORDER BY id LIMIT 1")) candidates :: IO [Only Int]
+                        case existing of
+                            (Only bid : _) -> do
+                                fillMissing conn bid bookmark
+                                mergeTags conn bid (ibTags bookmark) now
+                                pure (Right (BookmarkImportResult (ibOldId bookmark) bid False timestampsAdjusted))
+                            [] -> do
                                 executeNamed
                                     conn
                                     "INSERT INTO bookmarks (url,title,description,domain,note_body,extracted_text,is_read,is_dead,created_at,added_at,updated_at,source,author,sitename,published_at,language,image_url,final_url,open_count,last_opened_at,reading_time_minutes,ai_summary) VALUES (:url,:title,:description,:domain,:note,:extracted,:read,:dead,:created,:added,:updated,:source,:author,:sitename,:published,:language,:image,:final,:open_count,:last_opened,:reading,:ai_summary)"
@@ -488,8 +524,11 @@ importJson conn value =
                                     case idRows of
                                         (Only tid : _) -> execute conn "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (newId, tid)
                                         _ -> pure ()
-                                pure newId
-                        pure (Right (ibOldId bookmark, bid, timestampsAdjusted))
+                                -- Newly inserted rows enqueue background enrichment
+                                -- in the same transaction, like the Netscape
+                                -- importer; matched rows keep their state (F9).
+                                enqueueJob conn "enrich" newId
+                                pure (Right (BookmarkImportResult (ibOldId bookmark) newId True timestampsAdjusted))
     fillMissing connection bid bookmark =
         executeNamed
             connection
@@ -503,14 +542,13 @@ importJson conn value =
             , ":final" := ibFinal bookmark
             , ":id" := bid
             ]
-    mergeTags connection bid tags now = do
-        withImmediateTransaction connection $ do
-            forM_ (dedupeTags tags) $ \tag -> do
-                execute connection "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, ?)" (tag, now)
-                idRows <- query connection "SELECT id FROM tags WHERE name = ?" (Only tag) :: IO [Only Int]
-                case idRows of
-                    (Only tid : _) -> execute connection "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (bid, tid)
-                    _ -> pure ()
+    mergeTags connection bid tags now =
+        forM_ (dedupeTags tags) $ \tag -> do
+            execute connection "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, ?)" (tag, now)
+            idRows <- query connection "SELECT id FROM tags WHERE name = ?" (Only tag) :: IO [Only Int]
+            case idRows of
+                (Only tid : _) -> execute connection "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)" (bid, tid)
+                _ -> pure ()
     importHighlight :: Int -> Map.Map Int Int -> Value -> IO (Either Text ())
     importHighlight now bookmarkMap raw =
         case parseMaybe parseHighlight raw of
@@ -523,21 +561,20 @@ importJson conn value =
                         if not (null duplicate)
                             then pure (Right ())
                             else do
-                                withImmediateTransaction conn $
-                                    executeNamed
-                                        conn
-                                        "INSERT INTO highlights (bookmark_id,quote,prefix,suffix,start_offset,end_offset,note,color,created_at,updated_at) VALUES (:bid,:quote,:prefix,:suffix,:start,:end,:note,:color,:created,:updated)"
-                                        [ ":bid" := bid
-                                        , ":quote" := quote
-                                        , ":prefix" := prefix
-                                        , ":suffix" := suffix
-                                        , ":start" := start
-                                        , ":end" := end
-                                        , ":note" := note
-                                        , ":color" := color
-                                        , ":created" := (if created > 0 then created else now)
-                                        , ":updated" := now
-                                        ]
+                                executeNamed
+                                    conn
+                                    "INSERT INTO highlights (bookmark_id,quote,prefix,suffix,start_offset,end_offset,note,color,created_at,updated_at) VALUES (:bid,:quote,:prefix,:suffix,:start,:end,:note,:color,:created,:updated)"
+                                    [ ":bid" := bid
+                                    , ":quote" := quote
+                                    , ":prefix" := prefix
+                                    , ":suffix" := suffix
+                                    , ":start" := start
+                                    , ":end" := end
+                                    , ":note" := note
+                                    , ":color" := color
+                                    , ":created" := (if created > 0 then created else now)
+                                    , ":updated" := now
+                                    ]
                                 pure (Right ())
     importSavedSearch :: Int -> Value -> IO (Either Text ())
     importSavedSearch now raw =
@@ -553,11 +590,10 @@ importJson conn value =
                             then pure (Right ())
                             else do
                                 let tagsJson = TE.decodeUtf8 (LBS.toStrict (encode (dedupeTags tags)))
-                                withImmediateTransaction conn $
-                                    execute
-                                        conn
-                                        "INSERT INTO saved_searches (name,q,tags_json,created_at) VALUES (?,?,?,?)"
-                                        (clean, q, tagsJson, (if created > 0 then created else now))
+                                execute
+                                    conn
+                                    "INSERT INTO saved_searches (name,q,tags_json,created_at) VALUES (?,?,?,?)"
+                                    (clean, q, tagsJson, (if created > 0 then created else now))
                                 pure (Right ())
     importRule :: Int -> Value -> IO (Either Text ())
     importRule now raw =
@@ -575,11 +611,10 @@ importJson conn value =
                             then pure (Right ())
                             else do
                                 let tagJson = TE.decodeUtf8 (LBS.toStrict (encode (dedupeTags tags)))
-                                withImmediateTransaction conn $
-                                    execute
-                                        conn
-                                        "INSERT INTO rules (name,enabled,field,pattern,add_tags,mark_read,created_at) VALUES (?,?,?,?,?,?,?)"
-                                        (cleanName, (if enabled then 1 else 0) :: Int, safeField, cleanPattern, tagJson, (if markRead then 1 else 0) :: Int, now)
+                                execute
+                                    conn
+                                    "INSERT INTO rules (name,enabled,field,pattern,add_tags,mark_read,created_at) VALUES (?,?,?,?,?,?,?)"
+                                    (cleanName, (if enabled then 1 else 0) :: Int, safeField, cleanPattern, tagJson, (if markRead then 1 else 0) :: Int, now)
                                 pure (Right ())
     importCapture :: Int -> Map.Map Int Int -> Value -> IO (Either Text ())
     importCapture now bookmarkMap raw =
@@ -598,38 +633,37 @@ importJson conn value =
                         if not (null duplicate)
                             then pure (Right ())
                             else do
-                                withImmediateTransaction conn $
-                                    executeNamed
-                                        conn
-                                        "INSERT INTO captures (bookmark_id,url,canonical_url,title,author,site,description,published,language,image_url,favicon_url,content_markdown,rendered_markdown,content_text,content_html,selection,tags,template_name,source,client,idempotency_key,request_hash,extractor,extractor_version,metadata_json,word_count,parse_time_ms,captured_at,created_at) VALUES (:bid,:url,:canonical,:title,:author,:site,:description,:published,:language,:image,:favicon,:markdown,:rendered,:text,:html,:selection,:tags,:template_name,:source,:client,'','',:extractor,:extractor_version,:metadata,:word_count,:parse_time_ms,:captured_at,:created_at)"
-                                        [ ":bid" := bid
-                                        , ":url" := icUrl capture
-                                        , ":canonical" := icCanonicalUrl capture
-                                        , ":title" := icTitle capture
-                                        , ":author" := icAuthor capture
-                                        , ":site" := icSite capture
-                                        , ":description" := icDescription capture
-                                        , ":published" := icPublished capture
-                                        , ":language" := icLanguage capture
-                                        , ":image" := icImage capture
-                                        , ":favicon" := icFavicon capture
-                                        , ":markdown" := icContentMarkdown capture
-                                        , ":rendered" := icRenderedMarkdown capture
-                                        , ":text" := icContentText capture
-                                        , ":html" := icContentHtml capture
-                                        , ":selection" := icSelection capture
-                                        , ":tags" := jsonTextOr "[]" (icTags capture)
-                                        , ":template_name" := icTemplateName capture
-                                        , ":source" := icSource capture
-                                        , ":client" := icClient capture
-                                        , ":extractor" := icExtractor capture
-                                        , ":extractor_version" := icExtractorVersion capture
-                                        , ":metadata" := jsonTextOr "{}" (icMetadata capture)
-                                        , ":word_count" := icWordCount capture
-                                        , ":parse_time_ms" := icParseTimeMs capture
-                                        , ":captured_at" := (if icCapturedAt capture > 0 then icCapturedAt capture else now)
-                                        , ":created_at" := (if icCreatedAt capture > 0 then icCreatedAt capture else now)
-                                        ]
+                                executeNamed
+                                    conn
+                                    "INSERT INTO captures (bookmark_id,url,canonical_url,title,author,site,description,published,language,image_url,favicon_url,content_markdown,rendered_markdown,content_text,content_html,selection,tags,template_name,source,client,idempotency_key,request_hash,extractor,extractor_version,metadata_json,word_count,parse_time_ms,captured_at,created_at) VALUES (:bid,:url,:canonical,:title,:author,:site,:description,:published,:language,:image,:favicon,:markdown,:rendered,:text,:html,:selection,:tags,:template_name,:source,:client,'','',:extractor,:extractor_version,:metadata,:word_count,:parse_time_ms,:captured_at,:created_at)"
+                                    [ ":bid" := bid
+                                    , ":url" := icUrl capture
+                                    , ":canonical" := icCanonicalUrl capture
+                                    , ":title" := icTitle capture
+                                    , ":author" := icAuthor capture
+                                    , ":site" := icSite capture
+                                    , ":description" := icDescription capture
+                                    , ":published" := icPublished capture
+                                    , ":language" := icLanguage capture
+                                    , ":image" := icImage capture
+                                    , ":favicon" := icFavicon capture
+                                    , ":markdown" := icContentMarkdown capture
+                                    , ":rendered" := icRenderedMarkdown capture
+                                    , ":text" := icContentText capture
+                                    , ":html" := icContentHtml capture
+                                    , ":selection" := icSelection capture
+                                    , ":tags" := jsonTextOr "[]" (icTags capture)
+                                    , ":template_name" := icTemplateName capture
+                                    , ":source" := icSource capture
+                                    , ":client" := icClient capture
+                                    , ":extractor" := icExtractor capture
+                                    , ":extractor_version" := icExtractorVersion capture
+                                    , ":metadata" := jsonTextOr "{}" (icMetadata capture)
+                                    , ":word_count" := icWordCount capture
+                                    , ":parse_time_ms" := icParseTimeMs capture
+                                    , ":captured_at" := (if icCapturedAt capture > 0 then icCapturedAt capture else now)
+                                    , ":created_at" := (if icCreatedAt capture > 0 then icCreatedAt capture else now)
+                                    ]
                                 pure (Right ())
 
     importViews :: [Value] -> IO [Either Text ()]

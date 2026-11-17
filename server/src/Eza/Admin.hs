@@ -19,6 +19,7 @@ module Eza.Admin (
     setUserEnabled,
     setUserRole,
     resetUserPassword,
+    resetUserPasswordRotatingCodes,
     deleteUserAccount,
     missingUserDatabases,
     userLimitWarning,
@@ -351,10 +352,24 @@ dropSessions path = do
 {- | Admin password reset: set a temporary password, clear the optional passkey
 second factor (an admin reset is a break-glass path for a user who lost the
 device), and revoke every session of that account. The control username stays
-authoritative.
+authoritative. This CLI-shaped variant keeps the account's recovery codes;
+'resetUserPasswordRotatingCodes' is the API break-glass reset, which also
+rotates them so the reset is exclusive.
 -}
 resetUserPassword :: Config -> Connection -> Int -> Text -> IO (Either AdminError ())
-resetUserPassword cfg control userId newPassword = do
+resetUserPassword cfg control userId newPassword =
+    fmap (fmap (const ())) (resetUserPasswordInternal False cfg control userId newPassword)
+
+{- | The admin API password reset. Same takeover as 'resetUserPassword', but it
+also rotates the account's recovery codes and returns the ten new plaintext
+codes once, so the old holder of the account's recovery codes cannot redeem one
+and take the account straight back after the reset.
+-}
+resetUserPasswordRotatingCodes :: Config -> Connection -> Int -> Text -> IO (Either AdminError [Text])
+resetUserPasswordRotatingCodes = resetUserPasswordInternal True
+
+resetUserPasswordInternal :: Bool -> Config -> Connection -> Int -> Text -> IO (Either AdminError [Text])
+resetUserPasswordInternal rotateCodes cfg control userId newPassword = do
     found <- Control.lookupUserById control userId
     case found of
         Nothing -> pure (Left AdminNotFound)
@@ -371,10 +386,12 @@ resetUserPassword cfg control userId newPassword = do
                             Auth.setAccountPassword conn (cuUsername user) passwordHash
                             Auth.setRequirePasskey conn False
                             void (Auth.deleteAllSessions conn)
+                            codes <- if rotateCodes then Auth.regenerateRecoveryCodes conn else pure []
                             Sqlite.close conn
+                            pure codes
                         pure $ case result of
                             Left (err :: SomeException) -> Left (AdminInternal (T.pack (show err)))
-                            Right () -> Right ()
+                            Right codes -> Right codes
 
 -- --------------------------------------------------------------- deleting ---
 
@@ -388,22 +405,30 @@ deleteUserAccount cfg control userId deleteDb = do
     case found of
         Nothing -> pure (Left AdminNotFound)
         Just user -> do
-            admins <- Control.countEnabledAdmins control
-            let removingLastAdmin =
-                    cuRole user == RoleAdmin
-                        && isNothing (cuDisabledAt user)
-                        && admins <= 1
-            if removingLastAdmin
-                then pure (Left AdminLastAdmin)
+            -- The last-enabled-admin check and the delete are one conditional
+            -- statement inside one immediate transaction, so two concurrent
+            -- admin deletes cannot both pass the check and remove the last two
+            -- admins. A row that is disabled, a member, or an admin among more
+            -- than one enabled admin matches the guard and is removed.
+            removed <-
+                Sqlite.withImmediateTransaction control $ do
+                    Sqlite.execute
+                        control
+                        ("DELETE FROM users WHERE id = ? AND (disabled_at IS NOT NULL OR role <> 'admin' OR (SELECT COUNT(*) FROM users WHERE disabled_at IS NULL AND role = 'admin') > 1)")
+                        (Sqlite.Only userId)
+                    Sqlite.changes control
+            if removed == 0
+                then do
+                    -- Zero rows means the row was not deletable: either it is
+                    -- the last enabled admin, or it disappeared concurrently
+                    -- (another process deleted it). Re-read to classify.
+                    still <- Control.lookupUserById control userId
+                    pure (Left (maybe AdminNotFound (const AdminLastAdmin) still))
                 else do
-                    removed <- Control.deleteUserRow control userId
-                    if not removed
-                        then pure (Left AdminNotFound)
-                        else do
-                            when deleteDb $ do
-                                removeDbFiles (cuDbPath user)
-                                void (try (removeDirectoryRecursive (userDir cfg userId)) :: IO (Either SomeException ()))
-                            pure (Right ())
+                    when deleteDb $ do
+                        removeDbFiles (cuDbPath user)
+                        void (try (removeDirectoryRecursive (userDir cfg userId)) :: IO (Either SomeException ()))
+                    pure (Right ())
 
 removeDbFiles :: FilePath -> IO ()
 removeDbFiles path =

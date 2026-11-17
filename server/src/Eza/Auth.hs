@@ -323,7 +323,6 @@ scopeAllows scope method path
     | scope == "recovery" = case (method, path) of
         ("POST", ["api", "setup", "password"]) -> True
         ("POST", ["api", "auth", "logout"]) -> True
-        ("GET", ["api", "v1", "boot"]) -> True
         ("GET", ["api", "v1", "account"]) -> True
         _ -> False
     | otherwise = False

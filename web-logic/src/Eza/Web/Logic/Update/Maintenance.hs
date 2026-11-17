@@ -4,11 +4,13 @@
 -- | Part of the client update function; see "Eza.Web.Update".
 module Eza.Web.Logic.Update.Maintenance (handle) where
 
+import Control.Monad (when)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 
 import Eza.Types
 import Eza.Web.Logic.Browser
+import Eza.Web.Logic.Effect (nextRequestId, requestIsCurrent)
 import Eza.Web.Logic.Error
 import Eza.Web.Logic.Job (JobKind (..))
 import Eza.Web.Logic.Model
@@ -91,14 +93,35 @@ handle = \case
     UndoEntriesFailed err ->
         putModel (\m -> m{gMaint = (gMaint m){mnUndoLoading = False, mnUndoError = Just ((aeMessage err))}})
     UndoPreviewRequest snapshotId -> do
-        putModel (\m -> m{gMaint = (gMaint m){mnUndoPreview = Nothing, mnUndoPreviewLoading = True, mnUndoPreviewError = Nothing}})
-        fetchUndoPreview snapshotId UndoPreviewLoaded UndoPreviewFailed
-    UndoPreviewLoaded preview ->
-        putModel (\m -> m{gMaint = (gMaint m){mnUndoPreview = Just preview, mnUndoPreviewLoading = False, mnUndoPreviewError = Nothing}})
-    UndoPreviewFailed err ->
-        putModel (\m -> m{gMaint = (gMaint m){mnUndoPreviewLoading = False, mnUndoPreviewError = Just ((aeMessage err))}})
+        m <- get
+        let requestId = nextRequestId (mUndoPreviewEpoch m)
+        putModel
+            ( \x ->
+                x{gMaint = (gMaint x){mnUndoPreview = Nothing, mnUndoPreviewLoading = True, mnUndoPreviewError = Nothing, mnUndoPreviewEpoch = requestId, mnUndoPreviewId = Just snapshotId}}
+            )
+        fetchUndoPreview snapshotId (UndoPreviewLoaded requestId snapshotId) (UndoPreviewFailed requestId snapshotId)
+    -- A late answer for an older request (or another snapshot) is dropped, and
+    -- so is an answer that arrives after the dialog was closed.
+    UndoPreviewLoaded requestId snapshotId preview -> do
+        m <- get
+        when (requestIsCurrent (mUndoPreviewEpoch m) requestId && mUndoPreviewId m == Just snapshotId) $
+            putModel
+                ( \x ->
+                    x{gMaint = (gMaint x){mnUndoPreview = Just preview, mnUndoPreviewLoading = False, mnUndoPreviewError = Nothing}}
+                )
+    UndoPreviewFailed requestId snapshotId err -> do
+        m <- get
+        when (requestIsCurrent (mUndoPreviewEpoch m) requestId && mUndoPreviewId m == Just snapshotId) $
+            putModel
+                ( \x ->
+                    x{gMaint = (gMaint x){mnUndoPreviewLoading = False, mnUndoPreviewError = Just ((aeMessage err))}}
+                )
     UndoPreviewClose ->
-        putModel (\m -> m{gMaint = (gMaint m){mnUndoPreview = Nothing, mnUndoPreviewLoading = False, mnUndoPreviewError = Nothing}})
+        -- Bump the epoch so a fetch already in flight cannot reopen the dialog.
+        putModel
+            ( \m ->
+                m{gMaint = (gMaint m){mnUndoPreview = Nothing, mnUndoPreviewLoading = False, mnUndoPreviewError = Nothing, mnUndoPreviewEpoch = nextRequestId (mUndoPreviewEpoch m), mnUndoPreviewId = Nothing}}
+            )
     UndoConfirm snapshotId -> do
         putModel (\m -> m{gMaint = (gMaint m){mnUndoBusy = True, mnUndoPreviewError = Nothing}})
         runUndo snapshotId UndoDone UndoFailed

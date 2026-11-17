@@ -26,6 +26,7 @@ import qualified Eza.Control as Control
 import Eza.Routes (allRoutes, renderRoutePath, routeClass, routeMethod)
 import TestHarness (
     HttpResponse,
+    TestServer,
     cookieHeaders,
     createTestUser,
     expectJust,
@@ -142,6 +143,94 @@ spec = describe "route dispatch" $ do
             shared <- httpRequest server "GET" ("/s/" <> T.unpack (lastSegment shareUrl)) [] Nothing
             shared `shouldHaveStatus` 200
 
+    it "answers OPTIONS on any known path with 204 and an Allow it really honours" $
+        withTestServer $ \server -> do
+            options <- httpRequest server "OPTIONS" "/api/v1/bookmarks" [] Nothing
+            options `shouldHaveStatus` 204
+            allow <- expectJust "Allow header" (headerValue options "Allow")
+            let allowed = decodeAscii allow
+            T.isInfixOf "GET" allowed `shouldBe` True
+            T.isInfixOf "POST" allowed `shouldBe` True
+            T.isInfixOf "OPTIONS" allowed `shouldBe` True
+            -- The advertised methods are real: an anonymous GET is 401, not 404.
+            anonymousGet <- httpRequest server "GET" "/api/v1/bookmarks" [] Nothing
+            anonymousGet `shouldHaveStatus` 401
+
+    it "serves HEAD on a session route with the GET headers and no body" $
+        withTestServer $ \server -> do
+            _ <- createTestUser server "alice" "alice password" roleAdmin
+            (session, csrf) <- loginAs server "alice" "alice password"
+            getAccount <- httpRequest server "GET" "/api/v1/account" (cookieHeaders session csrf) Nothing
+            headAccount <- httpRequest server "HEAD" "/api/v1/account" (cookieHeaders session csrf) Nothing
+            getAccount `shouldHaveStatus` 200
+            headAccount `shouldHaveStatus` 200
+            hrespBody headAccount `shouldBe` ""
+            headerValue headAccount "Content-Type" `shouldBe` headerValue getAccount "Content-Type"
+
+    it "answers a known non-API path with the wrong method with 405 and Allow" $
+        withTestServer $ \server -> do
+            postHealth <- httpRequest server "POST" "/healthz" [] Nothing
+            postHealth `shouldHaveStatus` 405
+            errorCode postHealth `shouldBe` Just "method_not_allowed"
+            allow <- expectJust "Allow header" (headerValue postHealth "Allow")
+            decodeAscii allow `shouldBe` "GET, HEAD, OPTIONS"
+            putLogin <- httpRequest server "PUT" "/login" [] Nothing
+            putLogin `shouldHaveStatus` 405
+            errorCode putLogin `shouldBe` Just "method_not_allowed"
+
+    it "cancels a queued job owned by the caller and returns its cancelled view" $
+        withTestServer $ \server -> do
+            _ <- createTestUser server "alice" "alice password" roleAdmin
+            (session, csrf) <- loginAs server "alice" "alice password"
+            bookmarkId <- createCancellableBookmark server session csrf "https://example.test/cancel-queued"
+            jobId <- enqueueSnapshotJob server session csrf bookmarkId
+            cancelled <-
+                httpRequest
+                    server
+                    "POST"
+                    ("/api/v1/jobs/" <> show jobId <> "/cancel")
+                    (sessionHeaders session csrf)
+                    Nothing
+            cancelled `shouldHaveStatus` 200
+            jsonTextField "state" (hrespBody cancelled) `shouldBe` Just "cancelled"
+            -- Cancelling again is a 200 replay, not a conflict.
+            replay <-
+                httpRequest
+                    server
+                    "POST"
+                    ("/api/v1/jobs/" <> show jobId <> "/cancel")
+                    (sessionHeaders session csrf)
+                    Nothing
+            replay `shouldHaveStatus` 200
+            jsonTextField "state" (hrespBody replay) `shouldBe` Just "cancelled"
+
+    it "404s a cancel for another account's job and for an unknown id" $
+        withTestServer $ \server -> do
+            _ <- createTestUser server "alice" "alice password" roleAdmin
+            _ <- createTestUser server "bob" "bob password" Control.RoleMember
+            (bobSession, bobCsrf) <- loginAs server "bob" "bob password"
+            bookmarkId <- createCancellableBookmark server bobSession bobCsrf "https://example.test/cancel-other"
+            bobJob <- enqueueSnapshotJob server bobSession bobCsrf bookmarkId
+            (aliceSession, aliceCsrf) <- loginAs server "alice" "alice password"
+            foreignCancel <-
+                httpRequest
+                    server
+                    "POST"
+                    ("/api/v1/jobs/" <> show bobJob <> "/cancel")
+                    (sessionHeaders aliceSession aliceCsrf)
+                    Nothing
+            foreignCancel `shouldHaveStatus` 404
+            errorCode foreignCancel `shouldBe` Just "not_found"
+            unknown <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/v1/jobs/999999/cancel"
+                    (sessionHeaders aliceSession aliceCsrf)
+                    Nothing
+            unknown `shouldHaveStatus` 404
+            errorCode unknown `shouldBe` Just "not_found"
+
 -- ----------------------------------------------------------------- helpers ---
 
 roleAdmin :: Control.UserRole
@@ -159,6 +248,34 @@ sessionHeaders session csrf =
 
 lastSegment :: Text -> Text
 lastSegment = T.takeWhileEnd (/= '/')
+
+-- | Create one bookmark and return its id (used to enqueue a cancellable job).
+createCancellableBookmark :: TestServer -> Text -> Text -> Text -> IO Int
+createCancellableBookmark server session csrf url = do
+    created <-
+        httpRequest
+            server
+            "POST"
+            "/api/v1/bookmarks"
+            (sessionHeaders session csrf)
+            (Just (encode (object ["url" .= url, "title" .= ("cancel test" :: Text)])))
+    created `shouldHaveStatus` 201
+    expectJust "bookmark id" (jsonIntField "id" (hrespBody created))
+
+{- | Queue one snapshot job (the test server has no egress worker, so it stays
+queued and is cancellable) and return its id.
+-}
+enqueueSnapshotJob :: TestServer -> Text -> Text -> Int -> IO Int
+enqueueSnapshotJob server session csrf bookmarkId = do
+    queued <-
+        httpRequest
+            server
+            "POST"
+            ("/api/v1/bookmarks/" <> show bookmarkId <> "/snapshot")
+            (sessionHeaders session csrf)
+            Nothing
+    queued `shouldHaveStatus` 202
+    expectJust "job id" (jsonIntField "job_id" (hrespBody queued))
 
 errorCode :: HttpResponse -> Maybe Text
 errorCode response = case jsonField "error" (hrespBody response) of

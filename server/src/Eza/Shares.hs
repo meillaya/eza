@@ -14,6 +14,7 @@ module Eza.Shares (
     shareBookmarkPage,
     shareSearchPage,
     shareUnavailablePage,
+    shareUnavailablePageWith,
     shareSearchFeed,
 ) where
 
@@ -28,6 +29,7 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import Database.SQLite.Simple
 
 import Eza.Share (ShareView (..))
+import Eza.Shell (PageAssets (..))
 import Eza.Types (BookmarkDetail (..), BookmarkSummary (..), SavedSearch (..), SearchPage (..))
 
 data ShareRecord = ShareRecord
@@ -146,9 +148,10 @@ resolveShareState conn raw = do
 -- Public pages
 -- ---------------------------------------------------------------------------
 
-shareBookmarkPage :: ShareRecord -> BookmarkDetail -> Text
-shareBookmarkPage record bookmark =
+shareBookmarkPage :: PageAssets -> ShareRecord -> BookmarkDetail -> Text
+shareBookmarkPage pages record bookmark =
     shareDocument
+        pages
         (bdTitle bookmark)
         ( T.unlines
             [ shareStageOpen
@@ -165,9 +168,10 @@ shareBookmarkPage record bookmark =
             ]
         )
 
-shareSearchPage :: ShareRecord -> SavedSearch -> SearchPage -> Text
-shareSearchPage record saved page =
+shareSearchPage :: PageAssets -> ShareRecord -> SavedSearch -> SearchPage -> Text
+shareSearchPage pages record saved page =
     shareDocument
+        pages
         (ssName saved)
         ( T.unlines
             [ shareStageOpen
@@ -184,9 +188,10 @@ shareSearchPage record saved page =
             ]
         )
 
-shareUnavailablePage :: ShareUnavailable -> Text
-shareUnavailablePage unavailable =
+shareUnavailablePageWith :: PageAssets -> ShareUnavailable -> Text
+shareUnavailablePageWith pages unavailable =
     shareDocument
+        pages
         heading
         ( T.unlines
             [ shareStageOpen
@@ -212,6 +217,24 @@ shareUnavailablePage unavailable =
             ( "This link does not exist."
             , "Check the address."
             )
+
+{- | Compatibility shim for direct callers that only render the page text (the
+server always goes through 'shareUnavailablePageWith' with the manifest assets).
+The fallback URLs are the unhashed source paths; a deployed bundle keeps them,
+but they are not content-addressed, so nothing served uses them.
+-}
+shareUnavailablePage :: ShareUnavailable -> Text
+shareUnavailablePage = shareUnavailablePageWith unbundledShareAssets
+
+-- | Asset URLs for direct rendering without an asset manifest (tests only).
+unbundledShareAssets :: PageAssets
+unbundledShareAssets =
+    PageAssets
+        { paCss = "/assets/eza.css"
+        , paThemeJs = "/assets/theme.js"
+        , paAuthJs = "/assets/auth.js"
+        , paFavicon = "/favicon.svg"
+        }
 
 shareSearchFeed :: SavedSearch -> SearchPage -> Text
 shareSearchFeed saved page =
@@ -241,8 +264,8 @@ shareSearchFeed saved page =
 -- Fragments shared by the public pages
 -- ---------------------------------------------------------------------------
 
-shareDocument :: Text -> Text -> Text
-shareDocument title body =
+shareDocument :: PageAssets -> Text -> Text -> Text
+shareDocument pages title body =
     T.unlines
         [ "<!doctype html>"
         , "<html lang=\"en\" data-theme=\"light\">"
@@ -253,9 +276,9 @@ shareDocument title body =
         , "<meta name=\"theme-color\" content=\"#F2EDE3\">"
         , "<meta name=\"theme-color\" media=\"(prefers-color-scheme: dark)\" content=\"#10141F\">"
         , "<title>" <> escape title <> " | eza</title>"
-        , "<link rel=\"stylesheet\" href=\"/assets/eza.css\">"
-        , "<link rel=\"icon\" href=\"/favicon.svg\">"
-        , "<script src=\"/assets/theme.js\"></script>"
+        , "<link rel=\"stylesheet\" href=\"" <> escape (paCss pages) <> "\">"
+        , "<link rel=\"icon\" href=\"" <> escape (paFavicon pages) <> "\">"
+        , "<script src=\"" <> escape (paThemeJs pages) <> "\"></script>"
         , "</head><body class=\"share-body\"><main class=\"share\">"
         , body
         , "</main></body></html>"

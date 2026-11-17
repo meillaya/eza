@@ -1,24 +1,49 @@
 # Performance
 
-The benchmark measures the read paths against a live-size copy of the library.
-Every case is one or more reads; the benchmark never writes and never migrates
-the database it opens.
+This page records two different things:
 
-## Method
+- the historical 2026-11-08 read-path benchmark, taken on a **pre-0.4 flat
+  database** (schema v8, migrated to v9 by the first open) and kept as a
+  baseline; and
+- the current 0.4 artifact measurements (WASM bundle size and the build gates).
+
+The benchmark sections have **not** been re-run against a 0.4 account library,
+so their numbers are historical, not a claim about the current server. The
+benchmark never writes and never migrates the database it opens.
+
+## Current benchmark target (0.4)
+
+A 0.4 library is a per-account SQLite file under `EZA_DATA_DIR/users/<id>/eza.db`
+(schema v18). The benchmark resolves the account the same way the server does:
+
+```bash
+EZA_DATA_DIR=/path/to/data eza-bookmarks bench --user <name|id> --iterations 20
+```
+
+A fresh run on a live-size 0.4 account library has not been recorded yet. Run
+the command above on a scratch copy of the library and replace the historical
+result table when it is measured; do not read the numbers below as the current
+server cost.
+
+## Historical benchmark method (2026-11-08, pre-0.4)
 
 - CPU: AMD Ryzen 7 5700X, 8 cores and 16 threads
 - Memory: 62 GiB
 - Compiler: GHC 9.10.3, `-O1`
-- Database: 14,582 bookmarks, 76 tags, 27,843 tag links, FTS5 enabled, 8.7 MB
+- Database: the pre-0.4 flat single-user `eza.db` (not a 0.4 account library),
+  14,582 bookmarks, 76 tags, 27,843 tag links, FTS5 enabled, 8.7 MB
 - Command: `eza-bookmarks bench --iterations 20`
 - Date: 2026-11-08
 
 The benchmark source is [`server/src/Eza/Bench.hs`](../server/src/Eza/Bench.hs).
-The database is a scratch copy (`sqlite3 .backup`) of the owner's library; the
+The database was a scratch copy (`sqlite3 .backup`) of the owner's library; the
 first open migrated it from schema v8 to v9 (115 ms including the verified
-pre-migration backup and four index builds). The live database is untouched.
+pre-migration backup and four index builds). The live database was untouched.
+0.4 never opens a flat `EZA_DB`/`data/eza.db`; this run predates the
+per-account layout, so the account must be selected with `--user` for a current
+run.
 
-## Result
+## Historical result (2026-11-08, pre-0.4)
 
 ```
 iterations: 20
@@ -49,8 +74,8 @@ What the cases measure:
   expensive list shape because the filtered id set is materialised before the
   year-count scan.
 - `boot-components`: everything one boot request reads (list page, tags,
-  library stats). The client now consumes the `bpInitial` page from this
-  payload, so a cold load makes exactly one API request.
+  library stats). The client consumes the `bpInitial` page from this payload, so
+  a cold load makes exactly one API request.
 - `library-stats`: the 17-field `LibraryStats` from three statements. It was
   15.4 ms average with the previous one-query-per-figure implementation.
 - `sort-opened`: the `last_opened_at` index path; the old `COALESCE(...)`
@@ -59,18 +84,19 @@ What the cases measure:
   grouping (11,290 records in groups before the cleanup below) and the first
   page of the duplicates view (60 URL + 40 title groups). The page fetch is
   bounded; counts come from the same grouping pass. After the cleanup the
-  grouping drops to 11.1 ms average because 5,677 duplicate rows are gone.
+  grouping dropped to 11.1 ms average because 5,677 duplicate rows were gone.
 
-## Graph
+## Historical graph measurement (pre-0.4)
 
 The `graph` case issues the four reads behind `GET /api/v1/graph`: tag counts,
 every record, the tag memberships, and the resolved wikilinks. One payload is
 about 950 KB of raw JSON, which the gzip middleware compresses like the other
 JSON responses.
 
-This run used the reference database `data/eza.db` (8,838 records, 77 tags,
-21,848 tag links, 1 resolved wikilink) with
-`eza-bookmarks bench --iterations 10`:
+This run used the pre-0.4 flat reference database `data/eza.db` (8,838 records,
+77 tags, 21,848 tag links, 1 resolved wikilink) with
+`eza-bookmarks bench --iterations 10`. On 0.4 the same reads run against an
+account library selected with `--user`:
 
 ```
 graph: total_ms=204.14 avg_ms=20.41 p50_ms=17.97 p95_ms=34.42 p99_ms=34.42 rows=8915 bytes=949888
@@ -85,22 +111,24 @@ The cases above were measured on the 14,582-row scratch copy, not on this
 8,838-record reference library, so the graph figures are not directly
 comparable with that table.
 
-The client side was profiled in headless Chromium at 1440x950 (dpr 1)
-against a verified scratch copy of the reference library: 8,838 records, 77
-tags, 21,848 tag memberships and 1 resolved wikilink. The profiling script is
-ad-hoc; the committed `tests/e2e/graph-perf.mjs` measures a synthetic
-9,000-record library, so the two do not produce identical numbers.
+## Historical client profiling (2026-11-12)
+
+The client side was profiled in headless Chromium at 1440x950 (dpr 1) against
+the pre-0.4 reference library: 8,838 records, 77 tags, 21,848 tag memberships
+and 1 resolved wikilink. The profiling script was ad-hoc; the committed
+`tests/e2e/graph-perf.mjs` measures a synthetic 9,000-record library, so the two
+do not produce identical numbers.
 
 The first renderer drew visible primitives on every frame once the zoom passed
 three times the fit scale. On the reference library that path cost 107.8 ms per
 frame at 3.05x zoom (frame p95 133.5 ms) and 33.6 ms per frame at 7.45x, which
 is the lag the whole-library plate showed when zoomed.
 
-The current renderer keeps a cached whole-library bitmap for motion and builds
-a screen-resolution detail plate after the view settles, at most 1,000
-primitives per animation frame. The detail plate and the labels are not redrawn
-per primitive while the reader drags or zooms, the settle work is split across
-frames, and the old per-frame vector path is gone:
+The renderer at that point kept a cached whole-library bitmap for motion and
+built a screen-resolution detail plate after the view settled, at most 1,000
+primitives per animation frame. The detail plate and the labels were not redrawn
+per primitive while the reader dragged or zoomed, the settle work was split
+across frames, and the old per-frame vector path was gone:
 
 ```
 drag frames p50 / p95 / max, fit:            16.7 / 16.8 / 16.8 ms
@@ -114,19 +142,19 @@ cold plate, in-app:                        2,847 ms
 cold plate, full reload:                   2,812 ms
 ```
 
-The rare 33 ms frame is one detail chunk landing heavily while the plate
-sharpens after the gesture; it is not part of the continuous pan or zoom path.
+The rare 33 ms frame was one detail chunk landing heavily while the plate
+sharpened after the gesture; it was not part of the continuous pan or zoom path.
 Filtering rebuilds no plate, only the accent overlay. The tags toggle rebuilds
 the world bitmap once. Labels, hover emphasis and selection stay live overlays,
 so they remain crisp at every scale.
 
-Cold load is unchanged from the earlier harness runs: decoding the payload and
-building the deterministic layout dominate, and the settled 1,500 ms budget for
-the in-app cold plate is still missed on this library. The plate skeleton is
-shown while that work runs. The full reload is within its separate 3,000 ms
-budget.
+Cold load was unchanged from the earlier harness runs at that time: decoding the
+payload and building the deterministic layout dominated, and the settled
+1,500 ms budget for the in-app cold plate was still missed on this library. The
+plate skeleton is shown while that work runs. The full reload is within its
+separate 3,000 ms budget.
 
-### Post-batching measurement
+### Historical post-batching measurement (2026-11-12)
 
 The client numbers above predate the batched graph painter, the single-parse API
 callback, and the service-worker boot ordering. Re-run the committed harness
@@ -138,7 +166,7 @@ EZA_PERF_RECORDS=9000 EZA_PERF_ASSERT=1 EZA_BASE=http://localhost:8210 node test
 EZA_BASE=http://localhost:8210 node tests/e2e/load-perf.mjs
 ```
 
-`graph-perf.mjs` now emits `eza:graph:base-start/end` and
+`graph-perf.mjs` emits `eza:graph:base-start/end` and
 `eza:graph:detail-start/end` marks when `window.__ezaGraphPerf` is set (the
 script sets it), plus the loader's `eza:wasm-*`, `eza:hs-start` and
 `eza:app-ready` marks. It measures the whole-library plate, drag/wheel frames, a
@@ -148,7 +176,7 @@ non-zero. `load-perf.mjs` reports the cold first ledger row, cold graph
 in-app/full-reload, warm return, transfer sizes, and service-worker readiness.
 
 Measured on 2026-11-12 with build `a907cdab450a484a` against the 9,000-record
-synthetic library in `tests/e2e/graph-perf.mjs`:
+synthetic library in `tests/e2e/graph-perf.mjs` (historical, that build):
 
 ```
 scope/API request:               51 ms (within 400)
@@ -163,18 +191,20 @@ drag / wheel frame p95:        16.7 ms
 local depth 3 drag p95:        16.7 ms
 ```
 
-The in-app cold miss is now before the painter, not in it: the layout request
-(167 ms), graph request (71 ms), payload decode and hydration happen before
-`eza:graph:base-start`; the base paint itself is 59 ms. The whole-library graph
-is kept (it is roughly 2.9x faster than the 2,847 ms pre-change plate), but the
-remaining decode/network time is tracked separately. `filter apply` includes
-the 120 ms debounce; the render itself is below the 100 ms budget.
+The in-app cold miss was before the painter, not in it: the layout request
+(167 ms), graph request (71 ms), payload decode and hydration happened before
+`eza:graph:base-start`; the base paint itself was 59 ms. The whole-library graph
+was kept (it was roughly 2.9x faster than the 2,847 ms pre-change plate), but
+the remaining decode/network time was tracked separately. `filter apply`
+includes the 120 ms debounce; the render itself was below the 100 ms budget.
 
-`tests/e2e/load-perf.mjs` on the small mini fixture reports cold first ledger
-row 236 ms, cold graph in-app 293 ms, cold graph full reload 472 ms, warm graph
-return 306 ms, app.wasm transfer about 2,138,908 bytes cold, and service-worker
-readiness 236 ms after navigation. Those graph numbers are boot/API overhead on
-three records, not the 9k plate; use `graph-perf.mjs` for the graph budgets.
+`tests/e2e/load-perf.mjs` on the small mini fixture reported, at that build,
+cold first ledger row 236 ms, cold graph in-app 293 ms, cold graph full reload
+472 ms, warm graph return 306 ms, app.wasm transfer about 2,138,908 bytes cold,
+and service-worker readiness 236 ms after navigation. Those graph numbers are
+boot/API overhead on three records, not the 9k plate; use `graph-perf.mjs` for
+the graph budgets, and read the bundle size from the current artifact section
+below.
 
 Client budgets for the 9,000-record synthetic library:
 
@@ -188,32 +218,33 @@ Client budgets for the 9,000-record synthetic library:
 | drag frame p95 | <= 33 ms |
 | depth-3 local drag frame p95 | <= 33 ms |
 | cold first ledger row | <= 1,200 ms |
-| app.wasm over the wire | <= 1.7 MB target; 2.2 MB hard ceiling |
+| app.wasm over the wire | <= 1,700,000 B gzip soft target; 7,800,000 B raw / 2,250,000 B gzip hard ceilings |
 
-### Layout endpoint
+### Historical layout-endpoint measurement (pre-0.4)
 
-M1 moves the deterministic layout to the server:
-`GET /api/v1/graph/layout?preset=compact|standard|airy` returns one preset's
-node positions quantized to 1/100 world unit, and the client hydrates them
-instead of rebuilding the layout when the layout revision matches its graph
-payload. On the reference `data/eza.db` (8,838 records, 77 tags) the layout work
-behind one preset, which is the build, the quantization and the JSON encoding,
-averages 22.1 ms (p50 19.4 ms, p95 37.7 ms). Over HTTP a first request for one
-preset takes 128-143 ms, which covers the session check, the graph read, the
-layout build and the gzip. A cache hit takes 20-22 ms. The cache holds at most
-three entries, one per preset for the current revision, so a repeat request at
-the same revision reuses the positions and a library change invalidates all
-three.
+The deterministic graph layout is served from
+`GET /api/v1/graph/layout?preset=compact|standard|airy`: one preset's node
+positions quantized to 1/100 world unit, which the client hydrates instead of
+rebuilding the layout when the layout revision matches its graph payload. On the
+pre-0.4 reference `data/eza.db` (a flat database 0.4 does not open; 8,838
+records, 77 tags) the layout work behind one preset, which is the build, the
+quantization and the JSON encoding, averaged 22.1 ms (p50 19.4 ms, p95
+37.7 ms). Over HTTP a first request for one preset took 128-143 ms, which
+covered the session check, the graph read, the layout build and the gzip. A
+cache hit took 20-22 ms. The cache holds at most three entries, one per preset
+for the current revision, so a repeat request at the same revision reuses the
+positions and a library change invalidates all three.
 
-The graph payload is 1,002,873 bytes on this run; the earlier 949,888-byte
+The graph payload was 1,002,873 bytes on that run; the earlier 949,888-byte
 measurement predates the `is_dead` field on every record and the `revision`
 field. The client compares that revision with the layout revision and falls
 back to its local deterministic builder when they differ or when the request
 fails.
 
-## Import and duplicate cleanup
+## Historical import and duplicate cleanup (pre-0.4)
 
-Both were measured on the scratch copy of the 14,582-row library.
+Both were measured on the 2026-11-08 pre-0.4 scratch copy of the 14,582-row
+library (flat `eza.db`, not a 0.4 account library).
 
 The 2026-08-14 export (4,557,817 bytes, 9,457 anchors) imports in 2.4-2.5 s
 wall time, of which about 2 s is parsing the HTML and 0.4 s is the write path.
@@ -234,18 +265,26 @@ Post-cleanup, on the 8,905-row copy: `all` 0.77/1.20 ms average/p95,
 `boot-components` 9.86/11.49, `library-stats` 5.78/6.42,
 `dedup-candidates` 42.62/45.91.
 
-## Assets and HTTP
+## Assets and HTTP (current 0.4 bundle)
 
-- `static/app/app.wasm` was 6,686,546 bytes raw and 1,540,229 bytes gzipped
-  when the 2026-11-08 release asset was measured; that figure is now stale.
-  On the current checkout `wasm-opt -Oz --strip-debug --strip-producers
-  --strip-dwarf` produces 7,638,603 bytes raw and 2,138,908 bytes gzipped.
-  The build enforces a 2.2 MB gzip / 7.7 MB raw hard ceiling and warns above
-  the 1.7 MB product target. The gap is a known regression (P1), not a success.
-  The server serves `<file>.gz`
-  sidecars with `Content-Encoding: gzip`, `Vary: Accept-Encoding`, and the
-  sidecar's ETag/304; `scripts/build-web.sh` writes sidecars for the WASM,
-  CSS, shell, and loader JavaScript.
+- The current 0.4 web bundle is built by `scripts/build-web.sh` from
+  `cabal.project.wasm`. A development build from the 0.4.0.0 line (build id
+  `db6edcde4b92dd7c`, 2026-11-17) produced a 5,358,744-byte raw and
+  1,729,229-byte gzip `app.<hash>.wasm`. The build gates in
+  `scripts/build-web.sh` are a 1,700,000-byte gzip soft target (warn only) with
+  2,250,000-byte gzip and 7,800,000-byte raw hard ceilings; the current gzip is
+  29,229 bytes over the soft target, so the build warns but passes, and both
+  hard ceilings are clear. The earlier M4-D exception (8,000,000/2,300,000) was
+  reversed by the M7 Model-partition pass, which recorded 5,313,531 raw /
+  1,714,657 gzip. Earlier artifacts are historical and not the current bundle:
+  6,686,546 raw / 1,540,229 gzip measured for the 2026-11-08 build, and
+  7,638,603 raw / 2,138,908 gzip before the M7 pass. The 2026-11-16 build
+  (`03a0bee03452f182`, before the second audit-fix pass) was 5,327,782 raw /
+  1,720,340 gzip.
+  The server serves `<file>.gz` sidecars with `Content-Encoding: gzip`,
+  `Vary: Accept-Encoding`, and the sidecar's ETag/304; `scripts/build-web.sh`
+  and `scripts/bundle-web.sh` write sidecars for the WASM, CSS, shell, and
+  loader JavaScript.
 - Dynamic JSON/HTML responses are gzipped above 512 bytes by the WAI middleware
   (the setup page and boot payload drop to a fraction of their JSON size).
 - The WASM loader fetches the precompressed asset; the service worker install
@@ -259,6 +298,10 @@ Post-cleanup, on the 8,905-row copy: `all` 0.77/1.20 ms average/p95,
 
 ## Targets and limits
 
+The server rows in this table are the 2026-11-08 historical pre-0.4
+measurements from the result table above; the WASM row is the current 0.4
+artifact and its current build gate.
+
 | Case | Target (p95) | Measured (p95) |
 |---|---|---|
 | ledger page, default | < 4 ms | 1.39 ms |
@@ -269,13 +312,13 @@ Post-cleanup, on the 8,905-row copy: `all` 0.77/1.20 ms average/p95,
 | duplicates first page (60 + 40 groups) | < 150 ms | 62.52 ms |
 | bulk merge, 11,290 records | seconds, one snapshot | 2.31 s, one snapshot |
 | import 9,457 anchors | < 2.5 s | 2.4-2.5 s |
-| WASM over the wire | <= 1.7 MB target; 2.2 MB hard ceiling | 2.139 MB current (known P1 regression) |
+| WASM over the wire | 1,700,000 B gzip soft target; 2,250,000 B gzip / 7,800,000 B raw hard ceilings | 1,729,229 B gzip / 5,358,744 B raw (0.4 build db6edcde4b92dd7c); 29,229 B over soft target, under ceilings |
 
-The tag-filtered list remains the slowest page shape because the filtered id
-set is materialised before the year-count scan; the absolute cost is 13 ms and
-is a candidate for a materialised tag/year set in a later change. Parsing is
-now the dominant cost of an import (about 2 s of the 2.4 s); a streaming
-Netscape parser is the next step. A 100,000-row run has not been measured; the
-duplicate grouping is O(n log n) over a light scan and the first-page response
-is constant-size, but boot and stats scaling past 14.5k should be measured
-before claiming a 100k budget.
+In the historical table the tag-filtered list remains the slowest page shape
+because the filtered id set is materialised before the year-count scan; the
+absolute cost was 13 ms and is a candidate for a materialised tag/year set in a
+later change. Parsing was the dominant cost of the historical import (about 2 s
+of the 2.4 s); a streaming Netscape parser is the next step. A 100,000-row run
+has not been measured; the duplicate grouping is O(n log n) over a light scan
+and the first-page response is constant-size, but boot and stats scaling past
+14.5k should be measured before claiming a 100k budget.

@@ -33,8 +33,8 @@ mkApiError status msg =
         Just m | not (T.null (T.strip m)) -> m
         _ -> case status of
             Just 401 -> "Your session expired. Sign in again to continue."
-            Just 403 -> "Not allowed (CSRF token missing or stale)."
-            Just 404 -> "This endpoint is not available yet (planned route)."
+            Just 403 -> "Not allowed."
+            Just 404 -> "Not found."
             Just 409 -> "Conflict: the server refused the change."
             Just 413 -> "That file is too large."
             Just 429 -> "Rate limited: try again in a moment."

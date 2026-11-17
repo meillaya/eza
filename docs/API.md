@@ -49,7 +49,7 @@ token. See [architecture.md](architecture.md) for the data layout.
 | 403 | CSRF, origin, session-scope, recovery-scope, or admin-role failure; retired passkey ceremony |
 | 404 | Row or route missing; unknown account |
 | 405 | Known path with an unsupported method; `Allow` lists the methods |
-| 409 | URL, tag, last-credential, last-admin, self-disable, or username conflict; two-factor precondition |
+| 409 | URL, tag, last-credential, last-admin, self-disable, or username conflict; two-factor precondition; second install claim (`setup_claimed`); job is already finished (`not_cancellable`) |
 | 410 | Share link revoked or expired; passkey setup retired |
 | 413 | Request body too large |
 | 429 | Rate limited; read `Retry-After` |
@@ -120,8 +120,9 @@ no accounts it creates the first account (admin) and its database; with a
 recovery session it finishes that session's account. Either way it marks the
 database claimed, replaces the recovery codes with ten new ones, returns
 `{"codes":[...],"redirect":"/"}`, and signs the browser in. It leaves passkey
-two-factor off. `POST /api/setup/options` and `/api/setup/verify` are retired
-and return 410.
+two-factor off. Claiming the installation is atomic: two concurrent first
+requests produce exactly one admin, and the loser answers 409 `setup_claimed`.
+`POST /api/setup/options` and `/api/setup/verify` are retired and return 410.
 
 The retired 0.2/0.3 passkey sign-in routes `POST /api/auth/options` and
 `POST /api/auth/verify` are removed in 0.4 and answer JSON 404. Passkeys sign
@@ -230,6 +231,10 @@ checksum-busted `?v=` links are used by the ledger rows. Bookmark rows only
 ever point at this local route; absolute remote icon URLs are ignored and
 cleared by the v15 repair.
 
+`POST /api/v1/bookmarks` and `POST /api/v1/quick-save` accept only absolute
+`http(s)://` URLs with a real host (no credentials, no whitespace or control
+characters); anything else is 400 `bad_request`.
+
 `GET /api/v1/bookmarks/{id}` returns a `BookmarkDetail`, including
 `enrich_state`, `enrich_error`, `reading_time_minutes`, and `manual_alive`.
 `PATCH` accepts any of `title`, `note_body`, `is_read`, `tags`, and
@@ -252,6 +257,7 @@ POST   /api/v1/maintenance/check-dead
 POST   /api/v1/ai/suggestions
 POST   /api/v1/webhooks/{id}/test
 GET    /api/v1/jobs/{id}
+POST   /api/v1/jobs/{id}/cancel
 ```
 
 `GET /api/v1/jobs/{id}` returns one own-library job:
@@ -263,7 +269,16 @@ GET    /api/v1/jobs/{id}
 
 An unknown id, and an id belonging to another account's library, return 404.
 While a job is `queued` or `running`, posting the same action for the same
-target returns the existing id instead of a second job. `GET /api/v1/ai/status`
+target returns the existing id instead of a second job.
+
+`POST /api/v1/jobs/{id}/cancel` requests cancellation of one queued or running
+job owned by the caller's library and returns the job view with `state` =
+`cancelled` (the cancel is durable: the job keeps `cancel_requested` set). A
+queued job is cancelled immediately and is never claimed; a job that is already
+running keeps running but its late result is discarded. The route is scoped to
+the caller's library, so an unknown id and a job in another account's library
+are 404; an already finished job (done or failed) returns 409
+`not_cancellable`. Cancelling an already-cancelled job is a 200 replay. `GET /api/v1/ai/status`
 (read) is the synchronous readiness probe beside the jobs: it returns
 `{"provider":Text,"model":Text,"configured":Bool}` where `provider` is the
 configured provider, `model` is the resolved default model, and `configured` is
@@ -330,7 +345,9 @@ empty tag.
 - `revision` is an opaque fingerprint built from the record count, the newest
   `updated_at`, the tag count, the tag-link count and the resolved link count.
   It changes when the library changes; clients only compare it, never parse
-  it. A response without it decodes as an empty string.
+  it. The client decodes the field strictly, so a payload without it is a
+  protocol error (the same rule as every other response DTO), never an empty
+  revision.
 
 The graph is whole-library, not a seed neighbourhood: every record and every
 tag is in the response. Pan, zoom, and filtering happen in the browser.
@@ -462,20 +479,26 @@ the Netscape format (or an eza JSON export) or an `application/json` body with
 a versioned eza JSON document. Both are bounded by `EZA_IMPORT_MAX_BYTES`
 (the JSON body path uses the import cap, not `EZA_MAX_BODY_BYTES`) and answer
 with an `ImportReport` shape (the JSON path adds `json_report` with per-kind
-counts, including `timestamps_normalised`); `POST /api/v1/import/json`
+counts, including `timestamps_normalised`, and honest `inserted`/`existing`
+bookmark counts; `imported`/`found` are the processed total); `POST /api/v1/import/json`
 is the dedicated JSON-only route. Rows are de-duplicated against the library
 by the canonical URL key before anything is inserted, so a re-run, an
 overlapping export, or an http/https copy of a filed page merges tags onto the
 existing record instead of creating a second row. Newly inserted rows are
 queued for background extraction.
 
-`GET /api/v1/export` returns Netscape HTML. Add `?format=json` for version 2
+`GET /api/v1/export` returns Netscape HTML; rows whose stored URL does not pass
+the strict `http(s)` policy (credentials, dot-only host, control characters) are
+omitted from that HTML view, while the JSON export keeps every stored row. Add
+`?format=json` for version 2
 of the portable JSON document: bookmarks (with their enrichment fields),
 highlights including prefix/suffix anchors, captures, saved searches, rules,
 views, and clip templates. Webhook subscription secrets are deliberately not
 exported. The version 1 document is still accepted by the importer.
-`GET /api/v1/export/notes` is reserved for the Markdown note export and
-currently answers `501 not_implemented`.
+`GET /api/v1/export/notes` returns the Markdown notes export: a
+`text/markdown` attachment named `eza-notes.md` with one `##` section per
+record that has a non-empty note, newest save first. Records without a note are
+omitted; the document is a download, not a JSON body.
 
 `GET /api/v1/stats` returns library counts: `bookmarks`, `tags`,
 `bookmark_tags`, `links`, `sources`, `top_sources`, `sources_once`, `first_day`,
@@ -614,10 +637,12 @@ disable, demote, or delete the last enabled admin (409 `last_admin`).
 
 `POST /api/v1/admin/users/{id}/password` takes `{"password":Text}` (at least
 ten characters), sets a temporary password, clears that account's optional
-passkey second factor, revokes every session of that account, and returns
-`{"ok":true}`. This is the break-glass path for a user who lost their device;
-it does not read the library, but it can hand the account to the caller. The
-target should be told out of band.
+passkey second factor, revokes every session of that account, rotates its
+recovery codes (the old codes stop working), and returns
+`{"ok":true,"recovery_codes":[Text]}` with the ten new codes shown once. This is
+the break-glass path for a user who lost their device; it does not read the
+library, but it can hand the account to the caller. The target should be told
+out of band.
 
 `DELETE /api/v1/admin/users/{id}` takes `{"confirm":true,"delete_db":Bool}`
 and returns `{"ok":true}`. The control row is always removed; the library

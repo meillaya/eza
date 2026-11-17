@@ -443,6 +443,7 @@ paragraphSegments numbered start para = step 0 inside
                             , HP.data_ "n" (ms (show num))
                             , C.styleInline_ (markCss (hColor hl))
                             , HP.title_ "Edit this highlight"
+                            , HE.onClick (HighlightEditStart (hId hl))
                             ]
                             [text (ms quoted)]
                        , H.span_

@@ -255,6 +255,38 @@ spec = describe "CLI" $ do
                             `shouldReturn` [Sqlite.Only 1]
                 [] -> expectationFailure "the backup output did not name the stamp"
 
+    it "prints carried accounts when a restore keeps a newer account" $
+        withCliConfig $ \cfg -> do
+            addCliUser cfg "alice" RoleAdmin
+            alice <- mustLookup cfg "alice"
+            bracket (Db.openDb (cuDbPath alice)) Sqlite.close $ \conn -> do
+                _ <- Bookmarks.insertBookmark conn "https://alice.example/carried" "Carried" []
+                pure ()
+            -- A partial stamp: only alice's library is captured.
+            ((), backupOutput) <- captureOutput (runCli cfg (textSource "") (Backup (Just "alice")))
+            -- bob exists only in the current installation; a restore must keep
+            -- him and report it.
+            addCliUser cfg "bob" RoleMember
+            bob <- mustLookup cfg "bob"
+            bracket (Db.openDb (cuDbPath bob)) Sqlite.close $ \conn -> do
+                _ <- Bookmarks.insertBookmark conn "https://bob.example/kept" "Kept" []
+                pure ()
+            case [T.drop 8 line | line <- T.lines backupOutput, "backup: " `T.isPrefixOf` line] of
+                (stamp : _) -> do
+                    ((), restoreOutput) <-
+                        captureOutput
+                            ( runCli
+                                cfg
+                                (textSource "")
+                                (RestoreCmd RestoreOpts{rstStamp = T.unpack stamp, rstDryRun = False, rstYes = True, rstForce = False})
+                            )
+                    restoreOutput `shouldSatisfy` T.isInfixOf "carried: user"
+                    restoreOutput `shouldSatisfy` T.isInfixOf "bob"
+                    bracket (Db.openDb (cuDbPath bob)) Sqlite.close $ \conn ->
+                        (Sqlite.query_ conn "SELECT COUNT(*) FROM bookmarks" :: IO [Sqlite.Only Int])
+                            `shouldReturn` [Sqlite.Only 1]
+                [] -> expectationFailure "the backup output did not name the stamp"
+
     it "fails verify when the FTS index drifted" $
         withCliConfig $ \cfg -> do
             addCliUser cfg "alice" RoleAdmin

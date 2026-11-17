@@ -496,6 +496,7 @@ runRestoreCommand cfg opts = do
             putStrLn ("  control database target: " <> rrsControlTarget report)
             mapM_ (\(userId, username) -> putStrLn ("  " <> T.unpack verb <> " user " <> show userId <> " (" <> T.unpack username <> ")")) (rrsRestored report)
             mapM_ (\(userId, username) -> putStrLn ("  keep current library for user " <> show userId <> " (" <> T.unpack username <> "): the stamp has no copy")) (rrsPreserved report)
+            mapM_ (\(userId, username) -> putStrLn ("  carried: user " <> show userId <> " (" <> T.unpack username <> "): the stamp does not include it, so its account and library are kept")) (rrsCarried report)
             mapM_ (\(userId, username) -> putStrLn ("  drop account " <> show userId <> " (" <> T.unpack username <> "): no library in the stamp or the current installation")) (rrsDropped report)
             unless (null (rrsDropped report)) $
                 putStrLn "  note: dropped accounts are removed from the restored control database"

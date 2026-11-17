@@ -94,7 +94,7 @@ jobSpec = describe "M4-D job polling" $ do
             effectsOf effects `shouldSatisfy` any (isInfixOf "ApiRequest ApiAiSuggestionsJob")
         it "the webhook action enqueues the test job" $ do
             let (model, effects) = run (WebhookTestRequest 3)
-            mWebhookTestBusy model `shouldBe` True
+            mWebhookTestBusy model `shouldBe` Just 3
             effectsOf effects `shouldSatisfy` any (isInfixOf "ApiRequest ApiTestWebhook 3")
         it "queuing records the poll and schedules the first tick" $ do
             let (model, effects) = run (SnapshotJobQueued 7 42)
@@ -209,7 +209,7 @@ jobSpec = describe "M4-D job polling" $ do
                         }
                 result = Just (object ["ok" .= True, "status" .= (200 :: Int)])
                 (model3, _) = update model2 (JobStatusLoaded (WebhookTestJob 3) 11 requestId (doneWith result))
-            mWebhookTestBusy model3 `shouldBe` False
+            mWebhookTestBusy model3 `shouldBe` Nothing
             case mWebhookTest model3 of
                 Just (3, testResult) -> wtOk testResult `shouldBe` True
                 other -> expectationFailure ("unexpected test result: " <> show other)

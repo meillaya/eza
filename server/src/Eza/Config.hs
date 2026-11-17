@@ -16,6 +16,7 @@ module Eza.Config (
 ) where
 
 import Control.Exception (SomeException, try)
+import Control.Monad (when)
 import Data.Bits (shiftL, shiftR, (.&.))
 import Data.Char (toLower)
 import Data.List (isInfixOf, nub)
@@ -24,9 +25,11 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word32, Word8)
 import Network.Socket (AddrInfo, AddrInfoFlag (AI_NUMERICHOST), SockAddr (..), SocketType (Stream), addrAddress, addrFlags, addrSocketType, defaultHints, getAddrInfo, hostAddressToTuple)
+
 import System.Directory (createDirectoryIfMissing)
 import System.Environment (lookupEnv)
 import System.FilePath (takeDirectory, (</>))
+import System.IO (hPutStrLn, stderr)
 import Text.Read (readMaybe)
 
 import Eza.Password (PasswordParams (..), defaultPasswordParams)
@@ -135,6 +138,18 @@ loadConfig = do
     faviconTtl <- readIntEnv "EZA_FAVICON_TTL_DAYS" 90
     faviconBackfill <- readBoolEnv "EZA_FAVICON_BACKFILL" True
     shareTtl <- readIntEnv "EZA_SHARE_TTL_DAYS" 7
+    -- Share creation itself only accepts 1..365 days; clamping the configured
+    -- default the same way keeps a value outside that range from making every
+    -- default-expiry share fail.
+    let shareTtlClamped = max 1 (min 365 shareTtl)
+    when (shareTtl /= shareTtlClamped) $
+        hPutStrLn
+            stderr
+            ( "eza: EZA_SHARE_TTL_DAYS="
+                <> show shareTtl
+                <> " is outside the supported 1..365 days; using "
+                <> show shareTtlClamped
+            )
     aiProvider <- fromMaybe "none" <$> lookupEnv "EZA_AI_PROVIDER"
     ollamaUrl <- fromMaybe "http://127.0.0.1:11434" <$> lookupEnv "EZA_OLLAMA_BASE_URL"
     aiModel <- fromMaybe "" <$> lookupEnv "EZA_AI_MODEL"
@@ -180,7 +195,7 @@ loadConfig = do
             , cfgFaviconMaxBytes = max 4096 faviconMax
             , cfgFaviconTtlDays = max 1 faviconTtl
             , cfgFaviconBackfill = faviconBackfill
-            , cfgShareTtlDays = max 1 shareTtl
+            , cfgShareTtlDays = shareTtlClamped
             , cfgAiProvider = aiProvider
             , cfgOllamaBaseUrl = ollamaUrl
             , cfgAiModel = aiModel

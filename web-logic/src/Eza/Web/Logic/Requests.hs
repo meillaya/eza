@@ -25,6 +25,7 @@ module Eza.Web.Logic.Requests (
     percentEncode,
     decodeResponseAt,
     decodeStatsAt,
+    decodeResetPasswordCodes,
     submitImportRequest,
 
     -- * Shared wire values
@@ -187,7 +188,7 @@ import Eza.Web.Logic.Api (BookmarkListQuery (..), ClientRequest (..), DedupCandi
 import Eza.Web.Logic.Effect (Effect (..))
 import Eza.Web.Logic.Error (ApiError (..), mkApiError)
 import Eza.Web.Logic.Job (JobStatus)
-import Eza.Web.Logic.Model (Action)
+import Eza.Web.Logic.Model (Action (BootDecodeFailed))
 import qualified Eza.Web.Logic.Route as ClientRoute
 import Eza.Web.Logic.Update.Monad (Update, emit)
 import Eza.Web.Logic.Wire (ImportResponse (..), ListParams (..), WebhookTest (..), defaultListParams)
@@ -456,8 +457,20 @@ answer with the summary counts @inserted@, @found@ and @existing@; the full
 
 -- ------------------------------------------------------------------ reads --
 
+{- | Boot is the one read whose decode failure is a protocol mismatch rather
+than a generic error: the caller blocks the paint with the same message a
+wire-version refusal uses, instead of letting a renamed field read as a
+transport failure.
+-}
 fetchBoot :: (BootPayload -> Action) -> (ApiError -> Action) -> Update ()
-fetchBoot = requestGetJson ApiBoot
+fetchBoot onOk onErr =
+    emit
+        ( ApiRequest ApiBoot Nothing $ \result -> case result of
+            Left err -> onErr err
+            Right value -> case decodeResponseAt (requestPath ApiBoot) value of
+                Right payload -> onOk payload
+                Left err -> BootDecodeFailed (aeMessage err)
+        )
 
 fetchBookmarks ::
     ListParams ->
@@ -628,14 +641,28 @@ patchAdminUser userId enabled role onOk onErr =
         decodeResponseAt
         onOk
         onErr
+
+{- | @POST /api/v1/admin/users/{id}/password@ rotates the target account's
+recovery codes and returns them exactly once: @{"ok":true,"recovery_codes":
+[...]}@. The codes are the one-time reveal, so a body without them is an error
+rather than an empty success.
+-}
 resetAdminPassword ::
     Int ->
     Text ->
-    Action ->
+    ([Text] -> Action) ->
     (ApiError -> Action) ->
     Update ()
 resetAdminPassword userId password onOk onErr =
-    requestWriteNone (ApiResetAdminPassword userId) (Just (object ["password" .= password])) onOk onErr
+    requestWriteValue
+        (ApiResetAdminPassword userId)
+        (Just (object ["password" .= password]))
+        decodeResetPasswordCodes
+        onOk
+        onErr
+
+decodeResetPasswordCodes :: Text -> Value -> Either ApiError [Text]
+decodeResetPasswordCodes endpoint = decodeListFieldAt endpoint "recovery_codes"
 deleteAdminUser ::
     Int ->
     Bool ->

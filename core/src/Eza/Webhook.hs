@@ -7,6 +7,10 @@ Webhooks are the external-extension surface: the server records events in the
 same transaction as the write, a per-library worker delivers them with HMAC
 signing and retries, and a disabled subscription has no effect. The types here
 are shared by the server, the client, and the JSON Schema contract.
+
+Response decoding is strict (a missing or renamed field is a parse failure, per
+the client-decode rule in @AGENTS.md@); the create/update payload 'WebhookInput'
+keeps the documented input defaults.
 -}
 module Eza.Webhook (
     -- * Events
@@ -28,10 +32,11 @@ module Eza.Webhook (
 
 import Data.Aeson
 import Data.Aeson.Types (Parser)
-import Data.Char (isSpace)
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
+
+import Eza.Url (isHttpUrl)
 
 -- ----------------------------------------------------------------- events ---
 
@@ -103,7 +108,9 @@ maxWebhookUrl :: Int
 maxWebhookUrl = 2048
 
 {- | One stored subscription. The secret is never part of the list payload;
-the reveal-once value belongs to the create response only.
+the reveal-once value belongs to the create response only. The response codec is
+strict: every field on the wire is required, including the nullable last-*
+fields (which the server writes as JSON null when unknown).
 -}
 data Webhook = Webhook
     { whId :: Int
@@ -136,23 +143,27 @@ instance ToJSON Webhook where
 
 instance FromJSON Webhook where
     parseJSON = withObject "Webhook" $ \o -> do
-        rawEvents <- o .:? "events" .!= ([] :: [Text])
+        rawEvents <- o .: "events"
         events <- traverse parseEvent rawEvents
         Webhook
-            <$> (o .:? "id" .!= 0)
-            <*> (o .:? "name" .!= "")
-            <*> (o .:? "url" .!= "")
+            <$> o .: "id"
+            <*> o .: "name"
+            <*> o .: "url"
             <*> pure events
-            <*> (o .:? "enabled" .!= True)
-            <*> (o .:? "created_at" .!= 0)
-            <*> o .:? "last_status"
-            <*> o .:? "last_attempt_at"
-            <*> (o .:? "last_error" .!= "")
-            <*> (o .:? "fail_streak" .!= 0)
+            <*> o .: "enabled"
+            <*> o .: "created_at"
+            <*> o .: "last_status"
+            <*> o .: "last_attempt_at"
+            <*> o .: "last_error"
+            <*> o .: "fail_streak"
       where
         parseEvent raw = maybe (fail "unknown webhook event") pure (parseEventType raw)
 
--- | Create/update payload.
+{- | Create/update payload. Decoding is intentionally lenient for the documented
+input defaults: an omitted @enabled@ means true and omitted @events@ means the
+empty list (the server then validates the required name/url and the
+at-least-one-event rule). Responses always use the strict 'Webhook' codec.
+-}
 data WebhookInput = WebhookInput
     { wiName :: Text
     , wiUrl :: Text
@@ -182,7 +193,10 @@ instance FromJSON WebhookInput where
       where
         parseEvent raw = maybe (fail "unknown webhook event") pure (parseEventType raw)
 
--- | One recent delivery shown in the account UI.
+{- | One recent delivery shown in the account UI. The response codec is strict:
+every field is required, so a server rename fails the client parse instead of
+showing an empty delivery row.
+-}
 data DeliveryView = DeliveryView
     { dvId :: Int
     , dvEvent :: EventType
@@ -209,12 +223,12 @@ instance FromJSON DeliveryView where
         rawEvent <- o .: "event" :: Parser Text
         eventType <- maybe (fail "unknown delivery event") pure (parseEventType rawEvent)
         DeliveryView
-            <$> (o .:? "id" .!= 0)
+            <$> o .: "id"
             <*> pure eventType
-            <*> (o .:? "state" .!= "")
-            <*> (o .:? "attempts" .!= 0)
-            <*> (o .:? "last_error" .!= "")
-            <*> (o .:? "created_at" .!= 0)
+            <*> o .: "state"
+            <*> o .: "attempts"
+            <*> o .: "last_error"
+            <*> o .: "created_at"
 
 -- ---------------------------------------------------------------- validation ---
 
@@ -231,14 +245,3 @@ validateWebhookInput input = do
     if null events then Left ["at least one event is required"] else Right ()
     if length events > length allEventTypes then Left ["too many events"] else Right ()
     if all (`elem` allEventTypes) events then Right () else Left ["unknown event type"]
-
-isHttpUrl :: Text -> Bool
-isHttpUrl url =
-    let lowered = T.toLower url
-        schemes = ["http://", "https://"]
-        afterScheme = case [scheme | scheme <- schemes, scheme `T.isPrefixOf` lowered] of
-            (scheme : _) -> T.drop (T.length scheme) url
-            [] -> ""
-     in not (T.null afterScheme)
-            && not (T.any isSpace afterScheme)
-            && T.head afterScheme /= '/'

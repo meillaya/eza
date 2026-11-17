@@ -23,6 +23,8 @@ module Eza.Jobs (
     failJobPermanent,
     cancelJob,
     jobCancelRequested,
+    requestJobCancel,
+    requeueStaleJobs,
     getJob,
     getJobView,
     resetRunningJobs,
@@ -138,7 +140,7 @@ claimJob conn = do
 completeJob :: Connection -> Int -> IO ()
 completeJob conn jobId = do
     now <- epoch
-    execute conn "UPDATE jobs SET state = 'done', updated_at = ? WHERE id = ?" (now, jobId)
+    execute conn "UPDATE jobs SET state = 'done', updated_at = ? WHERE id = ? AND state <> 'cancelled'" (now, jobId)
 
 -- | Finish a job with its JSON result.
 completeJobResult :: Connection -> Int -> Value -> IO ()
@@ -146,7 +148,7 @@ completeJobResult conn jobId result = do
     now <- epoch
     execute
         conn
-        "UPDATE jobs SET state = 'done', result = ?, last_error = '', updated_at = ? WHERE id = ?"
+        "UPDATE jobs SET state = 'done', result = ?, last_error = '', updated_at = ? WHERE id = ? AND state <> 'cancelled'"
         (TE.decodeUtf8 (LBS.toStrict (encode result)), now, jobId)
 
 -- | Retry with a short backoff, then park the job as failed.
@@ -161,7 +163,7 @@ failJob conn jobId message attempts = do
         state = if next >= 3 then "failed" else "queued"
     execute
         conn
-        "UPDATE jobs SET state = ?, attempts = ?, available_at = ?, last_error = ?, updated_at = ? WHERE id = ?"
+        "UPDATE jobs SET state = ?, attempts = ?, available_at = ?, last_error = ?, updated_at = ? WHERE id = ? AND state <> 'cancelled'"
         (state :: Text, next, now + backoff, message, now, jobId)
 
 -- | Fail without retrying (refused URL, missing provider key, webhook error).
@@ -170,7 +172,7 @@ failJobPermanent conn jobId message = do
     now <- epoch
     execute
         conn
-        "UPDATE jobs SET state = 'failed', attempts = attempts + 1, last_error = ?, updated_at = ? WHERE id = ?"
+        "UPDATE jobs SET state = 'failed', attempts = attempts + 1, last_error = ?, updated_at = ? WHERE id = ? AND state <> 'cancelled'"
         (message, now, jobId)
 
 -- | Mark a queued or running job cancelled.
@@ -186,6 +188,23 @@ jobCancelRequested :: Connection -> Int -> IO Bool
 jobCancelRequested conn jobId = do
     rows <- query conn "SELECT cancel_requested FROM jobs WHERE id = ?" (Only jobId) :: IO [Only Int]
     pure (case rows of [Only value] -> value /= 0; _ -> False)
+
+{- | Request cancellation of one queued or running job (the HTTP cancel route).
+The row is marked cancelled immediately so it is never claimed again, and the
+durable @cancel_requested@ flag stays set. Returns False when the id does not
+exist or the job is already terminal, so the handler can distinguish "not found
+or already finished" from "cancelled". A worker that is already executing the
+job keeps running, but its late completion or failure is ignored because the
+completion helpers skip a cancelled row.
+-}
+requestJobCancel :: Connection -> Int -> IO Bool
+requestJobCancel conn jobId = do
+    now <- epoch
+    execute
+        conn
+        "UPDATE jobs SET state = 'cancelled', cancel_requested = 1, updated_at = ? WHERE id = ? AND state IN ('queued','running')"
+        (now, jobId)
+    (> 0) <$> changes conn
 
 -- | Read a job's execution fields regardless of state (tests and tooling).
 getJob :: Connection -> Int -> IO (Maybe Job)
@@ -222,6 +241,37 @@ resetRunningJobs :: Connection -> IO ()
 resetRunningJobs conn =
     withImmediateTransaction conn $
         execute_ conn "UPDATE jobs SET state = 'queued', available_at = strftime('%s','now'), cancel_requested = 0 WHERE state = 'running'"
+
+{- | Recover jobs abandoned @running@ by a worker that died mid-flight. A row
+whose @updated_at@ is older than @staleSeconds@ is treated as one failed
+attempt: it is failed when the retry budget is spent (the same attempt limit as
+'failJob'), cancelled when a cancel request arrived while it was running, and
+requeued otherwise. Returns @(requeued, failed, cancelled)@. Long-lived jobs are
+bounded by the egress and enrichment fetch timeouts, so the default window
+(~15 minutes) is far above any legitimate execution time.
+-}
+requeueStaleJobs :: Connection -> Int -> IO (Int, Int, Int)
+requeueStaleJobs conn staleSeconds = do
+    now <- epoch
+    let cutoff = now - max 60 staleSeconds
+        staleMessage = "the job worker stopped while this job was running" :: Text
+    withImmediateTransaction conn $ do
+        execute
+            conn
+            "UPDATE jobs SET state = 'cancelled', updated_at = ? WHERE state = 'running' AND updated_at < ? AND cancel_requested <> 0"
+            (now, cutoff)
+        cancelled <- changes conn
+        execute
+            conn
+            "UPDATE jobs SET state = 'failed', attempts = attempts + 1, last_error = ?, updated_at = ? WHERE state = 'running' AND updated_at < ? AND cancel_requested = 0 AND attempts >= 2"
+            (staleMessage, now, cutoff)
+        failed <- changes conn
+        execute
+            conn
+            "UPDATE jobs SET state = 'queued', attempts = attempts + 1, available_at = ?, last_error = ?, updated_at = ?, cancel_requested = 0 WHERE state = 'running' AND updated_at < ? AND cancel_requested = 0 AND attempts < 2"
+            (now, staleMessage, now, cutoff)
+        requeued <- changes conn
+        pure (requeued, failed, cancelled)
 
 cleanupJobs :: Connection -> IO ()
 cleanupJobs conn = do

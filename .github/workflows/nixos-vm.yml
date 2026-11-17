@@ -1,0 +1,42 @@
+name: NixOS VM test
+
+# Builds and boots the flake's full NixOS VM check
+# (`checks.x86_64-linux.nixos-vm`): systemd unit, /healthz, the per-account data
+# layout and the backup oneshot. This is deliberately not part of the
+# every-push CI: the check builds a complete NixOS system image, and GitHub's
+# hosted runners have no /dev/kvm, so the QEMU test runs under TCG and is slow
+# (tens of minutes on a cold store). Run it from the Actions tab on demand, or
+# let the weekly schedule cover module and deployment changes.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nixos-vm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nixos-vm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      # Same Cachix setup as the other Nix jobs: the public devenv cache always,
+      # plus the eza project cache when BOTH vars.CACHIX_CACHE and
+      # secrets.CACHIX_AUTH_TOKEN are configured. The VM check builds the server
+      # package, so a warm project cache matters most here.
+      - uses: cachix/cachix-action@v16
+        with:
+          name: ${{ vars.CACHIX_CACHE || 'devenv' }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          extraPullNames: devenv
+      - name: NixOS VM test (QEMU, no KVM on hosted runners)
+        run: nix build -L .#checks.x86_64-linux.nixos-vm

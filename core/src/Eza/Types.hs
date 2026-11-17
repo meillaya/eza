@@ -28,7 +28,7 @@ module Eza.Types (
     UndoResult (..),
 ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON, genericToJSON, object, withObject, (.!=), (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON, genericToJSON, object, withObject, (.:), (.=))
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
@@ -255,6 +255,10 @@ instance FromJSON GraphLink where
 {- | The whole library as one graph: every record, every tag, and the resolved
 wikilinks between records. Tag membership is expressed by 'grTags'; the only
 two relationship types are that membership and 'gdLinks'.
+
+The response decoder requires @revision@: it is what hydrates/caches the layout
+wire, so a renamed or missing revision must fail the parse instead of silently
+disabling layout hydration. (The server always writes it.)
 -}
 data GraphData = GraphData
     { gdTags :: [GraphTag]
@@ -281,7 +285,7 @@ instance FromJSON GraphData where
             <$> o .: "tags"
             <*> o .: "records"
             <*> o .: "links"
-            <*> o .:? "revision" .!= ""
+            <*> o .: "revision"
 
 data ImportReport = ImportReport
     { irFound :: Int

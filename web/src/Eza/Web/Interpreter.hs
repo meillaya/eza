@@ -124,6 +124,10 @@ subscriptions =
     , -- Connectivity drives the offline banner.
       windowSub "online" emptyDecoder (\() -> ConnectivityChanged True)
     , windowSub "offline" emptyDecoder (\() -> ConnectivityChanged False)
+    , -- The OS theme preference changed: static/theme.js resolves and
+      -- dispatches the theme so the canvas palette and the toggle labels
+      -- follow the CSS the rest of the page already uses.
+      windowSub "eza-theme" themeEventDecoder (ThemeLoaded . themeOfText)
     ]
 
 {- | Decode the @detail@ object the keyboard bridge puts on the custom event.
@@ -142,6 +146,15 @@ ezaKeyDecoder =
                 <*> (o MJ..:? "altKey" MJ..!= False)
                 <*> (o MJ..:? "editable" MJ..!= False)
                 <*> (o MJ..:? "row")
+
+{- | The theme name the boot script dispatches when the OS preference changes
+while the reader has not chosen a theme explicitly.
+-}
+themeEventDecoder :: Decoder Text
+themeEventDecoder =
+    at ["detail"] $
+        MJ.withObject "eza-theme" $
+            \o -> o MJ..: "theme"
 
 {- | Schedule one native timer. The callback carries the native id, so the
 reducer decides whether the fire is still current.

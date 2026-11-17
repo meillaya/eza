@@ -23,8 +23,21 @@ import Eza.GraphLayout (GraphLayoutWire (..), LayoutPreset (..), graphLayoutWire
 import Eza.Problem
 import Eza.Rule
 import Eza.Share
-import Eza.Types (BookmarkSummary (..), LibraryStats (..), SearchPage (..), TagStat (..))
-import Eza.User (UserRole (..))
+import Eza.Types (BookmarkSummary (..), GraphData (..), GraphRecord (..), GraphTag (..), LibraryStats (..), SearchPage (..), TagStat (..))
+import Eza.Url (isHttpUrl)
+import Eza.User (UserCreateInput (..), UserCreateResult (..), UserRole (..), UserView (..))
+import Eza.View (
+    ColorGroup (..),
+    GraphViewDefinition (..),
+    LabelMode (..),
+    View (..),
+    ViewDefinition (..),
+    ViewInput (..),
+    ViewKind (..),
+    defaultGraphViewDefinition,
+    defaultLedgerViewDefinition,
+ )
+import Eza.Webhook (DeliveryView (..), EventType (..), Webhook (..), WebhookInput (..), validateWebhookInput)
 
 contractTests :: Spec
 contractTests = do
@@ -67,21 +80,17 @@ contractTests = do
                                   , "mark_read"
                                   , "created_at"
                                   ]
-        it "decodes a create request with the documented defaults" $
+        it "decodes a RuleInput create request with the documented defaults" $
             eitherDecode "{\"name\":\"hn\",\"pattern\":\"news.ycombinator\"}"
-                `shouldBe` Right
-                    Rule
-                        { ruleId = 0
-                        , ruleName = "hn"
-                        , ruleEnabled = True
-                        , ruleField = "url"
-                        , rulePattern = "news.ycombinator"
-                        , ruleAddTags = []
-                        , ruleMarkRead = False
-                        , ruleCreatedAt = 0
-                        }
-        it "rejects a rule response without a pattern" $
+                `shouldBe` Right (RuleInput "hn" True "url" "news.ycombinator" [] False)
+        it "fills a server-shaped rule from a create request" $
+            ruleInputToRule (RuleInput "hn" False "domain" "news.ycombinator.com" ["reading"] True)
+                `shouldBe` rule{ruleId = 0, ruleEnabled = False, ruleField = "domain", rulePattern = "news.ycombinator.com", ruleAddTags = ["reading"], ruleMarkRead = True, ruleCreatedAt = 0}
+        it "rejects a strict rule response without a pattern" $
             (eitherDecode "{\"name\":\"hn\"}" :: Either String Rule) `shouldSatisfy` isLeft
+        it "rejects a rule response with a missing or renamed field" $ do
+            (eitherDecode (encode (removeKey "enabled" (toJSON rule))) :: Either String Rule) `shouldSatisfy` isLeft
+            (eitherDecode (encode (renameKey "add_tags" "tags" (toJSON rule))) :: Either String Rule) `shouldSatisfy` isLeft
 
     describe "Eza.Share" $ do
         it "round-trips a share" $ roundTrip shareView
@@ -162,6 +171,131 @@ contractTests = do
         it "round-trips the boot payload" $ roundTrip bootPayload
         it "rejects a boot payload without wire_version" $
             (eitherDecode "{}" :: Either String BootPayload) `shouldSatisfy` isLeft
+
+    describe "Eza.Webhook" $ do
+        it "round-trips a stored webhook" $ roundTrip webhook
+        it "uses the historical webhook keys" $
+            keysOf webhook
+                `shouldMatchList` [ "id"
+                                  , "name"
+                                  , "url"
+                                  , "events"
+                                  , "enabled"
+                                  , "created_at"
+                                  , "last_status"
+                                  , "last_attempt_at"
+                                  , "last_error"
+                                  , "fail_streak"
+                                  ]
+        it "rejects a webhook response with a missing or renamed field" $ do
+            (eitherDecode (encode (removeKey "fail_streak" (toJSON webhook))) :: Either String Webhook) `shouldSatisfy` isLeft
+            (eitherDecode (encode (renameKey "last_error" "error" (toJSON webhook))) :: Either String Webhook) `shouldSatisfy` isLeft
+        it "keeps the documented WebhookInput defaults" $ do
+            eitherDecode "{\"name\":\"deploy\",\"url\":\"https://example.com/hook\",\"events\":[\"bookmark.created\"]}"
+                `shouldBe` Right (WebhookInput "deploy" "https://example.com/hook" [BookmarkCreated] True)
+            eitherDecode "{}"
+                `shouldBe` Right (WebhookInput "" "" [] True)
+        it "round-trips a delivery view and rejects a missing field" $ do
+            roundTrip deliveryView
+            (eitherDecode (encode (removeKey "attempts" (toJSON deliveryView))) :: Either String DeliveryView) `shouldSatisfy` isLeft
+            (eitherDecode (encode (renameKey "last_error" "error" (toJSON deliveryView))) :: Either String DeliveryView) `shouldSatisfy` isLeft
+        it "rejects webhook targets carrying URL credentials or a dot-only host" $ do
+            validateWebhookInput goodHook{wiUrl = "https://user:secret@example.com/hook"} `shouldSatisfy` isLeft
+            validateWebhookInput goodHook{wiUrl = "https://.../hook"} `shouldSatisfy` isLeft
+
+    describe "Eza.User" $ do
+        it "round-trips a user view and rejects a missing or renamed field" $ do
+            roundTrip userView
+            (eitherDecode (encode (removeKey "role" (toJSON userView))) :: Either String UserView) `shouldSatisfy` isLeft
+            (eitherDecode (encode (renameKey "username" "name" (toJSON userView))) :: Either String UserView) `shouldSatisfy` isLeft
+        it "requires both fields of a created user result" $ do
+            roundTrip userCreateResult
+            (eitherDecode (encode (removeKey "recovery_codes" (toJSON userCreateResult))) :: Either String UserCreateResult) `shouldSatisfy` isLeft
+        it "keeps the documented UserCreateInput role default" $
+            eitherDecode "{\"username\":\"bob\",\"password\":\"a-long-password\"}"
+                `shouldBe` Right (UserCreateInput "bob" "a-long-password" RoleMember)
+
+    describe "Eza.View" $ do
+        it "round-trips a stored graph view and a stored ledger view" $ do
+            roundTrip graphView
+            roundTrip ledgerView
+        it "uses the historical wrapper keys" $
+            keysOf graphView
+                `shouldMatchList` [ "schema"
+                                  , "id"
+                                  , "slug"
+                                  , "name"
+                                  , "kind"
+                                  , "is_default"
+                                  , "definition"
+                                  , "created_at"
+                                  , "updated_at"
+                                  ]
+        it "rejects a stored view with a missing or renamed wrapper field" $ do
+            (eitherDecode (encode (removeKey "updated_at" (toJSON graphView))) :: Either String View) `shouldSatisfy` isLeft
+            (eitherDecode (encode (renameKey "is_default" "default" (toJSON graphView))) :: Either String View) `shouldSatisfy` isLeft
+        it "rejects a stored view with a missing definition field" $ do
+            (eitherDecode "{\"schema\":1,\"id\":1,\"slug\":\"g\",\"name\":\"G\",\"kind\":\"graph\",\"is_default\":false,\"definition\":{\"query\":\"\",\"label_mode\":\"auto\",\"layout_preset\":\"standard\",\"local_depth\":null,\"color_groups\":[]},\"created_at\":0,\"updated_at\":0}" :: Either String View) `shouldSatisfy` isLeft
+            (eitherDecode "{\"schema\":1,\"id\":1,\"slug\":\"g\",\"name\":\"G\",\"kind\":\"graph\",\"is_default\":false,\"definition\":{\"query\":\"\",\"tags_shown\":true,\"label_mode\":\"auto\",\"layout_preset\":\"standard\",\"local_depth\":null,\"color_groups\":[{\"name\":\"rust\",\"query\":\"tag:rust\",\"color\":\"#C98A3E\"}]},\"created_at\":0,\"updated_at\":0}" :: Either String View) `shouldSatisfy` isLeft
+        it "keeps the documented ViewInput definition defaults" $ do
+            eitherDecode "{\"name\":\"Rust\",\"kind\":\"graph\",\"definition\":{}}"
+                `shouldBe` Right (ViewInput "Rust" GraphKind (GraphDefinition defaultGraphViewDefinition) Nothing)
+            eitherDecode "{\"name\":\"Rust\",\"kind\":\"graph\",\"definition\":{\"color_groups\":[{\"name\":\"rust\"}]}}"
+                `shouldBe` Right
+                    ( ViewInput
+                        "Rust"
+                        GraphKind
+                        (GraphDefinition defaultGraphViewDefinition{gvdColorGroups = [ColorGroup "rust" "" "#C98A3E" True]})
+                        Nothing
+                    )
+
+    describe "Eza.Types GraphData" $ do
+        it "round-trips the compact graph payload" $ roundTrip graphData
+        it "requires the revision field" $ do
+            (eitherDecode "{\"tags\":[],\"records\":[],\"links\":[]}" :: Either String GraphData) `shouldSatisfy` isLeft
+            (eitherDecode (encode (removeKey "revision" (toJSON graphData))) :: Either String GraphData) `shouldSatisfy` isLeft
+
+    describe "Eza.Url.isHttpUrl" $ do
+        it "accepts absolute http(s) URLs with a usable host" $
+            map
+                isHttpUrl
+                [ "http://example.com"
+                , "https://example.com/path?q=1#frag"
+                , "HTTP://EXAMPLE.COM"
+                , "  https://example.com  "
+                , "http://example.com:8080"
+                , "http://127.0.0.1:9/hook"
+                , "https://[::1]"
+                , "https://[::1]:8443/x"
+                , "https://sub.domain.example/a_b-c~d"
+                ]
+                `shouldBe` replicate 9 True
+        it "rejects empty, hostless, credential, dot-only and malformed hosts" $
+            map
+                isHttpUrl
+                [ ""
+                , "   "
+                , "http://"
+                , "http:///path"
+                , "http://?q=1"
+                , "http://#frag"
+                , "http://."
+                , "http://.."
+                , "http://./path"
+                , "http://exa mple.com"
+                , "http://exa\tmple.com"
+                , "http://exa\nmple.com"
+                , "http://user:secret@example.com"
+                , "http://@example.com"
+                , "http://example.com:"
+                , "http://example.com:not-a-port"
+                , "ftp://example.com"
+                , "javascript:alert(1)"
+                , "//example.com"
+                , "http:/example.com"
+                , "https:example.com"
+                ]
+                `shouldBe` replicate 21 False
 
 -- ------------------------------------------------------------------ samples ---
 
@@ -322,6 +456,95 @@ bootPayload =
         , bpViews = []
         }
 
+webhook :: Webhook
+webhook =
+    Webhook
+        { whId = 3
+        , whName = "deploy"
+        , whUrl = "https://example.com/hook"
+        , whEvents = [BookmarkCreated, BookmarkDeleted]
+        , whEnabled = True
+        , whCreatedAt = 1700000000
+        , whLastStatus = Just 200
+        , whLastAttemptAt = Just 1700000100
+        , whLastError = ""
+        , whFailStreak = 0
+        }
+
+goodHook :: WebhookInput
+goodHook = WebhookInput "deploy" "https://example.com/hook" [BookmarkCreated] True
+
+deliveryView :: DeliveryView
+deliveryView =
+    DeliveryView
+        { dvId = 7
+        , dvEvent = BookmarkCreated
+        , dvState = "delivered"
+        , dvAttempts = 1
+        , dvLastError = ""
+        , dvCreatedAt = 1700000000
+        }
+
+userView :: UserView
+userView =
+    UserView
+        { uvId = 1
+        , uvUsername = "alice"
+        , uvRole = RoleAdmin
+        , uvCreatedAt = 1700000000
+        , uvDisabledAt = Nothing
+        , uvLastLoginAt = Just 1700000100
+        }
+
+userCreateResult :: UserCreateResult
+userCreateResult = UserCreateResult userView ["code-1", "code-2"]
+
+graphDefinition :: GraphViewDefinition
+graphDefinition =
+    GraphViewDefinition
+        { gvdQuery = "tag:rust"
+        , gvdTagsShown = True
+        , gvdLabelMode = LabelTags
+        , gvdLayoutPreset = Standard
+        , gvdLocalDepth = Just 2
+        , gvdColorGroups = [ColorGroup "Rust" "tag:rust" "#C98A3E" True]
+        }
+
+graphView :: View
+graphView =
+    View
+        { vId = 7
+        , vSlug = "graph"
+        , vName = "Graph"
+        , vKind = GraphKind
+        , vIsDefault = True
+        , vDefinition = GraphDefinition graphDefinition
+        , vCreatedAt = 1
+        , vUpdatedAt = 2
+        }
+
+ledgerView :: View
+ledgerView =
+    View
+        { vId = 8
+        , vSlug = "ledger"
+        , vName = "Ledger"
+        , vKind = LedgerKind
+        , vIsDefault = False
+        , vDefinition = LedgerDefinition defaultLedgerViewDefinition
+        , vCreatedAt = 1
+        , vUpdatedAt = 2
+        }
+
+graphData :: GraphData
+graphData =
+    GraphData
+        { gdTags = [GraphTag "rust" 2]
+        , gdRecords = [GraphRecord 7 "Title" "example.com" 1700000000 True False [0]]
+        , gdLinks = []
+        , gdRevision = "r1:3:4:5:2"
+        }
+
 -- ------------------------------------------------------------------ helpers ---
 
 roundTrip :: (Eq a, Show a, ToJSON a, FromJSON a) => a -> Expectation
@@ -340,3 +563,17 @@ isLeft :: Either a b -> Bool
 isLeft = \case
     Left _ -> True
     Right _ -> False
+
+-- | Drop one object key so a strict response decoder has to fail.
+removeKey :: T.Text -> Value -> Value
+removeKey key = \case
+    Object o -> Object (KeyMap.delete (Key.fromText key) o)
+    other -> other
+
+-- | Rename one object key so a strict response decoder cannot find the old name.
+renameKey :: T.Text -> T.Text -> Value -> Value
+renameKey old new = \case
+    Object o -> case KeyMap.lookup (Key.fromText old) o of
+        Nothing -> Object o
+        Just value -> Object (KeyMap.insert (Key.fromText new) value (KeyMap.delete (Key.fromText old) o))
+    other -> other

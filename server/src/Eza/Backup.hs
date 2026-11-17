@@ -45,7 +45,8 @@ module Eza.Backup (
     pruneBackups,
 ) where
 
-import Control.Exception (SomeException, onException, try)
+import Control.Concurrent (threadDelay)
+import Control.Exception (IOException, SomeException, fromException, onException, try)
 import Control.Monad (forM_, unless, when)
 import Data.Aeson (FromJSON (..), ToJSON (..), decode, encode, object, withObject, (.!=), (.:), (.:?), (.=))
 import qualified Data.ByteString.Lazy as LBS
@@ -73,6 +74,7 @@ import System.Directory (
     renameFile,
  )
 import System.FilePath (addTrailingPathSeparator, isAbsolute, takeDirectory, takeFileName, (</>))
+import System.IO.Error (isAlreadyExistsError)
 
 import qualified Eza.Admin as Admin
 import Eza.Config (Config (..))
@@ -201,32 +203,44 @@ cannot be pruned out from under the restore.
 -}
 runBackupInternal :: Config -> Maybe Text -> Bool -> IO (Either Text BackupReport)
 runBackupInternal cfg selector pruneOld = do
-    createDirectoryIfMissing True (cfgBackupDir cfg)
-    now <- getPOSIXTime
-    let stamp = formatTime defaultTimeLocale "%Y%m%d-%H%M%S" (posixSecondsToUTCTime now)
-    rootResult <- try (newStampDir (cfgBackupDir cfg) stamp)
-    case rootResult of
+    ready <-
+        try (createDirectoryIfMissing True (cfgBackupDir cfg)) ::
+            IO (Either SomeException ())
+    case ready of
         Left (err :: SomeException) ->
-            pure (Left ("the backup stamp directory could not be created: " <> T.pack (show err)))
-        Right root -> do
-            let controlDest = root </> "control.db"
-                usersDir = root </> "users"
-            opened <- try openControl
-            case opened of
-                Left (err :: SomeException) ->
-                    pure (Left ("the control database could not be opened for backup: " <> T.pack (show err)))
-                Right (control, users) -> do
-                    result <- try (runPlan cfg control users selector root controlDest usersDir)
-                    Sqlite.close control
-                    case result of
-                        Left (err :: SomeException) -> do
-                            cleanupFailed root
-                            pure (Left (T.pack (show err)))
-                        Right report -> do
-                            when pruneOld $ do
-                                pruneBackups (cfgBackupDir cfg) (cfgBackupKeepDays cfg)
-                                prunePreMigrationSiblings cfg users
-                            pure (Right report)
+            pure
+                ( Left
+                    ( "the backup directory "
+                        <> T.pack (cfgBackupDir cfg)
+                        <> " could not be created: "
+                        <> T.pack (show err)
+                    )
+                )
+        Right () -> do
+            now <- getPOSIXTime
+            let stamp = formatTime defaultTimeLocale "%Y%m%d-%H%M%S" (posixSecondsToUTCTime now)
+            rootResult <- newStampDir (cfgBackupDir cfg) stamp
+            case rootResult of
+                Left message -> pure (Left message)
+                Right root -> do
+                    let controlDest = root </> "control.db"
+                        usersDir = root </> "users"
+                    opened <- try openControl
+                    case opened of
+                        Left (err :: SomeException) ->
+                            pure (Left ("the control database could not be opened for backup: " <> T.pack (show err)))
+                        Right (control, users) -> do
+                            result <- try (runPlan cfg control users selector root controlDest usersDir)
+                            Sqlite.close control
+                            case result of
+                                Left (err :: SomeException) -> do
+                                    cleanupFailed root
+                                    pure (Left (T.pack (show err)))
+                                Right report -> do
+                                    when pruneOld $ do
+                                        pruneBackups (cfgBackupDir cfg) (cfgBackupKeepDays cfg)
+                                        prunePreMigrationSiblings cfg users
+                                    pure (Right report)
   where
     openControl = do
         conn <- Control.openControlDb (cfgControlDbPath cfg)
@@ -407,18 +421,49 @@ isStampName name = case splitAt 15 name of
 
 {- | Never reuse an existing run directory. The directory is created atomically
 (@createDirectory@ fails when it exists) so two backups started in the same
-second still get separate stamps.
+second still get separate stamps. Only an already-existing name is retried, and
+only for a handful of attempts: a real creation failure (permissions, a
+read-only mount, a full disk) is reported as an actionable error instead of
+being retried forever.
 -}
-newStampDir :: FilePath -> String -> IO FilePath
+newStampDir :: FilePath -> String -> IO (Either Text FilePath)
 newStampDir base stamp = go (1 :: Int)
   where
-    go attempt = do
-        let name = if attempt == (1 :: Int) then stamp else stamp <> "-" <> show attempt
-            path = base </> name
-        result <- try (createDirectory path) :: IO (Either SomeException ())
-        case result of
-            Right () -> pure path
-            Left _ -> go (attempt + 1)
+    maxAttempts = 5 :: Int
+    go attempt
+        | attempt > maxAttempts =
+            pure
+                ( Left
+                    ( "the backup stamp directory could not be created under "
+                        <> T.pack base
+                        <> ": "
+                        <> T.pack (show (attempt - 1))
+                        <> " candidate names already exist (check the system clock and the backup directory)"
+                    )
+                )
+        | otherwise = do
+            let name = if attempt == (1 :: Int) then stamp else stamp <> "-" <> show attempt
+                path = base </> name
+            result <- try (createDirectory path) :: IO (Either SomeException ())
+            case result of
+                Right () -> pure (Right path)
+                Left err
+                    | Just ioErrorValue <- fromException err :: Maybe IOException
+                    , isAlreadyExistsError ioErrorValue -> do
+                        -- A same-second collision: wait a moment so the next
+                        -- attempt is likely to find a free suffix.
+                        threadDelay (attempt * 100 * 1000)
+                        go (attempt + 1)
+                    | otherwise ->
+                        pure
+                            ( Left
+                                ( "the backup stamp directory could not be created under "
+                                    <> T.pack base
+                                    <> ": "
+                                    <> T.pack (show err)
+                                    <> " (check that the backup directory exists and is writable)"
+                                )
+                            )
 
 -- ------------------------------------------------------------------- restore ---
 
@@ -436,7 +481,12 @@ data RestoreReport = RestoreReport
     , rrsAutoBackup :: Maybe FilePath
     , rrsRestored :: [(Int, Text)]
     , rrsPreserved :: [(Int, Text)]
+    , rrsCarried :: [(Int, Text)]
+    {- ^ Accounts that exist only in the current installation: their rows and
+    libraries are kept (never deleted by a partial stamp).
+    -}
     , rrsDropped :: [(Int, Text)]
+    -- ^ Always empty now (kept for the CLI report shape).
     , rrsTargets :: [BackupTarget]
     , rrsControlTarget :: FilePath
     }
@@ -462,7 +512,8 @@ data RestorePlan = RestorePlan
     { rpStamp :: FilePath
     , rpEntries :: [RestoreEntry]
     , rpPreserved :: [PreservedEntry]
-    , rpDropped :: [ControlUser]
+    , rpCarried :: [PreservedEntry]
+    -- ^ Current-only accounts: insert their control rows and keep their files.
     , rpControlSource :: FilePath
     }
 
@@ -520,28 +571,33 @@ buildRestorePlan cfg stamp contents = do
         then pure (Left "the stamp control database failed its integrity check")
         else do
             currentUsers <- readCurrentUsers cfg
-            result <- foldRestorePlan cfg stamp contents currentUsers (scUsers contents) ([], [], [])
-            case result of
+            case validateRestoreAccounts (scUsers contents) currentUsers of
                 Left message -> pure (Left message)
-                Right (entries, preserved, dropped)
-                    | null entries && null preserved ->
-                        pure (Left "the stamp contains no account libraries to restore")
-                    | otherwise ->
-                        pure
-                            ( Right
-                                RestorePlan
-                                    { rpStamp = stamp
-                                    , rpEntries = entries
-                                    , rpPreserved = preserved
-                                    , rpDropped = dropped
-                                    , rpControlSource = stamp </> "control.db"
-                                    }
-                            )
+                Right () -> do
+                    result <- foldRestorePlan cfg stamp contents currentUsers (scUsers contents) ([], [])
+                    case result of
+                        Left message -> pure (Left message)
+                        Right (entries, preserved)
+                            | null entries && null preserved ->
+                                pure (Left "the stamp contains no account libraries to restore")
+                            | otherwise ->
+                                pure
+                                    ( Right
+                                        RestorePlan
+                                            { rpStamp = stamp
+                                            , rpEntries = entries
+                                            , rpPreserved = preserved
+                                            , rpCarried = carriedEntries cfg (scUsers contents) currentUsers
+                                            , rpControlSource = stamp </> "control.db"
+                                            }
+                                    )
 
 {- | Decide, for every account in the stamp's control database, whether its
-library is restored from the stamp, kept from the current installation (an old
-stamp that skipped disabled accounts), or dropped (no copy anywhere). A
-library that exists in the stamp but fails its integrity check refuses the
+library is restored from the stamp or kept from the current installation (a
+partial @--user@ stamp that skipped it). Nothing is dropped or relinked: an
+account the stamp does not capture must be present and consistent in the
+current installation, otherwise the restore refuses with an actionable error.
+A library that exists in the stamp but fails its integrity check refuses the
 whole restore.
 -}
 foldRestorePlan ::
@@ -550,11 +606,11 @@ foldRestorePlan ::
     StampContents ->
     [ControlUser] ->
     [ControlUser] ->
-    ([RestoreEntry], [PreservedEntry], [ControlUser]) ->
-    IO (Either Text ([RestoreEntry], [PreservedEntry], [ControlUser]))
-foldRestorePlan cfg stamp contents currentUsers pending (entries, preserved, dropped) =
+    ([RestoreEntry], [PreservedEntry]) ->
+    IO (Either Text ([RestoreEntry], [PreservedEntry]))
+foldRestorePlan cfg stamp contents currentUsers pending (entries, preserved) =
     case pending of
-        [] -> pure (Right (reverse entries, reverse preserved, reverse dropped))
+        [] -> pure (Right (reverse entries, reverse preserved))
         (user : rest) -> do
             sourceResult <- stampSourceFor stamp contents (cuId user)
             let dest = cfgUsersDir cfg </> show (cuId user) </> "eza.db"
@@ -565,18 +621,84 @@ foldRestorePlan cfg stamp contents currentUsers pending (entries, preserved, dro
                     if not ok
                         then pure (Left ("the stamp library for account " <> cuUsername user <> " failed its integrity check: " <> T.pack path))
                         else
-                            foldRestorePlan cfg stamp contents currentUsers rest (RestoreEntry user path dest : entries, preserved, dropped)
+                            foldRestorePlan cfg stamp contents currentUsers rest (RestoreEntry user path dest : entries, preserved)
                 Right Nothing ->
                     case lookup (cuId user) [(cuId current, current) | current <- currentUsers] of
                         Just current -> do
                             currentExists <- doesFileExist (cuDbPath current)
                             if currentExists
                                 then
-                                    foldRestorePlan cfg stamp contents currentUsers rest (entries, PreservedEntry user (cuDbPath current) dest : preserved, dropped)
+                                    foldRestorePlan cfg stamp contents currentUsers rest (entries, PreservedEntry user (cuDbPath current) dest : preserved)
                                 else
-                                    foldRestorePlan cfg stamp contents currentUsers rest (entries, preserved, user : dropped)
+                                    pure
+                                        ( Left
+                                            ( "the backup stamp does not capture the library for account "
+                                                <> cuUsername user
+                                                <> " (id "
+                                                <> T.pack (show (cuId user))
+                                                <> ") and the current installation has no library file for it; restore a full stamp instead"
+                                            )
+                                        )
                         Nothing ->
-                            foldRestorePlan cfg stamp contents currentUsers rest (entries, preserved, user : dropped)
+                            pure
+                                ( Left
+                                    ( "the backup stamp does not capture the library for account "
+                                        <> cuUsername user
+                                        <> " (id "
+                                        <> T.pack (show (cuId user))
+                                        <> ") and the current installation has no account with that id; this looks like a partial --user stamp restored on an installation where that account does not exist"
+                                    )
+                                )
+
+{- | Refuse a restore whose account map cannot be applied safely: the stamp and
+the current installation disagree about who owns an account id or a username.
+Two different accounts' libraries are never silently relinked.
+-}
+validateRestoreAccounts :: [ControlUser] -> [ControlUser] -> Either Text ()
+validateRestoreAccounts stampUsers currentUsers =
+    case idConflicts <> usernameConflicts of
+        [] -> Right ()
+        (message : _) -> Left message
+  where
+    findCurrent userId = lookup userId [(cuId current, current) | current <- currentUsers]
+    stampIds = map cuId stampUsers
+    sameName left right = T.toCaseFold left == T.toCaseFold right
+    idConflicts =
+        [ "the backup stamp has account id "
+            <> T.pack (show (cuId stampUser))
+            <> " ("
+            <> cuUsername stampUser
+            <> ") but the current installation has a different account with that id ("
+            <> cuUsername current
+            <> "); refusing to relink the libraries"
+        | stampUser <- stampUsers
+        , Just current <- [findCurrent (cuId stampUser)]
+        , not (sameName (cuUsername current) (cuUsername stampUser))
+        ]
+    usernameConflicts =
+        [ "the backup stamp has an account named "
+            <> cuUsername stampUser
+            <> " (id "
+            <> T.pack (show (cuId stampUser))
+            <> ") and the current installation has a different account with the same name (id "
+            <> T.pack (show (cuId current))
+            <> "); refusing to merge the account maps"
+        | current <- currentUsers
+        , cuId current `notElem` stampIds
+        , stampUser <- stampUsers
+        , sameName (cuUsername stampUser) (cuUsername current)
+        ]
+
+{- | Accounts that exist only in the current installation. Their control rows
+and libraries are carried into the restored database instead of being deleted
+when the stamp's control copy replaces the current one.
+-}
+carriedEntries :: Config -> [ControlUser] -> [ControlUser] -> [PreservedEntry]
+carriedEntries cfg stampUsers currentUsers =
+    [ PreservedEntry current (cuDbPath current) (cfgUsersDir cfg </> show (cuId current) </> "eza.db")
+    | current <- currentUsers
+    , cuId current `notElem` map cuId stampUsers
+    ]
 
 {- | Where a stamp keeps one account's library: always @users/<id>/eza.db@, as
 named by the manifest. A manifest that names a file which is missing is
@@ -649,7 +771,8 @@ dryRunReport cfg opts plan =
         , rrsAutoBackup = Nothing
         , rrsRestored = [(cuId (reUser entry), cuUsername (reUser entry)) | entry <- rpEntries plan]
         , rrsPreserved = [(cuId (peUser entry), cuUsername (peUser entry)) | entry <- rpPreserved plan]
-        , rrsDropped = [(cuId user, cuUsername user) | user <- rpDropped plan]
+        , rrsCarried = [(cuId (peUser entry), cuUsername (peUser entry)) | entry <- rpCarried plan]
+        , rrsDropped = []
         , rrsTargets =
             [ BackupTarget ("user " <> cuUsername (reUser entry)) (reSource entry) (reDest entry)
             | entry <- rpEntries plan
@@ -675,6 +798,8 @@ applyRestore cfg opts plan = do
     applyNow backupStamp = do
         forM_ (rpPreserved plan) $ \entry ->
             when (peCurrent entry /= peDest entry) (copyDatabaseFile (peCurrent entry) (peDest entry))
+        forM_ (rpCarried plan) $ \entry ->
+            when (peCurrent entry /= peDest entry) (copyDatabaseFile (peCurrent entry) (peDest entry))
         forM_ (rpEntries plan) $ \entry ->
             copyDatabaseFile (reSource entry) (reDest entry)
         writeRestoredControl cfg plan
@@ -685,7 +810,8 @@ applyRestore cfg opts plan = do
                 , rrsAutoBackup = backupStamp
                 , rrsRestored = [(cuId (reUser entry), cuUsername (reUser entry)) | entry <- rpEntries plan]
                 , rrsPreserved = [(cuId (peUser entry), cuUsername (peUser entry)) | entry <- rpPreserved plan]
-                , rrsDropped = [(cuId user, cuUsername user) | user <- rpDropped plan]
+                , rrsCarried = [(cuId (peUser entry), cuUsername (peUser entry)) | entry <- rpCarried plan]
+                , rrsDropped = []
                 , rrsTargets =
                     [ BackupTarget ("user " <> cuUsername (reUser entry)) (reSource entry) (reDest entry)
                     | entry <- rpEntries plan
@@ -712,10 +838,11 @@ autoBackup cfg = do
                         )
                 Right report -> Right (Just (brRoot report))
 
-{- | Rewrite the stamp's control database into place. Every kept account's
-@db_path@ is rewritten to the configured users directory; accounts whose
-library could not be restored are removed so the control row never points at
-a file that does not exist. The file is written last and atomically.
+{- | Rewrite the stamp's control database into place. Every restored or kept
+account's @db_path@ is rewritten to the configured users directory; accounts
+that exist only in the current installation are inserted so a partial stamp
+never deletes them. Nothing is deleted from the restored control database. The
+file is written last and atomically.
 -}
 writeRestoredControl :: Config -> RestorePlan -> IO ()
 writeRestoredControl cfg plan = do
@@ -737,8 +864,19 @@ writeRestoredControl cfg plan = do
             conn
             "UPDATE users SET db_path = ? WHERE id = ?"
             (peDest preserved, cuId (peUser preserved))
-    forM_ (rpDropped plan) $ \user ->
-        Sqlite.execute conn "DELETE FROM users WHERE id = ?" (Only (cuId user))
+    forM_ (rpCarried plan) $ \carried ->
+        Sqlite.execute
+            conn
+            "INSERT INTO users (id, username, db_path, role, credential_handle, created_at, disabled_at, last_login_at) VALUES (?,?,?,?,?,?,?,?)"
+            ( cuId (peUser carried)
+            , cuUsername (peUser carried)
+            , peDest carried
+            , Control.userRoleText (cuRole (peUser carried))
+            , cuCredentialHandle (peUser carried)
+            , cuCreatedAt (peUser carried)
+            , cuDisabledAt (peUser carried)
+            , cuLastLoginAt (peUser carried)
+            )
     rows <- Sqlite.query_ conn "PRAGMA integrity_check" :: IO [Only Text]
     let intact = case rows of [Only "ok"] -> True; _ -> False
     _ <- Sqlite.execute_ conn "PRAGMA journal_mode = DELETE"

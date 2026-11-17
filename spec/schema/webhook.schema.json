@@ -2,11 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eza.local/spec/schema/webhook.schema.json",
   "title": "eza webhook",
-  "description": "A webhook stored in one user database. Delivery is at least once, signed with HMAC, retried, and disabled after a terminal failure. The URL is data; extensions v1 never executes webhook-provided code.",
+  "description": "A webhook subscription, stored in one user database and exchanged over /api/v1/webhooks. One schema covers both shapes: a create or PATCH payload and the stored/exported object. `name`, `url` and `events` are required; `enabled` is optional because an omitted value means true on create, and the server-assigned fields (`id`, `created_at`, `last_status`, `last_attempt_at`, `last_error`, `fail_streak`) are optional because they only appear on a stored object. Event kinds may repeat in an input document; the server de-duplicates them before storing and keeps them unique, so the array does not use uniqueItems. Delivery is at least once, signed with HMAC, retried, and disabled after a terminal failure. The URL is data; extensions v1 never executes webhook-provided code.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["name", "url", "events", "enabled"],
+  "required": ["name", "url", "events"],
   "properties": {
+    "id": {
+      "type": "integer",
+      "description": "Server-assigned subscription id. Optional on create; always present on a stored object."
+    },
     "name": {
       "type": "string",
       "minLength": 1,
@@ -17,14 +21,13 @@
       "type": "string",
       "format": "uri",
       "maxLength": 2048,
-      "pattern": "^https?://[^\\s]+$",
-      "description": "Absolute http or https delivery URL."
+      "pattern": "^https?://[^/@\\s]*[^/@\\s.][^/@\\s]*(?:[/?#][^\\s]*)?$",
+      "description": "Absolute http or https delivery URL. The pattern rejects whitespace, credential (user:pass@) URLs, an empty host and an all-dot host; the server additionally applies its stricter runtime policy before storing the subscription."
     },
     "events": {
       "type": "array",
       "minItems": 1,
       "maxItems": 4,
-      "uniqueItems": true,
       "items": {
         "enum": [
           "bookmark.created",
@@ -33,11 +36,32 @@
           "clip.created"
         ]
       },
-      "description": "Event kinds this webhook subscribes to."
+      "description": "Event kinds this webhook subscribes to, one to four. Duplicates are accepted on input and de-duplicated before storage."
     },
     "enabled": {
       "type": "boolean",
-      "description": "Delivery is attempted only while enabled."
+      "description": "Delivery is attempted only while true. Optional on create/PATCH: omitted means true. Always present on a stored object."
+    },
+    "created_at": {
+      "type": "integer",
+      "description": "POSIX seconds. Server-assigned; always present on a stored object."
+    },
+    "last_status": {
+      "type": ["integer", "null"],
+      "description": "HTTP status of the last delivery attempt, or null before the first attempt. Stored object only."
+    },
+    "last_attempt_at": {
+      "type": ["integer", "null"],
+      "description": "POSIX seconds of the last delivery attempt, or null before the first attempt. Stored object only."
+    },
+    "last_error": {
+      "type": ["string", "null"],
+      "description": "Last delivery error message, empty when there was none. Stored object only."
+    },
+    "fail_streak": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Consecutive failed delivery attempts. Stored object only."
     }
   }
 }
