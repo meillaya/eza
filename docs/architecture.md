@@ -100,8 +100,6 @@ running jobs to queued. `GET /api/v1/jobs/{id}` reports state, attempts, result
 and error for the caller's own library only. The snapshot file *read* remains a
 normal `GET /api/v1/bookmarks/{id}/snapshot`; only capture is a job.
 
-![Architecture: one process, one control database, one library per account](figures/architecture.png)
-
 The CLI commands (`import`, `export`, `enrich`, `verify`, `backup`,
 `check-dead`, `set-password`) accept `--user <name|id>`; without it they use
 the only enabled account, and otherwise fail (there is no flat-file fallback in
@@ -141,8 +139,6 @@ matches all 8,905 URLs and inserts zero rows. The tag counts are mode-dependent;
 the historical 8,988-row reference database was imported before normalized
 deduplication and before the leaf-only rule, so its 21,316 links are not
 directly comparable.
-
-![Import: 9,457 anchors collapse to 8,905 rows](figures/import.png)
 
 Two timestamps matter. `created_at` is the earliest `ADD_DATE` for the URL,
 which preserves when the bookmark was saved. `added_at` records when eza first
@@ -227,8 +223,6 @@ is `https://reddit.com/...`, so a URL-only index makes the facet link return
 nothing. The server then opens a
 snippet window around the first matching term and returns at most the requested
 page size.
-
-![Search: query parsing, FTS, tag filters, and match grouping](figures/search.png)
 
 The measured p95 on the 14,582-row scratch copy (the dataset used by
 [performance.md](performance.md)) is 0.92 to 2.00 ms for FTS queries and 11.15

@@ -1,9 +1,6 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/wordmark-dark.svg">
-  <img src="docs/figures/wordmark-light.svg" alt="eza" width="420">
-</picture>
+<h1>eza</h1>
 
 <p><i>A self-hosted library for the links you save.</i></p>
 

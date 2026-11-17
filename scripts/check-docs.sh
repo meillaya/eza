@@ -6,8 +6,8 @@
 # The checks are intentionally boring and mechanical: they catch the drift
 # classes that have already bitten this repository (a source directory missing
 # from the AGENTS.md layout, the version string copied into deployment files,
-# and a docs/figures image deleted while README.md and docs/ still reference it)
-# and reject stale generated reference docs.
+# and an attached image or cross-document link deleted while README.md or
+# docs/ still reference it) and reject stale generated reference docs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

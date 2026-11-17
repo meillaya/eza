@@ -71,6 +71,10 @@ outputs are the installable artifacts; both are built from the same revision.
   checks the commit), and the command-palette description.
 - The add-passkey e2e script now asserts page render and the credential count
   instead of exiting 0 without checks.
+- The generated architecture/import/search figures and the README wordmark
+  generators were removed from the repository; the README uses a plain text
+  wordmark and the architecture page relies on its prose. `docs/figures` is no
+  longer part of the tree.
 
 ## 0.4.0.0
 

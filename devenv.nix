@@ -29,9 +29,8 @@ in
     # problem, not a silently skipped compression step.
     pkgs.gzip
     # python3 with Draft 2020-12 JSON-Schema validation for
-    # scripts/check-specs.sh, plus fontTools and brotli for the README wordmark
-    # generator in docs/figures.
-    (pkgs.python3.withPackages (ps: [ ps.jsonschema ps.fonttools ps.brotli ]))
+    # scripts/check-specs.sh.
+    (pkgs.python3.withPackages (ps: [ ps.jsonschema ]))
     pkgs.fourmolu
     pkgs.hlint
     # TLA+ model checker (tlc) for the spec/ checks.
