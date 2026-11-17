@@ -93,10 +93,10 @@ registration fee) and a verified developer email.
      grants in Options; there is no static host permission.
 6. **Remote code**: answer **No**. The extension ships all of its JavaScript.
    It uses no `eval`, no remote scripts, and no dynamic module loading.
-7. **Screenshots**: upload at least one 1280×800 (or 640×400) PNG. Required
-   states: the popup on an unsaved page with **Add bookmark**, the popup on a
-   saved page with **In your library** and **Open in eza**, and the options page
-   with the connection test. A 440×280 promotional tile is optional.
+7. **Screenshots**: upload the checked-in set from
+   `extension/store/screenshots/` (1280×800, 24-bit RGB PNG, no alpha):
+   `01-add-bookmark.png`, `02-already-saved.png`, `03-options.png`. A 440×280
+   promotional tile is optional.
 8. Submit for review.
 
 The Chrome build declares `minimum_chrome_version` 116. It has no
@@ -135,7 +135,8 @@ Account requirement: an addons.mozilla.org developer account.
      no developer endpoint is contacted.
    - The `tabs` permission is required for the active-page saved-state
      indicator. Page content is read only after an explicit user action.
-7. **Screenshots**: reuse the Chrome screenshots (1280×800 or 640×400).
+7. **Screenshots**: reuse the three files in `extension/store/screenshots/`
+   (1280×800, RGB PNG).
 8. Submit for review. The signed `.xpi` is available from the AMO listing; a
    self-distributed signed build can also be produced with
    `npx web-ext sign --source-dir extension/dist/firefox --api-key ... --api-secret ...`.
@@ -148,21 +149,38 @@ publication is not possible.
 
 ## Screenshot capture
 
-The screenshots must show the real extension, not a mock. After loading
-`extension/dist/chrome` or the Firefox build and configuring a test server:
+The checked-in screenshots in `extension/store/screenshots/` are generated from
+the real built popup and options pages, with a fake API and an illustrative
+browser frame and article. They are 1280×800 24-bit RGB PNGs with no alpha,
+which is the Chrome Web Store's preferred shape; AMO accepts the same files.
 
-1. Open the popup on a page that is not saved, with the title/tags fields
-   visible, and capture a 1280×800 PNG.
-2. Add the bookmark, reopen the popup on the same page, and capture the
-   **In your library** state with **Open in eza**.
-3. Open Options, run **Test connection**, and capture the connected state.
-4. Keep the screenshots free of real server hostnames, tokens, page content,
-   and personal bookmarks. Use a throwaway instance and a page such as
-   `https://example.com`.
+Regenerate them from the repository root:
 
-Chrome suggests 1280×800 or 640×400; AMO accepts PNG or JPG at a comparable
-size. Store listings also need a 128×128 icon, which is already in the ZIP at
-`icons/icon-128.png`.
+```bash
+cd extension
+npm test && npm run build
+cd ..
+node extension/store/capture-screenshots.mjs
+```
+
+The capture script needs the repository's `@playwright/test` dependency and
+ImageMagick (`magick` on PATH, or set `MAGICK`). It builds a temporary copy of
+the Chrome package, renders the real popup states and the connected options
+page, and writes the three files without any real server, token, or personal
+bookmarks. The fake API is injected only into the screenshot page.
+
+If you prefer screenshots from a live installation, load
+`extension/dist/chrome` or the Firefox build, configure a throwaway server, and
+capture the same three states manually:
+
+1. The popup on an unsaved page with the title/tags fields and
+   **Add bookmark**.
+2. The popup on the saved page with **In your library** and **Open in eza**.
+3. Options after **Test connection** succeeds.
+
+Keep manual captures free of real server hostnames, tokens, page content, and
+personal bookmarks, and flatten them to 24-bit RGB. Store listings also need a
+128×128 icon, which is already in the ZIP at `icons/icon-128.png`.
 
 ## Updates
 
