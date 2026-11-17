@@ -6,14 +6,15 @@
 #   docker compose -f docker-compose.eza.yml up -d
 #
 # Local developers can build the same image from the checkout with Nix (the web
-# client is a CI-built WASM release asset, so there is no Dockerfile):
+# client is built from source inside the image derivation, so there is no
+# Dockerfile):
 #
 #   nix build .#docker
 #   docker load < result
 #   EZA_IMAGE=eza:0.4.0.0 docker compose -f deploy/docker-compose.yml up -d
 #
 # The container runs as uid/gid 10001 (non-root) and stores everything in the
-# /data volume (eza.db, snapshots/, backups/).
+# /data volume (control.db, users/<id>/, snapshots/ and backups/).
 #
 # Full runbook: docs/deployment-docker.md
 name: eza

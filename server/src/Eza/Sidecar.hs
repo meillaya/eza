@@ -10,7 +10,8 @@ module Eza.Sidecar (
     sidecarExtract,
 ) where
 
-import Control.Exception (SomeException, try)
+import Control.Concurrent.Async (AsyncCancelled)
+import Control.Exception (AsyncException, SomeException, fromException, tryJust)
 import Data.Aeson
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.Text (Text)
@@ -62,7 +63,7 @@ sidecarExtract command url html = do
     outcome <-
         timeout
             20000
-            ( try (readProcessWithExitCode "sh" ["-c", T.unpack command] (LBS8.unpack request <> "\n")) ::
+            ( tryNonAsync (readProcessWithExitCode "sh" ["-c", T.unpack command] (LBS8.unpack request <> "\n")) ::
                 IO (Either SomeException (ExitCode, String, String))
             )
     pure $ case outcome of
@@ -70,6 +71,23 @@ sidecarExtract command url html = do
         Just (Left err) -> Left (T.pack (show err))
         Just (Right (ExitFailure code, _, _)) -> Left ("sidecar exited with " <> T.pack (show code))
         Just (Right (ExitSuccess, stdout, _)) -> parseOutput stdout
+
+{- | Run an action and catch synchronous failures only: asynchronous exceptions
+(worker cancellation) are rethrown instead of falling back to the in-process
+extractor and swallowing the cancel. @AsyncCancelled@ is not an @AsyncException@
+subtype, so both are checked.
+-}
+tryNonAsync :: IO a -> IO (Either SomeException a)
+tryNonAsync action = tryJust isSyncFailure action
+  where
+    isSyncFailure err
+        | isAsync err = Nothing
+        | otherwise = Just err
+    isAsync err = case fromException err :: Maybe AsyncException of
+        Just _ -> True
+        Nothing -> case fromException err :: Maybe AsyncCancelled of
+            Just _ -> True
+            Nothing -> False
 
 parseOutput :: String -> Either Text Extracted
 parseOutput stdout =

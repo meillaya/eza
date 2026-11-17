@@ -1147,7 +1147,7 @@ deleteDialog m detail
                         , H.strong_ [] [text (accession (bdId detail))]
                         , text " · "
                         , H.strong_ [] [text (ms (bdTitle detail))]
-                        , text " with its note, highlights and links. This cannot be undone."
+                        , text " with its note, highlights and links. A snapshot is kept, so this can be undone."
                         ]
                     ]
                 , H.div_

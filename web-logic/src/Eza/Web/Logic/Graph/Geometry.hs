@@ -26,11 +26,13 @@ module Eza.Web.Logic.Graph.Geometry (
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet as IS
 import Data.List (sortOn)
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isNothing, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 
 import Eza.GraphLayout
+import qualified Eza.GraphMatch as GraphMatch
+import Eza.SearchQuery (SearchQuery (..), parseSearchQuery)
 import Eza.Types (GraphRecord (..))
 
 import Eza.Web.Logic.Graph (GraphMatches (..), GraphView (..), emptyMatches)
@@ -146,20 +148,40 @@ neighbourhood layout key = IM.fromList [(neighbour, ()) | neighbour <- neighbour
 scan over the records; nothing is sorted per frame.
 -}
 
-{- | Match records by title, domain, or tag name. Tokens are ANDed and lowered
-once. The top list keeps the eight best records for the results panel.
+{- | Match records against the shared search grammar.
+
+The filter text is parsed with 'parseSearchQuery' — the same parser as the
+ledger search line — and evaluated against the fields the graph payload carries
+(title, domain, tag names, filed date, read and dead flags) with
+'Eza.GraphMatch.matchesRecord', the matcher the saved colour groups use. Plain
+terms are case-insensitive substring matches over those fields and are ANDed;
+@-term@ excludes a term; @tag:@ is an exact tag filter; @is:unread@,
+@is:dead@, @year:@ and @day:@ work as documented in @docs/extensions.md@
+(dates are UTC). Malformed operators are dropped by the parser, so a query
+that parses to nothing is no filter — the same behaviour as the ledger.
+
+@link:@ cannot match on the graph: the graph payload has no record URLs, so a
+live filter that carries a link target selects nothing. Stored graph views
+still reject @link:@ in 'Eza.View.validateViewDefinition', and colour groups
+use the same matcher. The eight @top@ records are ranked for the results panel
+by plain-term hits (title three, tag two, domain one); operator-only queries
+rank by record key.
 -}
 matchGraph :: Text -> GraphLayout -> GraphMatches
 matchGraph rawQuery layout
-    | null tokens = emptyMatches
+    | queryIsEmpty query = emptyMatches
     | otherwise = GraphMatches True recordIds topIds count tagIds
   where
-    tokens = T.words (T.toLower (T.strip rawQuery))
+    query = parseSearchQuery (T.strip rawQuery)
     tagNames = IM.map fst (glTags layout)
-    scored =
-        [ (recordKey, score)
+    contexts =
+        [ (recordKey, recordContext recordKey record)
         | (recordKey, record) <- IM.toList (glRecords layout)
-        , Just score <- [recordScore recordKey record]
+        ]
+    scored =
+        [ (recordKey, recordScore context)
+        | (recordKey, context) <- contexts
+        , GraphMatch.matchesRecord query context
         ]
     recordIds = IS.fromList (map fst scored)
     count = length scored
@@ -167,24 +189,32 @@ matchGraph rawQuery layout
         IS.fromList
             [ tagKey
             | (tagKey, name) <- IM.toList tagNames
-            , all (\token -> T.isInfixOf token (T.toLower name)) tokens
+            , GraphMatch.matchesTag query (GraphMatch.TagContext name)
             ]
-    recordScore recordKey record =
-        let title = T.toLower (grTitle record)
-            domain = T.toLower (grDomain record)
-            tagWords =
-                [ T.toLower name
-                | tagKey <- fromMaybe [] (IM.lookup recordKey (glRecordTags layout))
-                , Just name <- [IM.lookup tagKey tagNames]
-                ]
-            titleHits = length [() | token <- tokens, T.isInfixOf token title]
-            tagHits = length [() | token <- tokens, any (T.isInfixOf token) tagWords]
-            domainHits = length [() | token <- tokens, T.isInfixOf token domain]
-            matched =
-                all
-                    (\token -> T.isInfixOf token title || T.isInfixOf token domain || any (T.isInfixOf token) tagWords)
-                    tokens
-         in if matched then Just (titleHits * 3 + tagHits * 2 + domainHits) else Nothing
+    recordContext recordKey record =
+        GraphMatch.RecordContext
+            { GraphMatch.rcTitle = grTitle record
+            , GraphMatch.rcDomain = grDomain record
+            , GraphMatch.rcTags = recordTagNames recordKey
+            , GraphMatch.rcCreatedAt = grCreatedAt record
+            , GraphMatch.rcIsRead = grIsRead record
+            , GraphMatch.rcIsDead = grIsDead record
+            }
+    recordTagNames recordKey =
+        [ name
+        | tagKey <- fromMaybe [] (IM.lookup recordKey (glRecordTags layout))
+        , Just name <- [IM.lookup tagKey tagNames]
+        ]
+    terms = map T.toLower (sqTerms query)
+    recordScore context =
+        let title = T.toLower (GraphMatch.rcTitle context)
+            domain = T.toLower (GraphMatch.rcDomain context)
+            tagWords = map T.toLower (GraphMatch.rcTags context)
+            titleHits = countHits (`T.isInfixOf` title)
+            tagHits = countHits (\term -> any (T.isInfixOf term) tagWords)
+            domainHits = countHits (`T.isInfixOf` domain)
+         in titleHits * 3 + tagHits * 2 + domainHits
+    countHits predicate = length [() | term <- terms, predicate term]
     topIds = map fst (take 8 (foldl' insertTop [] scored))
     insertTop :: [(Int, Int)] -> (Int, Int) -> [(Int, Int)]
     insertTop [] item = [item]
@@ -192,6 +222,21 @@ matchGraph rawQuery layout
         | rank item < rank existing = item : existing : rest
         | otherwise = existing : insertTop rest item
     rank (recordKey, score) = (negate score, recordKey)
+
+{- | Does the parsed filter constrain anything? Input the parser drops
+completely (whitespace, an unknown @is:@ flag, an empty @tag:@) is no filter,
+which mirrors the ledger's "malformed operators are dropped" rule.
+-}
+queryIsEmpty :: SearchQuery -> Bool
+queryIsEmpty query =
+    null (sqTerms query)
+        && null (sqNegated query)
+        && null (sqTags query)
+        && null (sqLinkTargets query)
+        && not (sqIsUnread query)
+        && not (sqIsDead query)
+        && isNothing (sqYear query)
+        && isNothing (sqDay query)
 
 -- ---------------------------------------------------------------- drawing ---
 

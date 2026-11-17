@@ -12,11 +12,22 @@ import Database.SQLite.Simple
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
+import Eza.Api.Extensions (isClipPath)
 import Eza.Clip
 import Eza.Db (openDb, queryScalar)
 
 spec :: Spec
 spec = describe "browser clipper" $ do
+    it "classifies quick-save with the clip family for the CORS origin guard" $ do
+        isClipPath ["api", "v1", "clip"] `shouldBe` True
+        isClipPath ["api", "v1", "clip", "preview"] `shouldBe` True
+        isClipPath ["api", "v1", "clip-templates"] `shouldBe` True
+        isClipPath ["api", "v1", "clip-templates", "3"] `shouldBe` True
+        isClipPath ["api", "v1", "quick-save"] `shouldBe` True
+        isClipPath ["api", "v1", "whoami"] `shouldBe` True
+        isClipPath ["api", "v1", "bookmarks"] `shouldBe` False
+        isClipPath ["api", "v1", "quick-save", "extra"] `shouldBe` False
+
     it "saves a capture, replays it, and rejects a conflicting key" $
         withSystemTempDirectory "eza-clip" $ \dir -> do
             bracket (openDb (dir <> "/eza.db")) close $ \conn -> do

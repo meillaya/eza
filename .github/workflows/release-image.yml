@@ -9,7 +9,9 @@ name: Release container image
 # :latest.
 #
 # workflow_dispatch exists so an existing release can be backfilled, or a failed
-# image publish retried.
+# image publish retried. It always builds the release tag (refs/tags/v<version>);
+# the image job asserts that the checked-out revision is that tag before
+# publishing.
 on:
   workflow_run:
     workflows: ["Create GitHub release"]
@@ -21,7 +23,7 @@ on:
         required: true
         type: string
       ref:
-        description: "Optional git ref to build (default: the default branch). Use refs/tags/v<version> to publish a tag release from a branch dispatch."
+        description: "Optional tag ref; must equal refs/tags/v<version> (the default). The image is always built from the release tag."
         required: false
         default: ""
         type: string
@@ -57,12 +59,14 @@ jobs:
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             version="${{ inputs.version }}"
-            # Build backfills from the default branch (or an explicit ref) so
-            # they include the current flake/packaging fixes. Normal tag
-            # releases build the tag.
-            ref="${{ inputs.ref }}"
-            if [ -z "$ref" ]; then
-              ref="${{ github.event.repository.default_branch }}"
+            # A dispatch backfill builds the release tag, never the default
+            # branch: the published image must match the tagged revision
+            # (docs/release.md). The image job asserts it again after checkout.
+            ref="refs/tags/v${version}"
+            requested_ref="${{ inputs.ref }}"
+            if [ -n "$requested_ref" ] && [ "$requested_ref" != "$ref" ]; then
+              echo "::error title=Explicit ref rejected::workflow_dispatch builds release tag ${ref}; '${requested_ref}' is not the tag for v${version}."
+              exit 1
             fi
           else
             tag="${{ github.event.workflow_run.head_branch }}"
@@ -107,6 +111,21 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.ref }}
           fetch-depth: 1
+
+      - name: Verify the checked-out revision is the release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          tag="v${version}"
+          git fetch --force --depth=1 origin "+refs/tags/${tag}:refs/tags/${tag}"
+          head_sha="$(git rev-parse HEAD)"
+          tag_sha="$(git rev-parse "refs/tags/${tag}^{commit}")"
+          if [ "$head_sha" != "$tag_sha" ]; then
+            echo "::error title=Revision mismatch::the image would be built from ${head_sha}, but release tag ${tag} is ${tag_sha}. Refusing to publish code that is not the tagged revision."
+            exit 1
+          fi
+          echo "::notice::building release tag ${tag} at ${head_sha}"
 
       - uses: cachix/install-nix-action@v31
         with:

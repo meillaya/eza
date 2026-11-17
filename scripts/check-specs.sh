@@ -55,12 +55,12 @@ required_files=(
     "$examples_dir/graph-view.json"
     "$examples_dir/ledger-view.json"
     "$examples_dir/webhook.json"
-    "$bad_dir/unknown-kind.json"
-    "$bad_dir/bad-schema.json"
-    "$bad_dir/bad-color.json"
-    "$bad_dir/too-many-groups.json"
-    "$bad_dir/webhook-unknown-event.json"
 )
+# The counterexample list is derived from spec/bad/ so a new fixture cannot be
+# added without being required and validated below.
+bad_files=("$bad_dir"/*.json)
+(( ${#bad_files[@]} > 0 )) || die "no bad fixtures found under spec/bad"
+required_files+=("${bad_files[@]}")
 for file in "${required_files[@]}"; do
     [[ -r "$file" ]] || die "missing required file: ${file#"$repo_root"/}"
 done
@@ -178,7 +178,7 @@ done
 
 # The files are valid JSON. Now assert the examples match the bounded plan
 # constraints and the bad documents violate one of them. A full JSON-Schema
-# validation pass runs when python3 with the jsonschema package is available.
+# validation pass runs below and is mandatory.
 json_ok() {
     local file="$1"
     local filter="$2"
@@ -226,6 +226,7 @@ json_ok "$webhook" '(.enabled | type == "boolean")' 'boolean enabled'
 json_bad "$bad_dir/unknown-kind.json" '(.kind == "graph") or (.kind == "ledger")' 'an unknown kind'
 json_bad "$bad_dir/bad-schema.json" '.schema == 1' 'an unknown schema version'
 json_bad "$bad_dir/bad-color.json" 'all(.definition.color_groups[]; (.color | test("^#[0-9a-f]{6}$")))' 'an invalid color'
+json_bad "$bad_dir/bad-slug.json" '(.slug | type == "string") and (.slug | test("^[a-z0-9][a-z0-9-]*$"))' 'a slug starting with a lower-case letter or digit'
 json_bad "$bad_dir/too-many-groups.json" '(.definition.color_groups | length) <= 24' 'more than 24 color groups'
 json_bad "$bad_dir/webhook-unknown-event.json" 'all(.events[]; . == "bookmark.created" or . == "bookmark.updated" or . == "bookmark.deleted" or . == "clip.created")' 'an unknown event kind'
 
@@ -242,17 +243,15 @@ python3 -c 'from jsonschema import Draft202012Validator' >/dev/null 2>&1 \
 
 log "jsonschema available: full draft 2020-12 validation"
 python3 - "$schema_dir/view.schema.json" "$schema_dir/webhook.schema.json" \
-        "$examples_dir/graph-view.json" "$examples_dir/ledger-view.json" \
-        "$examples_dir/webhook.json" \
-        "$bad_dir/unknown-kind.json" "$bad_dir/bad-schema.json" \
-        "$bad_dir/bad-color.json" "$bad_dir/too-many-groups.json" \
-        "$bad_dir/webhook-unknown-event.json" <<'PY'
+        "$examples_dir" "$bad_dir" <<'PY'
+import glob
 import json
+import os
 import sys
 
 from jsonschema import Draft202012Validator
 
-view_schema, webhook_schema, *documents = sys.argv[1:]
+view_schema, webhook_schema, examples_dir, bad_dir = sys.argv[1:5]
 with open(view_schema, encoding="utf-8") as handle:
     view = Draft202012Validator(json.load(handle))
 with open(webhook_schema, encoding="utf-8") as handle:
@@ -260,21 +259,26 @@ with open(webhook_schema, encoding="utf-8") as handle:
 Draft202012Validator.check_schema(view.schema)
 Draft202012Validator.check_schema(webhook.schema)
 
-valid_documents = documents[:3]
-invalid_documents = documents[3:]
-for path in valid_documents:
+def validator_for(document):
+    return webhook if document.get("events") is not None else view
+
+for name in ["graph-view.json", "ledger-view.json", "webhook.json"]:
+    path = os.path.join(examples_dir, name)
     with open(path, encoding="utf-8") as handle:
         document = json.load(handle)
-    validator = webhook if document.get("events") is not None else view
-    errors = sorted(validator.iter_errors(document), key=lambda error: error.path)
+    errors = sorted(validator_for(document).iter_errors(document), key=lambda error: error.path)
     if errors:
         sys.exit(f"{path}: expected valid: {errors[0].message}")
-for path in invalid_documents:
+
+bad_paths = sorted(glob.glob(os.path.join(bad_dir, "*.json")))
+if not bad_paths:
+    sys.exit(f"{bad_dir}: no bad fixtures found")
+for path in bad_paths:
     with open(path, encoding="utf-8") as handle:
         document = json.load(handle)
-    validator = webhook if path.endswith("webhook-unknown-event.json") else view
-    if validator.is_valid(document):
+    if validator_for(document).is_valid(document):
         sys.exit(f"{path}: expected invalid but the schema accepted it")
+print(f"jsonschema: {len(bad_paths)} bad fixtures rejected", file=sys.stderr)
 PY
 
 log "all spec checks passed"

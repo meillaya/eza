@@ -341,12 +341,16 @@ are not followed, and a 4xx or 5xx is a failure and schedules the next attempt.
 Response bodies are drained within the size cap and discarded; the status code
 is recorded, not the answer.
 
-`POST /api/v1/webhooks/{id}/test` sends one synthetic delivery through the same
-signed path and returns `{"ok":Bool,"status":Maybe Int,"error":Text}`. The test
-envelope has `id` `evt-test`, type `bookmark.updated`, and `data` `{"test":true}`,
-and its `X-Eza-Delivery` is `test`. The result updates the subscription's
-`last_status`, `last_attempt_at` and `last_error`; it does not create a
-delivery row.
+`POST /api/v1/webhooks/{id}/test` enqueues one synthetic delivery as a durable
+job and returns `202 {"job_id":N}` (the same asynchronous contract as
+[API.md](API.md#asynchronous-jobs)); poll `GET /api/v1/jobs/{id}` until the
+state is `done` or `failed`, then read the job's `result`. That result is
+`{"ok":Bool,"status":Int,"error":Text|null}` (`status` is `0` when no HTTP
+response was received; the job fails if the delivery itself could not be
+attempted). The test envelope has `id` `evt-test`, type `bookmark.updated`, and
+`data` `{"test":true}`, and its `X-Eza-Delivery` is `test`. The job updates the
+subscription's `last_status`, `last_attempt_at` and `last_error`; it does not
+create a delivery row.
 
 ### Delivery records and retention
 

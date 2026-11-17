@@ -97,6 +97,23 @@ field inputId label inputType autocomplete =
             <> "\" spellcheck=\"false\" required>"
         ]
 
+{- | A username input. Browsers must not capitalise or autocorrect the value:
+the account keeps its original spelling (login folds case, but a phone keyboard
+capitalising the first letter still surprises people), and usernames are not
+prose. The password inputs keep 'field' because lower-case/autocorrect rules do
+not apply to them.
+-}
+usernameField :: Text -> Text -> Text -> Text
+usernameField inputId label autocomplete =
+    T.unlines
+        [ "        <label class=\"auth-form-label meta\" for=\"" <> inputId <> "\">" <> label <> "</label>"
+        , "        <input id=\""
+            <> inputId
+            <> "\" class=\"input auth-form-input\" type=\"text\" autocomplete=\""
+            <> autocomplete
+            <> "\" spellcheck=\"false\" autocapitalize=\"none\" autocorrect=\"off\" required>"
+        ]
+
 escapeHtml :: Text -> Text
 escapeHtml value =
     T.replace "\"" "&quot;" (T.replace ">" "&gt;" (T.replace "<" "&lt;" (T.replace "&" "&amp;" value)))
@@ -125,7 +142,7 @@ loginPage pages =
                 [ authBrand "/login"
                 , authTitle "Sign in"
                 , "      <form id=\"auth-form\" class=\"auth-form\" novalidate>"
-                , field "username" "username" "text" "username"
+                , usernameField "username" "username" "username"
                 , field "password" "password" "password" "current-password"
                 , "        <button id=\"password-login\" class=\"btn btn--strong auth-action\" type=\"submit\">sign in</button>"
                 , "      </form>"
@@ -145,7 +162,7 @@ setupPage pages =
                 , authTitle "Claim this library"
                 , authSub "The first account is the admin; the password needs ten characters or more."
                 , "      <form id=\"auth-form\" class=\"auth-form\" novalidate>"
-                , field "username" "username" "text" "username"
+                , usernameField "username" "username" "username"
                 , field "password" "password" "password" "new-password"
                 , field "confirm-password" "confirm password" "password" "new-password"
                 , "        <button id=\"password-setup\" class=\"btn btn--strong auth-action\" type=\"submit\">claim the library</button>"

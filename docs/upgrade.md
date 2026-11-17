@@ -87,14 +87,18 @@ migration needs write access to the volume only.
 ## NixOS module
 
 ```bash
+# The module does not install the CLI on PATH: run the release package's
+# binary from the store (same flake revision you are switching to).
+EZA_BIN="$(nix build --no-link --print-out-paths github:meillaya/eza/v0.4.0.0#eza-bookmarks)/bin/eza-bookmarks"
+
 # as the eza user: take the stamp before switching the generation
-sudo -u eza eza-bookmarks backup
+sudo -u eza "$EZA_BIN" backup
 
 # switch to the new flake revision
 sudo nixos-rebuild switch --flake .#host
 
 # the unit migrated the data on start
-sudo -u eza eza-bookmarks verify
+sudo -u eza "$EZA_BIN" verify
 curl -fsS http://127.0.0.1:8080/healthz
 ```
 
@@ -105,11 +109,11 @@ not the upgrade backup: take one explicitly before the switch.
 
 ```bash
 # with the old checkout running
-devenv shell -- eza-bookmarks backup   # or ./result/bin/eza-bookmarks backup
+devenv shell -- cabal run eza-bookmarks -- backup   # or ./result/bin/eza-bookmarks backup
 
 git fetch --tags && git checkout v0.4.0.0
 devenv shell -- build
-devenv shell -- eza-bookmarks verify
+devenv shell -- cabal run eza-bookmarks -- verify
 devenv shell -- dev
 ```
 

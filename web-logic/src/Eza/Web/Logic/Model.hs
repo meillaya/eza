@@ -2513,12 +2513,14 @@ isSelected m bookmarkId = IS.member bookmarkId (mSelection m)
 selectedCount :: Model -> Int
 selectedCount = IS.size . mSelection
 
-{- | Command-palette entries: navigation, actions, and recent bookmarks that
-match the current palette query.  Kept in the model layer so both the view
+{- | Command-palette entries: navigation, saved searches and actions, filtered
+by the palette query.  The palette deliberately lists no records: the search
+line and the ledger own record lookup, and mixing recent records into the slip
+made the command list hard to scan.  Kept in the model layer so both the view
 and the update function agree on what Enter selects.
 -}
 paletteEntries :: Model -> [(Text, Text, Action)]
-paletteEntries m = filter matches (fileRecord ++ savedSearches ++ bookmarks ++ sections ++ accountActions)
+paletteEntries m = filter matches (fileRecord ++ savedSearches ++ sections ++ accountActions)
   where
     needle = T.toLower (T.strip (toTextLow (mPaletteQ m)))
     matches (label, hint, _) =
@@ -2530,11 +2532,6 @@ paletteEntries m = filter matches (fileRecord ++ savedSearches ++ bookmarks ++ s
     savedSearches =
         [ (ssName saved, "saved search", SavedSearchApply saved)
         | saved <- mSaved m
-        ]
-
-    bookmarks =
-        [ (bsTitle b, bsDomain b, Navigate (Bookmark (bsId b)))
-        | b <- take 12 (mItems m)
         ]
 
     sections =

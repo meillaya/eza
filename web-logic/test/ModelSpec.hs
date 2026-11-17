@@ -12,7 +12,7 @@ import qualified Data.Text as T
 import Test.Hspec
 
 import Eza.GraphLayout (LayoutPreset (..))
-import Eza.Types (SavedSearch (..))
+import Eza.Types (BookmarkSummary (..), SavedSearch (..))
 
 import Eza.Web.Logic.Effect (RequestId (..))
 import Eza.Web.Logic.Graph (GraphView (..), initialGraphView)
@@ -83,6 +83,32 @@ modelSpec = describe "native client model" $ do
                 model = initialModel{gLedger = (gLedger initialModel){lfSaved = [saved]}, gShell = (gShell initialModel){sfPaletteQ = "rust"}}
             any (\(label, hint, _) -> label == "rust reading" && hint == "saved search") (paletteEntries model)
                 `shouldBe` True
+        it "lists commands only, never records" $ do
+            let record =
+                    BookmarkSummary
+                        { bsId = 7
+                        , bsUrl = "https://example.com/palette-record"
+                        , bsTitle = "a record that must not appear"
+                        , bsDomain = "example.com"
+                        , bsCreatedAt = 1760000000
+                        , bsAddedAt = 1760000000
+                        , bsFaviconUrl = ""
+                        , bsTags = []
+                        , bsIsRead = False
+                        , bsIsDead = False
+                        , bsSnippet = Nothing
+                        }
+                model =
+                    initialModel
+                        { gLedger = (gLedger initialModel){lfItems = [record]}
+                        , gShell = (gShell initialModel){sfPaletteQ = "record"}
+                        }
+                isRecordEntry (_, _, action) = case action of
+                    Navigate (Bookmark _) -> True
+                    _ -> False
+            map (\(label, _, _) -> label) (paletteEntries model)
+                `shouldNotContain` ["a record that must not appear"]
+            not (any isRecordEntry (paletteEntries model)) `shouldBe` True
     describe "graph state types" $ do
         it "keeps the initial viewport and layout preset" $ do
             gvWidth initialGraphView `shouldBe` 920

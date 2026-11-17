@@ -85,6 +85,7 @@
   --gap: 16px;
   --rail: 260px;
   --drawer: 320px;
+  --strip: 0px;                             /* bottom chrome lane: 0 desktop, 46px mobile tab bar */
   --radius: 2px;
 
   /* ---- spacing scale (4px base) ---- */
@@ -135,6 +136,7 @@ html[data-theme='dark'] {
     --gap: 12px;
     --rail: 0px;
     --drawer: 100%;
+    --strip: 46px;
   }
 }
 
@@ -4087,3 +4089,19 @@ main.auth, main.share { min-height: 100vh; display: flex; flex-direction: column
 }
 .undo-preview-list li { padding: 2px 0; overflow-wrap: anywhere; }
 .undo-preview-list .meta { color: var(--muted); }
+
+/* ---- focus rings the field resets must not remove ----
+   .query-input and .slip-input declare outline:0, and .noteed-area removes
+   its :focus-visible ring, all later than the global rule. Restore the 2 px
+   accent ring the accessibility contract promises. The note editor sits in an
+   overflow:hidden wrap, so its ring is inset (the same offset .note-input
+   uses) instead of being clipped. */
+.query-input:focus-visible,
+.slip-input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.noteed-area:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -3px;
+}

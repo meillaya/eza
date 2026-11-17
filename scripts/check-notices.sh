@@ -6,7 +6,10 @@
 #
 # What it checks:
 #   * every package pinned in flake.nix's `hpkgsUpgraded` Hackage overlay has a
-#     row in THIRD-PARTY-NOTICES.md with the pinned version. The overlay is the
+#     row in THIRD-PARTY-NOTICES.md with the pinned version. Both overlay call
+#     forms are covered (`hackagePkg` and `hackagePkgWith`); the parsed count is
+#     asserted against the overlay's assignment lines so a new call shape cannot
+#     silently escape the check. The overlay is the
 #     TLS/crypto generation (webauthn 0.12, crypton 1.1, tls 2.4, http2 5.4,
 #     jose, hpke, mlkem, ...) that nixpkgs does not ship for GHC 9.10, so it is
 #     the part of the tree most likely to drift from the notices.
@@ -54,14 +57,51 @@ notes = []
 
 # --- pinned overlay packages from flake.nix --------------------------------
 flake = flake_path.read_text(encoding="utf-8")
+overlay_start = flake.find("hpkgsUpgraded = hpkgs.extend")
+if overlay_start < 0:
+    sys.exit(
+        "check-notices.sh: could not find the hpkgsUpgraded overlay in flake.nix; "
+        "update this script if the flake layout changed"
+    )
+overlay_end = flake.find("});", overlay_start)
+if overlay_end < 0:
+    sys.exit("check-notices.sh: could not find the end of the hpkgsUpgraded overlay in flake.nix")
+overlay_block = flake[overlay_start:overlay_end]
+
+# Both pin forms appear in the overlay: `hackagePkg` and `hackagePkgWith` (the
+# latter passes extra arguments to callCabal2nix). Both are part of the pinned
+# dependency set and must be covered by the notices table.
+entry_pattern = re.compile(
+    r'^\s*([A-Za-z0-9_.+-]+)\s*=\s*hackagePkg(?:With)?\s+self\s+"([^"]+)"\s+"([^"]+)"\s+"sha256-[^"]+"',
+    re.MULTILINE,
+)
 overlay = {}
-pattern = re.compile(r'hackagePkg\s+self\s+"([^"]+)"\s+"([^"]+)"\s+"sha256-')
-for match in pattern.finditer(flake):
-    overlay[match.group(1)] = match.group(2)
+for match in entry_pattern.finditer(overlay_block):
+    package, pinned_version = match.group(1), match.group(3)
+    if package in overlay:
+        problems.append(f"duplicate overlay pin: {package} appears more than once in hpkgsUpgraded")
+    overlay[package] = pinned_version
 if not overlay:
     sys.exit(
-        "check-notices.sh: could not find the hackagePkg overlay in flake.nix; "
+        "check-notices.sh: could not find the hackagePkg overlay entries in flake.nix; "
         "update this script if the flake layout changed"
+    )
+
+# Every hackagePkg assignment in the overlay must be parsed: a new call shape
+# must not silently escape the notices check. This also pins the parsed count
+# to the number of overlay entries (currently 20).
+overlay_assignment_lines = [
+    line.strip()
+    for line in overlay_block.splitlines()
+    if "hackagePkg" in line and "=" in line and not line.strip().startswith("#")
+]
+for line in overlay_assignment_lines:
+    if not entry_pattern.match(line):
+        problems.append(f"unrecognised hackagePkg overlay entry: {line}")
+if len(overlay) != len(overlay_assignment_lines):
+    problems.append(
+        f"parsed {len(overlay)} overlay pins but found {len(overlay_assignment_lines)} "
+        "hackagePkg assignment lines in hpkgsUpgraded"
     )
 
 # --- notices table rows ----------------------------------------------------
@@ -87,7 +127,10 @@ for package, pinned_version in sorted(overlay.items()):
         )
     if not row["license"]:
         problems.append(f"missing license: {package} row has an empty license cell")
-notes.append(f"flake overlay: {len(overlay)} pinned packages, all present in the notices table")
+notes.append(
+    f"flake overlay: {len(overlay)} pinned packages checked against the notices table "
+    f"({len(overlay_assignment_lines)} overlay assignment lines parsed)"
+)
 
 # --- resolved cabal plan vs flake pin --------------------------------------
 if check_plan:

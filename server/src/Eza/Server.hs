@@ -51,7 +51,7 @@ import Network.HTTP.Types
 import Network.Wai
 import Network.Wai.Handler.Warp
 import Network.Wai.Middleware.Gzip (GzipFiles (..), GzipSettings (..), defaultGzipSettings, gzip)
-import Network.Wai.Middleware.RequestLogger (logStdout, logStdoutDev)
+import Network.Wai.Middleware.RequestLogger (logStdout)
 import Network.Wai.Middleware.RequestSizeLimit (defaultRequestSizeLimitSettings, requestSizeLimitMiddleware, setMaxLengthForRequest, setOnLengthExceeded)
 
 import System.Exit (exitFailure)
@@ -93,7 +93,7 @@ import qualified Eza.Api.Jobs as Jobs
 import qualified Eza.Api.Maintenance as Maintenance
 import qualified Eza.Api.Tags as Tags
 
-import Eza.Api.Extensions (clipPreflight, isClipPath, requestOriginAllowed)
+import Eza.Api.Extensions (clipPreflight, isClipPath, requestOriginAllowed, withCors)
 import Eza.Api.Public (health, publicShareHandler)
 import Eza.Api.Static (indexResponse, serveAsset, serveNamedAsset, serveServiceWorker, serveStaticFile)
 
@@ -160,14 +160,20 @@ isSnapshotRequest r = case pathInfo r of
     ["api", "v1", "bookmarks", _, "snapshot"] -> requestMethod r == "GET"
     _ -> False
 
-{- | Access logging follows @EZA_LOG_LEVEL@: @debug@ logs the full request
-development line, @info@ logs one access line per request, and @warn@/@error@
-(the default is @info@) leave access logging off while the explicit error
-messages keep going to stderr.
+{- | Access logging follows @EZA_LOG_LEVEL@: @debug@ and @info@ log one access
+line per request, and @warn@/@error@ (the default is @info@) leave access
+logging off while the explicit error messages keep going to stderr.
+
+Do not switch @debug@ to wai-extra's @logStdoutDev@: that detailed formatter
+prints request bodies (up to 2 KiB) and parsed query/POST parameters, so a
+login, setup, recovery or password-change request would put the plaintext
+password or recovery code in the server log. AGENTS forbids logging credentials
+and cookies; @logStdout@ never logs a body or a header (it logs the method, the
+URL, and the status).
 -}
 accessLogger :: Config -> Middleware
 accessLogger cfg = case map toLower (cfgLogLevel cfg) of
-    "debug" -> logStdoutDev
+    "debug" -> logStdout
     "info" -> logStdout
     _ -> id
 
@@ -239,8 +245,8 @@ dispatchApp cfg state req respond =
 
     dispatchUnmatched
         | isApiPath path = case knownMethods path of
-            [] -> respond (jsonProblem status404 "not_found" "No such route")
-            allowed -> respond (methodNotAllowed allowed)
+            [] -> respond (respondClipped (jsonProblem status404 "not_found" "No such route"))
+            allowed -> respond (respondClipped (methodNotAllowed allowed))
         | otherwise = authedSpa
       where
         -- A non-API path that matched no route is still not an API request:
@@ -248,6 +254,12 @@ dispatchApp cfg state req respond =
         authedSpa = case Routes.matchRoute "GET" path of
             Just route -> authed route
             Nothing -> respond (jsonProblem status404 "not_found" "No such route")
+
+    -- Clip routes are cross-origin by contract, so even a pre-guard error
+    -- (unknown clip sub-path, wrong method) must be readable by the clipper.
+    respondClipped response
+        | isClipPath path = withCors cfg req response
+        | otherwise = response
 
     optionsDispatch
         | isClipPreflightPath path = clipPreflight cfg req respond
@@ -331,11 +343,12 @@ isApiPath path = case path of
     ("api" : _) -> True
     _ -> False
 
-{- | Clip CORS preflights run before the guard and answer for the clipper's
-routes, including the quick-save path that "Eza.Routes" classifies public.
+{- | Clip CORS preflights run before the guard. The clip path family (which
+includes quick-save) is the single classification; "Eza.Api.Extensions" uses
+the same predicate for the origin guard and response headers.
 -}
 isClipPreflightPath :: [Text] -> Bool
-isClipPreflightPath path = isClipPath path || path == ["api", "v1", "quick-save"]
+isClipPreflightPath = isClipPath
 
 -- Public auth handlers
 -- ---------------------------------------------------------------------------
@@ -374,7 +387,9 @@ withAuthed ::
 withAuthed cfg state req respond action = do
     authResult <- authenticateRequest state req
     case authResult of
-        Left response -> respond response
+        Left response
+            | isClipPath (pathInfo req) -> respond (withCors cfg req response)
+            | otherwise -> respond response
         Right (user, slot, ctx) -> do
             let rctx = RequestContext cfg state user slot ctx
             if requestMethod req `elem` ["GET", "HEAD"]

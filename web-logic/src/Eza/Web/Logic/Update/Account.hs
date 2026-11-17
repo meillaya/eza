@@ -386,15 +386,16 @@ handle = \case
     WebhookEnabledToggled -> putModel (\m -> m{gWebhooks = (gWebhooks m){wkWebhookEnabled = not (mWebhookEnabled m)}})
     WebhookCreate -> do
         m <- get
-        let input =
-                WebhookInput
-                    { wiName = T.strip ((mWebhookName m))
-                    , wiUrl = T.strip ((mWebhookUrl m))
-                    , wiEvents = mWebhookEvents m
-                    , wiEnabled = mWebhookEnabled m
-                    }
-        putModel (\x -> x{gWebhooks = (gWebhooks x){wkWebhookBusy = True, wkWebhookFormError = Nothing}})
-        createWebhook input (\(webhook, secret) -> WebhookCreated webhook secret) WebhookCreateFailed
+        unless (mWebhookBusy m) $ do
+            let input =
+                    WebhookInput
+                        { wiName = T.strip ((mWebhookName m))
+                        , wiUrl = T.strip ((mWebhookUrl m))
+                        , wiEvents = mWebhookEvents m
+                        , wiEnabled = mWebhookEnabled m
+                        }
+            putModel (\x -> x{gWebhooks = (gWebhooks x){wkWebhookBusy = True, wkWebhookFormError = Nothing}})
+            createWebhook input (\(webhook, secret) -> WebhookCreated webhook secret) WebhookCreateFailed
     WebhookCreated webhook secret -> do
         notify "Webhook created. Copy the signing secret now." ToastOk
         putModel

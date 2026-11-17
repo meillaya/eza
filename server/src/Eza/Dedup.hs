@@ -412,8 +412,8 @@ mergeGroupTx conn keep merges preferHttps = do
                         -- keeper stays dead only when every copy was dead.
                         isRead = if any ((/= 0) . mrIsRead) allRows then (1 :: Int) else 0
                         isDead = if all ((/= 0) . mrIsDead) allRows then (1 :: Int) else 0
-                        createdAt = minimum (map mrCreatedAt allRows)
-                        addedAt = minimum (map mrAddedAt allRows)
+                        createdAt = minNonZero (map mrCreatedAt allRows)
+                        addedAt = minNonZero (map mrAddedAt allRows)
                         capturedAt = firstJust (map mrSnapshotCapturedAt allRows)
                         -- Empty keeper metadata is filled from the first absorbed
                         -- row that has it, so a merge never drops a description,
@@ -594,6 +594,15 @@ firstJust :: [Maybe Int] -> Maybe Int
 firstJust [] = Nothing
 firstJust (Nothing : rest) = firstJust rest
 firstJust (Just value : _) = Just value
+
+{- | The earliest known date. @0@ means "no original save date" in the import
+paths, so it must not win the minimum: an undated duplicate used to erase the
+keeper's filing date. All-zero values stay zero.
+-}
+minNonZero :: [Int] -> Int
+minNonZero values = case filter (> 0) values of
+    [] -> 0
+    present -> minimum present
 
 maxJust :: [Maybe Int] -> Maybe Int
 maxJust values = case [v | Just v <- values] of

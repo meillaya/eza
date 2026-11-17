@@ -244,7 +244,7 @@ in
     logLevel = mkOption {
       type = types.str;
       default = "info";
-      description = "Server log level (EZA_LOG_LEVEL: debug, info, warn, error).";
+      description = "Server log level (EZA_LOG_LEVEL: debug, info, warn, error). Access lines never include request or response bodies.";
     };
     allowPrivateFetch = mkOption {
       type = types.bool;

@@ -12,14 +12,15 @@ with the process-wide enrichment semaphore and checks the job's cancellation
 flag before it starts.
 -}
 module Eza.Egress (
+    claimNextEgressJob,
     runEgressWorkerFor,
     processOneJob,
 ) where
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (AsyncCancelled)
 import Control.Concurrent.QSem (QSem, signalQSem, waitQSem)
-import Control.Exception (SomeException, bracket, bracket_, try)
-import Control.Monad (forM)
+import Control.Exception (AsyncException, SomeException, bracket, bracket_, fromException, tryJust)
 import Data.Aeson (Key, Object, Value (..), decode, object, (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
@@ -44,6 +45,22 @@ import Eza.Webhooks (defaultWebhookWorkerConfig, testWebhook)
 egressKinds :: [Text]
 egressKinds = ["snapshot", "check_dead", "ai_suggestions", "webhook_test"]
 
+{- | Claim at most one ready egress job. Kinds are tried in priority order and
+the first successful claim wins: one loop iteration executes exactly one job, so
+the other kinds are never flipped to @running@ and abandoned (which used to
+strand them, and their dedupe keys, until the next process restart). Exported for
+the job-queue regression test.
+-}
+claimNextEgressJob :: Connection -> IO (Maybe Job)
+claimNextEgressJob conn = go egressKinds
+  where
+    go [] = pure Nothing
+    go (kind : rest) = do
+        claimed <- claimJobKind conn kind
+        case claimed of
+            Just _ -> pure claimed
+            Nothing -> go rest
+
 {- | One loop per library. It opens its own connection and closes it on
 cancellation, like the other worker loops.
 -}
@@ -52,24 +69,36 @@ runEgressWorkerFor manager cfg dbPath snapshotDirectory sem =
     bracket (Db.openDb dbPath) Db.closeDb loop
   where
     loop conn = do
-        claimed <- forM egressKinds (claimJobKind conn)
-        case firstJust claimed of
+        claimed <- claimNextEgressJob conn
+        case claimed of
             Nothing -> threadDelay (2 * 1000000) >> loop conn
             Just job -> do
                 cancelled <- jobCancelRequested conn (jobId job)
                 if cancelled
                     then cancelJob conn (jobId job)
                     else do
-                        outcome <- try (bracket_ (waitQSem sem) (signalQSem sem) (processOneJob manager cfg snapshotDirectory conn job)) :: IO (Either SomeException ())
+                        outcome <- tryNonAsync (bracket_ (waitQSem sem) (signalQSem sem) (processOneJob manager cfg snapshotDirectory conn job)) :: IO (Either SomeException ())
                         case outcome of
                             Left err -> failJobPermanent conn (jobId job) (T.take 400 (T.pack (show err)))
                             Right () -> pure ()
                 loop conn
 
-firstJust :: [Maybe a] -> Maybe a
-firstJust (Just value : _) = Just value
-firstJust (Nothing : rest) = firstJust rest
-firstJust [] = Nothing
+{- | Run an action and catch synchronous failures only: asynchronous exceptions
+(worker cancellation) are rethrown, so a cancel stops the loop instead of being
+swallowed and recorded as a permanent job failure. @AsyncCancelled@ is not an
+@AsyncException@ subtype, so both are checked.
+-}
+tryNonAsync :: IO a -> IO (Either SomeException a)
+tryNonAsync action = tryJust isSyncFailure action
+  where
+    isSyncFailure err
+        | isAsync err = Nothing
+        | otherwise = Just err
+    isAsync err = case fromException err :: Maybe AsyncException of
+        Just _ -> True
+        Nothing -> case fromException err :: Maybe AsyncCancelled of
+            Just _ -> True
+            Nothing -> False
 
 {- | Execute one claimed job and record its outcome: a JSON result on success, a
 permanent failure on deterministic errors (refused URL, missing provider key,
@@ -95,7 +124,7 @@ processOneJob manager cfg snapshotDirectory conn job = case jobKind job of
                     Nothing -> failJobPermanent conn (jobId job) "the snapshot could not be captured"
                     Just (_, name) -> do
                         let path = snapshotDirectory </> T.unpack name
-                        sized <- try (getFileSize path) :: IO (Either SomeException Integer)
+                        sized <- tryNonAsync (getFileSize path) :: IO (Either SomeException Integer)
                         case sized of
                             Left _ -> failJobPermanent conn (jobId job) "the snapshot file is missing"
                             Right bytes ->

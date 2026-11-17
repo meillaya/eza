@@ -13,8 +13,9 @@ module Eza.Enrich (
 ) where
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (AsyncCancelled)
 import Control.Concurrent.QSem (QSem, signalQSem, waitQSem)
-import Control.Exception (SomeException, bracket, bracket_, try)
+import Control.Exception (AsyncException, SomeException, bracket, bracket_, fromException, tryJust)
 import Control.Monad (forM_, forever)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -207,6 +208,22 @@ markFailed conn bookmarkId message attempts = do
             "UPDATE bookmarks SET enrich_state = 'failed', enrich_error = ?, enrich_attempts = ?, updated_at = strftime('%s','now') WHERE id = ? AND enrich_state <> 'manual'"
             (message, attempts + 1, bookmarkId)
 
+{- | Run an action and catch synchronous failures only: asynchronous exceptions
+(worker cancellation) are rethrown so cancelling a worker always stops it.
+@AsyncCancelled@ is not an @AsyncException@ subtype, so both are checked.
+-}
+tryNonAsync :: IO a -> IO (Either SomeException a)
+tryNonAsync action = tryJust isSyncFailure action
+  where
+    isSyncFailure err
+        | isAsync err = Nothing
+        | otherwise = Just err
+    isAsync err = case fromException err :: Maybe AsyncException of
+        Just _ -> True
+        Nothing -> case fromException err :: Maybe AsyncCancelled of
+            Just _ -> True
+            Nothing -> False
+
 {- | One enrichment loop for one user database. The semaphore is process-wide,
 so @EZA_ENRICH_WORKERS@ bounds the network work across every account while
 each database still gets its own claimer.
@@ -229,7 +246,7 @@ runEnrichWorkerFor manager cfg databasePath sem =
                             Just bookmarkId -> do
                                 result <-
                                     bracket_ (waitQSem sem) (signalQSem sem) $
-                                        try (enrichBookmark manager cfg conn bookmarkId) ::
+                                        tryNonAsync (enrichBookmark manager cfg conn bookmarkId) ::
                                         IO (Either SomeException (Either Text ()))
                                 case result of
                                     Left err -> failJob conn (jobId job) (T.pack (show err)) (jobAttempts job)
@@ -442,14 +459,14 @@ runFaviconWorkerFor :: Manager -> Config -> FilePath -> QSem -> IO ()
 runFaviconWorkerFor manager cfg databasePath sem =
     -- One connection for the loop, closed when the worker is cancelled.
     bracket (Db.openDb databasePath) Db.closeDb $ \conn -> do
-        repaired <- try (repairStoredFavicons conn) :: IO (Either SomeException ())
+        repaired <- tryNonAsync (repairStoredFavicons conn) :: IO (Either SomeException ())
         case repaired of
             Left err -> hPutStrLn stderr ("eza: favicon repair: " <> show err)
             Right () -> pure ()
         forever $ do
             outcome <-
                 bracket_ (waitQSem sem) (signalQSem sem) $
-                    try (backfillFaviconStep manager cfg conn) ::
+                    tryNonAsync (backfillFaviconStep manager cfg conn) ::
                     IO (Either SomeException Bool)
             case outcome of
                 Left err -> hPutStrLn stderr ("eza: favicon worker: " <> show err)

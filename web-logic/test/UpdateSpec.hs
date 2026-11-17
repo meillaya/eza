@@ -7,6 +7,7 @@ sequence the shell interpreter consumes.
 -}
 module UpdateSpec (updateSpec) where
 
+import qualified Data.IntSet as IS
 import Data.List (isInfixOf)
 import Test.Hspec
 
@@ -162,3 +163,89 @@ updateSpec = describe "native per-group update" $ do
                 (model, effects) = update stale (StatsLoaded (RequestId 8) undefined)
             mStats model `shouldBe` Nothing
             effects `shouldBe` []
+    describe "repeat-action guards" $ do
+        it "disarms the prune confirmation when a candidate is toggled" $ do
+            let armed = initialModel{gMaint = (gMaint initialModel){mnConfirmPrune = True, mnPruneSel = [1]}}
+                (model, _) = update armed (PruneToggle 2)
+            mConfirmPrune model `shouldBe` False
+            mPruneSel model `shouldBe` [1, 2]
+        it "requires a fresh confirmation after the prune selection changed" $ do
+            let armed = initialModel{gMaint = (gMaint initialModel){mnConfirmPrune = True, mnPruneSel = [1]}}
+                (toggled, _) = update armed (PruneToggle 2)
+                (model, effects) = update toggled PruneRun
+            mConfirmPrune model `shouldBe` True
+            effectShows effects `shouldSatisfy` not . any (isInfixOf "ApiRunPrune")
+        it "prunes once the confirmation is armed" $ do
+            let armed = initialModel{gMaint = (gMaint initialModel){mnConfirmPrune = True, mnPruneSel = [1]}}
+                (model, effects) = update armed PruneRun
+            mConfirmPrune model `shouldBe` False
+            effectShows effects `shouldSatisfy` any (isInfixOf "ApiRunPrune")
+        it "drops a second bulk mark while one is in flight" $ do
+            let busy = initialModel{gLedger = (gLedger initialModel){lfSelection = IS.fromList [1, 2], lfBulkBusy = True}}
+                (_, effects) = update busy (BulkMark True)
+            effects `shouldBe` []
+        it "sends the first bulk mark request" $ do
+            let selected = initialModel{gLedger = (gLedger initialModel){lfSelection = IS.fromList [1, 2]}}
+                (_, effects) = update selected (BulkMark True)
+            effectShows effects `shouldSatisfy` any (isInfixOf "ApiBulkUpdate")
+        it "drops a second bulk tag submit while one is in flight" $ do
+            let busy =
+                    initialModel
+                        { gLedger =
+                            (gLedger initialModel)
+                                { lfSelection = IS.fromList [1]
+                                , lfTagPrompt = Just True
+                                , lfTagPromptValue = "rust"
+                                , lfBulkBusy = True
+                                }
+                        }
+                (_, effects) = update busy BulkTagSubmit
+            effects `shouldBe` []
+        it "drops a second bulk delete confirmation while one is in flight" $ do
+            let busy =
+                    initialModel
+                        { gLedger =
+                            (gLedger initialModel)
+                                { lfSelection = IS.fromList [1]
+                                , lfConfirmBulkDelete = True
+                                , lfBulkBusy = True
+                                }
+                        }
+                (_, effects) = update busy BulkDeleteConfirm
+            effects `shouldBe` []
+        it "drops a second view save while the first is in flight" $ do
+            let busy =
+                    initialModel
+                        { gViews =
+                            (gViews initialModel)
+                                { vwViewUi =
+                                    (mViewUi initialModel)
+                                        { vuBusy = True
+                                        , vuSaveOpen = True
+                                        , vuSaveName = "name"
+                                        }
+                                }
+                        }
+                (_, effects) = update busy ViewSaveSubmit
+            effects `shouldBe` []
+        it "sends the first view save request" $ do
+            let open =
+                    initialModel
+                        { gViews =
+                            (gViews initialModel)
+                                { vwViewUi =
+                                    (mViewUi initialModel)
+                                        { vuSaveOpen = True
+                                        , vuSaveName = "name"
+                                        }
+                                }
+                        }
+                (_, effects) = update open ViewSaveSubmit
+            effectShows effects `shouldSatisfy` any (isInfixOf "ApiCreateView")
+        it "drops a second webhook create while the first is in flight" $ do
+            let busy = initialModel{gWebhooks = (gWebhooks initialModel){wkWebhookBusy = True}}
+                (_, effects) = update busy WebhookCreate
+            effects `shouldBe` []
+        it "sends the first webhook create request" $ do
+            let (_, effects) = run WebhookCreate
+            effectShows effects `shouldSatisfy` any (isInfixOf "ApiCreateWebhook")

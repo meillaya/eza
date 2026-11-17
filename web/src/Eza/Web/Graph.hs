@@ -45,9 +45,6 @@ module Eza.Web.Graph (
     labelPolicy,
     labelCount,
 
-    -- * Matching
-    matchGraph,
-
     -- * Painting
     GraphDraw (..),
     drawGraph,
@@ -76,7 +73,7 @@ import Eza.GraphLayout
 
 import Eza.Types (GraphRecord (..))
 import Eza.View (LabelMode (..))
-import Eza.Web.Logic.Graph (GraphDrag (..), GraphMatches (..), GraphView (..), emptyMatches)
+import Eza.Web.Logic.Graph (GraphDrag (..), GraphMatches (..), GraphView (..))
 
 -- --------------------------------------------------------------- viewport ---
 
@@ -192,57 +189,6 @@ neighbourhood layout key = IM.fromList [(neighbour, ()) | neighbour <- neighbour
     neighbours = fromMaybe [] (IM.lookup key (glAdj layout))
 
 -- --------------------------------------------------------------- matching ---
-
-{- | The filter result. The record set, tag set and top ids are filled by one
-scan over the records; nothing is sorted per frame.
--}
-
-{- | Match records by title, domain, or tag name. Tokens are ANDed and lowered
-once. The top list keeps the eight best records for the results panel.
--}
-matchGraph :: Text -> GraphLayout -> GraphMatches
-matchGraph rawQuery layout
-    | null tokens = emptyMatches
-    | otherwise = GraphMatches True recordIds topIds count tagIds
-  where
-    tokens = T.words (T.toLower (T.strip rawQuery))
-    tagNames = IM.map fst (glTags layout)
-    scored =
-        [ (recordKey, score)
-        | (recordKey, record) <- IM.toList (glRecords layout)
-        , Just score <- [recordScore recordKey record]
-        ]
-    recordIds = IS.fromList (map fst scored)
-    count = length scored
-    tagIds =
-        IS.fromList
-            [ tagKey
-            | (tagKey, name) <- IM.toList tagNames
-            , all (\token -> T.isInfixOf token (T.toLower name)) tokens
-            ]
-    recordScore recordKey record =
-        let title = T.toLower (grTitle record)
-            domain = T.toLower (grDomain record)
-            tagWords =
-                [ T.toLower name
-                | tagKey <- fromMaybe [] (IM.lookup recordKey (glRecordTags layout))
-                , Just name <- [IM.lookup tagKey tagNames]
-                ]
-            titleHits = length [() | token <- tokens, T.isInfixOf token title]
-            tagHits = length [() | token <- tokens, any (T.isInfixOf token) tagWords]
-            domainHits = length [() | token <- tokens, T.isInfixOf token domain]
-            matched =
-                all
-                    (\token -> T.isInfixOf token title || T.isInfixOf token domain || any (T.isInfixOf token) tagWords)
-                    tokens
-         in if matched then Just (titleHits * 3 + tagHits * 2 + domainHits) else Nothing
-    topIds = map fst (take 8 (foldl' insertTop [] scored))
-    insertTop :: [(Int, Int)] -> (Int, Int) -> [(Int, Int)]
-    insertTop [] item = [item]
-    insertTop (existing : rest) item
-        | rank item < rank existing = item : existing : rest
-        | otherwise = existing : insertTop rest item
-    rank (recordKey, score) = (negate score, recordKey)
 
 -- ---------------------------------------------------------------- drawing ---
 

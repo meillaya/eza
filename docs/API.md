@@ -211,6 +211,12 @@ The route accepts a capture or write token.
 accepts at most 10,000 ids, writes an undo snapshot first, and returns
 `{"updated","snapshot_id"}`. Delete requires `"confirm":true`.
 
+`POST /api/v1/inbox/mark-all-above` takes `{"above_id":N}` and marks read up to
+10,000 unread records whose `created_at` is at or above that record's save date
+(by id order), recording the same undo snapshot as the bulk endpoint. It
+returns `{"updated":N}`; a missing or unknown `above_id` returns
+`{"updated":0}`.
+
 `GET /api/v1/favicons/{domain}` serves the cached icon bytes for one source
 domain. Icons are stored per domain, not per bookmark: the background
 `EZA_FAVICON_BACKFILL` loop fills one icon for a domain and applies it to every
@@ -257,8 +263,13 @@ GET    /api/v1/jobs/{id}
 
 An unknown id, and an id belonging to another account's library, return 404.
 While a job is `queued` or `running`, posting the same action for the same
-target returns the existing id instead of a second job. Job kinds and their
-`result` documents:
+target returns the existing id instead of a second job. `GET /api/v1/ai/status`
+(read) is the synchronous readiness probe beside the jobs: it returns
+`{"provider":Text,"model":Text,"configured":Bool}` where `provider` is the
+configured provider, `model` is the resolved default model, and `configured` is
+the readiness flag the client uses for the AI controls (it is false for
+`none` and for a key-based provider without a key; `ollama` needs no key). Job
+kinds and their `result` documents:
 
 - `snapshot` — `{"snapshot":{"path":Text,"bytes":N}}`; `path` is the absolute
   file under the account's snapshots directory. The public-address and size
@@ -269,7 +280,8 @@ target returns the existing id instead of a second job. Job kinds and their
   the same bounded 20-bookmark sample as before is sent to the provider, and
   with no provider configured the job fails with the disabled notice in
   `error`.
-- `webhook_test` — `{"ok":Bool,"status":Maybe Int,"error":Maybe Text}`.
+- `webhook_test` — `{"ok":Bool,"status":Int,"error":Text|null}`; `status` is `0`
+  when the test delivery received no HTTP response.
 
 ## Tags, searches, and navigation
 
@@ -462,6 +474,8 @@ of the portable JSON document: bookmarks (with their enrichment fields),
 highlights including prefix/suffix anchors, captures, saved searches, rules,
 views, and clip templates. Webhook subscription secrets are deliberately not
 exported. The version 1 document is still accepted by the importer.
+`GET /api/v1/export/notes` is reserved for the Markdown note export and
+currently answers `501 not_implemented`.
 
 `GET /api/v1/stats` returns library counts: `bookmarks`, `tags`,
 `bookmark_tags`, `links`, `sources`, `top_sources`, `sources_once`, `first_day`,
@@ -629,11 +643,12 @@ database. `GET /api/v1/webhooks` returns `{"webhooks":[Webhook]}`;
 `POST /api/v1/webhooks` takes a `WebhookInput` and returns 201 with
 `{"webhook":Webhook,"secret":Text}`. The secret is 64 lowercase hex characters
 and is shown only on create. `GET`, `PATCH`, and `DELETE
-/api/v1/webhooks/{id}` read, update, and remove one subscription; `PATCH`
-takes a `WebhookInput` and returns the updated `Webhook`. `POST
-/api/v1/webhooks/{id}/test` queues one synthetic `bookmark.updated` delivery
-and returns 202 `{"job_id":N}`; the job result is
-`{"ok":Bool,"status":Maybe Int,"error":Maybe Text}`.
+/api/v1/webhooks/{id}` read, update, and remove one subscription; `PATCH` takes
+a `WebhookInput` and returns the updated `Webhook`.
+`POST /api/v1/webhooks/{id}/test` queues one synthetic `bookmark.updated`
+delivery and returns 202 `{"job_id":N}`; the job result is
+`{"ok":Bool,"status":Int,"error":Text|null}` (see [Asynchronous
+jobs](#asynchronous-jobs)).
 `GET /api/v1/webhooks/{id}/deliveries` returns the most recent deliveries as
 `{"deliveries":[DeliveryView]}`, newest first; `limit` defaults to 20 and is
 clamped to 1-100.
@@ -719,6 +734,7 @@ SearchPage      {items: [BookmarkSummary], total, offset, limit, has_more,
                  year_counts: [[Int, Int]]}
 BootPayload     {version, origin, tags: [TagStat], saved_searches,
                  initial: SearchPage, stats: LibraryStats, views: [View]}
+AiStatus        {provider: Text, model: Text, configured: Bool}
 LibraryStats    {total, tags, tag_links, sources,
                  top_sources: [[Text, Int]], sources_once, first_day, last_day,
                  days, years: [[Int, Int]], filing_days: [[Text, Int]],

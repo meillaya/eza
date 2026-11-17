@@ -49,6 +49,7 @@ import Eza.Views (listViews)
 
 import Eza.Api.Common
 import Eza.Api.Context
+import Eza.Api.Extensions (withCors)
 import System.FilePath (addTrailingPathSeparator)
 
 {- | Everything one boot request reads. Exported so the server tests can check
@@ -265,18 +266,23 @@ quickSaveHandler :: Config -> Connection -> Request -> (Response -> IO ResponseR
 quickSaveHandler cfg conn req respond = do
     body <- jsonValue cfg req
     case body of
-        Left response -> respond response
+        Left response -> respondJson response
         Right (QuickBody url title tags)
-            | not (isHttpUrl url) -> respond (jsonProblem status400 "bad_request" "url must be http(s)")
+            | not (isHttpUrl url) -> respondJson (jsonProblem status400 "bad_request" "url must be http(s)")
             | otherwise -> do
                 result <- quickSave conn url (fromMaybe "" title) (fromMaybe [] tags)
                 case result of
-                    Left message -> respond (jsonProblem status409 "conflict" message)
+                    Left message -> respondJson (jsonProblem status409 "conflict" message)
                     Right (bid, existing) -> do
                         if existing
                             then pure ()
                             else enqueueEnrichment conn bid
-                        respond (jsonResponse (if existing then status200 else status201) (object ["id" .= bid, "existing" .= existing]))
+                        respondJson (jsonResponse (if existing then status200 else status201) (object ["id" .= bid, "existing" .= existing]))
+  where
+    -- Quick-save is a capture-token route with a CORS preflight, so every
+    -- response (including this handler's errors) needs the clip headers; the
+    -- guard wraps its own errors for the same reason (see Eza.Server).
+    respondJson = respond . withCors cfg req
 
 data MarkAboveBody = MarkAboveBody (Maybe Int)
 

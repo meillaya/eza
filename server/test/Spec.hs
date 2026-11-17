@@ -2,9 +2,11 @@ module Main (main) where
 
 import Control.Exception (bracket)
 import Data.Aeson (Value (..), decode, encode, object, toJSON)
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Lazy as LBS
 import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -180,6 +182,53 @@ main = hspec $ do
                 prefix <- Sqlite.query_ target "SELECT prefix, suffix FROM highlights" :: IO [(Text, Text)]
                 prefix `shouldBe` [("before ", " after")]
                 close target
+
+        it "carries saved searches and rules through a round-trip" $
+            withSystemTempDirectory "eza-json-rules" $ \dir -> do
+                source <- openDb (dir </> "source.db")
+                Sqlite.execute_ source "INSERT INTO saved_searches (name,q,tags_json,created_at) VALUES ('rust links','rust','[\"rust\",\"tooling\"]',1)"
+                Sqlite.execute_ source "INSERT INTO rules (name,enabled,field,pattern,add_tags,mark_read,created_at) VALUES ('domain rule',1,'domain','example.test','[\"ruled\"]',1,1)"
+                document <- exportJson source
+                close source
+                -- The exporter writes tag lists as arrays, not as the stored JSON text.
+                let exportedTags = case document of
+                        Object root -> case KeyMap.lookup (Key.fromText "saved_searches") root of
+                            Just (Array searches) -> case toList searches of
+                                (Object search : _) -> KeyMap.lookup (Key.fromText "tags") search
+                                _ -> Nothing
+                            _ -> Nothing
+                        _ -> Nothing
+                exportedTags `shouldBe` Just (toJSON (["rust", "tooling"] :: [Text]))
+                target <- openDb (dir </> "target.db")
+                result <- importJson target document
+                case result of
+                    Left err -> expectationFailure (T.unpack err)
+                    Right report -> jrSkipped report `shouldBe` 0
+                searches <- Sqlite.query_ target "SELECT name,q,tags_json FROM saved_searches" :: IO [(Text, Text, Text)]
+                searches `shouldBe` [("rust links", "rust", "[\"rust\",\"tooling\"]")]
+                rules <- Sqlite.query_ target "SELECT name,pattern,add_tags,mark_read FROM rules" :: IO [(Text, Text, Text, Int)]
+                rules `shouldBe` [("domain rule", "example.test", "[\"ruled\"]", 1)]
+                close target
+
+        it "accepts the legacy string form of saved-search tags and rule add-tags" $
+            withSystemTempDirectory "eza-json-legacy" $ \dir -> do
+                let legacyJson =
+                        "{\"format\":\"eza-json\",\"version\":1,"
+                            <> "\"saved_searches\":[{\"name\":\"legacy search\",\"q\":\"rust\",\"tags\":\"[\\\"old\\\"]\"}],"
+                            <> "\"rules\":[{\"name\":\"legacy rule\",\"pattern\":\"example.org\",\"add_tags\":\"[\\\"oldtag\\\"]\"}]}"
+                case (decode (LBS.fromStrict (BSC.pack legacyJson)) :: Maybe Value) of
+                    Nothing -> expectationFailure "the legacy fixture is not valid JSON"
+                    Just value -> do
+                        target <- openDb (dir </> "legacy.db")
+                        result <- importJson target value
+                        case result of
+                            Left err -> expectationFailure (T.unpack err)
+                            Right report -> jrSkipped report `shouldBe` 0
+                        searches <- Sqlite.query_ target "SELECT name, tags_json FROM saved_searches" :: IO [(Text, Text)]
+                        searches `shouldBe` [("legacy search", "[\"old\"]")]
+                        rules <- Sqlite.query_ target "SELECT name, add_tags FROM rules" :: IO [(Text, Text)]
+                        rules `shouldBe` [("legacy rule", "[\"oldtag\"]")]
+                        close target
 
     describe "tag-aware search" $ do
         it "finds a record by a tag name in free-text search" $

@@ -3,6 +3,7 @@ module Main (main) where
 import Test.Hspec
 
 import ApiSpec (apiSpec)
+import GraphFilterSpec (graphFilterSpec)
 import HelperSpec (helperSpec)
 import JobSpec (jobSpec)
 import LedgerSpec (ledgerSpec)
@@ -24,4 +25,5 @@ main = hspec $ do
     jobSpec
     viewSpec
     helperSpec
+    graphFilterSpec
     puritySpec

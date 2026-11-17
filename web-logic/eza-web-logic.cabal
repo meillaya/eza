@@ -69,6 +69,7 @@ test-suite eza-web-logic-test
                     HelperSpec
                     LedgerSpec
                     JobSpec
+                    GraphFilterSpec
                     ModelSpec
                     UpdateSpec
                     ViewSpec

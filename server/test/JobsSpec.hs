@@ -101,6 +101,23 @@ spec = do
                 (jobId <$> snapshotClaim) `shouldBe` Just snapshotId
                 Sqlite.close conn
 
+        it "claims at most one egress job per iteration and leaves the others queued" $
+            withSystemTempDirectory "eza-jobs-claim-one" $ \dir -> do
+                conn <- Db.openDb (dir </> "claim-one.db")
+                snapshotId <- enqueueTrackedJob conn "snapshot" "bookmark:1" (object ["bookmark_id" .= (1 :: Int)])
+                deadId <- enqueueTrackedJob conn "check_dead" "maintenance" (object [])
+                firstClaim <- Egress.claimNextEgressJob conn
+                (jobId <$> firstClaim) `shouldBe` Just snapshotId
+                afterFirst <- Sqlite.query_ conn "SELECT id, state FROM jobs ORDER BY id" :: IO [(Int, Text)]
+                afterFirst `shouldBe` [(snapshotId, "running"), (deadId, "queued")]
+                secondClaim <- Egress.claimNextEgressJob conn
+                (jobId <$> secondClaim) `shouldBe` Just deadId
+                afterSecond <- Sqlite.query_ conn "SELECT id, state FROM jobs ORDER BY id" :: IO [(Int, Text)]
+                afterSecond `shouldBe` [(snapshotId, "running"), (deadId, "running")]
+                noMore <- Egress.claimNextEgressJob conn
+                noMore `shouldBe` Nothing
+                Sqlite.close conn
+
         it "cancels and permanently fails jobs with a reason" $
             withSystemTempDirectory "eza-jobs-fail" $ \dir -> do
                 conn <- Db.openDb (dir </> "fail.db")

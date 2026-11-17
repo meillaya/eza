@@ -59,6 +59,7 @@ spec = describe "Phase A security fixes" $ do
     bodyLimitSpec
     recoveryCsrfSpec
     loginEnumerationSpec
+    loginCaseSpec
 
 -- ---------------------------------------------------------------------------
 -- S1: static asset path traversal
@@ -533,6 +534,36 @@ loginEnumerationSpec = describe "S6 login lockout symmetry" $ do
             unknown <- loginStatuses server "nobody-at-all" 6
             known `shouldBe` [401, 401, 401, 401, 429, 429]
             unknown `shouldBe` known
+
+-- ---------------------------------------------------------------------------
+-- S7: case-insensitive username at the password step
+-- ---------------------------------------------------------------------------
+
+{- | The control database looks accounts up with @COLLATE NOCASE@, so the
+password step must accept the same spelling variants; otherwise a user who
+creates @Alice@ cannot sign in as @alice@ and every attempt counts as a failed
+login toward the account lockout.
+-}
+loginCaseSpec :: Spec
+loginCaseSpec = describe "S7 case-insensitive login" $ do
+    it "signs in a differently-cased username with the correct password" $
+        withTestServer $ \server -> do
+            _ <- createTestUser server "Alice" "alice password" Control.RoleAdmin
+            _ <- loginAs server "alice" "alice password"
+            _ <- loginAs server "ALICE" "alice password"
+            pure ()
+    it "still rejects a wrong password for a differently-cased username" $
+        withTestServer $ \server -> do
+            _ <- createTestUser server "Alice" "alice password" Control.RoleAdmin
+            response <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/auth/login"
+                    jsonHeaders
+                    (Just (encodeJsonObject [("username", "alice"), ("password", "definitely wrong")]))
+            response `shouldHaveStatus` 401
+            hrespBody response `shouldSatisfy` containsText "invalid_credentials"
 
 loginStatuses :: TestServer -> Text -> Int -> IO [Int]
 loginStatuses server username attempts =

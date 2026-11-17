@@ -102,6 +102,17 @@ spec = do
                 absorbedTags <- bookmarkTags conn absorbedA
                 absorbedTags `shouldBe` ["alpha"]
 
+        it "keeps the keeper's created_at when an absorbed duplicate has no date" $
+            withDb $ \conn -> do
+                keeper <- addRaw conn "http://example.com/dated" "Dated" "example.com"
+                absorbed <- addRaw conn "https://example.com/dated" "Undated" "example.com"
+                -- 0 means "no original save date"; it must not win the merge minimum.
+                execute conn "UPDATE bookmarks SET created_at = 0 WHERE id = ?" (Only absorbed)
+                report <- mergeUrlDuplicatesAll conn
+                dmGroups report `shouldBe` 1
+                rows <- query_ conn "SELECT id, created_at FROM bookmarks ORDER BY id" :: IO [(Int, Int)]
+                rows `shouldBe` [(keeper, 1)]
+
         it "does nothing and writes no snapshot when there are no same-URL groups" $
             withDb $ \conn -> do
                 _ <- addRaw conn "https://example.com/one" "One" "example.com"

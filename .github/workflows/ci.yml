@@ -82,7 +82,7 @@ jobs:
       - name: Formal spec checks
         run: devenv shell -- bash scripts/check-specs.sh
       - name: Formatting and lint
-        run: devenv shell -- bash -c 'fourmolu --mode check core server web && hlint core server web'
+        run: devenv shell -- bash -c 'fourmolu --mode check core server web web-logic && hlint core server web web-logic'
       # Drift checks for the documents contributors and agents read first: the
       # AGENTS.md layout vs the tracked source directories, the version copies
       # named by scripts/version.sh, and generated reference tables.

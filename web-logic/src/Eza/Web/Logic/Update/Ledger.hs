@@ -229,26 +229,28 @@ handle = \case
         let ids = IS.toList (mSelection m)
             tags = splitTags (mTagPromptValue m)
             adding = mTagPrompt m == Just True
-        if null ids
-            then notify "Select at least one bookmark first" ToastInfo
-            else
-                if null tags
-                    then notify "Type at least one tag" ToastInfo
-                    else do
-                        putModel (\x -> x{gLedger = (gLedger x){lfBulkBusy = True, lfTagPrompt = Nothing, lfTagPromptValue = ""}})
-                        bulkUpdate
-                            (if adding then BulkAddTags tags else BulkRemoveTags tags)
-                            ids
-                            BulkActionDone
-                            BulkActionFailed
+        unless (mBulkBusy m) $
+            if null ids
+                then notify "Select at least one bookmark first" ToastInfo
+                else
+                    if null tags
+                        then notify "Type at least one tag" ToastInfo
+                        else do
+                            putModel (\x -> x{gLedger = (gLedger x){lfBulkBusy = True, lfTagPrompt = Nothing, lfTagPromptValue = ""}})
+                            bulkUpdate
+                                (if adding then BulkAddTags tags else BulkRemoveTags tags)
+                                ids
+                                BulkActionDone
+                                BulkActionFailed
     BulkMark readFlag -> do
         m <- get
         let ids = IS.toList (mSelection m)
-        if null ids
-            then notify "Select at least one bookmark first" ToastInfo
-            else do
-                putModel (\x -> x{gLedger = (gLedger x){lfBulkBusy = True}})
-                bulkUpdate (BulkMarkRead readFlag) ids BulkActionDone BulkActionFailed
+        unless (mBulkBusy m) $
+            if null ids
+                then notify "Select at least one bookmark first" ToastInfo
+                else do
+                    putModel (\x -> x{gLedger = (gLedger x){lfBulkBusy = True}})
+                    bulkUpdate (BulkMarkRead readFlag) ids BulkActionDone BulkActionFailed
     BulkDeleteRequest -> do
         m <- get
         if IS.null (mSelection m)
@@ -257,8 +259,9 @@ handle = \case
     BulkDeleteCancel -> putModel (\m -> m{gLedger = (gLedger m){lfConfirmBulkDelete = False}})
     BulkDeleteConfirm -> do
         m <- get
-        putModel (\x -> x{gLedger = (gLedger x){lfConfirmBulkDelete = False, lfBulkBusy = True}})
-        bulkUpdate BulkDelete (IS.toList (mSelection m)) BulkActionDone BulkActionFailed
+        unless (mBulkBusy m) $ do
+            putModel (\x -> x{gLedger = (gLedger x){lfConfirmBulkDelete = False, lfBulkBusy = True}})
+            bulkUpdate BulkDelete (IS.toList (mSelection m)) BulkActionDone BulkActionFailed
     BulkActionDone updated -> do
         putModel
             ( \m ->

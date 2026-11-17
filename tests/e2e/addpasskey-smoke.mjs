@@ -1,34 +1,58 @@
-import { chromium } from "@playwright/test";
+// Add-passkey smoke: claim a fresh account, register a passkey through
+// /account/add-passkey with a CDP virtual authenticator, and prove the account
+// reports one more credential and the page redirects back to /account. Every
+// step asserts; a missing page, a failed ceremony, or a credential that is not
+// persisted fails the suite instead of printing a log line.
+import { launchBrowser, launchPage, newChecker } from "./lib/dom.mjs";
+
 const BASE = process.env.EZA_BASE || "http://localhost:8092";
-const browser = await chromium.launch({ headless: true });
-const context = await browser.newContext();
-const page = await context.newPage();
-const cdp = await context.newCDPSession(page);
-await cdp.send("WebAuthn.enable", { enableUI: false });
-await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
-await page.goto(BASE + "/setup", { waitUntil: "networkidle" });
-await page.fill("#username", process.env.EZA_TEST_USER || "e2e");
-await page.fill("#password", process.env.EZA_TEST_PASSWORD || "e2e-password-123");
-await page.fill("#confirm-password", process.env.EZA_TEST_PASSWORD || "e2e-password-123");
-await page.click("#password-setup");
-await page.waitForSelector("#recovery:not([hidden])", { timeout: 30000 });
-const before = await page.evaluate(async () => (await (await fetch("/api/v1/account")).json()).credentials.length);
-await page.goto(BASE + "/account/add-passkey", { waitUntil: "networkidle" });
-const addButton = await page.locator("#passkey-add").count();
-console.log("add page title:", await page.title(), "button:", addButton, "url:", page.url());
-if (addButton === 0) {
-  // Password accounts are the primary login; the add-passkey page retires
-  // passkey-first setup, which 0.4 no longer offers.
-  console.log("passkey enrollment retired for password accounts");
-  await browser.close();
-  process.exit(0);
+const USER = process.env.EZA_TEST_USER || "e2e";
+const PASSWORD = process.env.EZA_TEST_PASSWORD || "e2e-password-123";
+
+const { check, report } = newChecker();
+const browser = await launchBrowser();
+const { context, page, errors } = await launchPage(browser);
+
+async function credentialCount() {
+  return page.evaluate(async () => {
+    const response = await fetch("/api/v1/account");
+    if (!response.ok) return -1;
+    const body = await response.json();
+    return Array.isArray(body.credentials) ? body.credentials.length : -1;
+  });
 }
-await page.click("#passkey-add");
-await page.waitForTimeout(3000);
-console.log("error:", await page.locator("#auth-error").innerText().catch(() => "?"));
-console.log("url:", page.url());
-await page.screenshot({ path: ".dsh-cache/addpasskey.png" });
-try { await page.waitForURL("**/account", { timeout: 5000 }); } catch (_) {}
-const after = await page.evaluate(async () => (await (await fetch("/api/v1/account")).json()).credentials.length);
-console.log("passkeys before/after:", before, after);
-await browser.close();
+
+try {
+  await page.goto(BASE + "/setup", { waitUntil: "networkidle" });
+  await page.fill("#username", USER);
+  await page.fill("#password", PASSWORD);
+  await page.fill("#confirm-password", PASSWORD);
+  await page.click("#password-setup");
+  await page.waitForSelector("#recovery:not([hidden])", { timeout: 30000 });
+  check("setup reaches the recovery panel", true);
+
+  const before = await credentialCount();
+  check("the fresh account has no passkeys", before === 0, String(before));
+
+  await page.goto(BASE + "/account/add-passkey", { waitUntil: "networkidle" });
+  check("the add-passkey page renders", (await page.title()).length > 0);
+  const addButton = page.locator("#passkey-add");
+  check("the add-passkey button is present", (await addButton.count()) === 1);
+
+  await Promise.all([
+    page.waitForURL((url) => url.pathname === "/account", { timeout: 30000 }),
+    addButton.click(),
+  ]);
+  check("registration redirects back to the account page", true);
+  await page.waitForLoadState("networkidle").catch(() => {});
+
+  const after = await credentialCount();
+  check("registration adds one passkey to the account", after === before + 1, `${before} -> ${after}`);
+
+  const jsErrors = errors.filter((error) => !/Failed to load resource/.test(error));
+  check("no page errors", jsErrors.length === 0, jsErrors.slice(0, 3).join(" | "));
+} finally {
+  await context.close();
+  await browser.close();
+  report(errors);
+}

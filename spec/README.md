@@ -156,9 +156,12 @@ these invariants. Current bounds find about 48,000 (`MultiUser`), 232,000
 (`Extensions`), 2,000 (`Jobs`) and 216,000 (`Undo`) distinct states.
 
 The JSON checks are shape checks. `view.schema.json` and
-`webhook.schema.json` are draft 2020-12 schemas. The validator in the script
-checks the schemas themselves and the fixtures when a JSON-Schema validator is
-available; otherwise `jq` checks the same constraints the schemas state.
+`webhook.schema.json` are draft 2020-12 schemas. `scripts/check-specs.sh`
+requires a validator (`python3` with the `jsonschema` package, provided by the
+dev shell) and fails instead of skipping the pass when it is missing: it checks
+the schemas themselves and validates every example and every `bad/` document.
+The `jq` checks in the same script are an earlier, hand-written shape pass that
+runs before the full schema validation.
 
 ## What is not proven
 

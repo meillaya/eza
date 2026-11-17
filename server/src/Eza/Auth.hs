@@ -239,6 +239,17 @@ randomToken n = TE.decodeUtf8 . B64.encodeUnpadded <$> getRandomBytes n
 hashToken :: Text -> Text
 hashToken raw = T.pack (show (hash (TE.encodeUtf8 raw) :: Digest SHA256))
 
+{- | Fold a username for the password-step comparison. The control database
+looks accounts up with @COLLATE NOCASE@ (ASCII case folding), so the second
+check against the account database must fold the same way: a user who signs in
+as @alice@ for the stored name @Alice@ reaches the account, and then must not
+be rejected by a case-sensitive compare. Stored usernames keep their original
+spelling; only this comparison is folded, and it is still constant-time for a
+fixed input length.
+-}
+foldUsername :: Text -> BS.ByteString
+foldUsername = TE.encodeUtf8 . T.toLower . T.strip
+
 base64Id :: BS.ByteString -> Text
 base64Id = TE.decodeUtf8 . B64.encodeUnpadded
 
@@ -462,7 +473,7 @@ verifyPasswordLogin conn ac suppliedUsername suppliedPassword = do
                 knownUsername = acctUsername account
                 usernameMatches =
                     not (T.null knownUsername)
-                        && Password.constantTimeEq (TE.encodeUtf8 (T.strip suppliedUsername)) (TE.encodeUtf8 knownUsername)
+                        && Password.constantTimeEq (foldUsername suppliedUsername) (foldUsername knownUsername)
                 storedHash = acctPasswordHash account
             if T.null storedHash || not usernameMatches
                 then do

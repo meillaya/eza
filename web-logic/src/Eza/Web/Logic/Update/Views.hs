@@ -230,11 +230,12 @@ handle = \case
             definition = case vuSaveKind ui of
                 EV.GraphKind -> currentGraphDefinition m
                 EV.LedgerKind -> currentLedgerDefinition m
-        if T.null name
-            then putModel (\x -> x{gViews = (gViews x){vwViewUi = (mViewUi x){vuError = Just "a name is required"}}})
-            else do
-                putModel (\x -> x{gViews = (gViews x){vwViewUi = (mViewUi x){vuBusy = True, vuError = Nothing}}})
-                createView (EV.ViewInput name (vuSaveKind ui) definition Nothing) ViewSaved ViewSaveFailed
+        unless (vuBusy ui) $
+            if T.null name
+                then putModel (\x -> x{gViews = (gViews x){vwViewUi = (mViewUi x){vuError = Just "a name is required"}}})
+                else do
+                    putModel (\x -> x{gViews = (gViews x){vwViewUi = (mViewUi x){vuBusy = True, vuError = Nothing}}})
+                    createView (EV.ViewInput name (vuSaveKind ui) definition Nothing) ViewSaved ViewSaveFailed
     ViewSaveCancel ->
         putModel (\x -> x{gViews = (gViews x){vwViewUi = (mViewUi x){vuSaveOpen = False, vuBusy = False, vuError = Nothing}}})
     ViewImportOpen ->

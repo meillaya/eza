@@ -227,7 +227,9 @@ nothing.
 
 The hint under the search line is a `⇧K` button and opens the palette. Bare `k`
 moves the ledger cursor on the ledger and inbox; on every other screen it opens
-the palette too. The graph focuses its canvas when the page opens, so `+`, `-`,
+the palette too. The palette lists commands, saved searches and actions only;
+records are looked up from the search line and the ledger. The graph focuses its
+canvas when the page opens, so `+`, `-`,
 `0`, `f` and the arrow keys work without tabbing first; `Esc` works from any
 focus and clears the graph filter line before the selection.
 

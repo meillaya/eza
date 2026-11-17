@@ -5,7 +5,8 @@ module Eza.Snapshot (
     captureSnapshot,
 ) where
 
-import Control.Exception (SomeException, try)
+import Control.Concurrent.Async (AsyncCancelled)
+import Control.Exception (AsyncException, SomeException, fromException, tryJust)
 import Control.Monad (void, when)
 import Data.Char (toLower)
 import Data.Text (Text)
@@ -56,14 +57,14 @@ captureSnapshot cfg snapshotDirectory conn bid = do
     capture sourceUrl = do
         createDirectoryIfMissing True snapshotDirectory
         result <-
-            try (timeout (30 * 1000000) (readProcessWithExitCode (cfgMonolith cfg) ["-o", partialPath, T.unpack sourceUrl] "")) ::
+            tryNonAsync (timeout (30 * 1000000) (readProcessWithExitCode (cfgMonolith cfg) ["-o", partialPath, T.unpack sourceUrl] "")) ::
                 IO (Either SomeException (Maybe (ExitCode, String, String)))
         captured <- case result of
             Right (Just (ExitSuccess, _, _)) -> withinLimit partialPath
             _ -> pure False
         if captured
             then do
-                renamed <- try (renameFile partialPath targetPath) :: IO (Either SomeException ())
+                renamed <- tryNonAsync (renameFile partialPath targetPath) :: IO (Either SomeException ())
                 case renamed of
                     Left _ -> discardPartialFile >> pure Nothing
                     Right () -> do
@@ -85,7 +86,24 @@ captureSnapshot cfg snapshotDirectory conn bid = do
 
     discardPartialFile = do
         exists <- doesFileExist partialPath
-        when exists $ void (try (removeFile partialPath) :: IO (Either SomeException ()))
+        when exists $ void (tryNonAsync (removeFile partialPath) :: IO (Either SomeException ()))
+
+{- | Run an action and catch synchronous failures only: asynchronous exceptions
+(worker cancellation) are rethrown so cancelling a snapshot worker stops it
+instead of being recorded as a failed capture. @AsyncCancelled@ is not an
+@AsyncException@ subtype, so both are checked.
+-}
+tryNonAsync :: IO a -> IO (Either SomeException a)
+tryNonAsync action = tryJust isSyncFailure action
+  where
+    isSyncFailure err
+        | isAsync err = Nothing
+        | otherwise = Just err
+    isAsync err = case fromException err :: Maybe AsyncException of
+        Just _ -> True
+        Nothing -> case fromException err :: Maybe AsyncCancelled of
+            Just _ -> True
+            Nothing -> False
 
 {- | Only an absolute http(s) URL whose host passes the public-address policy
 may be fetched. The check happens before the tool is spawned.

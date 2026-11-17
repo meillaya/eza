@@ -279,7 +279,7 @@ docker compose run --rm eza /bin/eza-bookmarks restore /data/backups/<stamp> --y
 ## Features
 
 - [x] Full-text search over title, description, URL, note, extracted text and source domain
-- [x] `tag:`, `is:unread`, `is:dead`, `link:`, `year:`, `day:` and `-term` filters, ordered by bm25
+- [x] `tag:`, `is:unread`, `is:dead`, `link:`, `year:`, `day:` and `-term` filters; text hits first, then the selected sort
 - [x] Ledger with accession numbers, year dividers, source and tag facets and a field drawer
 - [x] Inbox, saved searches and a command palette
 - [x] History index by year, filing day and source
@@ -411,7 +411,9 @@ Node sidecar (`EZA_DEFUDDLE_CMD`) handles extraction for the server. See
 
 Graph keys apply on `/graph`, with no dialog layer and no text field focused. The
 hint under the search line is a `⇧K` button. Sign out lives at the end of the
-section links, in the mobile bar, on the account page and in the palette.
+section links, in the mobile bar, on the account page and in the palette. The
+palette lists commands, saved searches and actions only; records are looked up
+from the search line and the ledger.
 
 </details>
 

@@ -41,10 +41,16 @@ import Eza.Api.Common
 import Eza.Api.Context
 import Eza.Api.Graph (viewsCreateHandler, viewsUpdateHandler)
 
+{- | The clip family: the routes a cross-origin clipper may call with a capture
+or write token. Quick-save is a capture-token route with its own CORS preflight,
+so it belongs to the same family as @clip@ itself; leaving it out made the
+bearer origin guard reject the extension origin after a successful preflight.
+-}
 isClipPath :: [Text] -> Bool
 isClipPath path = case path of
     ("api" : "v1" : "clip" : _) -> True
     ("api" : "v1" : "clip-templates" : _) -> True
+    ["api", "v1", "quick-save"] -> True
     ["api", "v1", "whoami"] -> True
     _ -> False
 
@@ -106,7 +112,7 @@ clipSaveHandler :: Config -> Connection -> Request -> (Response -> IO ResponseRe
 clipSaveHandler cfg conn req respond = do
     body <- readBodyLimited (8 * 1024 * 1024) req
     case body of
-        Left () -> respond (jsonProblem status413 "payload_too_large" "clip body must be at most 8 MiB")
+        Left () -> respond (withCors cfg req (jsonProblem status413 "payload_too_large" "clip body must be at most 8 MiB"))
         Right raw -> case eitherDecode raw of
             Left err -> respond (withCors cfg req (jsonProblem status400 "bad_request" (T.pack err)))
             Right request -> do
@@ -129,14 +135,14 @@ clipPreviewHandler :: Config -> Connection -> Request -> (Response -> IO Respons
 clipPreviewHandler cfg conn req respond = do
     body <- readBodyLimited (8 * 1024 * 1024) req
     case body of
-        Left () -> respond (payloadTooLargeResponse cfg)
+        Left () -> respond (withCors cfg req (payloadTooLargeResponse cfg))
         Right raw -> case eitherDecode raw of
-            Left err -> respond (jsonProblem status400 "bad_request" (T.pack err))
+            Left err -> respond (withCors cfg req (jsonProblem status400 "bad_request" (T.pack err)))
             Right request -> do
                 result <- previewClip conn request
                 case result of
                     Left err -> respond (clipErrorResponse cfg req err)
-                    Right preview -> respond (jsonResponse status200 preview)
+                    Right preview -> respond (withCors cfg req (jsonResponse status200 preview))
 
 whoAmI :: Config -> Connection -> Request -> AuthContext -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 whoAmI cfg conn req ctx respond =

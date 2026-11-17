@@ -3,10 +3,11 @@
 #
 #   devenv shell -- docs        # or: bash scripts/check-docs.sh
 #
-# The checks are intentionally boring and mechanical: they catch the two drift
+# The checks are intentionally boring and mechanical: they catch the drift
 # classes that have already bitten this repository (a source directory missing
-# from the AGENTS.md layout, and the version string copied into deployment
-# files) and, once the generators exist, reject stale generated reference docs.
+# from the AGENTS.md layout, the version string copied into deployment files,
+# and a docs/figures image deleted while README.md and docs/ still reference it)
+# and reject stale generated reference docs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,11 +44,21 @@ done
 # knows where the copies live.
 bash scripts/version.sh --check || fail "version drift between flake.nix and its copies"
 
+# -------------------------------------------------------- local file refs ---
+# README.md and every docs/**/*.md may attach figures/screenshots and link to
+# neighbouring pages. A moved or deleted target must fail here; this is the
+# drift class that would otherwise publish a broken README header or an
+# architecture page with missing images.
+command -v python3 >/dev/null 2>&1 \
+  || fail "python3 not found; run inside 'devenv shell' (devenv.nix provides python3)"
+python3 scripts/check-doc-links.py "$ROOT" \
+  || fail "README.md or docs/ references a missing local file (see the paths above)"
+
 # -------------------------------------------------------- generated docs -----
-# Route and configuration reference tables are generated from the Haskell
-# definitions, never hand-edited. A generator that cannot be found is an error
-# only when the generated file is tracked, so this check works both before and
-# after the generator lands.
+# Route reference tables are generated from the Haskell definitions, never
+# hand-edited. A generator that cannot be found is an error only when the
+# generated file is tracked, so this check works both before and after the
+# generator lands.
 if [ -f docs/generated/routes.md ]; then
   tmp="$(mktemp)"
   if ! cabal run -v0 eza-bookmarks -- routes --markdown >"$tmp" 2>/dev/null; then
@@ -57,19 +68,6 @@ if [ -f docs/generated/routes.md ]; then
   if ! diff -u docs/generated/routes.md "$tmp"; then
     rm -f "$tmp"
     fail "docs/generated/routes.md is stale; regenerate it with 'cabal run eza-bookmarks -- routes --markdown > docs/generated/routes.md'"
-  fi
-  rm -f "$tmp"
-fi
-
-if [ -f docs/generated/env.md ]; then
-  tmp="$(mktemp)"
-  if ! cabal run -v0 eza-bookmarks -- env --markdown >"$tmp" 2>/dev/null; then
-    rm -f "$tmp"
-    fail "could not generate the environment reference (cabal run eza-bookmarks -- env --markdown)"
-  fi
-  if ! diff -u docs/generated/env.md "$tmp"; then
-    rm -f "$tmp"
-    fail "docs/generated/env.md is stale; regenerate it with 'cabal run eza-bookmarks -- env --markdown > docs/generated/env.md'"
   fi
   rm -f "$tmp"
 fi

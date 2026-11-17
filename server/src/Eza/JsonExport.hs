@@ -282,8 +282,8 @@ exportJson conn = do
                 , "captured_at" .= ecCapturedAt c
                 , "created_at" .= ecCreatedAt c
                 ]
-        searchValue (sid, name, q, tags, created) = object ["id" .= sid, "name" .= name, "q" .= q, "tags" .= tags, "created_at" .= created]
-        ruleValue (rid, name, enabled, ruleFieldName, rulePattern, tags, markRead, created) = object ["id" .= rid, "name" .= name, "enabled" .= (enabled /= 0), "field" .= ruleFieldName, "pattern" .= rulePattern, "add_tags" .= tags, "mark_read" .= (markRead /= 0), "created_at" .= created]
+        searchValue (sid, name, q, tags, created) = object ["id" .= sid, "name" .= name, "q" .= q, "tags" .= textListValue tags, "created_at" .= created]
+        ruleValue (rid, name, enabled, ruleFieldName, rulePattern, tags, markRead, created) = object ["id" .= rid, "name" .= name, "enabled" .= (enabled /= 0), "field" .= ruleFieldName, "pattern" .= rulePattern, "add_tags" .= textListValue tags, "mark_read" .= (markRead /= 0), "created_at" .= created]
     pure
         ( object
             [ "format" .= ("eza-json" :: Text)
@@ -773,7 +773,7 @@ importJson conn value =
     parseSearch = withObject "saved_search" $ \o -> do
         name <- o .: "name" :: Parser Text
         q <- o .:? "q" .!= ("" :: Text)
-        tags <- o .:? "tags" .!= []
+        tags <- o .:? "tags" >>= tagListField
         created <- o .:? "created_at" .!= (0 :: Int)
         pure (name, q, tags :: [Text], created)
     parseRule = withObject "rule" $ \o -> do
@@ -781,9 +781,31 @@ importJson conn value =
         enabled <- o .:? "enabled" .!= True
         ruleFieldName <- o .:? "field" .!= "url"
         rulePattern <- o .: "pattern"
-        tags <- o .:? "add_tags" .!= []
+        tags <- o .:? "add_tags" >>= tagListField
         markRead <- o .:? "mark_read" .!= False
         pure (name, enabled, ruleFieldName, rulePattern, tags :: [Text], markRead)
+
+{- | The saved-search tag list and the rule add-tags are stored as JSON text in
+their columns; export them as a real array so the importer decodes the document
+instead of skipping the row.
+-}
+textListValue :: Text -> Value
+textListValue raw = case decode (LBS.fromStrict (TE.encodeUtf8 raw)) :: Maybe [Text] of
+    Just tags -> toJSON (filter (not . T.null) tags)
+    Nothing -> toJSON ([] :: [Text])
+
+{- | Tag lists in a JSON export: current documents carry an array, version-1 and
+older documents carry the stored JSON text as a string. Accept both so an old
+export still imports (and counts as imported rather than skipped).
+-}
+tagListField :: Maybe Value -> Parser [Text]
+tagListField Nothing = pure []
+tagListField (Just Null) = pure []
+tagListField (Just (String raw)) =
+    pure $ case decode (LBS.fromStrict (TE.encodeUtf8 raw)) :: Maybe [Text] of
+        Just tags -> tags
+        Nothing -> []
+tagListField (Just value) = parseJSON value
 
 dedupeTags :: [Text] -> [Text]
 dedupeTags = go []

@@ -69,8 +69,10 @@ WASM size gate: the bundle must pass `scripts/build-web.sh` with its recorded
 hard ceilings. The product target is `< 1,700,000 B` gzip; the hard ceilings
 are the guard against an accidental debug/dependency build. Any ceiling change
 needs a written reason in `scripts/build-web.sh` and
-`docs/program/README.md`, plus a recovery plan. The M4-D exception
-(8,000,000/2,300,000) must be reversed by the M7 size pass before release.
+`docs/program/README.md`, plus a recovery plan. The ceilings were temporarily
+raised for the M4-D async-job client (8,000,000/2,300,000) and the M7
+Model-partition pass restored them to the current 7,800,000/2,250,000; keep
+those values unless a new recorded reason exists.
 
 Nix gates:
 
@@ -120,8 +122,10 @@ git push origin v<version>
 
 Pushing the tag runs `.github/workflows/release.yml` (creates the GitHub
 release from the tagged tree) and then `.github/workflows/release-image.yml`
-(publishes the versioned container image and its Compose file). Do not
-hand-publish an image that was not built from the tagged revision.
+(publishes the versioned container image and its Compose file). The image
+workflow builds the release tag for both automatic and manually dispatched
+runs, and refuses to publish when the checked-out revision is not that tag. Do
+not hand-publish an image that was not built from the tagged revision.
 
 ## 5. Post-release
 

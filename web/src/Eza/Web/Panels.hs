@@ -1136,7 +1136,13 @@ viewSaveDialog m =
         , H.div_
             [HP.class_ "dialog__actions"]
             [ H.button_
-                [HP.class_ "btn btn--sm btn--strong", HP.type_ "button", testId "view-save-submit", HE.onClick ViewSaveSubmit]
+                ( [ HP.class_ "btn btn--sm btn--strong"
+                  , HP.type_ "button"
+                  , testId "view-save-submit"
+                  , HE.onClick ViewSaveSubmit
+                  ]
+                    ++ attrDisabled (vuBusy ui)
+                )
                 [text "save view"]
             , H.button_
                 [HP.class_ "btn btn--sm", HP.type_ "button", testId "view-save-cancel", HE.onClick ViewSaveCancel]
@@ -3414,11 +3420,13 @@ webhookForm m =
             Just message -> H.p_ [HP.class_ "add-error", HP.role_ "alert"] [text (ms message)]
             Nothing -> H.span_ [] []
         , H.button_
-            [ HP.class_ "btn btn--sm btn--strong"
-            , HP.type_ "button"
-            , testId "webhook-create"
-            , HE.onClick WebhookCreate
-            ]
+            ( [ HP.class_ "btn btn--sm btn--strong"
+              , HP.type_ "button"
+              , testId "webhook-create"
+              , HE.onClick WebhookCreate
+              ]
+                ++ attrDisabled (mWebhookBusy m)
+            )
             [text (if mWebhookBusy m then "creating…" else "create webhook")]
         ]
 

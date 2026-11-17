@@ -1058,7 +1058,7 @@ selectionBar m =
     selAct label action =
         H.button_
             ( [HP.class_ "ledg-act", HP.type_ "button", HE.onClick action]
-                ++ disabledAttr (mSelectingAll m)
+                ++ disabledAttr (mSelectingAll m || mBulkBusy m)
             )
             [txt label]
 
@@ -1509,8 +1509,8 @@ paletteView m =
                         [ HP.id_ "palette-input"
                         , HP.class_ "slip-input"
                         , HP.type_ "text"
-                        , HP.placeholder_ "search or type a command"
-                        , HP.aria_ "label" "Search commands and records"
+                        , HP.placeholder_ "type a command"
+                        , HP.aria_ "label" "Search commands"
                         , HP.autofocus_ True
                         , HP.value_ (ms (mPaletteQ m))
                         , HP.autocomplete_ "off"

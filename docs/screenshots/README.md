@@ -10,9 +10,10 @@ visible on the share page.
 The history pair was recaptured from the same scratch library after the archive
 page became History.
 
-The set is sixteen PNGs at 1440 pixels wide with a device pixel ratio of 2, in
-eight light and dark pairs. Every shot is 1440x900 except the cropped history
-pair (1440x561). Every screen is captured twice with the application's own
+The set is sixteen PNGs captured at a 1440x900 CSS-pixel viewport with device
+pixel ratio 2, in eight light and dark pairs; the committed files are 2880x1800
+except the cropped history pair (2880x1122). Every screen is captured twice with
+the application's own
 theme switch (the nav control on application screens, `window.EzaTheme.set` on
 the server-rendered pages), so the dark files show the reading-room theme as
 the application renders it, not a CSS override. The history pair is cropped
@@ -37,9 +38,9 @@ image:
    `devenv shell`:
 
    ```
-   EZA_DATA_DIR=.eza-scratch-shots EZA_DB=.eza-scratch-shots/eza.db \
+   EZA_DATA_DIR=.eza-scratch-shots \
      cabal run eza-bookmarks -- init
-   EZA_DATA_DIR=.eza-scratch-shots EZA_DB=.eza-scratch-shots/eza.db \
+   EZA_DATA_DIR=.eza-scratch-shots \
    EZA_STATIC_DIR=static EZA_BIND=127.0.0.1:8100 \
    PUBLIC_ORIGIN=http://localhost:8100 EZA_RP_ID=localhost \
    cabal run eza-bookmarks -- serve
@@ -48,7 +49,7 @@ image:
 2. Run the tracked capture script against it from the same shell:
 
    ```
-   EZA_BASE=http://localhost:8100 EZA_DB=.eza-scratch-shots/users/1/eza.db \
+   EZA_BASE=http://localhost:8100 \
    EZA_TEST_USER=design EZA_TEST_PASSWORD=design-pass-123 \
    EZA_SHOT_QUERY="tag:literature" EZA_FEATURE_ID=18311 \
    EZA_SEED_IMPORT=/path/to/bookmarks_14_08_2026.html \
@@ -111,8 +112,10 @@ same record, so the detail and graph pairs tell one story. The share shot is
 captured in both themes from the same server-rendered page.
 An explicit `EZA_SEED_READER=1` enables the old fixture-seeding escape hatch
 for a demo only; it is off by default and must not be used for the checked-in
-reference screenshots. `EZA_SHOT_QUERY` narrows the ledger shots to a query if
-a representative slice is wanted.
+reference screenshots. That escape hatch also reads `EZA_DB` (point it at the
+account library, `users/<id>/eza.db`); the normal capture path does not use
+`EZA_DB`. `EZA_SHOT_QUERY` narrows the ledger shots to a query if a
+representative slice is wanted.
 
 `EZA_SEED_IMPORT` points the import at another export file, and
 `EZA_SEED_IMPORT=0` keeps the library already on the server.

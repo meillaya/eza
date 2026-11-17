@@ -45,6 +45,7 @@ spec :: Spec
 spec = describe "server auth/egress/route fixes" $ do
     originGuardSpec
     publicMethodSpec
+    clipCorsSpec
     jsonImportLimitSpec
     loginLimiterSpec
     ipv6GuardSpec
@@ -247,6 +248,122 @@ publicMethodSpec = describe "#42 HEAD and OPTIONS on public routes" $ do
             check "/assets/eza.css" "GET, HEAD, OPTIONS"
             check "/login" "GET, HEAD, OPTIONS"
             check "/api/auth/login" "POST, OPTIONS"
+
+-- ---------------------------------------------------------------------------
+-- Clip CORS: quick-save and clip errors are readable cross-origin
+-- ---------------------------------------------------------------------------
+
+{- | The clip family is cross-origin: quick-save is a capture-token route with
+its own preflight, so the real request and every clip/quick-save error response
+must carry @Access-Control-Allow-Origin@ for an allowed extension origin, and a
+disallowed web origin must still be rejected without the header.
+-}
+clipCorsSpec :: Spec
+clipCorsSpec = describe "clip CORS and quick-save origin" $ do
+    it "accepts an extension origin on quick-save with a capture token and returns ACAO" $
+        withTestServer $ \server -> do
+            _ <- createTestUser server "alice" "alice password" Control.RoleAdmin
+            (session, csrf) <- loginAs server "alice" "alice password"
+            token <- createCaptureToken server session csrf
+            let origin = "chrome-extension://abcdefghijklmnop"
+                headers =
+                    [ ("Origin", TE.encodeUtf8 origin)
+                    , ("Authorization", "Bearer " <> TE.encodeUtf8 token)
+                    , ("Content-Type", "application/json")
+                    ]
+            saved <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/v1/quick-save"
+                    headers
+                    (Just (encode (object ["url" .= ("https://example.test/clip-cors-quick-save" :: Text), "title" .= ("quick" :: Text)])))
+            saved `shouldHaveStatus` 201
+            headerValue saved "Access-Control-Allow-Origin" `shouldBe` Just (TE.encodeUtf8 origin)
+
+    it "returns ACAO on clip preview success and on a handler error" $
+        withTestServer $ \server -> do
+            _ <- createTestUser server "alice" "alice password" Control.RoleAdmin
+            (session, csrf) <- loginAs server "alice" "alice password"
+            token <- createCaptureToken server session csrf
+            let origin = "chrome-extension://abcdefghijklmnop"
+                headers =
+                    [ ("Origin", TE.encodeUtf8 origin)
+                    , ("Authorization", "Bearer " <> TE.encodeUtf8 token)
+                    , ("Content-Type", "application/json")
+                    ]
+            preview <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/v1/clip/preview"
+                    headers
+                    (Just (encode (object ["url" .= ("https://example.test/clip-cors-preview" :: Text), "title" .= ("preview" :: Text)])))
+            preview `shouldHaveStatus` 200
+            headerValue preview "Access-Control-Allow-Origin" `shouldBe` Just (TE.encodeUtf8 origin)
+            malformed <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/v1/clip/preview"
+                    headers
+                    (Just (LBS.fromStrict "{not json"))
+            malformed `shouldHaveStatus` 400
+            headerValue malformed "Access-Control-Allow-Origin" `shouldBe` Just (TE.encodeUtf8 origin)
+
+    it "returns ACAO on a clip guard error even when the token is invalid" $
+        withTestServer $ \server -> do
+            _ <- createTestUser server "alice" "alice password" Control.RoleAdmin
+            let origin = "chrome-extension://abcdefghijklmnop"
+                headers =
+                    [ ("Origin", TE.encodeUtf8 origin)
+                    , ("Authorization", "Bearer eza_pat_u1_bogus")
+                    , ("Content-Type", "application/json")
+                    ]
+            rejected <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/v1/clip"
+                    headers
+                    (Just (encode (object ["url" .= ("https://example.test/clip-cors-guard" :: Text)])))
+            rejected `shouldHaveStatus` 401
+            headerValue rejected "Access-Control-Allow-Origin" `shouldBe` Just (TE.encodeUtf8 origin)
+            errorCode rejected `shouldBe` Just "unauthenticated"
+
+    it "keeps rejecting a disallowed web origin on quick-save with no ACAO" $
+        withTestServer $ \server -> do
+            _ <- createTestUser server "alice" "alice password" Control.RoleAdmin
+            (session, csrf) <- loginAs server "alice" "alice password"
+            token <- createCaptureToken server session csrf
+            let headers =
+                    [ ("Origin", "https://evil.example")
+                    , ("Authorization", "Bearer " <> TE.encodeUtf8 token)
+                    , ("Content-Type", "application/json")
+                    ]
+            rejected <-
+                httpRequest
+                    server
+                    "POST"
+                    "/api/v1/quick-save"
+                    headers
+                    (Just (encode (object ["url" .= ("https://example.test/clip-cors-evil" :: Text)])))
+            rejected `shouldHaveStatus` 403
+            errorCode rejected `shouldBe` Just "origin"
+            headerValue rejected "Access-Control-Allow-Origin" `shouldBe` Nothing
+
+-- | Create one capture-scoped API token and return its wire form.
+createCaptureToken :: TestServer -> Text -> Text -> IO Text
+createCaptureToken server session csrf = do
+    created <-
+        httpRequest
+            server
+            "POST"
+            "/api/v1/tokens"
+            (authHeaders session csrf)
+            (Just (encode (object ["name" .= ("clip-cors" :: Text), "scopes" .= (["capture"] :: [Text])])))
+    created `shouldHaveStatus` 201
+    expectJust "capture token" (jsonTextField "token" (hrespBody created))
 
 -- ---------------------------------------------------------------------------
 -- #34: JSON import body limit

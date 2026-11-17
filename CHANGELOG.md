@@ -7,6 +7,20 @@ outputs are the installable artifacts; both are built from the same revision.
 
 ### Client polish
 
+- The command palette lists commands, saved searches and actions only. It no
+  longer mixes recent records into the slip, so the list stays scannable;
+  record lookup stays on the search line and the ledger.
+- The graph filter and saved graph-view queries use the shared search grammar:
+  `tag:`, `year:`, `day:`, `is:unread`, `is:dead` and `-term` behave like the
+  ledger instead of silently matching nothing.
+- The prune "click again to confirm" arm is cleared by any selection change, so
+  the second click can only confirm the set the user armed.
+- The single-record delete dialog no longer claims the action cannot be undone;
+  it matches the journaled undo and the bulk dialog.
+- Webhook create, view save and the bulk actions are busy-guarded, so a double
+  click does not send a duplicate write.
+- Toast placement and the focus rings on the search line, palette and note
+  editor are restored (an undefined CSS variable and later `outline: 0` rules).
 - Webhook test failures are visible per webhook (the failure carries the
   webhook id and clears on retry/success; an abandoned test reports
   "cancelled").
@@ -23,10 +37,40 @@ outputs are the installable artifacts; both are built from the same revision.
 - A failed saved-search background refresh keeps the previous list and raises
   one toast until a successful refresh.
 
+### Server
+
+- The egress worker claims one job per iteration. It used to claim one job per
+  kind and run only the first, leaving the other kinds `running` forever; the
+  stuck job then replied to dedupe and a process restart was the only recovery.
+- `EZA_LOG_LEVEL=debug` no longer selects the wai-extra detailed logger, which
+  printed request bodies and parameters (plaintext passwords, recovery codes)
+  into stdout. Debug and info both log one access line without bodies.
+- Password login folds the username case like the control-database lookup, so
+  a mixed-case sign-in no longer fails and counts toward the lockout.
+- The clipper's quick-save route is part of the clip CORS family, and clip
+  error/413 responses carry the CORS headers the preflight promises.
+- Worker catch-all handlers rethrow asynchronous cancellation, so disabling an
+  account or shutting down with a job in flight cannot hang the supervisor.
+- The JSON export writes saved-search tags and rule add-tags as arrays (legacy
+  string documents still import), so a portable backup no longer silently
+  drops every saved search and rule.
+- Dedupe merge keeps the earliest non-zero filing date; an undated duplicate no
+  longer zeroes the keeper's `created_at`.
+
 ### Repository
 
 - `AGENTS.md` is tracked again: the project knowledge base is part of the
   checkout and validated by `scripts/check-docs.sh`.
+- The docs/CI gates now catch what they claim: `check-docs.sh` checks local
+  images and links (new `check-doc-links.py`), `check-notices.sh` covers the
+  `hackagePkgWith` pins (20 instead of 18), `check-specs.sh` validates every
+  `spec/bad` fixture including `bad-slug.json`, and CI lint includes
+  `web-logic`.
+- Docs follow 0.4: the webhook-test 202 job flow, healthz examples, compose
+  provenance/data layout, release-image dispatch (builds the release tag and
+  checks the commit), and the command-palette description.
+- The add-passkey e2e script now asserts page render and the credential count
+  instead of exiting 0 without checks.
 
 ## 0.4.0.0
 

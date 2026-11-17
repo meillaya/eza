@@ -26,11 +26,13 @@ handle = \case
     PruneFailed err -> do
         putModel (\m -> m{gMaint = (gMaint m){mnPruneError = Just ((aeMessage err))}})
         handleApiError err
-    PruneToggle bookmarkId -> putModel (\m -> m{gMaint = (gMaint m){mnPruneSel = toggleMember bookmarkId (mPruneSel m)}})
+    -- Any change to the candidate set disarms the prune confirmation: the arm
+    -- names a count, so it must not survive a different selection.
+    PruneToggle bookmarkId -> putModel (\m -> m{gMaint = (gMaint m){mnPruneSel = toggleMember bookmarkId (mPruneSel m), mnConfirmPrune = False}})
     PruneAll -> do
         m <- get
         let allIds = map bsId (mPrune m)
-        putModel (\x -> x{gMaint = (gMaint x){mnPruneSel = if length (mPruneSel x) == length allIds then [] else allIds}})
+        putModel (\x -> x{gMaint = (gMaint x){mnPruneSel = if length (mPruneSel x) == length allIds then [] else allIds, mnConfirmPrune = False}})
     PruneRun -> do
         m <- get
         if null (mPruneSel m)

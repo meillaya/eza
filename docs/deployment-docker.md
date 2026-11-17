@@ -103,7 +103,7 @@ The same binary provides `healthcheck` (for HEALTHCHECK / probes), `backup`,
 | `EZA_MAX_BODY_BYTES` | `8388608` | Limit for authenticated JSON request bodies; oversize returns 413. |
 | `EZA_IMPORT_MAX_BYTES` | `33554432` | Limit for one import upload (Netscape HTML or eza JSON). |
 | `EZA_MONOLITH` | `monolith` | Snapshot tool (on PATH in the image). |
-| `EZA_LOG_LEVEL` | `info` | `debug` logs a development request line, `info` one access line per request, `warn`/`error` disable access logging (error lines still reach stderr). |
+| `EZA_LOG_LEVEL` | `info` | `debug` and `info` log one access line per request; request and response bodies are never logged. `warn`/`error` disable access logging (error lines still reach stderr). |
 | `EZA_ENRICH_WORKERS` | `2` | Process-wide enrichment concurrency; `0` disables the per-account enrichment loop. |
 | `EZA_FETCH_TIMEOUT_MS` | `8000` | Timeout per outbound fetch (server clamps below 1000). |
 | `EZA_FAVICON_MAX_BYTES` | `262144` | Maximum favicon download size. Complete ICO entries are cropped before storage. |
@@ -133,7 +133,7 @@ The image defines a Docker healthcheck that runs the shipped CLI:
     eza-bookmarks healthcheck
 
 It performs `GET /healthz` on `EZA_BIND` and exits 0 only on HTTP 200.
-`/healthz` returns `200 {"status":"ok","version":"0.1.0"}` when the database
+`/healthz` returns `200 {"status":"ok","version":"0.4.0.0"}` when the database
 answers, and `503` otherwise. Compose/UI show `(healthy)` after the 15 s
 start period. Use the same command/endpoint for external monitoring.
 
@@ -323,4 +323,4 @@ after upgrading so records previously marked dead by a 403 become live.
 | `healthy` never becomes true | `/healthz` 503 → database problem; run `docker compose exec eza eza-bookmarks verify`. |
 | Passkeys fail | Origin must be HTTPS and match `PUBLIC_ORIGIN`; `EZA_RP_ID` must be its host. |
 | Permission denied in /data | Host bind mount not owned by 10001; fix on the host. |
-| Web UI 404 | Image built before the release asset was pinned; rebuild `.#docker`. |
+| Web UI 404 | The static tree is missing or incomplete: check `EZA_STATIC_DIR` points at a directory with `asset-manifest.json` under `share/eza/static`, then rebuild the image (`nix build .#docker`) or the bundle (`scripts/build-web.sh`). |

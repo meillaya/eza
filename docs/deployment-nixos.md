@@ -20,6 +20,12 @@ The deployment binary is **eza-bookmarks**:
     eza-bookmarks bench [N]
     eza-bookmarks version
 
+The module does not add this CLI to the system `PATH`; run the commands through
+the deployment package's store path
+(`nix build --no-link --print-out-paths .#eza-bookmarks`) as the `eza` user, or
+use `nix run` with the pinned flake revision. The Docker image is the case where
+`eza-bookmarks` is on `PATH` (see [deployment-docker.md](deployment-docker.md)).
+
 ## Prerequisites
 
 - NixOS with flakes enabled (24.11+; tested on nixos-unstable).
@@ -88,7 +94,7 @@ Then:
 
 ```bash
 sudo nixos-rebuild switch --flake .#host
-curl -fsS https://eza.tail1234.ts.net/healthz   # {"status":"ok","version":"0.1.0"}
+curl -fsS https://eza.example.com/healthz   # {"status":"ok","version":"0.4.0.0"}
 ```
 
 Open the origin in a browser: the first visit redirects to `/setup`, where the
@@ -130,7 +136,7 @@ All options live under `services.eza`:
 | `publicOrigin` | `https://<caddy.hostname>` or `http://localhost:<port>` | Browser-visible origin (`PUBLIC_ORIGIN`). Passkeys are bound to it. |
 | `rpId` | host of `publicOrigin` | WebAuthn relying-party ID (`EZA_RP_ID`); host only, no scheme/port. |
 | `rpName` | `eza` | Relying-party display name (`EZA_RP_NAME`). |
-| `logLevel` | `info` | `EZA_LOG_LEVEL`: `debug` logs a development request line, `info` one access line per request, `warn`/`error` disable access logging. |
+| `logLevel` | `info` | `EZA_LOG_LEVEL`: `debug` and `info` log one access line per request (bodies are never logged), `warn`/`error` disable access logging. |
 | `allowPrivateFetch` | `false` | `EZA_ALLOW_PRIVATE_FETCH`; permits fetching private/RFC1918 URLs. Leave off (SSRF guard). |
 | `enrichWorkers` | `2` | `EZA_ENRICH_WORKERS`: in-process background enrichment workers; 0 disables them. |
 | `fetchTimeoutMs` | `8000` | `EZA_FETCH_TIMEOUT_MS`: timeout per outbound fetch (server clamps below 1000). |
