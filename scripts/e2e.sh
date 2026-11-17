@@ -131,6 +131,7 @@ SCRIPTS=(
   graph-views-smoke.mjs
   pwa-smoke.mjs
   addpasskey-smoke.mjs
+  extension-popup-smoke.mjs
 )
 
 # Scripts that claim the first account themselves. They run against an empty
@@ -158,6 +159,13 @@ EXCLUDED_SCRIPTS=(
   docker-first-run.mjs
   # Utilities, not assertions.
   capture-screenshots.mjs
+  # Browser-extension smoke: it needs a Chromium build that still supports
+  # side-loading an extension headlessly. The Nix/Playwright Chromium in this
+  # development shell crashes at launch and branded Chrome ignores
+  # --load-extension, so run it manually with a compatible Chromium (or a
+  # browser-test image that installs Playwright's own Chromium) and see
+  # extension/README.md for the Firefox manual checklist.
+  extension-smoke.mjs
   graph-perf.mjs
   load-perf.mjs
   login-visual-check.mjs

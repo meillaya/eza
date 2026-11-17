@@ -3,51 +3,65 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Save to eza</title>
+    <title>eza clipper</title>
     <link rel="stylesheet" href="ui.css" />
   </head>
-  <body>
+  <body class="popup">
     <main>
       <header>
+        <img id="brand-icon" src="icons/icon-32.png" alt="" width="22" height="22" />
         <h1>eza</h1>
+        <span id="version" class="hint version"></span>
         <button id="open-options" class="link" type="button">Options</button>
       </header>
 
       <section id="loading-panel" aria-live="polite">
-        <p class="hint">Reading the page…</p>
+        <p class="hint">Checking this page…</p>
       </section>
 
       <section id="setup-panel" hidden>
-        <p>Connect the clipper to your eza server before saving anything.</p>
+        <p>Connect the clipper to your eza server before adding anything.</p>
         <div class="row">
           <button id="setup-open-options" class="primary" type="button">Open options</button>
         </div>
       </section>
 
-      <section id="clip-panel" hidden>
+      <section id="add-panel" hidden>
         <span id="page-url" class="url-line"></span>
         <label for="title">Title</label>
         <input id="title" type="text" autocomplete="off" spellcheck="true" />
         <label for="tags">Tags <span class="hint">comma separated</span></label>
         <input id="tags" type="text" autocomplete="off" placeholder="reading, design" />
-        <label for="template">Template</label>
-        <select id="template"></select>
-        <label class="checkline selection-row" id="selection-row" hidden>
-          <input id="include-selection" type="checkbox" />
-          Include the selected text
-        </label>
-        <p id="extractor-note" class="note" hidden></p>
+        <p id="lookup-note" class="note" hidden></p>
+        <p id="permission-note" class="note" hidden></p>
+        <p id="page-text-note" class="note" hidden></p>
         <div class="row">
-          <button id="save" class="primary" type="button">Save to eza</button>
+          <button id="add-bookmark" class="primary" type="button">Add bookmark</button>
+          <button id="add-page-text" type="button">Add page text</button>
+          <button id="grant-access" type="button" hidden>Grant access</button>
         </div>
-        <div id="clip-status" role="status" aria-live="polite"></div>
+        <div id="add-status" class="status" role="status" aria-live="polite"></div>
+      </section>
+
+      <section id="saved-panel" hidden>
+        <p class="eyebrow">In your library</p>
+        <span id="saved-url" class="url-line"></span>
+        <h2 id="saved-title"></h2>
+        <p id="saved-tags" class="tag-line"></p>
+        <p id="saved-read" class="hint"></p>
+        <p id="page-text-note-saved" class="note" hidden></p>
+        <div class="row">
+          <button id="open-in-eza" class="primary" type="button">Open in eza</button>
+          <button id="saved-add-page-text" type="button">Add page text</button>
+        </div>
+        <div id="saved-status" class="status" role="status" aria-live="polite"></div>
       </section>
 
       <section id="done-panel" hidden>
         <p id="done-text"></p>
         <div class="row">
-          <button id="open-library" class="primary" type="button">Open eza</button>
-          <button id="done-again" type="button">Save another</button>
+          <button id="done-open-library" class="primary" type="button">Open eza</button>
+          <button id="done-again" type="button">Close</button>
         </div>
       </section>
 

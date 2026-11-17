@@ -2592,7 +2592,7 @@ paletteEntries m = filter matches (fileRecord ++ savedSearches ++ sections ++ ac
         T.null needle
             || needle `T.isInfixOf` T.toLower (toTextLow label <> " " <> toTextLow hint)
 
-    fileRecord = [("file a record", "add", AddOpen)]
+    fileRecord = [("add bookmark", "add", AddOpen)]
 
     savedSearches =
         [ (ssName saved, "saved search", SavedSearchApply saved)

@@ -279,7 +279,7 @@ routeSubtitle = \case
     Maintenance -> "Dead links, prune, undo."
     Account -> "Account settings."
     History -> "Filing by year and source."
-    Save _ _ _ -> "File a record."
+    Save _ _ _ -> "Add a bookmark."
     NotFound -> "Not found."
 
 -- --------------------------------------------------------------- encoding ---

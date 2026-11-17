@@ -18,6 +18,7 @@
 // this process.
 
 import { ApiError, payloadFingerprint, saveClip, saveClipWithRetry, stablePayload } from '../src/api.js';
+import { CLIENT } from '../src/version.js';
 
 const config = {
   schema: 1,
@@ -33,7 +34,7 @@ const basePayload = {
   selection: '',
   tags: ['reading'],
   source: 'extension',
-  client: 'eza-clipper/0.1.0',
+  client: CLIENT,
   content_markdown: '# The Quiet Ledger',
   content_text: 'The Quiet Ledger',
   captured_at: 1762549200,

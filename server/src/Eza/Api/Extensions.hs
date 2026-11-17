@@ -46,6 +46,8 @@ import Eza.Api.Graph (viewsCreateHandler, viewsUpdateHandler)
 or write token. Quick-save is a capture-token route with its own CORS preflight,
 so it belongs to the same family as @clip@ itself; leaving it out made the
 bearer origin guard reject the extension origin after a successful preflight.
+The saved-page lookup is the status badge's capture-read route and takes the
+same extension origins and preflight, so its exact path is in the family too.
 -}
 isClipPath :: [Text] -> Bool
 isClipPath path = case path of
@@ -53,6 +55,7 @@ isClipPath path = case path of
     ("api" : "v1" : "clip-templates" : _) -> True
     ["api", "v1", "quick-save"] -> True
     ["api", "v1", "whoami"] -> True
+    ["api", "v1", "bookmarks", "lookup"] -> True
     _ -> False
 
 isExtensionOrigin :: Text -> Bool

@@ -3,14 +3,25 @@
 // Rules that matter:
 //   * The capture token travels only in the Authorization header.
 //   * Requests use credentials: 'omit'; the extension never relies on cookies.
+//   * The page URL under inspection is a query value (encodeURIComponent), so
+//     a URL containing '&', '#', spaces, or non-ASCII text cannot break the
+//     request or smuggle anything into it. The token is never a query value.
 //   * One Idempotency-Key per logical save. saveClipWithRetry retries a
 //     network failure/timeout/429/5xx with the same key, so the server replays
 //     its stored result instead of filing a duplicate capture.
+//   * The status lookup and quick-save are one-shot: they never retry.
 //   * No request or response body is ever logged, and no error message includes
 //     the token.
 
 import { apiUrl, isConfigured } from './config.js';
 import { CLIENT } from './version.js';
+
+/** Capture-read route for the saved-page indicator. */
+export const LOOKUP_PATH = '/api/v1/bookmarks/lookup';
+/** A lookup is a background check; it must not hang a tab refresh. */
+export const LOOKUP_TIMEOUT_MS = 5000;
+/** Minimal bookmark route used by "Add bookmark". */
+export const QUICK_SAVE_PATH = '/api/v1/quick-save';
 
 /** A failed API call with the server's error code when there is one. */
 export class ApiError extends Error {
@@ -56,6 +67,57 @@ export async function listTemplates(config) {
     }
     throw error;
   }
+}
+
+/**
+ * GET /api/v1/bookmarks/lookup?url=... — is this exact page already saved?
+ *
+ * The page URL is encoded with encodeURIComponent as the single query value.
+ * The request is a capture-read: it answers one exact normalized URL and never
+ * returns notes, extracted text, or captures. There is no retry; a failure is
+ * a status the UI can show, not an error to hammer the server with.
+ * @param {import('./config.js').DEFAULT_CONFIG} config
+ * @param {string} pageUrl the active tab's URL
+ * @param {{timeoutMs?: number}} [options] timeout override for tests
+ * @returns {Promise<{url: string, bookmark: object | null}>}
+ */
+export async function lookupBookmark(config, pageUrl, options = {}) {
+  if (typeof pageUrl !== 'string' || !pageUrl.trim()) {
+    throw new ApiError('There is no page URL to look up.', { code: 'client_error' });
+  }
+  const query = LOOKUP_PATH + '?url=' + encodeURIComponent(pageUrl.trim());
+  const timeoutMs =
+    Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? Math.floor(options.timeoutMs) : LOOKUP_TIMEOUT_MS;
+  return request(config, query, { method: 'GET', timeoutMs });
+}
+
+/**
+ * POST /api/v1/quick-save — add a bookmark without extracting page text.
+ *
+ * The server answers 200 `{id, existing:true}` for a known URL or 201
+ * `{id, existing:false}` for a new one. The title and tags are the values the
+ * user confirmed; an existing bookmark keeps its own title and tags.
+ * @param {import('./config.js').DEFAULT_CONFIG} config
+ * @param {{url: string, title?: string, tags?: string[]}} bookmark
+ * @returns {Promise<{id: number, existing: boolean}>}
+ */
+export async function quickSaveBookmark(config, bookmark) {
+  const url = bookmark && typeof bookmark.url === 'string' ? bookmark.url.trim() : '';
+  if (!url) throw new ApiError('There is no page URL to save.', { code: 'client_error' });
+  const title = bookmark && typeof bookmark.title === 'string' ? bookmark.title.trim() : '';
+  const rawTags = bookmark && Array.isArray(bookmark.tags) ? bookmark.tags : [];
+  const seen = new Set();
+  const tags = [];
+  for (const raw of rawTags) {
+    const tag = String(raw == null ? '' : raw).trim();
+    if (!tag) continue;
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tags.push(tag);
+    if (tags.length >= 100) break;
+  }
+  return request(config, QUICK_SAVE_PATH, { method: 'POST', body: { url, title, tags } });
 }
 
 /**

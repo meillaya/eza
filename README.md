@@ -372,20 +372,24 @@ Details and the event catalogue are in [docs/extensions.md](docs/extensions.md).
 
 ### Clipper
 
-The Chromium MV3 clipper extracts the readable page in the browser and posts a
-typed clip to `/api/v1/clip` with a capture token. Load `extension/` unpacked for
-the no-build version with the built-in extractor, or bundle Defuddle for better
-extraction:
+The eza clipper for Chrome and Firefox is the everyday companion to the
+library. It adds the current page with **Add bookmark**, shows a small check on
+the toolbar icon when the page is already saved, and opens the saved record in
+eza. Page text is captured only when you ask for it, so the extension stays
+lightweight. The store build is dependency-free; the optional Defuddle bundle
+is a local power-user build.
 
 ```bash
-bash scripts/build-extension.sh --with-defuddle   # writes extension/dist
+bash scripts/build-extension.sh                  # dist/chrome, dist/firefox and both store ZIPs
+bash scripts/build-extension.sh --with-defuddle  # optional local build with Defuddle
 ```
 
-`Ctrl+Shift+Y` saves the page, `Ctrl+Shift+U` saves the selection; the token lives
-in the extension and is sent only as a bearer header. The bookmarklet opens
-`/save`, a PWA share target backs the mobile route, and an optional JSON-lines
-Node sidecar (`EZA_DEFUDDLE_CMD`) handles extraction for the server. See
-[extension/README.md](extension/README.md) and [docs/clipper.md](docs/clipper.md).
+`Ctrl+Shift+Y` adds a bookmark, `Ctrl+Shift+U` adds the selection; the token
+lives in the extension and is sent only as a bearer header. The bookmarklet
+opens `/save`, a PWA share target backs the mobile route, and an optional
+JSON-lines Node sidecar (`EZA_DEFUDDLE_CMD`) handles extraction for the server.
+See [extension/README.md](extension/README.md), [docs/clipper.md](docs/clipper.md)
+and the [extension privacy policy](docs/extension-privacy.md).
 
 ---
 

@@ -1,13 +1,26 @@
 {
   "manifest_version": 3,
   "name": "eza clipper",
-  "version": "0.1.0",
-  "description": "Save the current page, or just the selection, to your eza library.",
+  "version": "0.2.0",
+  "description": "Add the current page to your eza library and see when it is already saved.",
+  "short_name": "eza clipper",
+  "homepage_url": "https://github.com/meillaya/eza",
   "minimum_chrome_version": "116",
-  "license": "Apache-2.0",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "action": {
-    "default_title": "Save to eza",
-    "default_popup": "popup.html"
+    "default_title": "eza \u2014 add bookmark",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
   },
   "background": {
     "service_worker": "background.js",
@@ -18,26 +31,27 @@
     "activeTab",
     "scripting",
     "storage",
-    "contextMenus"
+    "contextMenus",
+    "tabs"
   ],
   "optional_host_permissions": [
     "http://*/*",
     "https://*/*"
   ],
   "commands": {
-    "save-page": {
+    "add-bookmark": {
       "suggested_key": {
         "default": "Ctrl+Shift+Y",
         "mac": "Command+Shift+Y"
       },
-      "description": "Save the current page to eza"
+      "description": "Add the current page to eza"
     },
-    "save-selection": {
+    "add-selection": {
       "suggested_key": {
         "default": "Ctrl+Shift+U",
         "mac": "Command+Shift+U"
       },
-      "description": "Save the current selection to eza"
+      "description": "Add the selected text to eza"
     }
   }
 }

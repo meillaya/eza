@@ -51,6 +51,7 @@ publicRoutes =
     , ("OPTIONS", ["api", "v1", "clip"])
     , ("OPTIONS", ["api", "v1", "clip", "preview"])
     , ("OPTIONS", ["api", "v1", "quick-save"])
+    , ("OPTIONS", ["api", "v1", "bookmarks", "lookup"])
     ]
 
 shareRoutes :: [(Text, [Text])]
@@ -114,6 +115,7 @@ tokenRoutes =
     [ ("GET", ["api", "v1", "whoami"])
     , ("GET", ["api", "v1", "boot"])
     , ("GET", ["api", "v1", "bookmarks"])
+    , ("GET", ["api", "v1", "bookmarks", "lookup"])
     , ("POST", ["api", "v1", "bookmarks"])
     , ("POST", ["api", "v1", "bookmarks", "bulk"])
     , ("GET", ["api", "v1", "bookmarks", "1"])
@@ -205,18 +207,9 @@ authzSpec = describe "Eza.Authz" $ do
     it "lets read tokens read and write tokens read/write, on token routes only" $
         forM_ tokenRoutes $ \(method, path) -> do
             let isRead = T.toUpper method `elem` ["GET", "HEAD"]
-                isCaptureWrite =
-                    method == "POST"
-                        && path
-                            `elem` [ ["api", "v1", "quick-save"]
-                                   , ["api", "v1", "clip"]
-                                   , ["api", "v1", "clip", "preview"]
-                                   ]
-                isCaptureRead =
-                    T.toUpper method `elem` ["GET", "HEAD"]
-                        && ( path == ["api", "v1", "whoami"]
-                                || take 3 path == ["api", "v1", "clip-templates"]
-                           )
+                capability = requiredCapability method path
+                isCaptureWrite = capability == Just CapCaptureWrite
+                isCaptureRead = capability == Just CapCaptureRead
             tokenAllows [ScopeRead] method path `shouldBe` (isCaptureRead || (isRead && not isCaptureWrite))
             tokenAllows [ScopeWrite] method path `shouldBe` True
             tokenAllows [ScopeCapture] method path `shouldBe` (isCaptureWrite || isCaptureRead)

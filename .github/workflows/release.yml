@@ -108,6 +108,11 @@ jobs:
           (\`packages.<system>.eza-bookmarks\` and \`packages.<system>.eza-web\`); no
           separate web bundle download is published for this release.
 
+          The release also carries \`eza-clipper-<version>-chrome.zip\` and
+          \`eza-clipper-<version>-firefox.zip\`, the store-ready browser extension
+          packages. They are uploaded to the Chrome Web Store and Firefox Add-ons
+          manually; see \`extension/store/README.md\`.
+
           EOF
           )"
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -117,3 +122,21 @@ jobs:
             gh release create "$TAG" --title "eza $TAG" --notes "$notes"
             echo "::notice::created release $TAG"
           fi
+
+      - name: Build browser extension packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          node extension/build.mjs --target all --out extension/dist
+          for archive in extension/dist/eza-clipper-*.zip; do
+            echo "::notice::built $(basename "$archive") ($(du -h "$archive" | cut -f1))"
+          done
+
+      - name: Attach browser extension packages
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" extension/dist/eza-clipper-*.zip --clobber
+          echo "::notice::attached the Chrome and Firefox store packages to $TAG"

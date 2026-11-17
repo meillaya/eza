@@ -1,0 +1,23 @@
+{
+  "background": {
+    "scripts": [
+      "background.js"
+    ],
+    "type": "module"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "eza-clipper@eza.dev",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": [
+          "browsingActivity",
+          "bookmarksInfo"
+        ],
+        "optional": [
+          "websiteContent"
+        ]
+      }
+    }
+  }
+}

@@ -146,12 +146,16 @@ saw the row, and the prune view uses it.
 
 ## Capture and extraction
 
-The browser extension extracts the current page with Defuddle and sends a
-typed `ClipRequest` to `POST /api/v1/clip`. The server normalizes the URL,
-inserts or finds the bookmark, writes a `captures` row, applies clip templates
-and save rules, and stores the rendered Markdown as the note. Capture tokens
-are scoped to whoami/clip/template reads; template writes need a session.
-Idempotency keys make extension retries safe.
+The browser extension is one Chrome/Firefox source tree with two generated
+manifests. Adding a bookmark is a minimal `POST /api/v1/quick-save`; the
+toolbar saved-page indicator calls `GET /api/v1/bookmarks/lookup` for the
+active tab's exact URL and renders only the bookmark summary. A full reading
+capture is sent as a typed `ClipRequest` to `POST /api/v1/clip` only when the
+user asks for page text or a selection. The server normalizes the URL, inserts
+or finds the bookmark, writes a `captures` row, applies clip templates and save
+rules, and stores the rendered Markdown as the note. Capture tokens are scoped
+to whoami/clip/template reads, the lookup, and quick-save; template writes need
+a session. Idempotency keys make clip retries safe.
 
 The in-process TagSoup extractor remains the default for background
 enrichment. When `EZA_DEFUDDLE_CMD` is set, `Eza.Enrich` first sends the page

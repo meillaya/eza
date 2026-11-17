@@ -150,6 +150,7 @@ test-suite eza-test
                     IsolationSpec
                     LedgerSpec
                     LibrarySpec
+                    LookupSpec
                     MigrationSpec
                     JobsSpec
                     JournalSpec

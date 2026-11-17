@@ -29,7 +29,7 @@ static/  CSS, auth pages, WASI loader, built WASM
 spec/    bounded TLA+ models and JSON Schemas for the extension contract
 nix/     NixOS module, package, Docker image, web bundle
 deploy/  Docker Compose stack
-extension/ Chromium MV3 clipper source and checks
+extension/ Chrome and Firefox MV3 clipper source and store packages
 sidecar/ optional JSON-lines extraction sidecar
 scripts/ devenv command implementations, build and release helpers
 docs/    API, architecture, deployment, import, performance, figures
@@ -208,11 +208,15 @@ There is no Makefile. The devenv scripts are the command surface.
   browser clipper; `chrome-extension://`, `moz-extension://`, and
   `safari-web-extension://` origins are accepted for bearer capture routes.
 - Capture tokens are limited. A `capture` token may only `GET
-  /api/v1/whoami`, `GET /api/v1/clip-templates`, `POST /api/v1/clip`,
+  /api/v1/whoami`, `GET /api/v1/clip-templates`,
+  `GET /api/v1/bookmarks/lookup`, `POST /api/v1/clip`,
   `POST /api/v1/clip/preview`, and `POST /api/v1/quick-save`; template writes
   require a browser session. The clipper sends `Authorization: Bearer` and
   `Idempotency-Key`, never a cookie, and never places the token in a URL or
-  log. The clip API supports CORS preflight before the auth guard.
+  log. The clip family (including lookup and quick-save) supports CORS
+  preflight before the auth guard. Lookup answers for one exact normalized URL
+  and returns only the bookmark summary, never notes, extracted text, or
+  captures.
 
 ## Extension rules
 
@@ -230,6 +234,19 @@ There is no Makefile. The devenv scripts are the command surface.
 - The formal specs in `spec/` are bounded design checks, not refinement
   proofs. Do not claim a proof of the implementation; update the specs,
   schemas, examples, and bad fixtures together when a contract changes.
+- The browser clipper is one cross-browser source tree. `extension/build.mjs`
+  writes the Chrome manifest (MV3 service worker) and the Firefox manifest
+  (MV3 event page plus `browser_specific_settings`); the store build is the
+  plain build with no Defuddle bundle, no remote code, and no content scripts.
+  WebExtension APIs go through `extension/src/browser.js`; never call
+  `chrome.*` directly elsewhere. Page text is extracted only after an explicit
+  user action.
+- The toolbar saved-page indicator is a capture-read lookup for the active
+  tab's exact URL. The Firefox manifest declares `browsingActivity` and
+  `bookmarksInfo` as required data collection and `websiteContent` as
+  optional; changing what the clipper sends requires updating
+  `data_collection_permissions`, `docs/extension-privacy.md`, and
+  `extension/store/README.md` together.
 
 ## Conventions
 

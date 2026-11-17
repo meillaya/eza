@@ -153,6 +153,7 @@ session.
 GET    /healthz
 GET    /api/v1/boot
 GET    /api/v1/bookmarks
+GET    /api/v1/bookmarks/lookup?url=...
 POST   /api/v1/bookmarks
 POST   /api/v1/quick-save
 POST   /api/v1/bookmarks/bulk
@@ -201,6 +202,19 @@ queries never fail on a bad row.
 The route returns a `SearchPage`. `POST /api/v1/bookmarks` takes
 `{"url","title","tags"}` and returns 201 `{"id":N}`. It returns 409 when the
 normalized URL already exists.
+
+`GET /api/v1/bookmarks/lookup?url=<encoded>` is the saved-page indicator the
+browser extension paints on its toolbar button. It answers for one absolute
+`http(s)` URL of at most 8192 bytes: the server normalizes it (scheme and host
+case, a leading `www.`, the default port, the fragment, tracking parameters,
+and a trailing slash) and returns 200
+`{"url":Text,"bookmark":BookmarkSummary|null}`. `bookmark` is `null` when the
+page is not saved, never omitted and never a 404; the document carries only the
+summary fields, never notes, extracted text, or captures. A missing, invalid,
+or over-long `url` is a 400 `bad_request`, and an unauthenticated request is a
+401. The route accepts a `capture` token as well as a `read` or `write` token,
+and it is part of the clip CORS family, so an allowed extension origin gets its
+preflight and the `Access-Control-Allow-Origin` header.
 
 `POST /api/v1/quick-save` takes `{"url","title","tags"}`, normalizes the URL,
 returns 200 with `{"id","existing":true}` for a duplicate, or inserts a
@@ -720,6 +734,7 @@ finished deliveries older than 30 days are purged.
 ## Browser clipper
 
 ```
+GET    /api/v1/bookmarks/lookup?url=...
 GET    /api/v1/whoami
 POST   /api/v1/clip
 POST   /api/v1/clip/preview
@@ -739,10 +754,12 @@ and `needs_enrichment`. A replay with the same key and request hash returns
 200 with `replayed:true`; the same key with a different payload is 409
 `idempotency_conflict`. `POST /api/v1/clip/preview` renders the template
 without writing. `GET /api/v1/whoami` returns the authenticated username
-(cookie session) or token name/scopes (bearer). Capture tokens may only read
-templates and call whoami/clip; template writes need a browser session.
+(cookie session) or token name/scopes (bearer). Capture tokens may only call
+the saved-page lookup, read templates, and call `whoami`/`clip`; template
+writes need a browser session.
 
-The clipper CORS preflight runs before the auth guard. Allowed origins come
+The clipper CORS preflight (which covers the saved-page lookup and quick-save)
+runs before the auth guard. Allowed origins come
 from `EZA_CLIP_ORIGINS`, the public origin/allowed origins, and
 `chrome-extension://`, `moz-extension://`, or `safari-web-extension://`
 origins. The clip body limit is 8 MiB; content field limits are enforced by
@@ -755,6 +772,7 @@ template model.
 TagStat         {name: Text, count: Int}
 BookmarkSummary {id, url, title, domain, created_at, added_at, favicon_url,
                  tags: [Text], is_read: Bool, is_dead: Bool, snippet: Maybe Text}
+BookmarkLookup  {url: Text, bookmark: BookmarkSummary | null}
 SearchPage      {items: [BookmarkSummary], total, offset, limit, has_more,
                  year_counts: [[Int, Int]]}
 BootPayload     {version, origin, tags: [TagStat], saved_searches,

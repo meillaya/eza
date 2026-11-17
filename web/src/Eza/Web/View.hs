@@ -1361,7 +1361,7 @@ mobileNav m =
         , H.button_
             [ HP.class_ "m-nav-a m-nav-a--plus"
             , HP.type_ "button"
-            , HP.aria_ "label" "File a record"
+            , HP.aria_ "label" "Add bookmark"
             , HE.onClick AddOpen
             ]
             [text "+"]
@@ -1393,13 +1393,13 @@ savePage m =
         [ H.div_
             [HP.class_ "save-spread"]
             [ H.form_
-                [HP.class_ "save-sheet", HP.aria_ "label" "File a record", HE.onSubmit AddSubmit]
+                [HP.class_ "save-sheet", HP.aria_ "label" "Add bookmark", HE.onSubmit AddSubmit]
                 [ H.div_
                     [HP.class_ "save-head"]
-                    [ H.h2_ [HP.class_ "save-title"] [text "File a record"]
+                    [ H.h2_ [HP.class_ "save-title"] [text "Add bookmark"]
                     , H.p_
                         [HP.class_ "save-lede"]
-                        [text "The record keeps the page address as it arrived."]
+                        [text "The bookmark keeps the page address as it arrived."]
                     ]
                 , H.div_
                     [HP.class_ "save-fields"]
@@ -1435,7 +1435,7 @@ savePage m =
                           ]
                             ++ disabledAttr (mAddBusy m)
                         )
-                        [text (if mAddBusy m then "filing" else "file it")]
+                        [text (if mAddBusy m then "adding" else "add bookmark")]
                     ]
                 ]
             ]
@@ -1748,12 +1748,12 @@ addDialog m =
             , HP.data_ "add-state" (addState m)
             , HP.role_ "dialog"
             , HP.aria_ "modal" "true"
-            , HP.aria_ "label" "File a record"
+            , HP.aria_ "label" "Add bookmark"
             , HE.onClickWithOptions stopPropagation Noop
             ]
             [ H.div_
                 [HP.class_ "dialog__head"]
-                [H.h2_ [HP.class_ "dialog__title"] [text "File a record"], H.kbd_ [] [text "esc"]]
+                [H.h2_ [HP.class_ "dialog__title"] [text "Add bookmark"], H.kbd_ [] [text "esc"]]
             , H.form_
                 [HP.class_ "add-form", HE.onSubmit AddSubmit]
                 [ H.div_
@@ -1794,7 +1794,7 @@ addDialog m =
                           ]
                             ++ disabledAttr (mAddBusy m)
                         )
-                        [text "file it"]
+                        [text "add bookmark"]
                     ]
                 ]
             ]

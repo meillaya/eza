@@ -5,6 +5,7 @@ import Control.Exception (SomeException, try)
 
 import Data.Aeson
 
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 
 import Data.List (isPrefixOf)
@@ -45,6 +46,7 @@ import Eza.SavedSearches (listSavedSearches)
 import Eza.Shares (createShare, listShares, revokeShare)
 
 import Eza.Types
+import Eza.Url (normalizeUrl)
 import Eza.Views (listViews)
 
 import Eza.Api.Common
@@ -284,6 +286,38 @@ quickSaveHandler cfg conn req respond = do
     -- guard wraps its own errors for the same reason (see Eza.Server).
     respondJson = respond . withCors cfg req
 
+-- | The extension's active-tab URL cap for the lookup query parameter.
+lookupUrlMaxBytes :: Int
+lookupUrlMaxBytes = 8 * 1024
+
+{- | @GET /api/v1/bookmarks/lookup?url=...@ is the saved-page indicator: it
+answers for one exact URL with its normalized form and the matching summary
+(@null@ when the page is not saved), and never includes notes, extracted text,
+or captures. It is a capture-read route in the clip family, so the response
+and the validation errors all carry the clip CORS headers for an allowed
+extension origin.
+-}
+bookmarkLookupHandler :: Config -> Connection -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+bookmarkLookupHandler cfg conn req respond =
+    case param "url" req of
+        Nothing -> respondJson (jsonProblem status400 "bad_request" "url query parameter is required")
+        Just raw
+            | BS.length (TE.encodeUtf8 raw) > lookupUrlMaxBytes ->
+                respondJson
+                    ( jsonProblem
+                        status400
+                        "bad_request"
+                        ("url must be at most " <> T.pack (show lookupUrlMaxBytes) <> " bytes")
+                    )
+            | not (isHttpUrl raw) ->
+                respondJson (jsonProblem status400 "bad_request" "url must be http(s)")
+            | otherwise -> do
+                let url = normalizeUrl raw
+                found <- lookupBookmark conn url
+                respondJson (jsonResponse status200 (BookmarkLookup url found))
+  where
+    respondJson = respond . withCors cfg req
+
 data MarkAboveBody = MarkAboveBody (Maybe Int)
 
 instance FromJSON MarkAboveBody where
@@ -377,6 +411,8 @@ dispatch rctx conn route req respond = case route of
     RouteBookmarkList -> do
         page <- listBookmarks conn (listQueryFrom req)
         respond (jsonResponse status200 page)
+    RouteBookmarkLookup ->
+        bookmarkLookupHandler cfg conn req respond
     RouteBookmarkCreate -> addBookmark cfg conn req respond
     RouteBookmarkBulk -> bulkHandler cfg conn req respond
     RouteBookmarkRead bookmarkId -> do
@@ -440,6 +476,7 @@ owns :: Route -> Bool
 owns route = case route of
     RouteBoot -> True
     RouteBookmarkList -> True
+    RouteBookmarkLookup -> True
     RouteBookmarkCreate -> True
     RouteBookmarkBulk -> True
     RouteBookmarkRead _ -> True

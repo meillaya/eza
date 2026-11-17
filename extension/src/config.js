@@ -1,8 +1,14 @@
 // Configuration storage for the clipper.
 //
-// The capture token lives in chrome.storage.local (never sync, never the URL,
-// never a log line). Configuration is validated here so every caller gets the
-// same answer about what "configured" means.
+// The capture token lives in the extension-local storage area (never sync,
+// never a page, never a URL, never a log line). Configuration is validated
+// here so every caller gets the same answer about what "configured" means.
+//
+// This module is imported by the Node test suite, so it must not touch the
+// WebExtension namespace at load time: getApi() is called inside the
+// functions.
+
+import { getApi } from './browser.js';
 
 export const CONFIG_KEY = 'ezaClipper.config';
 export const CONFIG_SCHEMA = 1;
@@ -13,6 +19,8 @@ export const DEFAULT_CONFIG = Object.freeze({
   captureToken: '',
   templateId: 0,
   templateName: 'Default',
+  // Refresh the toolbar saved-page indicator for the active tab.
+  checkActivePage: true,
 });
 
 /**
@@ -21,12 +29,13 @@ export const DEFAULT_CONFIG = Object.freeze({
  * @returns {Promise<typeof DEFAULT_CONFIG>}
  */
 export async function loadConfig() {
-  const stored = await chrome.storage.local.get(CONFIG_KEY);
+  const stored = await getApi().storage.local.get(CONFIG_KEY);
   const value = stored && stored[CONFIG_KEY];
   if (!value || typeof value !== 'object') return { ...DEFAULT_CONFIG };
   return {
     ...DEFAULT_CONFIG,
     ...value,
+    checkActivePage: value.checkActivePage !== false,
     schema: CONFIG_SCHEMA,
   };
 }
@@ -40,7 +49,7 @@ export async function loadConfig() {
 export async function saveConfig(patch) {
   const current = await loadConfig();
   const next = { ...current, ...patch, schema: CONFIG_SCHEMA };
-  await chrome.storage.local.set({ [CONFIG_KEY]: next });
+  await getApi().storage.local.set({ [CONFIG_KEY]: next });
   return next;
 }
 
@@ -101,7 +110,28 @@ export function apiUrl(serverUrl, path) {
 }
 
 /**
- * Origin pattern for chrome.permissions.request/contains.
+ * URL of one bookmark in the web client.
+ * @param {string} serverUrl
+ * @param {number} bookmarkId
+ * @returns {string}
+ */
+export function bookmarkUrl(serverUrl, bookmarkId) {
+  const base = String(serverUrl || '').replace(/\/+$/, '');
+  const id = Number(bookmarkId);
+  return Number.isFinite(id) && id > 0 ? base + '/bookmark/' + Math.floor(id) : base + '/';
+}
+
+/**
+ * URL of the account page in the web client.
+ * @param {string} serverUrl
+ * @returns {string}
+ */
+export function accountUrl(serverUrl) {
+  return apiUrl(serverUrl, '/account');
+}
+
+/**
+ * Origin pattern for permissions.request/contains.
  * @param {string} serverUrl
  * @returns {string | null}
  */
@@ -112,8 +142,8 @@ export function originPattern(serverUrl) {
 }
 
 /**
- * Ask Chrome for access to the configured server origin. Must be called from a
- * user gesture (the options page buttons do).
+ * Ask the browser for access to the configured server origin. Must be called
+ * from a user gesture (the popup and options buttons do).
  * @param {string} serverUrl
  * @returns {Promise<{ok: boolean, granted?: boolean, error?: string}>}
  */
@@ -121,20 +151,35 @@ export async function ensureHostPermission(serverUrl) {
   const pattern = originPattern(serverUrl);
   if (!pattern) return { ok: false, error: 'Configure a valid server address first' };
   try {
-    // Call request first: it must happen inside the click gesture, and Chrome
-    // resolves immediately without a prompt when the origin is already
-    // granted. Awaiting contains() first can lose the gesture.
-    const granted = await chrome.permissions.request({ origins: [pattern] });
-    return { ok: true, granted };
+    // Call request first: it must happen inside the click gesture, and the
+    // browser resolves immediately without a prompt when the origin is
+    // already granted. Awaiting contains() first can lose the gesture.
+    const granted = await getApi().permissions.request({ origins: [pattern] });
+    return { ok: true, granted: Boolean(granted) };
   } catch (error) {
     return { ok: false, error: messageOf(error) };
   }
 }
 
 /**
+ * True when the extension may contact the configured server origin.
+ * @param {string} serverUrl
+ * @returns {Promise<boolean>}
+ */
+export async function hasHostPermission(serverUrl) {
+  const pattern = originPattern(serverUrl);
+  if (!pattern) return false;
+  try {
+    return Boolean(await getApi().permissions.contains({ origins: [pattern] }));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Describe a configuration to the UI without exposing the token.
  * @param {typeof DEFAULT_CONFIG} config
- * @returns {{serverUrl: string, hasToken: boolean, templateId: number, templateName: string}}
+ * @returns {{serverUrl: string, hasToken: boolean, templateId: number, templateName: string, checkActivePage: boolean}}
  */
 export function describeConfig(config) {
   return {
@@ -142,6 +187,7 @@ export function describeConfig(config) {
     hasToken: Boolean(config.captureToken),
     templateId: config.templateId,
     templateName: config.templateName,
+    checkActivePage: config.checkActivePage !== false,
   };
 }
 

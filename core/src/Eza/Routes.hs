@@ -216,6 +216,7 @@ data Route
     | RouteCorsPreflightClipTemplate Int
     | RouteCorsPreflightWhoami
     | RouteCorsPreflightQuickSave
+    | RouteCorsPreflightBookmarkLookup
     | -- public share links
       RouteSharePage Text
     | RouteShareFeed Text
@@ -261,6 +262,7 @@ data Route
     | RouteClipTemplateRead Int
     | RouteBoot
     | RouteBookmarkList
+    | RouteBookmarkLookup
     | RouteBookmarkCreate
     | RouteBookmarkBulk
     | RouteBookmarkRead Int
@@ -359,6 +361,7 @@ routeInfo = \case
     RouteCorsPreflightClipTemplate _ -> row "OPTIONS" "/api/v1/clip-templates/{id}" PublicClass Nothing
     RouteCorsPreflightWhoami -> row "OPTIONS" "/api/v1/whoami" PublicClass Nothing
     RouteCorsPreflightQuickSave -> row "OPTIONS" "/api/v1/quick-save" PublicClass Nothing
+    RouteCorsPreflightBookmarkLookup -> row "OPTIONS" "/api/v1/bookmarks/lookup" PublicClass Nothing
     RouteSharePage _ -> row "GET" "/s/{token}" ShareClass Nothing
     RouteShareFeed _ -> row "GET" "/s/{token}.xml" ShareClass Nothing
     RouteSpaPage -> row "GET" "/{page...}" SessionClass (Just CapSession)
@@ -400,6 +403,7 @@ routeInfo = \case
     RouteClipTemplateRead _ -> row "GET" "/api/v1/clip-templates/{id}" TokenClass (Just CapCaptureRead)
     RouteBoot -> row "GET" "/api/v1/boot" TokenClass (Just CapRead)
     RouteBookmarkList -> row "GET" "/api/v1/bookmarks" TokenClass (Just CapRead)
+    RouteBookmarkLookup -> row "GET" "/api/v1/bookmarks/lookup" TokenClass (Just CapCaptureRead)
     RouteBookmarkCreate -> row "POST" "/api/v1/bookmarks" TokenClass (Just CapWrite)
     RouteBookmarkBulk -> row "POST" "/api/v1/bookmarks/bulk" TokenClass (Just CapWrite)
     RouteBookmarkRead _ -> row "GET" "/api/v1/bookmarks/{id}" TokenClass (Just CapRead)
@@ -515,6 +519,7 @@ allRoutes =
     , RouteCorsPreflightClipTemplate 1
     , RouteCorsPreflightWhoami
     , RouteCorsPreflightQuickSave
+    , RouteCorsPreflightBookmarkLookup
     , RouteSharePage "u1_token"
     , RouteShareFeed "u1_token"
     , RouteSpaPage
@@ -556,6 +561,7 @@ allRoutes =
     , RouteClipTemplateRead 1
     , RouteBoot
     , RouteBookmarkList
+    , RouteBookmarkLookup
     , RouteBookmarkCreate
     , RouteBookmarkBulk
     , RouteBookmarkRead 1
@@ -672,6 +678,9 @@ matchGet path = case path of
     ["api", "v1", "clip-templates", idText] -> RouteClipTemplateRead <$> readInt idText
     ["api", "v1", "boot"] -> Just RouteBoot
     ["api", "v1", "bookmarks"] -> Just RouteBookmarkList
+    -- The extension's saved-page lookup: a fixed segment, so it must be
+    -- matched before the numeric bookmark-id family below.
+    ["api", "v1", "bookmarks", "lookup"] -> Just RouteBookmarkLookup
     ["api", "v1", "bookmarks", idText] -> RouteBookmarkRead <$> readInt idText
     ["api", "v1", "bookmarks", idText, "highlights"] -> RouteHighlightList <$> readInt idText
     ["api", "v1", "bookmarks", idText, "backlinks"] -> RouteBookmarkBacklinks <$> readInt idText
@@ -809,6 +818,7 @@ matchOptions path = case path of
         RouteCorsPreflightClipTemplate <$> readInt idText
     ["api", "v1", "whoami"] -> Just RouteCorsPreflightWhoami
     ["api", "v1", "quick-save"] -> Just RouteCorsPreflightQuickSave
+    ["api", "v1", "bookmarks", "lookup"] -> Just RouteCorsPreflightBookmarkLookup
     _ -> Nothing
 
 {- | The share handler also serves an Atom feed for a saved-search share: the

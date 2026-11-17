@@ -1,7 +1,7 @@
 // Minimal in-page extractor.
 //
-// `extractPage` is serialized by chrome.scripting.executeScript and runs in
-// the page's main world, so it must be completely self-contained: every helper
+// `extractPage` is serialized by the background worker's scripting call and
+// runs in the page's main world, so it must be completely self-contained: every helper
 // is nested, nothing is imported or captured from this module's scope.
 //
 // It is the fallback when the optional Defuddle bundle is not built. The
@@ -409,7 +409,7 @@ export function extractPage() {
     tags: [],
     template_id: null,
     source: 'extension',
-    client: 'eza-clipper/' + '0.1.0',
+    client: 'eza-clipper/' + '0.2.0',
     captured_at: Math.floor(Date.now() / 1000),
     metadata: {
       author: normalizeSpace(author),

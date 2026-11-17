@@ -4,6 +4,7 @@
 -- | Shared DTOs exchanged between the Haskell server and the Miso client.
 module Eza.Types (
     BookmarkSummary (..),
+    BookmarkLookup (..),
     BookmarkDetail (..),
     TagStat (..),
     SearchPage (..),
@@ -28,7 +29,7 @@ module Eza.Types (
     UndoResult (..),
 ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON, genericToJSON, object, withObject, (.:), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON, genericToJSON, object, withObject, (.:), (.:?), (.=))
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
@@ -53,6 +54,36 @@ instance ToJSON BookmarkSummary where
     toJSON = genericToJSON (jsonOptions "bs")
 instance FromJSON BookmarkSummary where
     parseJSON = genericParseJSON (jsonOptions "bs")
+
+{- | The answer to the extension's saved-page lookup: the normalized URL and
+the matching record when the library already holds the page. @bookmark@ is
+@null@, never omitted, when the page is not saved, so the extension can tell
+"not in the library" apart from an old server that does not answer the route.
+
+Only the summary fields travel; notes, extracted text, and captures are not
+part of this document.
+-}
+data BookmarkLookup = BookmarkLookup
+    { bluUrl :: Text
+    , bluBookmark :: Maybe BookmarkSummary
+    }
+    deriving stock (Show, Eq, Generic)
+
+{- | The generic encoder omits 'Nothing' fields, but the lookup contract needs
+@\"bookmark\": null@ in that case, so this document is encoded by hand.
+-}
+instance ToJSON BookmarkLookup where
+    toJSON lookupResult =
+        object
+            [ "url" .= bluUrl lookupResult
+            , "bookmark" .= bluBookmark lookupResult
+            ]
+
+instance FromJSON BookmarkLookup where
+    parseJSON = withObject "BookmarkLookup" $ \o ->
+        BookmarkLookup
+            <$> o .: "url"
+            <*> o .:? "bookmark"
 
 data BookmarkDetail = BookmarkDetail
     { bdId :: Int

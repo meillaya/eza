@@ -5,6 +5,30 @@ outputs are the installable artifacts; both are built from the same revision.
 
 ## Unreleased
 
+### Browser extension
+
+- The clipper is now one Chrome and Firefox extension. `extension/build.mjs`
+  writes a Chrome MV3 service-worker manifest and a Firefox MV3 event-page
+  manifest with `browser_specific_settings`, and packages both store ZIPs; the
+  plain build has no runtime dependencies, no remote code and no content
+  scripts.
+- The toolbar icon shows a small check and a "in your library" tooltip when the
+  active page is already saved. It is backed by the new capture-read
+  `GET /api/v1/bookmarks/lookup` route, which returns only the bookmark summary
+  for the exact normalized URL.
+- The popup is an **Add bookmark** action (`POST /api/v1/quick-save`) with
+  editable title and tags, an **Open in eza** link, and an optional **Add page
+  text** capture that runs only on request. The options page adds a
+  saved-page check toggle, a lookup-aware connection test and a token-creation
+  link.
+- The browser extension has app icons (16/32/48/128), store listing and
+  permission-justification docs, a privacy policy, and CI/release ZIP
+  artifacts. Firefox declares its data collection and asks for page-content
+  consent at runtime.
+- The in-app add action is renamed from "File a record" to **Add bookmark**
+  across the dialog, `/save` page, mobile action, command palette and
+  bookmarklet copy. The archive's "filing days" language is unchanged.
+
 ### Client polish
 
 - The command palette lists commands, saved searches and actions only. It no

@@ -126,7 +126,10 @@ tokenAllows token method path =
                            ]
         captureRead =
             method == "GET"
-                && ( path == ["api", "v1", "whoami"]
+                && ( path
+                        `elem` [ ["api", "v1", "whoami"]
+                               , ["api", "v1", "bookmarks", "lookup"]
+                               ]
                         || prefix ["api", "v1", "clip-templates"] path
                    )
      in if captureWrite

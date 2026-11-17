@@ -10,6 +10,7 @@ module Eza.Bookmarks (
     allTags,
     insertBookmark,
     findBookmarkIdByUrl,
+    lookupBookmark,
     quickSave,
     updateBookmark,
     updateBookmarkDetailed,
@@ -548,6 +549,31 @@ findBookmarkIdByUrl conn url = do
             params ::
             IO [Only Int]
     pure (case rows of [Only i] -> Just i; _ -> Nothing)
+
+{- | One saved record by the shared canonical URL key, as the ledger renders it.
+The extension's status badge calls this for the active tab's exact URL: the
+same indexed @IN@ over the normalized URL and its http/https variants as the
+save path, so http, https, @www.@, and trailing-slash spellings of one page
+resolve to the same row. Only the summary is loaded, never the note body,
+extracted text, or captures.
+-}
+lookupBookmark :: Connection -> Text -> IO (Maybe BookmarkSummary)
+lookupBookmark conn url = do
+    let candidates = dedupeLookupUrls url
+        names = [":url" <> T.pack (show i) | i <- [0 .. length candidates - 1]]
+        placeholders = T.intercalate ", " names
+        params = zipWith (:=) names candidates
+    rows <-
+        queryNamed
+            conn
+            (Query ("SELECT " <> coreColumns <> " FROM bookmarks b WHERE b.url IN (" <> placeholders <> ") ORDER BY b.id LIMIT 1"))
+            params ::
+            IO [SummaryCore]
+    case rows of
+        [] -> pure Nothing
+        (row : _) -> do
+            tagRows <- tagsForIds conn [scId row]
+            pure (Just (summaryOf row (fromMaybe [] (lookup (scId row) tagRows))))
 
 {- | Fast save path: normalize, return an existing row, or insert a minimal
 row. Enrichment is queued by the caller after a successful insert.

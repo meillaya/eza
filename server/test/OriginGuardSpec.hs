@@ -22,11 +22,13 @@ import Control.Exception (bracket)
 import Control.Monad (void)
 import Data.Aeson (Value (..), encode, object, (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word32, Word8)
+import Network.HTTP.Types (urlEncode)
 import Network.Socket (SockAddr (..), tupleToHostAddress)
 import Network.Wai (defaultRequest, remoteHost, requestHeaders)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
@@ -351,6 +353,70 @@ clipCorsSpec = describe "clip CORS and quick-save origin" $ do
             rejected `shouldHaveStatus` 403
             errorCode rejected `shouldBe` Just "origin"
             headerValue rejected "Access-Control-Allow-Origin" `shouldBe` Nothing
+
+    it "accepts an extension origin on the saved-page lookup with a capture token and returns ACAO" $
+        withTestServer $ \server -> do
+            _ <- createTestUser server "alice" "alice password" Control.RoleAdmin
+            (session, csrf) <- loginAs server "alice" "alice password"
+            token <- createCaptureToken server session csrf
+            let origin = "chrome-extension://abcdefghijklmnop"
+                headers =
+                    [ ("Origin", TE.encodeUtf8 origin)
+                    , ("Authorization", "Bearer " <> TE.encodeUtf8 token)
+                    , ("X-Eza-Client", "eza-clipper")
+                    ]
+            response <-
+                httpRequest
+                    server
+                    "GET"
+                    (lookupPath "https://example.test/lookup-cors")
+                    headers
+                    Nothing
+            response `shouldHaveStatus` 200
+            headerValue response "Access-Control-Allow-Origin" `shouldBe` Just (TE.encodeUtf8 origin)
+            jsonField "bookmark" (hrespBody response) `shouldBe` Just Null
+
+    it "answers the saved-page lookup preflight before the auth guard with ACAO" $
+        withTestServer $ \server -> do
+            let origin = "chrome-extension://abcdefghijklmnop"
+                headers =
+                    [ ("Origin", TE.encodeUtf8 origin)
+                    , ("Access-Control-Request-Method", "GET")
+                    , ("Access-Control-Request-Headers", "authorization, x-eza-client")
+                    ]
+            preflight <- httpRequest server "OPTIONS" "/api/v1/bookmarks/lookup" headers Nothing
+            preflight `shouldHaveStatus` 204
+            headerValue preflight "Access-Control-Allow-Origin" `shouldBe` Just (TE.encodeUtf8 origin)
+            headerValue preflight "Access-Control-Allow-Methods" `shouldSatisfy` maybe False ("GET" `BS.isInfixOf`)
+            headerValue preflight "Access-Control-Allow-Headers" `shouldSatisfy` maybe False ("X-Eza-Client" `BS.isInfixOf`)
+
+    it "keeps rejecting a disallowed web origin on the saved-page lookup with no ACAO" $
+        withTestServer $ \server -> do
+            _ <- createTestUser server "alice" "alice password" Control.RoleAdmin
+            (session, csrf) <- loginAs server "alice" "alice password"
+            token <- createCaptureToken server session csrf
+            let headers =
+                    [ ("Origin", "https://evil.example")
+                    , ("Authorization", "Bearer " <> TE.encodeUtf8 token)
+                    ]
+            rejected <-
+                httpRequest
+                    server
+                    "GET"
+                    (lookupPath "https://example.test/lookup-cors-evil")
+                    headers
+                    Nothing
+            rejected `shouldHaveStatus` 403
+            errorCode rejected `shouldBe` Just "origin"
+            headerValue rejected "Access-Control-Allow-Origin" `shouldBe` Nothing
+
+{- | The lookup request path for one page URL, percent-encoded like the
+extension's @encodeURIComponent(pageUrl)@ query.
+-}
+lookupPath :: Text -> String
+lookupPath url =
+    "/api/v1/bookmarks/lookup?url="
+        <> T.unpack (TE.decodeUtf8 (urlEncode True (TE.encodeUtf8 url)))
 
 -- | Create one capture-scoped API token and return its wire form.
 createCaptureToken :: TestServer -> Text -> Text -> IO Text

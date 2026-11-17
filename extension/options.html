@@ -9,12 +9,14 @@
   <body class="options">
     <main>
       <header>
+        <img id="app-icon" src="icons/icon-48.png" alt="" width="32" height="32" />
         <h1>eza clipper</h1>
-        <span class="hint">v0.1.0</span>
+        <span id="version" class="hint version"></span>
       </header>
       <p>
-        Save pages and selections to your eza library. Create a capture token in eza under
-        <strong>Account → Tokens</strong> with the <code>capture</code> scope, then paste it here.
+        Add the current page to your eza library, and see when a page is already saved. Create a
+        capture token in eza under <strong>Account → Tokens</strong> with the
+        <code>capture</code> scope, then paste it here.
       </p>
 
       <section id="connection">
@@ -43,32 +45,61 @@
           <option value="0">Default</option>
         </select>
 
+        <label class="checkline" for="check-active-page">
+          <input id="check-active-page" type="checkbox" />
+          Check the active page for saved status
+        </label>
+
         <div class="row">
           <button id="save" class="primary" type="button">Save</button>
           <button id="test" type="button">Test connection</button>
           <button id="grant" type="button">Grant access</button>
         </div>
-        <div id="status" role="status" aria-live="polite"></div>
+        <div id="status" class="status" role="status" aria-live="polite"></div>
+
+        <p id="account-line" class="hint">
+          Manage tokens and account settings in eza:
+          <a id="account-link" href="#" target="_blank" rel="noopener noreferrer">Open your account</a>
+        </p>
+      </section>
+
+      <section id="page-text-section" hidden>
+        <h2>Page text</h2>
+        <p id="page-text-note" class="hint"></p>
+        <p id="page-text-state" class="hint"></p>
+        <div class="row">
+          <button id="page-text-grant" type="button">Allow page text</button>
+        </div>
       </section>
 
       <details>
         <summary>How access works</summary>
         <p class="hint">
-          The extension asks Chrome for permission to contact only the server origin you configure.
-          The capture token is stored in this browser profile and sent only in the
+          The extension asks the browser for permission to contact only the server origin you
+          configure. The capture token is stored in this browser profile and sent only in the
           <code>Authorization</code> header. It is never placed in a URL, a page, or a log.
         </p>
         <p class="hint">
-          If saving fails with an access error, press <strong>Grant access</strong>, or re-save the
-          options after the prompt appears.
+          If adding fails with an access error, press <strong>Grant access</strong>, or save the
+          options again after the prompt appears.
+        </p>
+      </details>
+
+      <details>
+        <summary>What is sent to the server</summary>
+        <p class="hint">
+          The address and title of the active page are sent to your server to check whether it is
+          already saved. When you add a bookmark, the title and optional tags are sent. Page text is
+          read and sent only when you choose <strong>Add page text</strong> or
+          <strong>Add selection</strong>.
         </p>
       </details>
 
       <details>
         <summary>Keyboard shortcuts</summary>
         <p class="hint">
-          Ctrl+Shift+Y saves the whole page, Ctrl+Shift+U saves the selection (Command on macOS).
-          Rebind them at <code>chrome://extensions/shortcuts</code>.
+          Ctrl+Shift+Y adds the current page, Ctrl+Shift+U adds the selected text (Command on macOS).
+          Rebind them on the browser's extension shortcuts page.
         </p>
       </details>
     </main>

@@ -53,6 +53,7 @@ import qualified JobsSpec
 import qualified JournalSpec
 import qualified LedgerSpec
 import qualified LibrarySpec
+import qualified LookupSpec
 import qualified MigrationSpec
 import qualified OriginGuardSpec
 import qualified PerfSpec
@@ -1263,6 +1264,7 @@ main = hspec $ do
     DispatchSpec.spec
     LedgerSpec.spec
     LibrarySpec.spec
+    LookupSpec.spec
     MigrationSpec.spec
     GraphLayoutSpec.spec
     AuthzSpec.authzSpec

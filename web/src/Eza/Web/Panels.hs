@@ -285,7 +285,7 @@ graphBody m
         [ emptyPanel
             "0 records"
             "The library is empty."
-            "Save a record and it appears here."
+            "Add a bookmark and it appears here."
             []
         ]
     | Just layout <- activeGraphLayout m =
@@ -3843,7 +3843,7 @@ tokenForm m =
                 [HP.class_ "account-scopes"]
                 ( H.legend_ [HP.class_ "account-label meta"] [text "scopes"]
                     : [ scopeOption scope note
-                      | (scope, note) <- [("read", "read the library"), ("write", "file and edit"), ("capture", "file links only")]
+                      | (scope, note) <- [("read", "read the library"), ("write", "add and edit"), ("capture", "check and add links")]
                       ]
                 )
             ]
@@ -4331,7 +4331,7 @@ capturePanel m =
                     , HP.href_ "/save"
                     , HE.onClickPrevent (Navigate (Save Nothing Nothing Nothing))
                     ]
-                    [text "open the capture page"]
+                    [text "open the add-bookmark page"]
                 ]
             ]
         ]
@@ -4357,7 +4357,7 @@ bookmarkletLink m
             , HP.draggable_ True
             , HP.title_ "Drag this link to the bookmarks bar"
             ]
-            [text "file this page"]
+            [text "add this page"]
 
 hasBookmarklet :: Model -> Bool
 hasBookmarklet m = not (T.null (T.strip (fromMisoString (captureBookmarklet m) :: Text)))

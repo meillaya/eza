@@ -152,6 +152,23 @@ spec = describe "Eza.Routes" $ do
         tokenAllows [ScopeWrite] "POST" ["api", "v1", "jobs", "7", "cancel"] `shouldBe` True
         tokenAllows [ScopeRead] "POST" ["api", "v1", "jobs", "7", "cancel"] `shouldBe` False
 
+    it "renders, classifies, and re-parses the saved-page bookmark lookup" $ do
+        routePath RouteBookmarkLookup `shouldBe` "/api/v1/bookmarks/lookup"
+        renderRoutePath RouteBookmarkLookup `shouldBe` "/api/v1/bookmarks/lookup"
+        matchRoute "GET" ["api", "v1", "bookmarks", "lookup"] `shouldBe` Just RouteBookmarkLookup
+        -- The lookup segment is fixed, so it must win over the numeric id family.
+        matchRoute "GET" ["api", "v1", "bookmarks", "1"] `shouldBe` Just (RouteBookmarkRead 1)
+        Routes.routeClass RouteBookmarkLookup `shouldBe` TokenClass
+        Routes.routeCapability RouteBookmarkLookup `shouldBe` Just CapCaptureRead
+        tokenAllows [ScopeCapture] "GET" ["api", "v1", "bookmarks", "lookup"] `shouldBe` True
+        tokenAllows [ScopeRead] "GET" ["api", "v1", "bookmarks", "lookup"] `shouldBe` True
+        tokenAllows [ScopeWrite] "GET" ["api", "v1", "bookmarks", "lookup"] `shouldBe` True
+        -- The extension's CORS preflight is a public route, like the clip family.
+        routePath RouteCorsPreflightBookmarkLookup `shouldBe` "/api/v1/bookmarks/lookup"
+        matchRoute "OPTIONS" ["api", "v1", "bookmarks", "lookup"] `shouldBe` Just RouteCorsPreflightBookmarkLookup
+        Routes.routeClass RouteCorsPreflightBookmarkLookup `shouldBe` PublicClass
+        Routes.routeCapability RouteCorsPreflightBookmarkLookup `shouldBe` Nothing
+
     it "represents every client URL literal family in web/src/Eza/Web/Api.hs" $
         forM_ clientRouteSamples $ \(method, path) ->
             Authz.routeClass method (splitPath path) `shouldSatisfy` (/= DeniedClass)

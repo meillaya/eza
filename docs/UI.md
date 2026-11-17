@@ -75,7 +75,7 @@ fixed optical size so every browser draws the same letterforms.
 | `/tags/ai` | Advisory tag suggestions, applied one bookmark at a time |
 | `/maintenance` | Dead-link sweep, manual link health, prune candidates, undo history and preview |
 | `/account` | Username and role, password, optional passkey second factor, recovery, sessions, tokens, share links, webhooks, rules, import / export, capture; admins also get a users tab |
-| `/save` | Quick save from the PWA share target or bookmarklet |
+| `/save` | Add-bookmark page for the PWA share target or bookmarklet |
 | `/login`, `/setup`, `/recover`, `/account/add-passkey` | Username/password sign-in, optional passkey second factor, first claim, recovery reset |
 | `/s/:token` | Read-only share page for a bookmark or saved search |
 

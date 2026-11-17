@@ -35,6 +35,11 @@
   box-sizing: border-box;
 }
 
+/* The hidden attribute must win over display rules on panels and rows. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   background: var(--paper);
@@ -54,10 +59,20 @@ body.options main {
 
 header {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
   margin-bottom: 14px;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+}
+
+header .version {
+  margin-left: auto;
 }
 
 h1 {
@@ -75,15 +90,32 @@ p {
   margin: 0 0 12px;
 }
 
+a {
+  color: var(--accent);
+}
+
 .hint,
 .note {
   color: var(--muted);
   font-size: 12px;
 }
 
+.note {
+  margin: 0 0 10px;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: var(--ok);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 label {
   display: block;
-  margin: 0 0 12px;
+  margin: 0 0 6px;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -98,7 +130,7 @@ select,
 textarea {
   display: block;
   width: 100%;
-  margin-top: 5px;
+  margin: 5px 0 18px;
   padding: 8px 10px;
   border: 1px solid var(--rule);
   border-radius: 3px;
@@ -153,14 +185,14 @@ button.link {
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
-  margin: 10px 0;
+  margin: 0 0 10px;
 }
 
 .checkline {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 0 12px;
+  margin: 0 0 14px;
   font-size: 13px;
   font-weight: 500;
   color: var(--ink);
@@ -173,7 +205,7 @@ button.link {
 }
 
 details {
-  margin: 18px 0 0;
+  margin: 22px 0 0;
   border-top: 1px solid var(--rule);
   padding-top: 12px;
 }
@@ -192,32 +224,57 @@ summary {
   word-break: break-all;
 }
 
-#status {
-  min-height: 20px;
-  margin-top: 12px;
+.tag-line {
+  margin: 4px 0 8px;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.status {
+  min-height: 0;
+  margin: 0 0 12px;
   font-size: 13px;
 }
 
+.status:empty {
+  margin: 0;
+}
+
+#account-line {
+  margin: 0 0 16px;
+}
+
+.status.ok,
 #status.ok {
   color: var(--ok);
 }
 
+.status.err,
 #status.err {
   color: var(--err);
 }
 
+.status a,
 #status a {
   color: inherit;
 }
 
-.selection-row {
-  display: flex;
-}
-
-.spacer {
-  height: 8px;
-}
-
 .token-state {
   margin-top: -6px;
+}
+
+.token-state a {
+  color: inherit;
+}
+
+#page-text-section {
+  margin-top: 20px;
+  border-top: 1px solid var(--rule);
+  padding-top: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  button.primary {
+    color: var(--accent-ink);
+  }
 }

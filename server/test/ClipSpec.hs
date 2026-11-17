@@ -18,14 +18,17 @@ import Eza.Db (openDb, queryScalar)
 
 spec :: Spec
 spec = describe "browser clipper" $ do
-    it "classifies quick-save with the clip family for the CORS origin guard" $ do
+    it "classifies quick-save and the saved-page lookup with the clip family for the CORS origin guard" $ do
         isClipPath ["api", "v1", "clip"] `shouldBe` True
         isClipPath ["api", "v1", "clip", "preview"] `shouldBe` True
         isClipPath ["api", "v1", "clip-templates"] `shouldBe` True
         isClipPath ["api", "v1", "clip-templates", "3"] `shouldBe` True
         isClipPath ["api", "v1", "quick-save"] `shouldBe` True
         isClipPath ["api", "v1", "whoami"] `shouldBe` True
+        isClipPath ["api", "v1", "bookmarks", "lookup"] `shouldBe` True
         isClipPath ["api", "v1", "bookmarks"] `shouldBe` False
+        isClipPath ["api", "v1", "bookmarks", "lookup", "extra"] `shouldBe` False
+        isClipPath ["api", "v1", "bookmarks", "1"] `shouldBe` False
         isClipPath ["api", "v1", "quick-save", "extra"] `shouldBe` False
 
     it "saves a capture, replays it, and rejects a conflicting key" $
