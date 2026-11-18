@@ -19,6 +19,10 @@ an MV3 event page and `browser_specific_settings`. The plain build is the store
 build. Version 0.2.0 adds the saved-page indicator over the previous clip-only
 clipper.
 
+The Chrome build is listed in the
+[Chrome Web Store](https://chromewebstore.google.com/detail/eza-clipper/hdbgombaclbiolmememmjciigpfepghp).
+Firefox is not published yet; use the built temporary package below.
+
 ## Requirements
 
 - Chrome, Chromium, or Edge 116 or newer for the Chrome package.
@@ -68,7 +72,12 @@ the optional bundle to read pages unless you explicitly add page text.
 
 ### Install for development
 
-Chrome:
+Chrome from the store:
+
+1. Open the [Chrome Web Store listing](https://chromewebstore.google.com/detail/eza-clipper/hdbgombaclbiolmememmjciigpfepghp) and install **eza clipper**.
+2. Pin the extension so the toolbar icon stays visible.
+
+Chrome from source:
 
 1. Open `chrome://extensions` and turn on **Developer mode**.
 2. **Load unpacked** → choose `extension/dist/chrome` (or `extension/` after a
@@ -80,7 +89,7 @@ Firefox:
 1. Open `about:debugging#/runtime/this-firefox`.
 2. **Load Temporary Add-on…** → choose `extension/dist/firefox/manifest.json`.
 3. The temporary add-on is removed when Firefox closes; install the signed
-   package from AMO for a persistent install.
+   package from AMO for a persistent install once the listing is live.
 
 ## Configure
 

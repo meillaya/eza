@@ -15,6 +15,10 @@ One source tree builds two Manifest V3 packages:
   `browser_specific_settings` (add-on id, `strict_min_version` and the Firefox
   data-collection declaration).
 
+The Chrome build is listed in the
+[Chrome Web Store](https://chromewebstore.google.com/detail/eza-clipper/hdbgombaclbiolmememmjciigpfepghp).
+Firefox is not published yet.
+
 Build both packages:
 
 ```bash

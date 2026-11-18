@@ -24,7 +24,8 @@ outputs are the installable artifacts; both are built from the same revision.
 - The browser extension has app icons (16/32/48/128), store listing and
   permission-justification docs, a privacy policy, and CI/release ZIP
   artifacts. Firefox declares its data collection and asks for page-content
-  consent at runtime.
+  consent at runtime. The Chrome build is listed in the
+  [Chrome Web Store](https://chromewebstore.google.com/detail/eza-clipper/hdbgombaclbiolmememmjciigpfepghp).
 - The in-app add action is renamed from "File a record" to **Add bookmark**
   across the dialog, `/save` page, mobile action, command palette and
   bookmarklet copy. The archive's "filing days" language is unchanged.

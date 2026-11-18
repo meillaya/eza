@@ -39,6 +39,8 @@ unzip -l extension/dist/eza-clipper-<version>-firefox.zip | head
 
 ## Chrome Web Store
 
+Live listing: <https://chromewebstore.google.com/detail/eza-clipper/hdbgombaclbiolmememmjciigpfepghp>
+
 Account requirement: a Chrome Web Store developer account (one-time
 registration fee) and a verified developer email.
 

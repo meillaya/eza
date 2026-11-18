@@ -7,6 +7,7 @@
 <p>
   <a href="https://github.com/meillaya/eza/stargazers"><img src="https://img.shields.io/github/stars/meillaya/eza?style=for-the-badge&amp;labelColor=1A2340&amp;color=8A2B20&amp;logo=github&amp;logoColor=D9E0EE" alt="GitHub stars"></a>
   <a href="https://github.com/meillaya/eza/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/meillaya/eza/ci.yml?branch=main&amp;style=for-the-badge&amp;labelColor=1A2340&amp;color=3F6B4E&amp;label=CI" alt="CI"></a>
+  <a href="https://chromewebstore.google.com/detail/eza-clipper/hdbgombaclbiolmememmjciigpfepghp"><img src="https://img.shields.io/badge/Chrome%20Web%20Store-install-4285F4?style=for-the-badge&amp;logo=googlechrome&amp;logoColor=white&amp;labelColor=1A2340" alt="Chrome Web Store"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-8A2B20?style=for-the-badge&amp;labelColor=1A2340" alt="License"></a>
   <a href="https://www.haskell.org"><img src="https://img.shields.io/badge/Haskell-9.10-5e5086?style=for-the-badge&amp;logo=haskell&amp;logoColor=white&amp;labelColor=1A2340" alt="Haskell 9.10"></a>
   <a href="https://haskell-miso.org"><img src="https://img.shields.io/badge/client-Miso%20%2B%20WASM-8A2B20?style=for-the-badge&amp;labelColor=1A2340" alt="Miso and WebAssembly"></a>
@@ -378,6 +379,10 @@ the toolbar icon when the page is already saved, and opens the saved record in
 eza. Page text is captured only when you ask for it, so the extension stays
 lightweight. The store build is dependency-free; the optional Defuddle bundle
 is a local power-user build.
+
+Install it from the [Chrome Web Store](https://chromewebstore.google.com/detail/eza-clipper/hdbgombaclbiolmememmjciigpfepghp).
+The Firefox package is not listed yet; load `extension/dist/firefox` or build
+the ZIP below.
 
 ```bash
 bash scripts/build-extension.sh                  # dist/chrome, dist/firefox and both store ZIPs
