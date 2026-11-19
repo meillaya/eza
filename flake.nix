@@ -308,11 +308,94 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
 
-          # Stand-in for the web bundle so the module check never builds the
-          # wasm toolchain and dependency set.
+          # Stand-in for the web bundle so the module and VM checks never build
+          # the wasm toolchain and dependency set. The server validates the
+          # bundle at startup (schema_version, the required asset keys, the
+          # shell refs, index.html and sw.js), so the stub must satisfy that
+          # contract: a bare index.html makes eza.service exit and the VM test
+          # time out. The payloads are empty; nothing in the checks renders them.
           stubWeb = pkgs.runCommand "eza-web-stub" { } ''
-            mkdir -p $out/share/eza/static
-            printf '%s\n' '<!doctype html><title>eza</title>' > $out/share/eza/static/index.html
+            root="$out/share/eza/static"
+            mkdir -p "$root/fonts" "$root/icons" "$root/vendor"
+
+            cat > "$root/asset-manifest.json" <<'MANIFEST'
+            {
+              "schema_version": 1,
+              "build_id": "0123456789abcdef",
+              "assets": {
+                "app.ghc_wasm_jsffi.js": "/assets/app.ghc_wasm_jsffi.0123abcd.js",
+                "app.index.js": "/assets/app.index.0123abcd.js",
+                "app.wasm": "/assets/app.0123abcd.wasm",
+                "auth.js": "/assets/auth.0123abcd.js",
+                "eza.css": "/assets/eza.0123abcd.css",
+                "favicon-fallback.svg": "/assets/favicon-fallback.0123abcd.svg",
+                "favicon.svg": "/assets/favicon.0123abcd.svg",
+                "fonts/newsreader-300-800.woff2": "/assets/fonts/newsreader-300-800.0123abcd.woff2",
+                "icons/icon-192.png": "/assets/icons/icon-192.0123abcd.png",
+                "icons/icon-512.png": "/assets/icons/icon-512.0123abcd.png",
+                "manifest.webmanifest": "/manifest.webmanifest",
+                "pwa.js": "/assets/pwa.0123abcd.js",
+                "theme.js": "/assets/theme.0123abcd.js",
+                "vendor/browser_wasi_shim": "/assets/vendor/browser_wasi_shim.0123abcd"
+              },
+              "shell": {
+                "apple_touch_icon": "/assets/icons/icon-192.0123abcd.png",
+                "auth_js": "/assets/auth.0123abcd.js",
+                "css": "/assets/eza.0123abcd.css",
+                "favicon": "/assets/favicon.0123abcd.svg",
+                "favicon_fallback": "/assets/favicon-fallback.0123abcd.svg",
+                "manifest": "/manifest.webmanifest",
+                "module_js": "/assets/app.index.0123abcd.js",
+                "preload_font": "/assets/fonts/newsreader-300-800.0123abcd.woff2",
+                "pwa_js": "/assets/pwa.0123abcd.js",
+                "theme_js": "/assets/theme.0123abcd.js"
+              },
+              "precache": [
+                "/",
+                "/assets/eza.0123abcd.css",
+                "/assets/app.index.0123abcd.js"
+              ]
+            }
+            MANIFEST
+
+            for asset in \
+              app.ghc_wasm_jsffi.0123abcd.js \
+              app.index.0123abcd.js \
+              app.0123abcd.wasm \
+              auth.0123abcd.js \
+              eza.0123abcd.css \
+              favicon-fallback.0123abcd.svg \
+              favicon.0123abcd.svg \
+              fonts/newsreader-300-800.0123abcd.woff2 \
+              icons/icon-192.0123abcd.png \
+              icons/icon-512.0123abcd.png \
+              manifest.webmanifest \
+              pwa.0123abcd.js \
+              theme.0123abcd.js \
+              vendor/browser_wasi_shim.0123abcd
+            do
+              : > "$root/$asset"
+            done
+
+            cat > "$root/index.html" <<'SHELL'
+            <!doctype html><html><head>
+            <link rel="stylesheet" href="/assets/eza.0123abcd.css">
+            <link rel="icon" href="/assets/favicon.0123abcd.svg">
+            <link rel="icon" href="/assets/favicon-fallback.0123abcd.svg">
+            <link rel="apple-touch-icon" href="/assets/icons/icon-192.0123abcd.png">
+            <link rel="manifest" href="/manifest.webmanifest">
+            <link rel="preload" as="font" href="/assets/fonts/newsreader-300-800.0123abcd.woff2">
+            <script type="module" src="/assets/app.index.0123abcd.js"></script>
+            <script src="/assets/auth.0123abcd.js"></script>
+            <script src="/assets/theme.0123abcd.js"></script>
+            <script src="/assets/pwa.0123abcd.js"></script>
+            </head><body><div id="app"></div></body></html>
+            SHELL
+
+            cat > "$root/sw.js" <<'WORKER'
+            const BUILD = 'eza-app-shell-0123456789abcdef';
+            const PRECACHE = ['/', '/assets/eza.0123abcd.css', '/assets/app.index.0123abcd.js'];
+            WORKER
           '';
 
           # Minimal stand-ins so the module check never builds the real server
@@ -460,6 +543,21 @@
               machine.succeed("test -d /var/lib/eza/users")
               machine.succeed("systemctl show eza.service -p User --value | grep -qx eza")
               machine.succeed("systemctl show eza.service -p NoNewPrivileges --value | grep -qx yes")
+              # 0.4 `backup` requires at least one claimed account (it refuses
+              # to write a "successful" empty stamp), so claim the first admin
+              # through the real /setup ceremony before exercising the backup
+              # oneshot. This also covers the setup flow and the per-account
+              # library creation.
+              machine.succeed(
+                  "printf '%s' '{\"username\":\"vmadmin\",\"password\":\"vm-test-password-123\",\"confirm\":\"vm-test-password-123\"}' > /tmp/setup.json"
+              )
+              machine.succeed(
+                  "curl -fsS -X POST http://127.0.0.1:8080/api/setup/password"
+                  " -H 'Content-Type: application/json'"
+                  " -H 'Origin: http://localhost:8080'"
+                  " -d @/tmp/setup.json"
+              )
+              machine.succeed("test -f /var/lib/eza/users/1/eza.db")
               # The backup oneshot writes one stamp directory per run holding
               # control.db and the users/ subtree.
               machine.succeed("systemctl start eza-backup.service")
