@@ -323,4 +323,5 @@ after upgrading so records previously marked dead by a 403 become live.
 | `healthy` never becomes true | `/healthz` 503 → database problem; run `docker compose exec eza eza-bookmarks verify`. |
 | Passkeys fail | Origin must be HTTPS and match `PUBLIC_ORIGIN`; `EZA_RP_ID` must be its host. |
 | Permission denied in /data | Host bind mount not owned by 10001; fix on the host. |
+| `docker run` fails with `netavark ... failed to load network options: invalid type: sequence, expected a map` | The `docker` CLI is the Podman compatibility shim and `~/.config/containers/containers.conf` pins `helper_binaries_dir` to an older Podman package, so the running Podman uses a mismatched netavark. Remove that stale entry (or point it at the running Podman's `libexec/podman`) and restart the user podman service; `--network host` is a temporary stopgap. |
 | Web UI 404 | The static tree is missing or incomplete: check `EZA_STATIC_DIR` points at a directory with `asset-manifest.json` under `share/eza/static`, then rebuild the image (`nix build .#docker`) or the bundle (`scripts/build-web.sh`). |
