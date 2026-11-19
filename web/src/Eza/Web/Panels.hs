@@ -4201,15 +4201,15 @@ importPanel m =
             [ H.h3_ [HP.class_ "account-h3 display"] [text "Export"]
             , H.p_
                 [HP.class_ "account-note meta"]
-                [text "Netscape HTML any browser can import, the versioned eza JSON, or the notes as a Markdown document."]
+                [text "eza.json is the complete portable backup: bookmarks, notes, highlights, captures, saved searches, rules, views, clip templates and favicons. bookmarks.html carries only bookmarks, tags and folder structure, for importing into another browser. notes.md is the notes as one Markdown document."]
             , H.div_
                 [HP.class_ "account-actions"]
                 [ H.a_
-                    [HP.class_ "btn btn--strong", HP.href_ (ms exportUrl)]
-                    [text "export bookmarks.html"]
-                , H.a_
-                    [HP.class_ "btn btn--ghost", HP.href_ (ms exportJsonUrl)]
+                    [HP.class_ "btn btn--strong", HP.href_ (ms exportJsonUrl)]
                     [text "export eza.json"]
+                , H.a_
+                    [HP.class_ "btn btn--ghost", HP.href_ (ms exportUrl)]
+                    [text "export bookmarks.html"]
                 , H.a_
                     [ HP.class_ "btn btn--ghost"
                     , HP.href_ (ms notesExportUrl)

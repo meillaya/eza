@@ -398,7 +398,13 @@ runCli cfg passwords cmd = case cmd of
                 then do
                     document <- exportJson conn
                     LBS8.putStrLn (encode document)
-                else TIO.putStrLn =<< exportBookmarks conn
+                else do
+                    -- The Netscape file is a browser-bookmark interchange, not a
+                    -- backup: keep stdout pure and say so on stderr.
+                    hPutStrLn
+                        stderr
+                        "eza: the Netscape HTML export carries bookmarks and tags only; notes, highlights, captures, saved searches, rules, views, clip templates and favicons are not included. Use `eza-bookmarks export --json` or `eza-bookmarks backup` for a complete backup."
+                    TIO.putStrLn =<< exportBookmarks conn
     EnrichCmd opts -> runEnrichCommand cfg opts
     RepairDomains userSelector ->
         withLibrary cfg userSelector $ \_ conn -> do

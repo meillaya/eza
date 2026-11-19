@@ -99,6 +99,17 @@ Open <http://localhost:8080/setup>. The `eza-data` directory is the persistent
 state; back it up like any other SQLite data directory. For a permanent NixOS
 install use the module below instead.
 
+> [!IMPORTANT]
+> Already have an eza data directory (for example from a devenv checkout or an
+> older install)? Move the installation instead of re-importing: a 0.4
+> `EZA_DATA_DIR` is portable between builds, so point `EZA_DATA_DIR` at the
+> existing directory, or run `eza-bookmarks backup` in the old install and
+> `restore` the stamp in the new one. If you do use an export, use the account
+> panel's `export eza.json` (or `eza-bookmarks export --json`): it carries
+> notes, highlights, captures, saved searches, rules, views, clip templates and
+> favicons. The Netscape HTML export carries bookmarks and tags only, for
+> importing into other browsers.
+
 ### Quick start (devenv / source)
 
 For development or a source checkout:

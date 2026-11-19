@@ -8,7 +8,9 @@ module Eza.JsonExport (
 
 import Control.Monad (forM, forM_, void, when)
 import Data.Aeson
-import Data.Aeson.Types (Parser, parseMaybe)
+import Data.Aeson.Types (Parser, parseEither, parseMaybe)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -20,6 +22,7 @@ import GHC.Generics (Generic)
 
 import Eza.ClipTemplates (ClipTemplate (..), createTemplate, listTemplates)
 import Eza.Db (normaliseTimestamp)
+import Eza.Favicon (iconUrlFor)
 import Eza.Jobs (enqueueJob)
 import Eza.Url (dedupeLookupUrls, hostOf, isHttpUrl, normalizeUrl)
 import Eza.View (View (..), ViewDefinition, ViewInput (..), ViewKind (..), decodeViewDefinition, parseViewKind, viewKindText)
@@ -33,6 +36,7 @@ data JsonImportReport = JsonImportReport
     , jrCaptures :: Int
     , jrViews :: Int
     , jrTemplates :: Int
+    , jrFavicons :: Int
     , jrSkipped :: Int
     , jrTimestampsNormalised :: Int
     }
@@ -48,6 +52,7 @@ instance ToJSON JsonImportReport where
             , "captures" .= jrCaptures report
             , "views" .= jrViews report
             , "clip_templates" .= jrTemplates report
+            , "favicons" .= jrFavicons report
             , "skipped" .= jrSkipped report
             , "timestamps_normalised" .= jrTimestampsNormalised report
             ]
@@ -204,6 +209,36 @@ instance FromRow ExportCapture where
             <*> field
             <*> field
 
+{- | One cached favicon row. The bytes travel as base64 in the portable
+document so the icon cache survives a migration to another installation.
+-}
+data ExportFavicon = ExportFavicon
+    { efDomain :: Text
+    , efSourceUrl :: Text
+    , efMime :: Text
+    , efBytes :: BS.ByteString
+    , efContentHash :: Text
+    , efEtag :: Text
+    , efLastModified :: Text
+    , efFetchedAt :: Int
+    , efLastError :: Text
+    , efFailCount :: Int
+    }
+
+instance FromRow ExportFavicon where
+    fromRow =
+        ExportFavicon
+            <$> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+            <*> field
+
 exportJson :: Connection -> IO Value
 exportJson conn = do
     now <- (floor <$> getPOSIXTime) :: IO Int
@@ -227,6 +262,11 @@ exportJson conn = do
             IO [ExportCapture]
     views <- listViews conn
     templates <- listTemplates conn
+    favicons <-
+        query_
+            conn
+            "SELECT domain,source_url,mime,bytes,content_hash,etag,last_modified,fetched_at,last_error,fail_count FROM favicons ORDER BY domain" ::
+            IO [ExportFavicon]
     let tagsFor bid = [name | (bookmarkId, name) <- tagRows, bookmarkId == bid]
         bookmarkValue b =
             object
@@ -298,6 +338,19 @@ exportJson conn = do
                 , "captured_at" .= ecCapturedAt c
                 , "created_at" .= ecCreatedAt c
                 ]
+        faviconValue favicon =
+            object
+                [ "domain" .= efDomain favicon
+                , "source_url" .= efSourceUrl favicon
+                , "mime" .= efMime favicon
+                , "bytes" .= TE.decodeUtf8 (B64.encode (efBytes favicon))
+                , "content_hash" .= efContentHash favicon
+                , "etag" .= efEtag favicon
+                , "last_modified" .= efLastModified favicon
+                , "fetched_at" .= efFetchedAt favicon
+                , "last_error" .= efLastError favicon
+                , "fail_count" .= efFailCount favicon
+                ]
         searchValue (sid, name, q, tags, created) = object ["id" .= sid, "name" .= name, "q" .= q, "tags" .= textListValue tags, "created_at" .= created]
         ruleValue (rid, name, enabled, ruleFieldName, rulePattern, tags, markRead, created) = object ["id" .= rid, "name" .= name, "enabled" .= (enabled /= 0), "field" .= ruleFieldName, "pattern" .= rulePattern, "add_tags" .= textListValue tags, "mark_read" .= (markRead /= 0), "created_at" .= created]
     pure
@@ -312,6 +365,7 @@ exportJson conn = do
             , "captures" .= map captureValue captures
             , "views" .= views
             , "clip_templates" .= templates
+            , "favicons" .= map faviconValue favicons
             ]
         )
 
@@ -380,9 +434,64 @@ data ImportedView = ImportedView
     }
     deriving (Show, Eq)
 
+-- | One favicon document entry, with the bytes decoded from base64.
+data ImportedFavicon = ImportedFavicon
+    { ifDomain :: Text
+    , ifSourceUrl :: Text
+    , ifMime :: Text
+    , ifBytes :: BS.ByteString
+    , ifContentHash :: Text
+    , ifEtag :: Text
+    , ifLastModified :: Text
+    , ifFetchedAt :: Int
+    , ifLastError :: Text
+    , ifFailCount :: Int
+    }
+    deriving (Show, Eq)
+
+{- | Parse one favicon document entry. An invalid base64 body or an empty
+domain/mime/bytes fails the whole document import with the failing path (a
+document-level, actionable error; nothing is silently dropped). Failure
+placeholders (@fail_count > 0@, i.e. parked domains) are carried as parked rows
+and are never served, matching the store rows in the database. Cached-icon
+bodies are not re-sniffed here: the export is produced from rows the store path
+already validated (and the startup repair pass re-checks them on the target).
+-}
+parseFaviconEntry :: Value -> Parser ImportedFavicon
+parseFaviconEntry = withObject "favicon" $ \o -> do
+    domain <- o .: "domain"
+    sourceUrl <- o .:? "source_url" .!= ""
+    mime <- o .: "mime"
+    encoded <- o .: "bytes" :: Parser Text
+    payload <- case B64.decode (TE.encodeUtf8 encoded) of
+        Left err -> fail ("favicon " <> T.unpack domain <> ": bytes is not valid base64: " <> err)
+        Right value -> pure value
+    contentHash <- o .:? "content_hash" .!= ""
+    etag <- o .:? "etag" .!= ""
+    lastModified <- o .:? "last_modified" .!= ""
+    fetchedAt <- o .:? "fetched_at" .!= (0 :: Int)
+    lastError <- o .:? "last_error" .!= ""
+    failCount <- o .:? "fail_count" .!= (0 :: Int)
+    when (T.null (T.strip domain)) (fail "favicon domain is empty")
+    when (T.null (T.strip mime)) (fail ("favicon " <> T.unpack domain <> ": mime is empty"))
+    when (BS.null payload) (fail ("favicon " <> T.unpack domain <> ": bytes is empty"))
+    pure
+        ImportedFavicon
+            { ifDomain = domain
+            , ifSourceUrl = sourceUrl
+            , ifMime = mime
+            , ifBytes = payload
+            , ifContentHash = contentHash
+            , ifEtag = etag
+            , ifLastModified = lastModified
+            , ifFetchedAt = fetchedAt
+            , ifLastError = lastError
+            , ifFailCount = failCount
+            }
+
 importJson :: Connection -> Value -> IO (Either Text JsonImportReport)
 importJson conn value =
-    case parseMaybe
+    case parseEither
         ( withObject "eza-json" $ \o -> do
             format <- o .:? "format" .!= ("" :: Text)
             version <- o .:? "version" .!= (1 :: Int)
@@ -393,6 +502,8 @@ importJson conn value =
             captures <- o .:? "captures" .!= []
             views <- o .:? "views" .!= []
             templates <- o .:? "clip_templates" .!= []
+            rawFavicons <- o .:? "favicons" .!= ([] :: [Value])
+            favicons <- mapM parseFaviconEntry rawFavicons
             pure
                 ( format
                 , version
@@ -403,11 +514,12 @@ importJson conn value =
                 , captures :: [Value]
                 , views :: [Value]
                 , templates :: [Value]
+                , favicons :: [ImportedFavicon]
                 )
         )
         value of
-        Nothing -> pure (Left "invalid eza JSON document")
-        Just (format, version, bookmarks, highlights, searches, rules, captures, views, templates)
+        Left message -> pure (Left ("invalid eza JSON document: " <> T.pack message))
+        Right (format, version, bookmarks, highlights, searches, rules, captures, views, templates, favicons)
             | format /= "eza-json" -> pure (Left "document is not an eza JSON export")
             | version < 1 || version > 2 -> pure (Left ("unsupported eza JSON export version: " <> T.pack (show version)))
             | otherwise -> do
@@ -418,7 +530,7 @@ importJson conn value =
                 -- transactions inside "Eza.Views"/"Eza.ClipTemplates", so they
                 -- are imported after the atomic block; they are additive and
                 -- idempotent, and a per-item failure is only counted as skipped.
-                (imported, importedHighlights, importedSearches, importedRules, importedCaptures) <-
+                (imported, importedHighlights, importedSearches, importedRules, importedCaptures, importedFavicons) <-
                     withImmediateTransaction conn $ do
                         imported <- forM bookmarks (importBookmark now)
                         let idPairs =
@@ -431,7 +543,8 @@ importJson conn value =
                         importedSearches <- forM searches (importSavedSearch now)
                         importedRules <- forM rules (importRule now)
                         importedCaptures <- forM captures (importCapture now bookmarkMap)
-                        pure (imported, importedHighlights, importedSearches, importedRules, importedCaptures)
+                        importedFavicons <- forM favicons (importFaviconRow conn)
+                        pure (imported, importedHighlights, importedSearches, importedRules, importedCaptures, importedFavicons)
                 importedViews <- importViews views
                 importedTemplates <- forM templates importTemplate
                 let countRight results = length [() | Right _ <- results]
@@ -456,11 +569,41 @@ importJson conn value =
                             (countRight importedCaptures)
                             (countRight importedViews)
                             (countRight importedTemplates)
+                            (length importedFavicons)
                             skipped
                             normalisedTimestamps
                         )
                     )
   where
+    -- \| Upsert one favicon row from the portable document and fill the bookmark
+    --    rows of a valid cached icon immediately: the per-account background loop
+    --    would do the same on its next tick, but a restored installation should show
+    --    its icons without needing a refetch (the page snapshot/network policy is not
+    --    involved, so no network happens here).
+    --
+    importFaviconRow :: Connection -> ImportedFavicon -> IO ()
+    importFaviconRow connection favicon = do
+        executeNamed
+            connection
+            "INSERT OR REPLACE INTO favicons (domain, source_url, mime, bytes, content_hash, etag, last_modified, fetched_at, last_error, fail_count) VALUES (:domain,:source_url,:mime,:bytes,:content_hash,:etag,:last_modified,:fetched_at,:last_error,:fail_count)"
+            [ ":domain" := ifDomain favicon
+            , ":source_url" := ifSourceUrl favicon
+            , ":mime" := ifMime favicon
+            , ":bytes" := ifBytes favicon
+            , ":content_hash" := ifContentHash favicon
+            , ":etag" := ifEtag favicon
+            , ":last_modified" := ifLastModified favicon
+            , ":fetched_at" := ifFetchedAt favicon
+            , ":last_error" := ifLastError favicon
+            , ":fail_count" := ifFailCount favicon
+            ]
+        when (ifFailCount favicon == 0 && not (T.null (ifContentHash favicon))) $ do
+            let iconUrl = iconUrlFor (ifDomain favicon) (ifContentHash favicon)
+            execute
+                connection
+                "UPDATE bookmarks SET favicon_url = ? WHERE domain = ? AND favicon_url <> ?"
+                (iconUrl, ifDomain favicon, iconUrl)
+
     importBookmark :: Int -> Value -> IO (Either Text BookmarkImportResult)
     importBookmark now raw =
         case parseMaybe parseBookmark raw of

@@ -492,23 +492,33 @@ design. The command-line equivalent is
 the Netscape format (or an eza JSON export) or an `application/json` body with
 a versioned eza JSON document. Both are bounded by `EZA_IMPORT_MAX_BYTES`
 (the JSON body path uses the import cap, not `EZA_MAX_BODY_BYTES`) and answer
-with an `ImportReport` shape (the JSON path adds `json_report` with per-kind
-counts, including `timestamps_normalised`, and honest `inserted`/`existing`
-bookmark counts; `imported`/`found` are the processed total); `POST /api/v1/import/json`
-is the dedicated JSON-only route. Rows are de-duplicated against the library
+with an `ImportReport` shape. The JSON path also nests `json_report` with
+per-kind counts (`bookmarks`, `highlights`, `captures`, `views`,
+`clip_templates`, `favicons`, `skipped`, `timestamps_normalised`) and honest
+`inserted`/`existing` bookmark counts; `imported`/`found` are the processed
+total. `POST /api/v1/import/json` is the dedicated JSON-only route. Rows are de-duplicated against the library
 by the canonical URL key before anything is inserted, so a re-run, an
 overlapping export, or an http/https copy of a filed page merges tags onto the
 existing record instead of creating a second row. Newly inserted rows are
 queued for background extraction.
 
-`GET /api/v1/export` returns Netscape HTML; rows whose stored URL does not pass
-the strict `http(s)` policy (credentials, dot-only host, control characters) are
-omitted from that HTML view, while the JSON export keeps every stored row. Add
-`?format=json` for version 2
-of the portable JSON document: bookmarks (with their enrichment fields),
-highlights including prefix/suffix anchors, captures, saved searches, rules,
-views, and clip templates. Webhook subscription secrets are deliberately not
-exported. The version 1 document is still accepted by the importer.
+`GET /api/v1/export` returns Netscape HTML, which is a browser-bookmark
+interchange: it carries bookmarks, titles, folders/tags and descriptions only.
+Notes, highlights, captures, saved searches, rules, views, clip templates and
+the favicon cache are not part of the HTML export (the CLI prints the same
+warning on stderr). Rows whose stored URL does not pass the strict `http(s)`
+policy (credentials, dot-only host, control characters) are omitted from that
+HTML view, while the JSON export keeps every stored row. Add `?format=json`
+for version 2 of the portable JSON document: bookmarks (with their enrichment
+fields), highlights including prefix/suffix anchors, captures, saved searches,
+rules, views, clip templates, and the favicon cache (`favicons`: every stored
+column, with the image bytes as base64 text). Webhook subscription secrets are
+deliberately not exported. The version 1 document is still accepted by the
+importer, and a document without a `favicons` array imports with an empty icon
+cache. To move an installation to another `EZA_DATA_DIR`, prefer reusing the
+data directory or a backup stamp (`eza-bookmarks backup`/`restore`) over the
+HTML export; the JSON document is the portable copy when a stamp is not an
+option.
 `GET /api/v1/export/notes` returns the Markdown notes export: a
 `text/markdown` attachment named `eza-notes.md` with one `##` section per
 record that has a non-empty note, newest save first. Records without a note are

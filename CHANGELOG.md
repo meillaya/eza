@@ -83,11 +83,19 @@ outputs are the installable artifacts; both are built from the same revision.
   search debounce is cancelled on navigation; nine never-constructed actions
   were removed.
 - The account panel shows the temporary password and the rotated recovery codes
-  after an admin password reset (they are returned once), and the export panel
-  gained a Markdown notes download.
+  after an admin password reset (they are returned once); the export panel now
+  presents `eza.json` as the complete portable backup and labels the Netscape
+  `bookmarks.html` export as bookmarks/tags only, and gained a Markdown notes
+  download.
 
 ### Server
 
+- The portable JSON export/import now carries the favicon cache (base64 bytes
+  and per-domain metadata) as well as bookmarks, notes, highlights, captures,
+  saved searches, rules, views and clip templates, so moving an installation
+  through the JSON document keeps the icons; the Netscape HTML export prints a
+  stderr note that it carries bookmarks and tags only and points at `--json`
+  and `backup`.
 - The egress worker claims one job per iteration. It used to claim one job per
   kind and run only the first, leaving the other kinds `running` forever; the
   stuck job then replied to dedupe and a process restart was the only recovery.

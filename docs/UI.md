@@ -279,13 +279,18 @@ needs extra pages).
 
 Account > import / export takes a Netscape HTML bookmarks file or a versioned
 eza JSON document and appears as a file control with a per-run report.
-The same panel carries the two download buttons: `bookmarks.html` is the
-Netscape export any browser can import, and `eza-export.json` is the
-versioned eza document with highlights, captures, saved searches, rules, views
-and clip templates. Both are served with an attachment disposition, so the browser
-session keeps the page and saves the file; the library never leaves the
-server unless the file is moved. CLI equivalents are
-`eza-bookmarks export` / `export --json`.
+The same panel carries three downloads: `eza-export.json` is the complete
+portable backup (bookmarks with their notes and enrichment, highlights,
+captures, saved searches, rules, views, clip templates and favicons);
+`bookmarks.html` is the Netscape export any other browser can import and
+carries bookmarks, tags and folder structure only; `notes.md` is every note in
+one Markdown document. All three are served with an attachment disposition, so
+the browser session keeps the page and saves the file; the library never leaves
+the server unless the file is moved. CLI equivalents are `eza-bookmarks export`
+(Netscape HTML), `export --json` (the complete document) and
+`GET /api/v1/export/notes` (the Markdown notes). Moving a 0.4 installation to a
+different data directory should reuse the directory or use `backup`/`restore`,
+not the Netscape HTML export.
 
 ## About
 

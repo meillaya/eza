@@ -5,6 +5,13 @@ Firefox, Chromium, Safari, and browser-extension exporters write, and the
 versioned eza JSON export written by `eza-bookmarks export --json` (or the
 Account > About download links).
 
+The two formats are not equivalent. The Netscape HTML file is a browser
+interchange format: it carries bookmarks, titles, folders/tags and descriptions
+only, so notes, highlights, captures, saved searches, rules, views, clip
+templates and favicons are not in it. The version 2 JSON export carries those
+extra kinds, including the favicon cache, but it is still not a whole
+installation (the control database/accounts are not part of it).
+
 ## Before you start
 
 - Claim the first account at `/setup` (or create one with
@@ -16,6 +23,28 @@ Account > About download links).
   one writer serialises the transaction with web requests. Stop the server only
   for a very large import if you want to keep latency predictable.
 - Save the source file outside `EZA_DATA_DIR`; the importer reads it once.
+
+## Moving an existing eza installation
+
+An installation is the whole `EZA_DATA_DIR` tree (the control database and
+`users/<id>/eza.db`), not a browser bookmarks file. Moving to another host or
+data directory should reuse that tree or a backup stamp:
+
+1. Stop the server (never copy a live SQLite database).
+2. Copy `EZA_DATA_DIR` as a whole, or take a stamp with
+   `eza-bookmarks backup` and, on the target, restore it with
+   `eza-bookmarks restore STAMP --yes` while the target server is stopped. A
+   stamp contains the complete account database, so notes, highlights,
+   captures, saved searches, rules, views, clip templates and the favicon cache
+   all move with it.
+3. Keep `PUBLIC_ORIGIN` and `EZA_RP_ID` unchanged unless you intend the passkeys
+   to be invalidated.
+
+Do not use the Netscape HTML export to move an installation: it carries
+bookmarks and tags only, so the extra library data would be lost (the CLI warns
+about this on stderr). Use the JSON export/import
+(`eza-bookmarks export --json` / `eza-bookmarks import --json`) only when a
+data-directory move or a stamp is not possible.
 
 ## Run the import
 
@@ -36,9 +65,13 @@ eza-bookmarks import --json eza-export.json --user river > dist/import.json
 ```
 
 The JSON format carries bookmarks, highlights (including their prefix/suffix
-anchors), captures, saved searches, rules, views, and clip templates; webhook
-secret rows are deliberately not exported. Version 1 exports are still
-accepted.
+anchors), captures, saved searches, rules, views, clip templates, and the
+favicon cache (each icon's image bytes as base64, with the domain metadata that
+lets the target fill the bookmark favicon URLs immediately); webhook secret rows
+are deliberately not exported. Version 1 exports are still accepted, and a
+document without a `favicons` array imports with an empty icon cache. An invalid
+base64 favicon entry rejects the whole document with an actionable error instead
+of being silently dropped.
 
 A second run reports `inserted=0`, `existing=8905`, and
 `tag_links_added=0`. The importer matches rows by a canonical key: the scheme

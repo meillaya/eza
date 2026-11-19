@@ -34,7 +34,7 @@ import qualified Eza.Auth as Auth
 import Eza.Bookmarks
 import Eza.Db (openDb, queryScalar, schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaVersion, targetSchemaVersion)
 import Eza.DeadLinks (LinkState (..), classifyHttp)
-import Eza.Favicon (Favicon (..), getFavicon, parseDataIcon, parseIconLinks, putFavicon, recordFaviconFailure, sniffImage)
+import Eza.Favicon (Favicon (..), getFavicon, iconUrlFor, parseDataIcon, parseIconLinks, putFavicon, recordFaviconFailure, sniffImage)
 import Eza.Graph (GraphLayoutWire (..), emptyLayoutCache, globalGraph, graphLayoutPayload, graphRevision, layoutPresetFromText, layoutPresetText, lookupCachedLayout, storeCachedLayout)
 import Eza.GraphLayout (LayoutPreset (..))
 import Eza.Highlights (createHighlight, deleteHighlight, listHighlights, updateHighlight)
@@ -230,6 +230,106 @@ main = hspec $ do
                         rules <- Sqlite.query_ target "SELECT name, add_tags FROM rules" :: IO [(Text, Text)]
                         rules `shouldBe` [("legacy rule", "[\"oldtag\"]")]
                         close target
+
+    describe "JSON export favicons" $ do
+        it "carries the favicon cache (base64 bytes and every column) through a round-trip" $
+            withSystemTempDirectory "eza-json-favicons" $ \dir -> do
+                source <- openDb (dir </> "source.db")
+                Sqlite.execute_ source "INSERT INTO bookmarks (url,title,domain,created_at,added_at,updated_at) VALUES ('https://example.test/fav','Fav','example.test',1,1,1)"
+                let faviconBytes = BS.pack [0 .. 255]
+                    contentHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                Sqlite.execute
+                    source
+                    "INSERT INTO favicons (domain,source_url,mime,bytes,content_hash,etag,last_modified,fetched_at,last_error,fail_count) VALUES (?,?,?,?,?,?,?,?,?,?)"
+                    ( "example.test" :: Text
+                    , "https://example.test/favicon.ico" :: Text
+                    , "image/png" :: Text
+                    , faviconBytes
+                    , contentHash
+                    , "\"etag-1\"" :: Text
+                    , "Wed, 01 Jan 2025 00:00:00 GMT" :: Text
+                    , 1700000000 :: Int
+                    , "" :: Text
+                    , 0 :: Int
+                    )
+                Sqlite.execute source "UPDATE bookmarks SET favicon_url = ? WHERE domain = 'example.test'" (Sqlite.Only (iconUrlFor "example.test" contentHash))
+                document <- exportJson source
+                close source
+                case document of
+                    Object root -> case KeyMap.lookup (Key.fromText "favicons") root of
+                        Just (Array entries) -> length entries `shouldBe` 1
+                        _ -> expectationFailure "the export has no favicons array"
+                    _ -> expectationFailure "the export is not an object"
+                target <- openDb (dir </> "target.db")
+                result <- importJson target document
+                case result of
+                    Left err -> expectationFailure (T.unpack err)
+                    Right report -> jrFavicons report `shouldBe` 1
+                rows <-
+                    Sqlite.query_
+                        target
+                        "SELECT domain,source_url,mime,bytes,content_hash,etag,last_modified,fetched_at,last_error,fail_count FROM favicons ORDER BY domain" ::
+                        IO [(Text, Text, Text, BS.ByteString, Text, Text, Text, Int, Text, Int)]
+                rows
+                    `shouldBe` [
+                                   ( "example.test"
+                                   , "https://example.test/favicon.ico"
+                                   , "image/png"
+                                   , faviconBytes
+                                   , contentHash
+                                   , "\"etag-1\""
+                                   , "Wed, 01 Jan 2025 00:00:00 GMT"
+                                   , 1700000000
+                                   , ""
+                                   , 0
+                                   )
+                               ]
+                -- The derived bookmark favicon URL is filled from the restored cache.
+                bookmarkIcons <- Sqlite.query_ target "SELECT favicon_url FROM bookmarks" :: IO [Sqlite.Only Text]
+                bookmarkIcons `shouldBe` [Sqlite.Only (iconUrlFor "example.test" contentHash)]
+                close target
+
+        it "imports a legacy document without a favicons array" $
+            withSystemTempDirectory "eza-json-legacy-favicons" $ \dir -> do
+                conn <- openDb (dir </> "legacy.db")
+                let fixture =
+                        decode
+                            ( LBS.fromStrict
+                                (BSC.pack "{\"format\":\"eza-json\",\"version\":1,\"bookmarks\":[{\"url\":\"https://example.test/legacy\"}]}")
+                            ) ::
+                            Maybe Value
+                case fixture of
+                    Nothing -> expectationFailure "the legacy fixture is not valid JSON"
+                    Just value -> do
+                        result <- importJson conn value
+                        case result of
+                            Left err -> expectationFailure (T.unpack err)
+                            Right report -> do
+                                jrInserted report `shouldBe` 1
+                                jrFavicons report `shouldBe` 0
+                        icons <- Sqlite.query_ conn "SELECT COUNT(*) FROM favicons" :: IO [Sqlite.Only Int]
+                        icons `shouldBe` [Sqlite.Only 0]
+                        close conn
+
+        it "rejects a document whose favicon bytes are not base64" $
+            withSystemTempDirectory "eza-json-bad-favicon" $ \dir -> do
+                conn <- openDb (dir </> "bad-favicon.db")
+                let fixture =
+                        decode
+                            ( LBS.fromStrict
+                                (BSC.pack "{\"format\":\"eza-json\",\"version\":2,\"favicons\":[{\"domain\":\"example.test\",\"mime\":\"image/png\",\"bytes\":\"!!! not base64 !!!\"}]}")
+                            ) ::
+                            Maybe Value
+                case fixture of
+                    Nothing -> expectationFailure "the bad-favicon fixture is not valid JSON"
+                    Just value -> do
+                        result <- importJson conn value
+                        case result of
+                            Left message -> message `shouldSatisfy` T.isInfixOf "base64"
+                            Right _ -> expectationFailure "invalid base64 must fail the import"
+                        icons <- Sqlite.query_ conn "SELECT COUNT(*) FROM favicons" :: IO [Sqlite.Only Int]
+                        icons `shouldBe` [Sqlite.Only 0]
+                        close conn
 
     describe "JSON import counts and policy" $ do
         it "reports inserted, existing and skipped honestly and queues enrichment for new rows" $

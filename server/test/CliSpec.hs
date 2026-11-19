@@ -16,7 +16,7 @@ import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Directory (doesFileExist)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.IO (Handle, IOMode (..), hClose, hFlush, openFile, stdout)
+import System.IO (Handle, IOMode (..), hClose, hFlush, openFile, stderr, stdout)
 import System.IO.Temp (openTempFile, withSystemTempDirectory)
 import Test.Hspec
 
@@ -287,6 +287,23 @@ spec = describe "CLI" $ do
                             `shouldReturn` [Sqlite.Only 1]
                 [] -> expectationFailure "the backup output did not name the stamp"
 
+    it "warns that the Netscape HTML export is lossy while keeping stdout pure" $
+        withCliConfig $ \cfg -> do
+            addCliUser cfg "alice" RoleAdmin
+            alice <- mustLookup cfg "alice"
+            bracket (Db.openDb (cuDbPath alice)) Sqlite.close $ \conn -> do
+                _ <- Bookmarks.insertBookmark conn "https://alice.example/html-export" "Html" []
+                pure ()
+            (((), html), errOutput) <-
+                captureError (captureOutput (runCli cfg (textSource "") (ExportCmd False Nothing)))
+            -- stdout is the document, stderr carries the warning.
+            html `shouldSatisfy` T.isInfixOf "<!DOCTYPE NETSCAPE-Bookmark-file-1>"
+            errOutput `shouldSatisfy` T.isInfixOf "bookmarks and tags only"
+            errOutput `shouldSatisfy` T.isInfixOf "export --json"
+            -- The JSON export is the complete format and must not warn.
+            (_, errJson) <- captureError (captureOutput (runCli cfg (textSource "") (ExportCmd True Nothing)))
+            errJson `shouldSatisfy` (not . T.isInfixOf "bookmarks and tags only")
+
     it "fails verify when the FTS index drifted" $
         withCliConfig $ \cfg -> do
             addCliUser cfg "alice" RoleAdmin
@@ -365,6 +382,23 @@ captureOutput action = do
             `finally` do
                 hFlush stdout
                 hDuplicateTo old stdout
+                hClose handle
+    content <- TIO.readFile path
+    pure (result, content)
+
+{- | Capture stderr while the action runs (stdout is left to the caller, so this
+composes with 'captureOutput' for commands that write both streams).
+-}
+captureError :: IO a -> IO (a, T.Text)
+captureError action = do
+    (path, handle) <- openTempFile "/tmp" "eza-cli-err.txt"
+    old <- hDuplicate stderr
+    hDuplicateTo handle stderr
+    result <-
+        action
+            `finally` do
+                hFlush stderr
+                hDuplicateTo old stderr
                 hClose handle
     content <- TIO.readFile path
     pure (result, content)

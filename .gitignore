@@ -61,6 +61,14 @@ static/fonts/*.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].
 static/icons/*.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].png
 static/vendor/browser_wasi_shim.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/
 
+# Local flake outputs and data directories from the README quick-start recipe
+# (nix build --out-link eza-server / nix build --out-link eza-web, and the
+# EZA_DATA_DIR directories they serve).
+/eza-server
+/eza-web
+/eza-data/
+/eza-recovered/
+
 # Environments / secrets
 .env
 .env.local
