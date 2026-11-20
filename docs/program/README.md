@@ -131,6 +131,11 @@ Append one entry per gate run: milestone, date, commands, result, commit.
 2026-11-14 round-8 gates: build/test/build-web/e2e/lint/docs/spec/version/notices -> ok (158 logic + 35 core + 368 server; e2e 27/27; wasm 5,313,531/1,714,657)
 2026-11-14 M7 release: release image               -> 0.4.0.0 built from the tagged tree; version/PATH/health/verify/setup smoke green
 2026-11-14 M7 release: tag v0.4.0.0                 -> created in-repo (annotated); push/publish remains an operator step
+2026-11-20 0.5.0.0: gates at head 83479fd          -> build-web ok (5,366,481 raw / 1,730,350 gzip, build id 0b1d2bbb1416d219); -Werror build clean; cabal test 708 examples (55 core + 228 web-logic + 425 server, 0 failures, 1 pending); e2e 28/28 scripts, 635 PASS, 0 retry; specs/docs/notices/version/fourmolu+hlint ok; nix eza-web + docker + module check ok
+2026-11-20 0.5.0.0: upgrade drill 0.4.0.0 -> 0.5.0.0 -> PASS 12/12 (same volume/port; no schema change: control v2/library v18; session/data/tag/saved search survive; async check-dead job done; 0.4.0.0 image re-opens the 0.5 data; restore dry-run + real restore verified, docker-cp stamp chown caveat exercised)
+2026-11-20 0.5.0.0: tag v0.5.0.0                   -> pushed; Create GitHub release green (clipper zips + version-pinned compose asset)
+2026-11-20 0.5.0.0: release image                 -> multi-arch :0.5.0.0 + :latest built from 83479fd: index sha256:4e697c9e..., amd64 sha256:92639c88..., arm64 sha256:3167623a...; published-image smoke (healthz/version/verify/setup/login) green
+2026-11-20 0.5.0.0: published palette check       -> image wasm carries "type a command"/"add bookmark" and no "search or type a command"/"file a record"; local container recreated on :0.5.0.0
 ```
 
 ## Round-4 note
