@@ -3,6 +3,12 @@
 All notable changes to eza are recorded here. The container image and the Nix
 outputs are the installable artifacts; both are built from the same revision.
 
+## Unreleased
+
+- The README header carries the eza wordmark again, with the light and dark SVG
+  files restored under `docs/figures/`. The generated architecture, import and
+  search figures stay removed.
+
 ## 0.5.0.0
 
 The 0.5 line ships the cross-browser clipper: one Chrome and Firefox
