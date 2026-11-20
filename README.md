@@ -224,7 +224,7 @@ docker compose up -d
 
 The container runs as uid and gid 10001, keeps `/data` on a named volume and
 serves the `/healthz` probe. Put a TLS proxy in front for passkeys. To build the image locally instead,
-run `nix build .#docker` and set `EZA_IMAGE=eza:0.4.0.0`.
+run `nix build .#docker` and set `EZA_IMAGE=eza:0.5.0.0`.
 
 ### From source
 

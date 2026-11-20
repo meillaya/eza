@@ -94,7 +94,7 @@ Then:
 
 ```bash
 sudo nixos-rebuild switch --flake .#host
-curl -fsS https://eza.example.com/healthz   # {"status":"ok","version":"0.4.0.0"}
+curl -fsS https://eza.example.com/healthz   # {"status":"ok","version":"0.5.0.0"}
 ```
 
 Open the origin in a browser: the first visit redirects to `/setup`, where the

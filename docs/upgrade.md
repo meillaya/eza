@@ -1,4 +1,22 @@
-# Upgrading to 0.4
+# Upgrading eza
+
+## Upgrading to 0.5
+
+`0.5.0.0` has **no schema or data migration** from `0.4.0.0`: the control
+database stays at schema v2 and every account library at v18. Upgrading is the
+normal backup-first path:
+
+- Take a stamp with `eza-bookmarks backup` (or let the daily timer run) and
+  copy it off the host; page snapshots are not part of a stamp.
+- Pull `ghcr.io/meillaya/eza:0.5.0.0` and recreate the container with the same
+  `eza-data` volume, `PUBLIC_ORIGIN` and `EZA_RP_ID`.
+- `eza-bookmarks version` must print `eza 0.5.0.0` and `eza-bookmarks verify`
+  must pass.
+- Because the schema is unchanged, the `0.4.0.0` image opens the same data if
+  you need to roll back the container; restoring the stamp is still the safe
+  path for anything else.
+
+## Upgrading to 0.4
 
 0.4 keeps every shipped feature, the SQLite data model, the HTTP surface's
 success payloads and the WebAuthn scope, but it is a **one-way** upgrade:
@@ -27,6 +45,7 @@ success payloads and the WebAuthn scope, but it is a **one-way** upgrade:
 |---|---|---|---|
 | 0.2.x / 0.3 | 1 (the 0.2.0.0 image writes the same control tables with `user_version = 0`) | 15 | flat sessions/tokens, per-feature undo tables |
 | 0.4.x | 2 | 18 | checksummed migrations, journal, async jobs |
+| 0.5.x | 2 | 18 | no schema change from 0.4; cross-browser clipper |
 
 `eza-bookmarks version` prints the binary version and
 `eza-bookmarks verify` prints the schema version of the control database and

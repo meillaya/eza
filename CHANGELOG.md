@@ -3,7 +3,14 @@
 All notable changes to eza are recorded here. The container image and the Nix
 outputs are the installable artifacts; both are built from the same revision.
 
-## Unreleased
+## 0.5.0.0
+
+The 0.5 line ships the cross-browser clipper: one Chrome and Firefox
+extension with the saved-page indicator and the **Add bookmark** quick-save
+path, published as store-ready packages. It also carries the client polish and
+server fixes accumulated since 0.4.0.0. There is **no schema change** from 0.4:
+the control database stays at schema v2 and every account library at v18, so
+upgrading is a backup, an image pull and a container recreate.
 
 ### Browser extension
 
@@ -41,6 +48,10 @@ outputs are the installable artifacts; both are built from the same revision.
 - The graph filter and saved graph-view queries use the shared search grammar:
   `tag:`, `year:`, `day:`, `is:unread`, `is:dead` and `-term` behave like the
   ledger instead of silently matching nothing.
+- A graph page whose payload is newer than its cached server layout (a
+  background write lands between the graph and layout reads) keeps the painted
+  plate, fetches the matching layout and re-focuses the canvas instead of
+  dropping into a permanent "the server sent no layout" error.
 - The prune "click again to confirm" arm is cleared by any selection change, so
   the second click can only confirm the set the user armed.
 - The single-record delete dialog no longer claims the action cannot be undone;

@@ -57,7 +57,7 @@ Run from the repository root inside the devenv shell:
 devenv shell -- bash scripts/build-web.sh        # bundle + size ceilings
 devenv shell -- cabal build all --ghc-options=-Werror
 devenv shell -- cabal test all                   # core + web-logic + server
-devenv shell -- bash scripts/e2e.sh              # 27 browser scripts
+devenv shell -- bash scripts/e2e.sh              # 28 browser scripts
 devenv shell -- bash scripts/check-specs.sh      # 4 TLC models + JSON schemas
 devenv shell -- bash scripts/check-docs.sh
 devenv shell -- bash scripts/check-notices.sh --plan

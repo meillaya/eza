@@ -8,4 +8,4 @@ module Eza.Version (ezaVersionText) where
 import Data.Text (Text)
 
 ezaVersionText :: Text
-ezaVersionText = "0.4.0.0"
+ezaVersionText = "0.5.0.0"
