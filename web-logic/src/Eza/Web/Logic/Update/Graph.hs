@@ -322,15 +322,36 @@ handle = \case
                         if wirePreset == preset && glwRevision wire == gdRevision graph
                             then hydrateWire graph wire
                             else Nothing
+                    -- The graph and layout reads are separate requests, and a
+                    -- background write (an enrichment worker bumping
+                    -- @updated_at@) can change the library revision between
+                    -- them. The server is still the only layout producer, so a
+                    -- payload that no longer matches the cached layout asks for
+                    -- the current preset's layout instead of declaring the
+                    -- graph unloadable.
+                    wantsLayoutRefresh =
+                        wireMismatch || wirePresetDiffers m preset || isNothing (mGraphLayoutWire m)
                  in case hydrated of
-                        -- The server is the only layout producer. A graph payload
-                        -- with no matching layout is an error state, never a
-                        -- client-side layout build.
-                        Nothing ->
+                        Nothing -> do
+                            -- Keep a painted plate through the refresh: dropping
+                            -- it would blank the whole graph page (and lose the
+                            -- canvas focus) for a transient revision change.
+                            let keepPlate = isJust (mGraphLayout m)
                             putModel
                                 ( \x ->
-                                    x{gGraph = (gGraph x){grGraph = Just graph, grGraphLayout = Nothing, grGraphLoading = False, grGraphError = Just layoutMissingMessage}}
+                                    x
+                                        { gGraph =
+                                            (gGraph x)
+                                                { grGraph = Just graph
+                                                , grGraphLayout = if keepPlate then mGraphLayout x else Nothing
+                                                , grGraphLoading = wantsLayoutRefresh
+                                                , grGraphError = if keepPlate || wantsLayoutRefresh then Nothing else Just layoutMissingMessage
+                                                , grGraphHover = Nothing
+                                                }
+                                        }
                                 )
+                            when (wantsLayoutRefresh && not (mGraphLayoutPending m)) $
+                                fetchGraphLayout preset (GraphLayoutLoaded preset) GraphLayoutFailed
                         Just hydratedLayout -> do
                             let whole = hydratedLayout{glGen = generation}
                                 seeded =
@@ -355,7 +376,7 @@ handle = \case
                                      in scopedNow{gGraph = (gGraph scopedNow){grGraphView = view, grGraphSelected = mGraphFocus x}}
                                 )
                             scheduleGraphSettle
-                            when (wireMismatch || wirePresetDiffers m preset) $
+                            when (not (mGraphLayoutPending m) && (wireMismatch || wirePresetDiffers m preset)) $
                                 fetchGraphLayout preset (GraphLayoutLoaded preset) GraphLayoutFailed
                             unless (mGraphViewReady m) (measureGraphCanvas)
                             focusGraphPlate m
@@ -529,7 +550,7 @@ handle = \case
             )
         scheduleGraphSettle
     GraphLayoutLoaded preset wire -> do
-        putModel (\x -> x{gGraph = (gGraph x){grGraphLayoutWire = Just (preset, wire)}})
+        putModel (\x -> x{gGraph = (gGraph x){grGraphLayoutWire = Just (preset, wire), grGraphLayoutPending = False}})
         m <- get
         when (preset /= mGraphPreset m && isNothing (mGraph m)) $
             -- A default view or a preset change landed while this request was
@@ -570,6 +591,11 @@ handle = \case
                                  in applyGraphScope (recomputeGraphColors seeded)
                             )
                         when (not same || view /= old) scheduleGraphSettle
+                        -- A hydrate that recovered from a layout-less error or
+                        -- loading state is the first painted plate again; keep
+                        -- the documented graph-route behaviour of focusing the
+                        -- canvas once it exists.
+                        when (isNothing (mGraphLayout m)) (focusGraphPlate m)
                 -- The graph payload and the layout disagree on the payload
                 -- size (tags or records): there is no client-side layout
                 -- fallback, so say so instead of painting a partial plate.
@@ -591,9 +617,10 @@ handle = \case
                     { gGraph =
                         (gGraph x)
                             { grGraphLoading = False
+                            , grGraphLayoutPending = False
                             , grGraphError = case mGraphLayout x of
                                 Just _ -> mGraphError x
-                                Nothing -> Just ((aeMessage err))
+                                Nothing -> Just layoutMissingMessage
                             }
                     }
             )

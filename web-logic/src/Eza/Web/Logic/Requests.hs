@@ -188,9 +188,9 @@ import Eza.Web.Logic.Api (BookmarkListQuery (..), ClientRequest (..), DedupCandi
 import Eza.Web.Logic.Effect (Effect (..))
 import Eza.Web.Logic.Error (ApiError (..), mkApiError)
 import Eza.Web.Logic.Job (JobStatus)
-import Eza.Web.Logic.Model (Action (BootDecodeFailed))
+import Eza.Web.Logic.Model (Action (BootDecodeFailed), gGraph, grGraphLayoutPending)
 import qualified Eza.Web.Logic.Route as ClientRoute
-import Eza.Web.Logic.Update.Monad (Update, emit)
+import Eza.Web.Logic.Update.Monad (Update, emit, putModel)
 import Eza.Web.Logic.Wire (ImportResponse (..), ListParams (..), WebhookTest (..), defaultListParams)
 
 -- --------------------------------------------------------------- transport ---
@@ -534,7 +534,12 @@ fetchGraphLayout ::
     (GraphLayoutWire -> Action) ->
     (ApiError -> Action) ->
     Update ()
-fetchGraphLayout preset onOk onErr =
+fetchGraphLayout preset onOk onErr = do
+    -- The graph payload can land with a newer library revision than this
+    -- layout, so the update module keeps the painted plate and asks again.
+    -- Marking the request here keeps that catch-up from queueing a second
+    -- refresh for a recovery that is already in flight.
+    putModel (\m -> m{gGraph = (gGraph m){grGraphLayoutPending = True}})
     requestGet (ApiGraphLayout preset) (\endpoint value -> decodeResponseAt endpoint value) onOk onErr
 
 {- | The user's declarative views. @GET /api/v1/views@ answers

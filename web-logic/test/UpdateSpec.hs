@@ -8,12 +8,15 @@ sequence the shell interpreter consumes.
 module UpdateSpec (updateSpec) where
 
 import Data.Aeson (object, (.=))
+import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet as IS
 import Data.List (isInfixOf)
+import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import Test.Hspec
 
-import Eza.Types (SavedSearch (..))
+import Eza.GraphLayout (GraphLayout (..), GraphLayoutWire (..), LayoutPreset (..), buildLayout, graphLayoutWireSchema, recordKeyOf, tagKeyOf)
+import Eza.Types (GraphData (..), GraphRecord (..), GraphTag (..), SavedSearch (..))
 import Eza.View (ViewKind (..))
 import Eza.Web.Logic.Api (BookmarkListQuery (..), ClientRequest (..))
 import Eza.Web.Logic.Effect (Effect (..), RequestId (..), TimerId (..))
@@ -23,6 +26,7 @@ import Eza.Web.Logic.Model
 import Eza.Web.Logic.Requests (decodeResetPasswordCodes)
 import Eza.Web.Logic.Route (Route (..))
 import Eza.Web.Logic.Update (update)
+import Eza.Web.Logic.Update.Graph (layoutMissingMessage)
 
 {- | Request action, the confirmation it must arm, and the wire request its
 confirmed variant must send. The six actions are the ones not covered by the
@@ -45,6 +49,75 @@ run action = update initialModel action
 
 effectShows :: [Effect] -> [String]
 effectShows = map show
+
+-- ------------------------------------------------- graph revision catch-up ---
+
+{- | A two-record graph and its server layout. The revision is what the layout
+wire and the graph payload must agree on.
+-}
+graphFixture :: GraphData
+graphFixture =
+    GraphData
+        { gdTags = [GraphTag "rust" 2]
+        , gdRecords =
+            [ GraphRecord 1 "First" "a.example" 0 False False [0]
+            , GraphRecord 2 "Second" "b.example" 0 False False [0]
+            ]
+        , gdLinks = []
+        , gdRevision = "rev-1"
+        }
+
+graphLayoutFixture :: GraphLayout
+graphLayoutFixture = buildLayout 1 graphFixture
+
+-- | The layout endpoint wire for one revision, in the order the server sends it.
+graphWireFor :: T.Text -> GraphData -> GraphLayout -> GraphLayoutWire
+graphWireFor revision graph layout =
+    GraphLayoutWire
+        { glwSchema = graphLayoutWireSchema
+        , glwRevision = revision
+        , glwPreset = Standard
+        , glwTags = [point (tagKeyOf index) | index <- [0 .. length (gdTags graph) - 1]]
+        , glwRecords = [point (recordKeyOf (grId record)) | record <- gdRecords graph]
+        , glwBounds = layoutBounds
+        }
+  where
+    point key = fromMaybe (0, 0) (IM.lookup key (glPos layout))
+    positions = IM.elems (glPos layout)
+    layoutBounds =
+        ( minimum (map fst positions)
+        , minimum (map snd positions)
+        , maximum (map fst positions)
+        , maximum (map snd positions)
+        )
+
+-- | A graph page holding a painted plate for revision @rev-1@.
+graphPageModel :: Model
+graphPageModel =
+    initialModel
+        { gShell = (gShell initialModel){sfRoute = Graph}
+        , gGraph =
+            (gGraph initialModel)
+                { grGraph = Just graphFixture
+                , grGraphLayout = Just graphLayoutFixture
+                , grGraphLayoutWire = Just (Standard, graphWireFor "rev-1" graphFixture graphLayoutFixture)
+                , grGraphViewReady = True
+                }
+        }
+
+{- | A graph page that has the layout wire but no painted plate yet: the cold
+load state the client is in when the payload arrives with a moved revision.
+-}
+graphColdModel :: Model
+graphColdModel =
+    graphPageModel
+        { gGraph =
+            (gGraph graphPageModel)
+                { grGraph = Nothing
+                , grGraphLayout = Nothing
+                , grGraphViewReady = False
+                }
+        }
 
 updateSpec :: Spec
 updateSpec = describe "native per-group update" $ do
@@ -381,6 +454,48 @@ updateSpec = describe "native per-group update" $ do
                 (second, effects) = update first (SuggestionApply 5 ["ai"])
             mSuggestionApplyBusy second `shouldBe` Just 4
             effects `shouldBe` []
+    describe "graph revision catch-up" $ do
+        it "keeps the painted plate and asks for a fresh layout when the revision moved" $ do
+            let moved = graphFixture{gdRevision = "rev-2"}
+                (after, effects) = update graphPageModel (GraphLoaded moved)
+            mGraph after `shouldBe` Just moved
+            mGraphLayout after `shouldBe` Just graphLayoutFixture
+            mGraphError after `shouldBe` Nothing
+            mGraphLoading after `shouldBe` True
+            mGraphLayoutPending after `shouldBe` True
+            effectShows effects `shouldSatisfy` any (isInfixOf "ApiGraphLayout")
+        it "a second payload while the catch-up layout is in flight is not a second request" $ do
+            let moved = graphFixture{gdRevision = "rev-2"}
+                (first, _) = update graphPageModel (GraphLoaded moved)
+                movedAgain = moved{gdRevision = "rev-3"}
+                (second, effects) = update first (GraphLoaded movedAgain)
+            mGraph second `shouldBe` Just movedAgain
+            mGraphLayout second `shouldBe` Just graphLayoutFixture
+            mGraphLayoutPending second `shouldBe` True
+            effects `shouldBe` []
+        it "with no plate, loads the fresh layout and focuses the canvas once it paints" $ do
+            let moved = graphFixture{gdRevision = "rev-2"}
+                (waiting, waitingEffects) = update graphColdModel (GraphLoaded moved)
+            mGraph waiting `shouldBe` Just moved
+            mGraphLayout waiting `shouldBe` Nothing
+            mGraphError waiting `shouldBe` Nothing
+            mGraphLoading waiting `shouldBe` True
+            mGraphLayoutPending waiting `shouldBe` True
+            effectShows waitingEffects `shouldSatisfy` any (isInfixOf "ApiGraphLayout")
+            let freshLayout = buildLayout 2 moved
+                (painted, paintedEffects) =
+                    update waiting (GraphLayoutLoaded Standard (graphWireFor "rev-2" moved freshLayout))
+            mGraphLayout painted `shouldSatisfy` (/= Nothing)
+            mGraphError painted `shouldBe` Nothing
+            mGraphLayoutPending painted `shouldBe` False
+            effectShows paintedEffects `shouldSatisfy` any (isInfixOf "OpFocusGraphCanvas")
+        it "a failed refetch with no plate reports the documented layout message" $ do
+            let moved = graphFixture{gdRevision = "rev-2"}
+                (waiting, _) = update graphColdModel (GraphLoaded moved)
+                (failed, _) = update waiting (GraphLayoutFailed (mkApiError (Just 500) Nothing))
+            mGraphError failed `shouldBe` Just layoutMissingMessage
+            mGraphLoading failed `shouldBe` False
+            mGraphLayoutPending failed `shouldBe` False
     describe "escape resolves the top layer" $ do
         it "closes the dirty guard before the palette below it" $ do
             let model =

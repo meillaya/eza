@@ -938,6 +938,11 @@ data GraphFields = GraphFields
     , grGraphError :: Maybe Text
     , grGraphGen :: Int
     , grGraphLayout :: Maybe GraphLayout
+    , -- a layout-refresh request is in flight. A graph payload can land with a
+      -- newer library revision than the cached layout (background writes bump
+      -- `updated_at`); the update keeps the painted plate and asks for a fresh
+      -- layout, and this flag stops a second request for the same recovery.
+      grGraphLayoutPending :: Bool
     , grGraphLocalLayout :: Maybe GraphLayout
     , grGraphColors :: Maybe ColorAssignment
     , grGraphGroupCounts :: [Int]
@@ -1299,6 +1304,7 @@ initialModel =
                 , grGraphError = Nothing
                 , grGraphGen = 0
                 , grGraphLayout = Nothing
+                , grGraphLayoutPending = False
                 , grGraphLocalLayout = Nothing
                 , grGraphColors = Nothing
                 , grGraphGroupCounts = []
@@ -2117,6 +2123,10 @@ mGraphGen model = grGraphGen (gGraph model)
 {-# INLINE mGraphLayout #-}
 mGraphLayout :: Model -> Maybe GraphLayout
 mGraphLayout model = grGraphLayout (gGraph model)
+
+{-# INLINE mGraphLayoutPending #-}
+mGraphLayoutPending :: Model -> Bool
+mGraphLayoutPending model = grGraphLayoutPending (gGraph model)
 
 {-# INLINE mGraphLocalLayout #-}
 mGraphLocalLayout :: Model -> Maybe GraphLayout

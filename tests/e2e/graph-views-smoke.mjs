@@ -139,6 +139,29 @@ async function waitForPath(pathname) {
   return new URL(page.url()).pathname;
 }
 
+// The plate is focused by a client effect once the graph payload lands. The
+// popstate route change refetches the graph, so the one-shot read raced that
+// effect on a loaded runner: poll for the documented focus instead of failing
+// the check just because the refetch had not landed yet.
+async function waitForCanvasFocus(timeout = 15000) {
+  const focused = await page
+    .waitForFunction(() => Boolean(document.activeElement) && document.activeElement.id === "graph-canvas", null, { timeout })
+    .then(() => true)
+    .catch(() => false);
+  const active = await page
+    .evaluate(() => (document.activeElement ? document.activeElement.id || document.activeElement.tagName : ""))
+    .catch(() => "");
+  return { focused, active };
+}
+
+// A route change can repaint the panel while the graph/layout reads settle.
+// Wait for the status line to be attached before a real pointer click so the
+// click cannot sit out its whole timeout against a detached node.
+async function clickGraphStatus() {
+  await page.waitForSelector(SEL.graphStatus, { state: "visible", timeout: 20000 });
+  await page.locator(SEL.graphStatus).first().click({ timeout: 15000 });
+}
+
 // Click through the DOM rather than Playwright's actionability check: the graph
 // panel re-renders as layout responses land, and a freshly rendered button can
 // be detached between the stability check and the click. The click still runs
@@ -381,10 +404,16 @@ try {
   const coldRoot = await page.locator(SEL.graphRoot).first().innerText().catch(() => "");
   check("a cold deeplink load enters local mode", /depth 2/.test(coldStatus), coldStatus);
   check("a cold deeplink load names its root", coldRoot.trim() === "Bulk root", coldRoot || coldStatus);
+  // Applying the route refetches the graph; wait for that response so the
+  // status read below observes the re-rendered plate, not the previous paint.
+  const routeRefresh = page
+    .waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/graph", { timeout: 20000 })
+    .catch(() => null);
   await page.evaluate((url) => {
     history.pushState(null, "", url);
     window.dispatchEvent(new PopStateEvent("popstate"));
   }, localUrl);
+  await routeRefresh;
   await waitForStatus(/depth 2/);
   const localStatus = await statusMain();
   check("the deeplink route reports depth 2", /depth 2/.test(localStatus), localStatus);
@@ -393,17 +422,17 @@ try {
 
   // The local graph is a graph route: it must keep the documented keyboard
   // controls even though it is not the plain /graph URL.
-  const localFocus = await page.evaluate(() => document.activeElement && document.activeElement.id);
-  check("the local graph focuses its canvas", localFocus === "graph-canvas", String(localFocus));
+  const localFocus = await waitForCanvasFocus();
+  check("the local graph focuses its canvas", localFocus.focused, localFocus.active);
   const localFitZoom = await zoomPercent();
-  await page.locator(SEL.graphStatus).first().click();
+  await clickGraphStatus();
   await page.keyboard.press("+");
   const localZoomed = await waitForZoom(">", localFitZoom);
   check("+ zooms the local graph", localZoomed && (await zoomPercent()) > localFitZoom, localFitZoom + " -> " + (await zoomPercent()));
   await page.fill(SEL.graphFilter, "zzz-no-local-match");
   const localFilterSet = await waitForStatus(/match the filter/);
   check("the local graph filter applies", localFilterSet, await statusMain());
-  await page.locator(SEL.graphStatus).first().click();
+  await clickGraphStatus();
   await page.keyboard.press("Escape");
   const localEsc = await page
     .waitForFunction((selector) => (document.querySelector(selector)?.value || "") === "", SEL.graphFilter, { timeout: 15000 })
@@ -444,7 +473,7 @@ try {
   const localFromSelection = await waitForStatus(/depth 1/);
   const pinnedPreview = ((await page.locator(SEL.graphPreview).first().innerText()) || "").replace(/\s+/g, " ").trim();
   check("the local graph pins the selected record", localFromSelection && pinnedPreview.includes("Bulk root"), pinnedPreview);
-  await page.locator(SEL.graphStatus).first().click();
+  await clickGraphStatus();
   await page.keyboard.press("Escape");
   const selectionCleared = await page
     .waitForFunction((selector) => /Hover a node to preview it/.test(document.querySelector(selector)?.textContent || ""), SEL.graphPreview, { timeout: 15000 })
@@ -765,6 +794,10 @@ try {
   const unexpected = errors.filter((entry) => !/400|401/.test(entry));
   check("no unexpected console errors", unexpected.length === 0, unexpected.slice(0, 3).join(" | ").slice(0, 400));
 } catch (error) {
+  // The collected page/console errors are only reported at the end, which a
+  // thrown error never reaches: print them here so a CI failure names the
+  // client-side cause.
+  if (errors.length) console.log("page errors at failure: " + errors.slice(0, 5).join(" | "));
   check("unexpected error", false, String(error && error.stack ? error.stack : error));
 } finally {
   await browser.close();
